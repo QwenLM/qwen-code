@@ -1306,8 +1306,11 @@ export function buildRoleBrief(
           'says nothing about the suite. A third shape carries no field at all: a ' +
           'single-package repo whose budget ran out before its one suite has an ' +
           'empty `test[]` and no `testScope`, and only its `note` says so — read ' +
-          'the note before calling the dimension finished, and report it as ' +
-          'unfinished when no suite ran. A resumed call skips install and build and ' +
+          'the note before calling the dimension finished. That shape cannot be ' +
+          'continued (a continuation has no recorded scope to read, and answers ' +
+          '"ended before its test phase" without running anything): report the ' +
+          'dimension UNFINISHED and do not spend a continuation on it. A resumed ' +
+          'call skips install and build and ' +
           'runs only what is left, merging into the SAME report file. Same ' +
           `\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`, and at most ` +
           `${MAX_RESUME_CALLS} continuations — then report what the run has:`,

@@ -630,6 +630,14 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const t2 = performance.now();
     expect(budgetGapDisclosures(indented)).toEqual(['ok']);
     expect(performance.now() - t2).toBeLessThan(1000);
+    // The Chinese clause's own hazard shape: a token, a separator, then a long
+    // run that never reaches a completion word. Its first cut chained four
+    // optional groups across `\s*` — the overlapping shape this test exists
+    // for — and this input is what walks it.
+    const zhPathological = `Budget gap: 无 — ${'检查 '.repeat(20_000)}`;
+    const t3 = performance.now();
+    expect(budgetGapDisclosures(zhPathological)).toHaveLength(1);
+    expect(performance.now() - t3).toBeLessThan(1000);
     // And a deep-indented bullet disclosure still matches — the leading
     // whitespace lives inside the optional bullet group, not beside it.
     expect(

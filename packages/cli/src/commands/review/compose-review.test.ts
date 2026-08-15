@@ -4457,6 +4457,34 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
   });
 
+  it('sees a lens gap the budget-phrase splice removes from the rendered list', () => {
+    // The splice keeps the body from saying one gap twice, and it matches on a
+    // PHRASE — so an entry that merely mentions the review time budget in its
+    // free-form reason leaves `unreviewedDimensions` before anything else reads
+    // it. Harmless while every cap withheld the anchor; not harmless once one
+    // cap does not, because the spliced entry is the line-coverage claim the
+    // anchor decision exists to respect.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [
+        'security — the review time budget ended the round before the security relaunch returned evidence',
+      ],
+    });
+
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
   it('withholds the anchor when a dimension gap is about LINES, not depth', () => {
     // The distinction the exemption turns on, and the one a live review of
     // this change had to restore: Agent 7 is the only role whose brief sets

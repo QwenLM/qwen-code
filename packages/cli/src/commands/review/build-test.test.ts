@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -3343,6 +3349,101 @@ describe('runBuildTest', () => {
             exec: okResult,
           }),
         ).toThrow(/is not one/);
+      }
+    });
+
+    it('refuses a corrupt report with a named fix, never a stack trace', () => {
+      // Each of these cleared an earlier version of the gate and then died
+      // inside the merge on a raw TypeError — the stack trace the gate exists
+      // to replace. `null` is the sharpest: `JSON.parse('null')` returns null,
+      // and the gate read a field off it before checking it was an object.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      for (const corrupt of [
+        'null',
+        '[]',
+        '"a string"',
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [null],
+          build: [],
+          timedOut: [],
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [null],
+          timedOut: [],
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          testScope: 'not an object',
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          testScope: { workspaces: 'not a list' },
+        }),
+      ]) {
+        writeFileSync(outPath, corrupt);
+        expect(() =>
+          runBuildTest({
+            plan: planPath,
+            worktree: root,
+            out: outPath,
+            timeout: 60,
+            install: true,
+            resume: true,
+            exec: okResult,
+          }),
+        ).toThrow(/is not one\. Run build-test without --resume first/);
+      }
+    });
+
+    it('refuses rather than OVERWRITING the report when no toolchain applies', () => {
+      // The worst failure filed against this branch: the handler writes what
+      // runBuildTest returns to --out, which for a resume is the file it just
+      // read. A fresh unsupported report would replace an in-flight one, and
+      // the chain stays dead after the worktree path is fixed.
+      const bare = mkdtempSync(join(tmpdir(), 'bt-bare-'));
+      try {
+        threePackages();
+        const outPath = join(root, 'report.json');
+        const inFlight = {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: okResult('npm ci --no-audit --no-fund'),
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'in flight',
+          testScope: { workspaces: ['packages/core'], notRun: ['packages/a'] },
+        };
+        writeFileSync(outPath, JSON.stringify(inFlight));
+
+        expect(() =>
+          runBuildTest({
+            plan: planPath,
+            worktree: bare,
+            out: outPath,
+            timeout: 60,
+            install: true,
+            resume: true,
+            exec: okResult,
+          }),
+        ).toThrow(/no supported toolchain applies/);
+        // The refusal must leave the file exactly as it found it.
+        expect(JSON.parse(readFileSync(outPath, 'utf8'))).toEqual(inFlight);
+      } finally {
+        rmSync(bare, { recursive: true, force: true });
       }
     });
 

@@ -714,6 +714,16 @@ function composeReviewBody(
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
   // likeliest.
+  // Snapshot BEFORE the budget-phrase splice below removes entries. The splice
+  // exists so the body does not say the same gap twice, and it matches on a
+  // PHRASE — so an entry that merely mentions the review time budget in its
+  // free-form reason ("security — the review time budget ended the round
+  // before the security relaunch returned evidence") is spliced out too. That
+  // was harmless while every cap withheld the anchor; it is not harmless now
+  // that one cap does not, because the spliced entry is exactly the
+  // line-coverage claim the anchor decision must see. Render from the spliced
+  // list, decide from this one.
+  const unreviewedAsDisclosed = [...unreviewed];
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
@@ -1209,7 +1219,9 @@ function composeReviewBody(
   // anchor would let a twice-whiffed Security lens advance the range past the
   // lines it never reviewed — the harm the skill's own paragraph warns about,
   // and the reason the first cut of this exemption was wrong.
-  const dimensionGapsAreDepthOnly = unreviewed.every(isNonDiffDimensionGap);
+  const dimensionGapsAreDepthOnly = unreviewedAsDisclosed.every(
+    isNonDiffDimensionGap,
+  );
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';

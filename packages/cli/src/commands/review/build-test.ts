@@ -396,41 +396,56 @@ function previousReport(out: string | undefined): BuildTestReport {
         `--resume first.`,
     );
   }
+  // The base gate FIRST, and nothing may read a field before it: `JSON.parse`
+  // returns `null` for the literal `null`, and reading `.testScope` off that
+  // throws a raw TypeError from inside the function whose entire purpose is to
+  // refuse with a named fix.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `build-test: --resume expected a build-test report at ${out}, and that ` +
+        `file is not one. Run build-test without --resume first.`,
+    );
+  }
   const shape = parsed as {
     test?: unknown;
     build?: unknown;
     timedOut?: unknown;
     testScope?: { workspaces?: unknown; notRun?: unknown };
   };
+  // Every array the continuation walks, and every ELEMENT of the two it walks
+  // per-item. `test: [null]` cleared a gate that checked only `Array.isArray`
+  // and then died on `reading 'clamped'` — the same stack trace the gate
+  // exists to replace, one layer deeper.
+  const commandsOk = (v: unknown): boolean =>
+    Array.isArray(v) &&
+    v.every(
+      (e) =>
+        !!e &&
+        typeof e === 'object' &&
+        !Array.isArray(e) &&
+        typeof (e as { command?: unknown }).command === 'string',
+    );
   // `testScope` is optional — a build-only or single-root report carries none —
   // but a PRESENT one is walked for both of its lists, so a truthy non-object
   // (or a scope whose lists are not lists) has to be refused here rather than
   // becoming a `.filter of undefined` inside the merge.
+  const scope = shape.testScope;
   const scopeOk =
-    shape.testScope === undefined ||
-    (typeof shape.testScope === 'object' &&
-      shape.testScope !== null &&
-      !Array.isArray(shape.testScope) &&
-      Array.isArray(shape.testScope.workspaces) &&
-      (shape.testScope.notRun === undefined ||
-        Array.isArray(shape.testScope.notRun)));
-  // Every array the continuation walks, not just the one that names the work.
-  // A report carrying `test` alone cleared the old gate and then died on a raw
-  // `Cannot read properties of undefined (reading 'filter')` deep inside the
-  // merge — the structured refusal this function exists for, replaced by a
-  // stack trace at the moment the caller most needs to be told what to do.
+    scope === undefined ||
+    (typeof scope === 'object' &&
+      scope !== null &&
+      !Array.isArray(scope) &&
+      Array.isArray(scope.workspaces) &&
+      (scope.notRun === undefined || Array.isArray(scope.notRun)));
   if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    !Array.isArray(shape.test) ||
-    !Array.isArray(shape.build) ||
+    !commandsOk(shape.test) ||
+    !commandsOk(shape.build) ||
     !Array.isArray(shape.timedOut) ||
     !scopeOk
   ) {
     throw new Error(
       `build-test: --resume expected a build-test report at ${out}, and that ` +
-        `file is not one.`,
+        `file is not one. Run build-test without --resume first.`,
     );
   }
   return parsed as BuildTestReport;

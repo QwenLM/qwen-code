@@ -479,9 +479,13 @@ const ZH_BUDGET_TAIL =
   '(?:[，,、]?\\s*(?:未触及|未达到|未超出|未用尽|没有触及|在|不超过)' +
   '(?:工具)?(?:调用)?预算(?:上限|限制|范围内)?)?';
 const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
-const ZH_COMPLETION_CLAUSE =
-  `${ZH_ALL}?\\s*${ZH_PLANNED}?\\s*${ZH_CHECKS}?\\s*${ZH_DONE}` +
-  `${ZH_BUDGET_TAIL}`;
+// NO whitespace between the pieces. Four optional groups chained across `\s*`
+// is the overlapping-quantifier shape this module's header bans and its
+// 'stays linear on pathological inputs' test exists for — and Chinese does not
+// put spaces between these tokens anyway, so the quantifiers bought nothing
+// but the backtracking. Whitespace is allowed exactly once, after the
+// separator, where a model actually types it.
+const ZH_COMPLETION_CLAUSE = `${ZH_ALL}?${ZH_PLANNED}?${ZH_CHECKS}?${ZH_DONE}${ZH_BUDGET_TAIL}`;
 const ZH_PLACEHOLDER =
   `${ZH_TOKEN}(?:${ZH_TAIL}` +
   `|\\s*(?:${ZH_SEPARATOR})\\s*${ZH_COMPLETION_CLAUSE}${ZH_TAIL})`;
