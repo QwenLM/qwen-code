@@ -29,6 +29,69 @@ function textBlock(
   };
 }
 
+describe('Assistant branch anchors', () => {
+  it('preserves the checkpoint on the rendered Assistant message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'answer', 1, false, {
+        branchRecordId: 'checkpoint-1',
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      branchRecordId: 'checkpoint-1',
+    });
+  });
+
+  it('does not anchor an insight-only block onto the previous reply', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'first answer',
+    });
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    expect(messages.some((message) => message.role === 'insight_ready')).toBe(
+      true,
+    );
+    expect(messages.some((message) => 'branchRecordId' in message)).toBe(false);
+  });
+
+  it("anchors a checkpoint onto the insight block's own text segment", () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}} done',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    const anchored = messages.find(
+      (message) => message.role === 'assistant' && message.content === 'done',
+    );
+    expect(anchored).toMatchObject({
+      role: 'assistant',
+      content: 'done',
+      branchRecordId: 'checkpoint-2',
+    });
+  });
+});
+
 function statusBlock(
   id: string,
   text: string,

@@ -33,7 +33,11 @@ import {
   type DaemonSessionOwnerSnapshot,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  isDaemonTurnError,
+  isStaleBranchPointError,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
@@ -2044,6 +2048,8 @@ export function App({
   const customization = useMemo(
     () => ({
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -2068,6 +2074,8 @@ export function App({
     }),
     [
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -7543,13 +7551,24 @@ export function App({
     showContextUsage('/context detail', true);
   }, [showContextUsage]);
 
+  const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
-    (name?: string) => {
+    (name?: string, atRecordId?: string) => {
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
-      sessionActions
-        .branchSession(name || undefined)
+      const sourceSessionId = connectionRef.current.sessionId;
+      const requestKey = JSON.stringify([
+        sourceSessionId,
+        name ?? null,
+        atRecordId ?? null,
+      ]);
+      const pending = pendingBranchRequestsRef.current.get(requestKey);
+      if (pending) return pending;
+
+      const request = sessionActions
+        .branchSession(name || undefined, atRecordId)
         .then((result) => {
+          if (!result.switchStarted) return;
           store.dispatch([
             {
               type: 'status',
@@ -7559,22 +7578,69 @@ export function App({
             },
           ]);
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
+          if (
+            error instanceof DOMException &&
+            error.name === 'InvalidStateError' &&
+            error.message === 'A branch request is already in progress'
+          ) {
+            return;
+          }
+          if (isStaleBranchPointError(error)) {
+            if (!transcriptReloadSupported) {
+              pushToast('error', t('branch.staleUnsupported'));
+              return;
+            }
+            // The recovery reload targets whatever session is selected when
+            // the branch call returns. If the user switched away in flight,
+            // report the failure without refreshing the unrelated session.
+            if (connectionRef.current.sessionId !== sourceSessionId) {
+              pushToast('error', t('branch.failed'));
+              return;
+            }
+            let refreshed = false;
+            try {
+              await sessionActions.reloadSession(new AbortController().signal);
+              refreshed = true;
+            } catch (reloadError) {
+              refreshed = isAbortError(reloadError);
+            }
+            // A switch landing while the recovery reload is in flight
+            // supersedes it; the outcome toast belongs to the source session.
+            if (connectionRef.current.sessionId !== sourceSessionId) return;
+            pushToast(
+              'error',
+              t(refreshed ? 'branch.stale' : 'branch.staleRefreshFailed'),
+            );
+            return;
+          }
           reportError(error, t('branch.failed'));
+        })
+        .finally(() => {
+          if (pendingBranchRequestsRef.current.get(requestKey) === request) {
+            pendingBranchRequestsRef.current.delete(requestKey);
+          }
         });
+      pendingBranchRequestsRef.current.set(requestKey, request);
+      return request;
     },
     [
       reportError,
+      pushToast,
       requireActiveSessionForLocalCommand,
       sessionWriteBlocked,
       sessionActions,
       store,
       t,
+      transcriptReloadSupported,
     ],
   );
-  const handleBranchCurrentSession = useCallback(() => {
-    branchCurrentSession();
-  }, [branchCurrentSession]);
+  const handleBranchCurrentSession = useCallback(
+    (atRecordId?: string) => {
+      return branchCurrentSession(undefined, atRecordId);
+    },
+    [branchCurrentSession],
+  );
 
   const composerFocusRequestRef = useRef(0);
   const scheduleComposerFocus = useCallback((sessionId?: string) => {
@@ -12635,10 +12701,12 @@ export function App({
                   }}
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
-                  <ArtifactPanel
-                    {...artifactPanelSharedProps}
-                    variant="drawer"
-                  />
+                  <WebShellCustomizationProvider value={customization}>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      variant="drawer"
+                    />
+                  </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
             )}
@@ -12701,12 +12769,14 @@ export function App({
                       onPointerDown={handleArtifactPanelResizeStart}
                     />
                   )}
-                  <div className={styles.artifactPanelClip}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      panelWidth={artifactPanelWidth}
-                    />
-                  </div>
+                  <WebShellCustomizationProvider value={customization}>
+                    <div className={styles.artifactPanelClip}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        panelWidth={artifactPanelWidth}
+                      />
+                    </div>
+                  </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
               )}

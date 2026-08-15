@@ -499,6 +499,7 @@ export function transcriptBlocksToDaemonMessages(
           let hasTerminal = false;
           let readyCount = 0;
           let errorCount = 0;
+          let lastAssistantSegmentIndex: number | null = null;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
@@ -528,7 +529,17 @@ export function transcriptBlocksToDaemonMessages(
                 timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
+              lastAssistantSegmentIndex = currentAssistantIdx;
               currentThinkingIdx = null;
+            }
+          }
+          if (textBlock.branchRecordId && lastAssistantSegmentIndex !== null) {
+            const assistant = messages[lastAssistantSegmentIndex];
+            if (assistant?.role === 'assistant') {
+              messages[lastAssistantSegmentIndex] = {
+                ...assistant,
+                branchRecordId: textBlock.branchRecordId,
+              };
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -560,6 +571,9 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
@@ -571,6 +585,9 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
@@ -580,6 +597,9 @@ export function transcriptBlocksToDaemonMessages(
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
         }

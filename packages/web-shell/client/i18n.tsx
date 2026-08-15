@@ -1493,6 +1493,12 @@ const EN: Messages = {
   'notification.agent.cancelled': (v) =>
     `Background agent "${v?.description ?? ''}" was cancelled.`,
   'branch.failed': 'Failed to branch session.',
+  'branch.stale':
+    'This response is no longer on the active history path. The transcript has been refreshed.',
+  'branch.staleRefreshFailed':
+    'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+  'branch.staleUnsupported':
+    'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
@@ -4404,6 +4410,11 @@ const ZH: Messages = {
   'notification.agent.cancelled': (v) =>
     `后台智能体已取消：${v?.description ?? ''}`,
   'branch.failed': '分支会话失败。',
+  'branch.stale': '这条回复已不在当前活跃历史路径中，会话记录已刷新。',
+  'branch.staleRefreshFailed':
+    '这条回复已不在当前活跃历史路径中，且会话记录刷新失败，请重试。',
+  'branch.staleUnsupported':
+    '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
