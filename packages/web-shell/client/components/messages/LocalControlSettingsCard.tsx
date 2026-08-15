@@ -29,6 +29,11 @@ interface LocalControlStatus {
   interfaces?: LanCandidate[];
 }
 
+function resolveLocalControlUrl(baseUrl: string, path: string): URL {
+  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return new URL(path.replace(/^\/+/, ''), base);
+}
+
 async function requestLocalControl(
   baseUrl: string,
   token: string | undefined,
@@ -40,7 +45,7 @@ async function requestLocalControl(
     token ? { Authorization: `Bearer ${token}` } : undefined,
   );
   if (body) headers.set('Content-Type', 'application/json');
-  const response = await fetch(new URL(path, baseUrl), {
+  const response = await fetch(resolveLocalControlUrl(baseUrl, path), {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
@@ -54,7 +59,13 @@ async function requestLocalControl(
   } catch {
     if (response.ok) throw new Error('Invalid Local Control response');
   }
-  if (!response.ok) throw new Error(payload?.error || response.statusText);
+  if (!response.ok) {
+    throw new Error(
+      payload?.error?.trim() ||
+        response.statusText ||
+        `Local Control request failed (${response.status})`,
+    );
+  }
   return payload!;
 }
 
