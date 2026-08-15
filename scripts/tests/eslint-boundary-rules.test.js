@@ -228,6 +228,80 @@ describe('eslint cli serve boundary rules', () => {
     expect(boundaryHits).toEqual([]);
   });
 
+  // Round-7 entrances (#8084): each spelling below resolves to serve/
+  // while evading the relative patterns; every one is pinned here.
+  it('rejects case-variant serve spellings', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "import '../../Serve/index.js';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { return import('../../Serve/live/live-task-service.js'); }",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "vi.mock('../../SERVE/live/live-task-service.js');",
+    );
+  });
+
+  it('rejects ?query and #fragment suffixes on serve specifiers', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "import '../../serve/index.js?x';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { return import('../../serve/index.js?x'); }",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "vi.mock('../../serve/live/live-task-service.js?x');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "import '../../serve/index.js#f';",
+    );
+  });
+
+  it('rejects percent-encoded pure-template vitest calls', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      'vi.mock(`../../%73erve/live/live-task-service.js`);',
+    );
+  });
+
+  it('rejects root-absolute and file: literal specifiers fail-closed', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "import '/srv/qwen/packages/cli/src/serve/index.js';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "import 'file:///srv/qwen/packages/cli/src/serve/index.js';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { return import('/srv/qwen/packages/cli/src/serve/index.js'); }",
+    );
+  });
+
+  it('flags createRequire source modules in guarded trees', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "import { createRequire } from 'node:module';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "import moduleBuiltin from 'module';",
+    );
+  });
+
   // R5-7: third-party packages whose name contains `serve` must not be
   // caught by the boundary (the old `**/serve*` globs matched them).
   it('allows third-party serve-named packages', async () => {

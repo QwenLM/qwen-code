@@ -64,12 +64,31 @@ const FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE =
   'the target (#8084, #9146).';
 
 // Node percent-decodes path segments when mapping the resolved URL to the
-// filesystem (`../%73erve/index.js` loads serve/), while these selectors
-// match raw specifier text — so any `%` in a guarded-tree specifier is
-// rejected outright instead of pattern-matched (round-6 entrance).
+// filesystem (`../%73erve/index.js` loads serve/), and bundlers/Node strip
+// `?query`/`#fragment` suffixes when resolving (`../serve?x` resolves to
+// the same module as `../serve`) — while these selectors match raw
+// specifier text. Any `%`, `?` or `#` in a guarded-tree specifier is
+// therefore rejected outright instead of pattern-matched (round-6/7
+// entrances).
 const SERVE_BOUNDARY_PERCENT_MESSAGE =
-  'Percent-encoded path segments bypass the serve/ boundary check; use the ' +
-  'canonical specifier spelling (#8084).';
+  'Percent-encoded segments and ?query/#fragment suffixes bypass the ' +
+  'serve/ boundary check; use the canonical specifier spelling (#8084).';
+
+// Root-absolute and file: specifiers carry no `../` run, so none of the
+// relative patterns can see them, yet Node loads both into serve/
+// (round-7 entrance). Literal forms are fail-closed rejected: a guarded
+// tree has no legitimate business importing by absolute path or URL.
+const SERVE_BOUNDARY_ABSOLUTE_MESSAGE =
+  'Root-absolute and file: specifiers bypass the serve/ boundary check; ' +
+  'use a relative specifier instead (#8084).';
+
+// createRequire aliases require() under any name, escaping the
+// CallExpression[callee.name="require"] arm; Node >=22 require(esm) loads
+// serve/ through it (round-7 entrance). Flag the createRequire source
+// module itself in guarded trees.
+const SERVE_BOUNDARY_CREATE_REQUIRE_MESSAGE =
+  'createRequire aliases require() and bypasses the serve/ boundary; ' +
+  'import modules statically instead (#8084).';
 
 // vitest's module-loading call APIs resolve (and, without a factory, load)
 // the real module — same boundary, CallExpression shape (round-6
@@ -80,11 +99,11 @@ const vitestModuleLoadingCallSelector =
 const restrictedServeDynamicImports = (message) => [
   ...serveDynamicImportPatterns.flatMap((pattern) => [
     {
-      selector: `ImportExpression[source.value=/${pattern}/]`,
+      selector: `ImportExpression[source.value=/${pattern}/i]`,
       message,
     },
     {
-      selector: `ImportExpression[source.quasis.0.value.cooked=/${pattern}/]`,
+      selector: `ImportExpression[source.quasis.0.value.cooked=/${pattern}/i]`,
       message,
     },
     // Static spellings must pass the same regexes: the depth-enumerated
@@ -92,46 +111,71 @@ const restrictedServeDynamicImports = (message) => [
     // `./../serve`, `..//serve`, and traversal-through-intermediate static
     // imports resolve to serve/ just the same (round-6 entrances).
     {
-      selector: `ImportDeclaration[source.value=/${pattern}/]`,
+      selector: `ImportDeclaration[source.value=/${pattern}/i]`,
       message,
     },
     {
-      selector: `ExportNamedDeclaration[source.value=/${pattern}/]`,
+      selector: `ExportNamedDeclaration[source.value=/${pattern}/i]`,
       message,
     },
     {
-      selector: `ExportAllDeclaration[source.value=/${pattern}/]`,
+      selector: `ExportAllDeclaration[source.value=/${pattern}/i]`,
       message,
     },
     {
       // @typescript-eslint wraps the specifier in a TSLiteralType: the string
       // lives at argument.literal.value, NOT argument.value (probe-verified;
       // the old path was dead code).
-      selector: `TSImportType[argument.literal.value=/${pattern}/]`,
+      selector: `TSImportType[argument.literal.value=/${pattern}/i]`,
       message,
     },
     // vitest module-loading calls (see vitestModuleLoadingCallSelector).
     {
-      selector: `${vitestModuleLoadingCallSelector}[arguments.0.value=/${pattern}/]`,
+      selector: `${vitestModuleLoadingCallSelector}[arguments.0.value=/${pattern}/i]`,
       message,
     },
     {
-      selector: `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/${pattern}/]`,
+      selector: `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/${pattern}/i]`,
       message,
     },
   ]),
-  // Percent-encoded segments (see SERVE_BOUNDARY_PERCENT_MESSAGE).
+  // Percent/query/fragment spellings (see SERVE_BOUNDARY_PERCENT_MESSAGE).
   ...[
-    'ImportExpression[source.value=/%/]',
-    'ImportExpression[source.quasis.0.value.cooked=/%/]',
-    'ImportDeclaration[source.value=/%/]',
-    'ExportNamedDeclaration[source.value=/%/]',
-    'ExportAllDeclaration[source.value=/%/]',
-    'TSImportType[argument.literal.value=/%/]',
-    `${vitestModuleLoadingCallSelector}[arguments.0.value=/%/]`,
+    'ImportExpression[source.value=/[%?#]/i]',
+    'ImportExpression[source.quasis.0.value.cooked=/[%?#]/i]',
+    'ImportDeclaration[source.value=/[%?#]/i]',
+    'ExportNamedDeclaration[source.value=/[%?#]/i]',
+    'ExportAllDeclaration[source.value=/[%?#]/i]',
+    'TSImportType[argument.literal.value=/[%?#]/i]',
+    `${vitestModuleLoadingCallSelector}[arguments.0.value=/[%?#]/i]`,
+    `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/[%?#]/i]`,
   ].map((selector) => ({
     selector,
     message: SERVE_BOUNDARY_PERCENT_MESSAGE,
+  })),
+  // Root-absolute / file: literal spellings (round-7 entrance) — see
+  // SERVE_BOUNDARY_ABSOLUTE_MESSAGE. Computed forms already fail closed.
+  ...[
+    'ImportExpression[source.value=/^(?:\\x2f|file:)/i]',
+    'ImportExpression[source.quasis.0.value.cooked=/^(?:\\x2f|file:)/i]',
+    'ImportDeclaration[source.value=/^(?:\\x2f|file:)/i]',
+    'ExportNamedDeclaration[source.value=/^(?:\\x2f|file:)/i]',
+    'ExportAllDeclaration[source.value=/^(?:\\x2f|file:)/i]',
+    'TSImportType[argument.literal.value=/^(?:\\x2f|file:)/i]',
+    `${vitestModuleLoadingCallSelector}[arguments.0.value=/^(?:\\x2f|file:)/i]`,
+    `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/^(?:\\x2f|file:)/i]`,
+  ].map((selector) => ({
+    selector,
+    message: SERVE_BOUNDARY_ABSOLUTE_MESSAGE,
+  })),
+  // createRequire source modules (round-7 entrance) — see
+  // SERVE_BOUNDARY_CREATE_REQUIRE_MESSAGE.
+  ...[
+    "ImportDeclaration[source.value=/^(?:node:)?module$/]",
+    "ImportExpression[source.value=/^(?:node:)?module$/]",
+  ].map((selector) => ({
+    selector,
+    message: SERVE_BOUNDARY_CREATE_REQUIRE_MESSAGE,
   })),
   // Fail-closed: concatenation, `new URL(...)`, template literals containing
   // expressions, and any other computed source cannot be proven safe
