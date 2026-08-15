@@ -28,10 +28,15 @@ interface FindingAnchor {
   path: string;
   line: number;
   /**
-   * Ledger id (`R<round>-<n>`) when the finding carries one. Carried-forward
-   * findings keep the id they already have; matching it against an existing
-   * comment at the same location is what marks that comment a re-post target
-   * instead of a duplicate (#9208).
+   * Ledger id (`R<round>-<n>`) — carried-forward findings ONLY. The
+   * orchestrator omits it on fresh findings of the current round: a fresh id
+   * can never appear in a comment posted before this round, and admitting one
+   * here would let a brand-new claim ride the id-less exemption into an
+   * unrelated thread, or crowd `wantedIds` past the single-carried-finding
+   * precondition and disable the exemption for a genuine re-post (#9212
+   * review). Matching a carried id against an existing comment at the same
+   * location is what marks that comment a re-post target instead of a
+   * duplicate (#9208).
    */
   id?: string;
 }
@@ -43,23 +48,64 @@ interface CommentSummary {
   commit_id: string;
   body: string;
   /**
-   * Set only on `repost` entries: the carried ledger ids in this comment's
-   * body that a new finding at the same location re-posts (#9208).
+   * The comment author's login, when known. The authorship gate refuses
+   * re-post exemptions on another account's comment; naming the author in the
+   * report is what makes that refusal self-explanatory — without it the drop
+   * line quotes a comment whose visible id matches the dropped finding, and
+   * nothing in the report says authorship is why (#9212 review).
+   */
+  user?: string;
+  /**
+   * Set only on `repost` entries: the carried ledger ids a new finding at the
+   * same location re-posts (#9208). Usually the ids carried in this comment's
+   * body; on the id-less fallback (a truly id-less own-account original at an
+   * unambiguous location) it is the location's single wanted id instead
+   * (#9212 review).
    */
   matchedIds?: string[];
 }
 
-/** Ledger ids look like `R3-2` — `R<round>-<n>`; the token lives in
- *  lib/ledger.ts so this extractor and compose-review's prefix parser
- *  cannot drift (#9212 review). */
-const CARRIED_ID_PATTERN = new RegExp(`\\b${LEDGER_ID_TOKEN}\\b`, 'g');
 /** Exact-shape check for ids read from the --new-findings file. */
 const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
+/**
+ * Prefix-anchored readback, mirroring compose-review's `CARRIED_ID_RE`: the
+ * write side guarantees a carried id leads the claim line right after the
+ * severity marker, so the read side keys on that same position. The earlier
+ * `\b`-bounded whole-body scan also matched cross-references ("see R3-2 for
+ * context") and ids embedded in longer hyphen runs, exempting a re-post under
+ * an unrelated thread (#9212 review).
+ */
+const CARRIED_ID_PREFIX = new RegExp(
+  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+);
+// Literal spelling of the two severity markers compose-review posts ahead of
+// the claim line (CRITICAL_PREFIX / SUGGESTION_PREFIX in inline-counts.ts);
+// spelled out because their `*[` characters are regex syntax.
+const SEVERITY_MARKER = /^\*\*\[(?:Critical|Suggestion)\]\*\*\s*/;
 
+/** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
-  const found = body.match(CARRIED_ID_PATTERN);
-  return found ? [...new Set(found)] : [];
+  const rest = body
+    .trimStart()
+    .replace(SEVERITY_MARKER, '')
+    .replace(/^:?\s*/, '');
+  const line = rest.split('\n')[0].trim();
+  const carried = CARRIED_ID_PREFIX.exec(line);
+  return carried ? [carried[1]] : [];
 }
+
+/**
+ * ANY ledger-id-shaped token, anywhere in the body — deliberately UNBOUNDED.
+ * The id-less fallback may only fire for a comment with NO id token at all,
+ * so any mention keeps the comment out of it: a mid-body cross-reference
+ * ("see R3-2 for context"), a hyphen run ("R3-2-1"), or a Markdown-emphasised
+ * `_R3-2_` (the `\b` anchors miss it — `_` is a word character). The prefix
+ * extractor returning [] cannot tell those apart from a truly id-less
+ * original, and a false positive here is the safe direction: the finding
+ * stays dropped and VISIBLE in the drop log instead of riding the fallback
+ * into an unrelated thread (#9212 review).
+ */
+const ANY_CARRIED_ID = new RegExp(LEDGER_ID_TOKEN);
 
 interface RawComment {
   id: number;
@@ -442,8 +488,11 @@ function classifyExistingComments(
 
   const newFindingKeys = new Set(newFindings.map((f) => `${f.path}:${f.line}`));
   // Location → carried ids of the findings anchored there. Only findings with
-  // an id participate: a fresh `R<this-round>-<n>` cannot appear in a comment
-  // posted before this round, so an id match is a genuine re-post signal.
+  // an id participate, and the orchestrator writes ids ONLY on carried
+  // findings (SKILL.md — the findings file): a fresh `R<this-round>-<n>`
+  // cannot appear in a comment posted before this round, so every id here is
+  // a genuine re-post signal, and `wantedIds.size === 1` below means exactly
+  // one CARRIED finding at the location (#9212 review).
   const carriedIdsByLocation = new Map<string, Set<string>>();
   for (const f of newFindings) {
     if (f.id === undefined) continue;
@@ -453,15 +502,17 @@ function classifyExistingComments(
     carriedIdsByLocation.set(key, ids);
   }
 
-  // Own-account Qwen comments per location among comments that can reach the
-  // overlap branch (current SHA, not a reply). A count of exactly one makes an
-  // id-less original unambiguous as a re-post target (#9212 review).
+  // Own-account Qwen comments per location at the current SHA. A count of
+  // exactly one makes an id-less original unambiguous as a re-post target
+  // (#9212 review). Replied-to comments COUNT: a replied-to original is
+  // still an original, and leaving it out of the ambiguity count handed the
+  // id-less exemption to a sibling comment belonging to a different finding
+  // (#9212 review).
   const ownOverlapCountByLocation = new Map<string, number>();
   if (currentUserLogin !== '') {
     for (const c of qwenComments) {
       if (
         c.commit_id === commitSha &&
-        !repliedToIds.has(c.id) &&
         (c.user?.login ?? '').toLowerCase() === currentUserLogin.toLowerCase()
       ) {
         const key = `${c.path ?? ''}:${c.line ?? 0}`;
@@ -480,6 +531,7 @@ function classifyExistingComments(
       line: c.line ?? 0,
       commit_id: c.commit_id ?? '',
       body: (c.body || '').slice(0, 80),
+      ...(c.user?.login ? { user: c.user.login } : {}),
     };
     // Priority: Stale > Resolved > Overlap (+ Repost) > NoConflict.
     if (c.commit_id !== commitSha) {
@@ -511,7 +563,7 @@ function classifyExistingComments(
         if (matchedIds.length > 0) {
           buckets.repost.push({ ...summary, matchedIds });
         } else if (
-          extractCarriedIds(c.body || '').length === 0 &&
+          !ANY_CARRIED_ID.test(c.body || '') &&
           wantedIds.size === 1 &&
           ownOverlapCountByLocation.get(`${c.path}:${c.line}`) === 1
         ) {
@@ -746,10 +798,13 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
         noConflict: buckets.noConflict.length,
       },
       overlap: buckets.overlap,
-      // Overlap comments whose body carries a carried ledger id that a new
-      // finding at the same location re-posts — the drop rule exempts those
-      // findings (#9208). A comment appears here IN ADDITION TO `overlap`; the
-      // double count is deliberate (one comment, two roles).
+      // Overlap comments that a new finding at the same location re-posts —
+      // the drop rule exempts those findings (#9208). Matched by the carried
+      // ledger id the comment's claim line leads with, or — when the target
+      // is unambiguous — by the id-less fallback for a truly id-less
+      // own-account original (#9212 review). A comment appears here IN
+      // ADDITION TO `overlap`; the double count is deliberate (one comment,
+      // two roles).
       repost: buckets.repost,
       stale: buckets.stale,
       resolved: buckets.resolved,
@@ -820,7 +875,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`); an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post.",
+          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

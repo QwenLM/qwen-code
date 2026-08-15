@@ -913,19 +913,73 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.byBucket.repost).toBe(0);
     });
 
-    it('extracts the carried id from beyond the 80-char summary slice', async () => {
-      const longPrefix = 'x'.repeat(90);
+    it('extracts the carried id from a claim line longer than the 80-char summary slice', async () => {
+      // The summary slice caps `CommentSummary.body` at 80 chars; extraction
+      // must read the FULL body. A realistic carried body leads with the id
+      // right after the severity marker and runs long after it.
+      const longClaim = 'x'.repeat(90);
       const result = await presubmitWithComments(
         [
           {
             ...CARRIED_COMMENT,
-            body: `**[Critical]** ${longPrefix} R3-2: claim _— model via Qwen Code /review_`,
+            body: `**[Critical]** R3-2: ${longClaim} _— model via Qwen Code /review_`,
           },
         ],
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
       );
       expect(result.existingComments.byBucket.repost).toBe(1);
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('does not exempt a lone comment that only cross-references the id mid-body (#9212)', async () => {
+      // "see R3-2 for context" mentions the id without being its thread. The
+      // strict prefix match must not fire on it, and the id-less fallback
+      // must not swallow it either: the body still carries an id-shaped
+      // token, so the comment is not a truly id-less original. Single
+      // comment on purpose — at the unambiguous count the fallback WOULD
+      // fire if it keyed on the prefix extractor's [] alone.
+      const referenced = {
+        ...CARRIED_COMMENT,
+        body: '**[Critical]** unrelated claim (see R3-2 for context) _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [referenced],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('does not match an id embedded in a longer hyphen run (#9212)', async () => {
+      // `R3-2-1` leads the claim line, but it is not the ledger id `R3-2`:
+      // the prefix readback requires the id to end the token, and the
+      // hyphen-run token keeps the id-less fallback off too.
+      const extended = {
+        ...CARRIED_COMMENT,
+        body: '**[Critical]** R3-2-1: extended claim _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [extended],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('sees an id wrapped in Markdown emphasis as an id token (#9212)', async () => {
+      // `_R3-2_` defeats `\b` anchors (`_` is a word character), but the
+      // id-less fallback's no-token check is unbounded on purpose: the
+      // mention still marks the comment as belonging to a specific finding.
+      const emphasised = {
+        ...CARRIED_COMMENT,
+        body: '**[Critical]** unrelated claim (see _R3-2_ for context) _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [emphasised],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
     });
 
     it('exempts an id-less first-round original when the target is unambiguous (#9208)', async () => {
@@ -966,6 +1020,124 @@ describe('presubmitCommand', () => {
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
       );
       expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('keeps the id-less exemption off when several findings share the location (#9212)', async () => {
+      // Two CARRIED findings at one id-less location: `wantedIds.size === 1`
+      // is the unambiguity precondition, and exempting here would re-post
+      // BOTH findings under one thread that belongs to only one of them.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R4-1' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('keeps the id-less exemption off when the current user login is unknown (#9212)', async () => {
+      // With no authenticated login the authorship gate cannot vouch for ANY
+      // comment, so the exemption must stay off even at an unambiguous
+      // location — the drop still applies and stays visible. The body keeps
+      // its footer so the comment IS recognized; only the gate can block.
+      currentUserMock.mockReturnValue('');
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('exempts the carried finding when a fresh id-less finding shares the location (#9212)', async () => {
+      // The findings file carries ids on carried-forward findings only; the
+      // fresh finding of this round omits it. The exemption must still fire
+      // on the single CARRIED id, not be crowded out by the fresh entry.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+          { path: 'src/parse-args.ts', line: 44 },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R1-2']);
+    });
+
+    it('matches a prior re-post as the target when it carries the id (#9212)', async () => {
+      // A same-SHA re-run sees the original AND the re-post already made for
+      // it; only the comment leading with the id is a strict match. The
+      // duplication this can produce on further re-runs is disclosed in the
+      // Known-limitation paragraph — detecting "already re-posted" needs a
+      // carry-forward channel and is a follow-up.
+      const original = {
+        ...CARRIED_COMMENT,
+        id: 10,
+        body: '**[Critical]** some claim without an id',
+      };
+      const priorRepost = {
+        ...CARRIED_COMMENT,
+        id: 11,
+        body: '**[Critical]** R1-2: the same claim, re-reported _— model via Qwen Code /review_',
+      };
+      const result = await presubmitWithComments(
+        [original, priorRepost],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R1-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(11);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R1-2']);
+    });
+
+    it('counts a replied-to original toward the id-less ambiguity decision (#9212)', async () => {
+      // A replied-to original is bucketed `resolved`, but it is still an
+      // original at the location: leaving it out of the count handed the
+      // exemption to a sibling comment belonging to a DIFFERENT finding.
+      const repliedOriginal = {
+        ...CARRIED_COMMENT,
+        id: 10,
+        body: '**[Critical]** claim A without an id',
+      };
+      const maintainerReply = {
+        id: 12,
+        body: 'fixing this, thanks',
+        path: 'src/parse-args.ts',
+        line: 44,
+        commit_id: 'abc123',
+        in_reply_to_id: 10,
+        user: { login: 'maintainer-dev' },
+      };
+      const siblingOriginal = {
+        ...CARRIED_COMMENT,
+        id: 11,
+        body: '**[Critical]** claim B without an id',
+      };
+      const result = await presubmitWithComments(
+        [repliedOriginal, maintainerReply, siblingOriginal],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R2-1' }],
+      );
+      expect(result.existingComments.byBucket.resolved).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.existingComments.byBucket.repost).toBe(0);
     });
 
@@ -1167,6 +1339,12 @@ describe('parseFindingsFile (via mocked fs)', () => {
     ['[{"path":"a.ts","line":5,"id":"r3-2"}]', null],
     ['[{"path":"a.ts","line":5,"id":"R3-2 "}]', null],
     ['[{"path":"a.ts","line":5,"id":""}]', null],
+    // The SHAPE check is fully anchored: a padded or prefixed id contains a
+    // valid `R\d+-\d+` substring, so dropping either anchor would accept it
+    // — and an accepted `' R3-2'` can never round-trip against the
+    // extractor's `'R3-2'`, silently disabling the exemption (#9212 review).
+    ['[{"path":"a.ts","line":5,"id":" R3-2"}]', null],
+    ['[{"path":"a.ts","line":5,"id":"XR3-2"}]', null],
     ['[]', []],
   ];
   it.each(cases)('rejects/normalizes %s', (raw, expected) => {
