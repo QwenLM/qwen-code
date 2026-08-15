@@ -39,7 +39,6 @@ const MAX_PROCESSED_ITEMS = 5_000;
 const MAX_IM_TARGETS = 1_000;
 const MAX_TODO_STATES = 1_000;
 const MAX_SELF_SENDER_IDS = 20;
-const OUTBOUND_ECHO_TTL_MS = 30_000;
 const EVENT_RESTART_DELAY_MS = 2_000;
 const EVENT_RESTART_MAX_DELAY_MS = 5 * 60_000;
 const NO_REPLY_SENTINEL = '[NO_REPLY]';
@@ -137,7 +136,7 @@ function parseDocumentMentionNotification(
   content: string,
 ): DwsDocumentMentionNotification | undefined {
   const links = content.matchAll(
-    /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])]+/gu,
+    /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])\u007f-\u{10FFFF}]+/gu,
   );
   for (const match of links) {
     try {
@@ -164,6 +163,7 @@ function parseDocumentMentionNotification(
         const mentionText = line.slice(mentionIndex);
         const mention =
           mentionText.match(/^@[^()\r\n]*\([^)]*\)/u)?.[0] ??
+          mentionText.match(/^@[A-Za-z0-9_][A-Za-z0-9_-]*/u)?.[0] ??
           mentionText.match(/^@[^\s\p{P}\p{S}]+/u)?.[0];
         if (!mention) continue;
         const after = mentionText
@@ -298,38 +298,6 @@ function todoFingerprint(task: DwsTodoTask): string {
     .digest('hex');
 }
 
-function normalizeOutboundEchoContent(content: string): string {
-  let current = content;
-  for (let depth = 0; depth < 3; depth++) {
-    const trimmed = current.trim();
-    if (!trimmed.startsWith('{')) break;
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) break;
-      const record = parsed as Record<string, unknown>;
-      const nested =
-        typeof record['content'] === 'string'
-          ? record['content']
-          : typeof record['text'] === 'string'
-            ? record['text']
-            : undefined;
-      if (nested === undefined || nested === current) break;
-      current = nested;
-    } catch {
-      break;
-    }
-  }
-  return current.trim().replace(/\s+/gu, ' ');
-}
-
-function outboundEchoKey(conversationId: string, content: string): string {
-  return createHash('sha256')
-    .update(conversationId)
-    .update('\0')
-    .update(normalizeOutboundEchoContent(content))
-    .digest('hex');
-}
-
 function stableUuid(value: string): string {
   const hex = createHash('sha256').update(value).digest('hex').slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
@@ -418,10 +386,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
   private readonly watchTodos: boolean;
-  private readonly pendingOutboundEchoes = new Map<
-    string,
-    { count: number; expiresAt: number }
-  >();
+  private readonly outboundDirectConversations = new Set<string>();
   private readonly inboundReactionTargets = new Map<
     string,
     { conversationId: string; messageId: string }
@@ -638,7 +603,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.connected = false;
     this.pollAbortController.abort();
     this.lastTodoPollAt = 0;
-    this.pendingOutboundEchoes.clear();
+    this.outboundDirectConversations.clear();
     this.todoTargets.clear();
     for (const reactions of this.sessionReactionKeys.values()) {
       for (const [key, { conversationId, messageId }] of reactions) {
@@ -775,7 +740,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] no DWS message target is known for the requested chat.`,
       );
     }
-    await this.sendWithEchoTracking(chatId, text, () =>
+    await this.sendImWithPeerBinding(chatId, target, () =>
       this.client.sendImMessage(target, text, idempotencyKey),
     );
   }
@@ -869,14 +834,20 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       await this.sendMessage(chatId, text);
       return;
     }
-    await this.sendWithEchoTracking(chatId, text, () =>
-      this.client.replyToImMessage(
-        chatId,
-        messageId,
-        senderId,
-        text,
-        stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
-      ),
+    await this.sendImWithPeerBinding(
+      chatId,
+      this.findImTarget(chatId) ?? {
+        kind: 'direct',
+        openDingTalkId: senderId,
+      },
+      () =>
+        this.client.replyToImMessage(
+          chatId,
+          messageId,
+          senderId,
+          text,
+          stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
+        ),
     );
   }
 
@@ -1163,7 +1134,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
   ): Promise<void> {
     if (!this.connected) return;
-    if (this.cursor.selfSenderIds.includes(message.senderId)) {
+    if (this.isSelfMessage(message)) {
       this.markProcessedMessage(messageKey(message));
       this.saveCursor();
       return;
@@ -1216,11 +1187,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
     key: string,
   ): Promise<void> {
-    if (this.consumeOutboundEcho(message)) {
-      this.markProcessedMessage(key);
-      this.saveCursor();
-      return;
-    }
     const target: DwsImTarget =
       source.kind === 'direct'
         ? { kind: 'direct', openDingTalkId: message.senderId }
@@ -1454,26 +1420,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return delay;
   }
 
-  private async sendWithEchoTracking(
-    conversationId: string,
-    content: string,
-    send: () => Promise<void>,
-  ): Promise<void> {
-    if (!this.canReceiveOutboundEcho(conversationId)) {
-      await send();
-      return;
-    }
-    const cancel = this.trackOutboundEcho(conversationId, content);
-    try {
-      await send();
-    } catch (error) {
-      if (!(error instanceof DwsCommandError) || error.outcome === 'not_sent') {
-        cancel();
-      }
-      throw error;
-    }
-  }
-
   private reactionKey(conversationId: string, messageId: string): string {
     return `${conversationId}\0${messageId}`;
   }
@@ -1597,75 +1543,52 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     super.onSessionDied(sessionId);
   }
 
-  private canReceiveOutboundEcho(conversationId: string): boolean {
-    if (this.cursor.selfSenderIds.length === 0) return false;
-    const target = this.findImTarget(conversationId);
-    if (!target) return false;
+  private async sendImWithPeerBinding(
+    conversationId: string,
+    target: DwsImTarget,
+    send: () => Promise<void>,
+  ): Promise<void> {
+    if (target.kind !== 'direct' || this.cursor.selfSenderIds.length > 0) {
+      await send();
+      return;
+    }
+    const alreadyBound = this.outboundDirectConversations.has(conversationId);
+    this.outboundDirectConversations.add(conversationId);
+    let evicted: string | undefined;
+    if (this.outboundDirectConversations.size > MAX_IM_TARGETS) {
+      evicted = this.outboundDirectConversations.values().next().value;
+      if (evicted !== undefined) {
+        this.outboundDirectConversations.delete(evicted);
+      }
+    }
+    try {
+      await send();
+    } catch (error) {
+      if (
+        !alreadyBound &&
+        (!(error instanceof DwsCommandError) || error.outcome === 'not_sent')
+      ) {
+        this.outboundDirectConversations.delete(conversationId);
+        if (evicted !== undefined) {
+          this.outboundDirectConversations.add(evicted);
+        }
+      }
+      throw error;
+    }
+  }
+
+  private isSelfMessage(message: DwsImMessage): boolean {
+    if (this.cursor.selfSenderIds.includes(message.senderId)) return true;
     if (
-      target.kind === 'group' &&
-      (this.config.groups[target.conversationId]?.requireMention ??
-        this.config.groups['*']?.requireMention ??
-        true)
+      message.type !== 'user_im_message_receive_o2o_all' ||
+      !this.outboundDirectConversations.has(message.conversationId)
     ) {
       return false;
     }
-    return this.imStates.some(({ source }) =>
-      target.kind === 'direct'
-        ? source.kind === 'direct'
-        : source.kind === 'group-all' ||
-          (source.kind === 'group' &&
-            source.conversationId === target.conversationId),
+    const target = this.findImTarget(message.conversationId);
+    return (
+      target?.kind === 'direct' && target.openDingTalkId !== message.senderId
     );
-  }
-
-  private trackOutboundEcho(
-    conversationId: string,
-    content: string,
-  ): () => void {
-    const now = Date.now();
-    this.pruneOutboundEchoes(now);
-    const key = outboundEchoKey(conversationId, content);
-    const existing = this.pendingOutboundEchoes.get(key);
-    const pending = {
-      count: (existing?.count ?? 0) + 1,
-      expiresAt: Math.max(existing?.expiresAt ?? 0, now + OUTBOUND_ECHO_TTL_MS),
-    };
-    this.pendingOutboundEchoes.set(key, pending);
-    return () => {
-      const current = this.pendingOutboundEchoes.get(key);
-      if (!current || current.expiresAt <= Date.now()) return;
-      if (current.count <= 1) {
-        this.pendingOutboundEchoes.delete(key);
-      } else {
-        this.pendingOutboundEchoes.set(key, {
-          ...current,
-          count: current.count - 1,
-        });
-      }
-    };
-  }
-
-  private consumeOutboundEcho(message: DwsImMessage): boolean {
-    const now = Date.now();
-    this.pruneOutboundEchoes(now);
-    const key = outboundEchoKey(message.conversationId, message.content);
-    const pending = this.pendingOutboundEchoes.get(key);
-    if (!pending) return false;
-    if (this.cursor.selfSenderIds.length > 0) return false;
-    if (pending.count <= 1) this.pendingOutboundEchoes.delete(key);
-    else {
-      this.pendingOutboundEchoes.set(key, {
-        ...pending,
-        count: pending.count - 1,
-      });
-    }
-    return true;
-  }
-
-  private pruneOutboundEchoes(now: number): void {
-    for (const [key, pending] of this.pendingOutboundEchoes) {
-      if (pending.expiresAt <= now) this.pendingOutboundEchoes.delete(key);
-    }
   }
 
   private async readDocumentContext(

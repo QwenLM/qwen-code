@@ -93,4 +93,4 @@ Do not run both forms at once because they share the channel-service lease.
 
 For local verification, send a direct message from another account, approve pairing if required, and verify the eyes reaction appears while the task runs. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
 
-The channel learns its own sender ID from DWS message echoes and ignores later events from that sender to prevent reply and pairing loops.
+The channel ignores events from sender IDs that DWS identifies as the authenticated account. When that identity metadata is unavailable, a direct conversation stays bound to its observed peer sender ID and ignores events from other senders in that conversation, preventing reply and pairing loops without inferring identity from message text.

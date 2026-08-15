@@ -820,7 +820,7 @@ describe('DwsChannel', () => {
     },
   );
 
-  it.each([',', '.', '!', '?', '，', '…'])(
+  it.each([',', '.', '!', '?'])(
     'does not route a document reply when trailing %s corrupts the final comment key',
     async (punctuation) => {
       const client = new FakeDwsClient();
@@ -844,8 +844,37 @@ describe('DwsChannel', () => {
     },
   );
 
+  it.each(['。', '，', '请'])(
+    'routes a bare document mention before a non-ASCII %s suffix',
+    async (suffix) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const url =
+        'https://alidocs.dingtalk.com/i/nodes/doc-1?' +
+        'iframeQuery=comment_key%3Dcomment-1%26mention_source%3D2';
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `notification-unicode-${suffix}`,
+          `${url}${suffix}\n@DataWorksAgent summarize this thread`,
+        ),
+      );
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({
+          chatId: 'doc-1',
+          threadId: 'comment-1',
+          text: 'summarize this thread',
+        }),
+      ]);
+    },
+  );
+
   it.each([
     ['@DataWorksAgent，请总结这个评论的上下文', '请总结这个评论的上下文'],
+    ['@DataWorksAgent请总结这个评论的上下文', '请总结这个评论的上下文'],
     ['please @DataWorksAgent summarize this thread', 'summarize this thread'],
     [
       '@Data Works Agent (bot-id) summarize this thread',
@@ -1823,33 +1852,31 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('does not treat matching peer text as an echo after the tracking window expires', async () => {
-    vi.useFakeTimers();
-    try {
-      const client = new FakeDwsClient();
-      client.identity = { profile: 'corp-only' };
-      const channel = await readyChannel(client);
-      await client.emit(
-        1,
-        message('user_im_message_receive_o2o_all', 'request', 'hello'),
-      );
-      await channel.sendMessage('cid-1', 'shared text');
-      await vi.advanceTimersByTimeAsync(30_001);
+  it('filters direct self events without authenticated self sender metadata', async () => {
+    const client = new FakeDwsClient();
+    client.identity = { profile: 'corp-only' };
+    const channel = await readyChannel(client);
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'request', 'hello'),
+    );
+    await channel.sendMessage('cid-1', 'shared text');
 
-      await client.emit(
-        1,
-        message('user_im_message_receive_o2o_all', 'peer', 'shared text', {
-          senderId: 'open-bob',
-        }),
-      );
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'self', 'shared text', {
+        senderId: 'open-self',
+      }),
+    );
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'peer', 'shared text'),
+    );
 
-      expect(channel.inbound.map((item) => item.text)).toEqual([
-        'hello',
-        'shared text',
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(channel.inbound.map((item) => item.text)).toEqual([
+      'hello',
+      'shared text',
+    ]);
   });
 
   it('does not suppress matching peer text without an authoritative self sender', async () => {
@@ -1953,7 +1980,7 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('does not silently drop JSON-wrapped matching text without a self id', async () => {
+  it('filters JSON-wrapped direct self events without a self id', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const { bridge } = await readyPolicyChannel(
@@ -1980,10 +2007,10 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledTimes(2);
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
   });
 
-  it('does not silently drop folded matching text without a self id', async () => {
+  it('filters folded direct self events without a self id', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const { bridge } = await readyPolicyChannel(
@@ -2014,7 +2041,7 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledTimes(2);
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
   });
 
   it('does not persist an echo sender as the authenticated identity', async () => {
