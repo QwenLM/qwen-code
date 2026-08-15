@@ -182,11 +182,6 @@ jobs:
             )"
             if [[ -n "${override}" ]]; then
               qwen_ref="${override}"
-            elif [[ "${RELEASE_TAG}" =~ ^dsw-eas-tb-smoke-[0-9A-Za-z._-]+$ ]]; then
-              # Smoke prereleases are orchestration tags, not published npm
-              # versions. Keep them on the pinned release unless explicitly
-              # overridden in the release body.
-              qwen_ref='v0.21.12'
             fi
           fi
           git fetch --depth=1 --force origin "refs/tags/${qwen_ref}:refs/tags/${qwen_ref}"
