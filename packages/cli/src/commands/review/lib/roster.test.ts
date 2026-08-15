@@ -439,6 +439,20 @@ describe('requiredAgents — Step 3B', () => {
     const k = keys(incremental as typeof base);
     expect(k).toContain('invariant-a--src/delta.ts');
     expect(k).not.toContain('invariant-a--src/seam.ts');
+    // An array of junk passes Array.isArray but names nothing to subtract.
+    const junkDelta = {
+      ...base,
+      incremental: {
+        anchor: 'abc1234def567890',
+        deltaFiles: [null, 42],
+        interaction: [
+          { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+        ],
+      },
+    };
+    expect(keys(junkDelta as typeof base)).toContain(
+      'invariant-a--src/seam.ts',
+    );
     const mangled = { ...base, incremental: { interaction: 'nope' } };
     expect(keys(mangled as typeof base)).toContain('invariant-a--src/seam.ts');
     // A path in BOTH lists is a DELTA file (its change is live): the delta

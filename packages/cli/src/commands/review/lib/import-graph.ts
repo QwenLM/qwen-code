@@ -90,6 +90,9 @@ const EXT_MAP: ReadonlyArray<[RegExp, string]> = [
   // named `.tsx` targets no edge could ever reach.
   [/\.js$/, '.ts'],
   [/\.js$/, '.tsx'],
+  // …and `.jsx`: a JSX source in a JS project emits `.js` under the same
+  // convention, so the emitted name names it too.
+  [/\.js$/, '.jsx'],
   [/\.jsx$/, '.tsx'],
   [/\.mjs$/, '.mts'],
   [/\.cjs$/, '.cts'],
@@ -157,7 +160,13 @@ export function resolveSpecifier(
       return null;
     }
     if (spec.startsWith(`${pkg.name}/`)) {
-      const sub = spec.slice(pkg.name.length + 1);
+      // Normalised like a relative specifier: a legal subpath carrying `.`
+      // or `..` segments otherwise builds a candidate string no
+      // git-normalised membership path can equal, silently dropping the edge.
+      const subRaw = spec.slice(pkg.name.length + 1);
+      const subNorm = nodePath.posix.normalize(subRaw);
+      if (subNorm.startsWith('..')) return null;
+      const sub = subNorm;
       const base = pkg.dir === '' ? sub : `${pkg.dir}/${sub}`;
       for (const c of candidatesFor(base)) if (membership.has(c)) return c;
       // Deep imports into a package's emitted tree (`dist/…`) name build

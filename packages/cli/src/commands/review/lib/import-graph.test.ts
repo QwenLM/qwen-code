@@ -171,6 +171,30 @@ describe('resolveSpecifier', () => {
     ).toBe('packages/core/src/utils/foo.ts');
   });
 
+  it('maps an emitted .js to a .jsx source, and normalises package subpaths', () => {
+    expect(resolveSpecifier('a.ts', './W.js', new Set(['W.jsx']))).toBe(
+      'W.jsx',
+    );
+    const pkgs = [{ name: '@q/core', dir: 'packages/core' }];
+    expect(
+      resolveSpecifier(
+        'a.ts',
+        '@q/core/src/util/../x.js',
+        new Set(['packages/core/src/x.ts']),
+        pkgs,
+      ),
+    ).toBe('packages/core/src/x.ts');
+    // …and a subpath escaping the package resolves to nothing.
+    expect(
+      resolveSpecifier(
+        'a.ts',
+        '@q/core/../outside.js',
+        new Set(['outside.ts']),
+        pkgs,
+      ),
+    ).toBeNull();
+  });
+
   it('a directory that merely BEGINS with dots is not a root escape', () => {
     const dotFiles = new Set(['..config/mod.ts']);
     expect(resolveSpecifier('a.ts', './..config/mod.js', dotFiles)).toBe(

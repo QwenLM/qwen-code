@@ -209,9 +209,15 @@ export function gitRaw(...args: string[]): Buffer {
  * counters that disagreed would classify the same file heavy in one plan and
  * not the other.
  */
-export function fileLineCount(ref: string, path: string): number {
+export function fileLineCount(
+  ref: string,
+  path: string,
+  repoRoot?: string,
+): number {
   try {
-    const buf = gitRaw('show', `${ref}:${path}`);
+    const buf = repoRoot
+      ? gitRaw('-C', repoRoot, 'show', `${ref}:${path}`)
+      : gitRaw('show', `${ref}:${path}`);
     if (buf.length === 0) return 0;
     let n = 0;
     for (const b of buf) if (b === 0x0a) n++;
