@@ -199,7 +199,8 @@ function plan(
  * review runs: each one's recorded prompt, its brief, and the harness's transcript
  * of an agent launched with it that opened the brief. Neither names a line range,
  * so neither grants chunk coverage — they answer only "did the step run", which is
- * what `verificationGaps` asks. Pass a subset of `keys` to model a skipped step.
+ * what `verificationGaps` asks. Pass a subset of `keys` to model a skipped step;
+ * `['0']` lays down the issue-fidelity agent the same way.
  */
 function recordStep45(
   planPath: string,
@@ -385,7 +386,8 @@ function blindPrompt(chunk: number): string {
  * Both chunks reviewed by agents that opened the diff, and Step 4/5 ran — a
  * complete high-effort review. Pass a subset of keys to model a run that skipped a
  * step (what the (B) gap tests are about); `plan({ step45: false })` suppresses the
- * default pair so this controls them exactly.
+ * default pair so this controls them exactly. When the plan names the PR it also
+ * carries the issue-fidelity agent that plan's roster then requires.
  */
 function coveredPlan(
   step45Keys: string[] = ['verify', 'reverse-audit'],
@@ -407,6 +409,12 @@ function coveredPlan(
   recordBuilt(p, 2);
   recordMatrix(p);
   recordStep45(p, step45Keys);
+  // A plan naming the PR owes the roster's issue-fidelity agent (Agent 0)
+  // too; without its records the plan caps with `unreviewed-dimension`, and
+  // a verdict assertion over it is decided by the cap, not by the counts.
+  if (planOpts.ownerRepo !== undefined && planOpts.prNumber !== undefined) {
+    recordStep45(p, ['0']);
+  }
   return p;
 }
 
@@ -1280,6 +1288,12 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
       env: ENV,
       modelId: MODEL,
     });
+    // No cap may decide this run: under one, the COMMENT and the paragraph
+    // survive dropping the duplicate count from `s` — the exact regression
+    // this PR fixes — so the verdict this test pins would be the cap's, not
+    // the count's.
+    expect(r.cappedBy).toEqual([]);
+    expect(r.event).toBe('COMMENT');
     expect(r.body).toContain(
       '[comment 3788857375](https://github.com/QwenLM/qwen-code/pull/9204#discussion_r3788857375)',
     );
