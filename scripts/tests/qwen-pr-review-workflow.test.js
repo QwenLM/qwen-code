@@ -2689,7 +2689,7 @@ describe('checkout self-heal', () => {
       writeFileSync(join(dir, 'leftover'), 'x');
       mkdirSync(join(dir, '.git'));
       writeFileSync(join(dir, '.git', 'HEAD'), 'x');
-      runWipe({ GITHUB_WORKSPACE: dir });
+      runWipe({ GITHUB_WORKSPACE: dir, RUNNER_WORKSPACE: tmpdir() });
       expect(existsSync(dir)).toBe(true);
       expect(readdirSync(dir)).toEqual([]);
     } finally {
@@ -2744,6 +2744,7 @@ describe('checkout self-heal', () => {
       try {
         const out = runWipe({
           GITHUB_WORKSPACE: fixture.dir,
+          RUNNER_WORKSPACE: tmpdir(),
           PATH: `${bin}:${process.env.PATH}`,
         }); // must not throw
         expect(readdirSync(fixture.dir)).toContain('leftover');
@@ -2773,6 +2774,7 @@ describe('checkout self-heal', () => {
       try {
         runWipe({
           GITHUB_WORKSPACE: fixture.dir,
+          RUNNER_WORKSPACE: tmpdir(),
           PATH: `${bin}:${process.env.PATH}`,
         });
         expect(existsSync(marker)).toBe(true);
@@ -2793,7 +2795,12 @@ describe('checkout self-heal', () => {
   // `rm` is a PATH-fronted recorder: with the guard gone, the call log
   // shows the attempted delete and the test fails having deleted nothing.
   // The trailing-slash variants pin the normalization: the case arms are
-  // exact matches, so `/home/` would otherwise slip past the guard.
+  // exact matches, so `/home/` would otherwise slip past the guard. The
+  // dot-component and double-slash variants pin canonicalization: the kernel
+  // resolves them to the guarded roots (`/home/.` -> /home, `//usr` -> /usr),
+  // so the guard must resolve them the same way before matching. `/tmp` and
+  // `/opt` stand in for every root the denylist does not enumerate — only
+  // the runner-workspace allowlist refuses them.
   it('refuses suspicious workspace paths without invoking rm', () => {
     const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
     try {
@@ -2816,6 +2823,12 @@ describe('checkout self-heal', () => {
         '/var/',
         '//',
         '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
       ]) {
         writeFileSync(calls, '');
         const res = spawnSync(
@@ -2827,6 +2840,7 @@ describe('checkout self-heal', () => {
               ...process.env,
               PATH: `${dir}:${process.env.PATH}`,
               GITHUB_WORKSPACE: bad,
+              RUNNER_WORKSPACE: dir,
             },
           },
         );

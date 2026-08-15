@@ -503,11 +503,25 @@ jobs:
           # root-owned poisoning degrades to warn-and-retry — the heal chain
           # must never fail, so the retry still runs against survivors.
           WS="${GITHUB_WORKSPACE:?}"
+          # Canonicalize before matching: the kernel resolves non-canonical
+          # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
+          # /usr), so a raw string match lets them slip past the case arms.
+          WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           # Trailing slashes slip past the exact-match case arms below
-          # (`/home/` would pass the guard and reach the rm), so strip them.
+          # (`/home/` would pass the guard and reach the rm); realpath strips
+          # them too, but this keeps the guard whole when realpath is absent.
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: $WS"; exit 1 ;;
+          esac
+          # A denylist can only enumerate known roots — the allowlist closes
+          # every other one (/tmp, /opt, ...): only a directory inside the
+          # runner workspace may be wiped.
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: $WS"; exit 1 ;;
           esac
           if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
             echo "::warning::first checkout failed; wiped the workspace for a clean retry"
