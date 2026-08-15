@@ -365,9 +365,25 @@ export function captureLocalDiff(opts: {
     // changes every round by construction, so an incremental round could
     // never again report "no changes". None of it is ever the change under
     // review; drop it.
-    const SELF_DIRS = ['.qwen/tmp', '.qwen/review-cache', '.qwen/reviews'];
+    //
+    // The prefixes are computed, not hardcoded: `ls-files` returns
+    // repo-root-relative paths while the review writes its plumbing relative
+    // to the CWD the command was invoked from (`paths.ts` documents those
+    // three constants as cwd-relative), and a capture started from a
+    // subdirectory — supported, and pinned by this module's own `--file`
+    // tests — puts the plumbing at `<subdir>/.qwen/…` where a root-anchored
+    // filter matches nothing.
+    const cwdPrefix = relative(repoRoot, resolve(process.cwd())).replace(
+      /\\/g,
+      '/',
+    );
+    const selfDirs = ['.qwen/tmp', '.qwen/review-cache', '.qwen/reviews']
+      .flatMap((d) => (cwdPrefix === '' ? [d] : [d, `${cwdPrefix}/${d}`]))
+      // A cwd outside the repo (or above it) yields a `..` prefix that names
+      // nothing `ls-files` can return; keep the root form only.
+      .filter((d) => !d.startsWith('..'));
     const candidates = listUntracked(repoRoot, pathspec).filter(
-      (p) => !SELF_DIRS.some((d) => p === d || p.startsWith(`${d}/`)),
+      (p) => !selfDirs.some((d) => p === d || p.startsWith(`${d}/`)),
     );
 
     if (candidates.length > MAX_UNTRACKED_FILES) {

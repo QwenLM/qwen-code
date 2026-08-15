@@ -196,7 +196,7 @@ Based on the parsed `target.type`:
   - **Attach repository context** at medium or high effort, before `agent-prompt --roster` (and therefore before launching agents): run `qwen review repo-context` with absolute `--plan`, `--worktree`, and `--out` paths. See the repository-context step in the Diff capture section below; for same-repo PRs the manifest is read from the trusted merge base recorded by `fetch-pr`.
 
 - **`file`** (e.g., `src/foo.ts`):
-  - Run `"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the file's repo-relative path with every / replaced by _> --out .qwen/tmp/qwen-review-<target>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
+  - Run `"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the file's repo-relative path with every character outside [A-Za-z0-9._-] replaced by _> --out .qwen/tmp/qwen-review-<target>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
   - If the plan is empty (the file is tracked and unmodified), read the file and review its current state — see the no-diff branch below
 
 ### Diff capture and the review topology
@@ -226,10 +226,12 @@ For **local-diff and file-path reviews**, capture and plan in one command:
 ```bash
 "${QWEN_CODE_CLI:-qwen}" review capture-local --effort <effort> --out .qwen/tmp/qwen-review-local-plan.json
 # for a file-path review:
-"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the file's repo-relative path with every / replaced by _> --effort <effort> \
+"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the file's repo-relative path with every character outside [A-Za-z0-9._-] replaced by _> --effort <effort> \
   --out .qwen/tmp/qwen-review-<target>-plan.json
-# The target is the file's repo-relative path FLATTENED (`src/index.ts` →
-# `src_index.ts`), never its basename: the target keys the tmp stems AND the
+# The target is the file's repo-relative path FLATTENED with the SAME rule
+# the CLI applies to derive filenames (`safeTarget`: every character outside
+# [A-Za-z0-9._-] becomes `_`), e.g. `src/index.ts` → `src_index.ts`; pass
+# that token verbatim everywhere. Never the basename: the target keys the tmp stems AND the
 # review cache, and `src/index.ts` and `test/index.ts` reviewed under the
 # shared target `index.ts` would overwrite each other's cache — the second
 # review erasing the first file's still-open findings. Flattened, not raw:

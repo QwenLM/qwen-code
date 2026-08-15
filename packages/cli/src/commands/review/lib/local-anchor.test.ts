@@ -95,6 +95,21 @@ describe('readLocalCache', () => {
   it('null on every malformation — absent file, bad JSON, wrong shapes', () => {
     expect(readLocalCache('/no/such/file.json')).toBeNull();
     for (const bad of [
+      'null', // JSON.parse succeeds; the object guard must still refuse
+      JSON.stringify({
+        v: 1,
+        target: 't',
+        headSha: null,
+        files: {},
+        stateId: 5,
+      }),
+      JSON.stringify({
+        v: 1,
+        target: 't',
+        headSha: null,
+        files: 'x',
+        stateId: 's',
+      }),
       'not json',
       JSON.stringify({
         v: 2,
