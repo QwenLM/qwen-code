@@ -914,6 +914,30 @@ describe('workspace skill settings persistence', () => {
     expect(savedUser.skills.disabled).toEqual(['locked-skill']);
     expect(savedUser.skills.enabled).toBeUndefined();
 
+    const preinstallNoop = await persistDisabledSkillsBatch!(
+      workspace,
+      ['future-skill'],
+      true,
+    );
+    expect(preinstallNoop.outcomes).toEqual([
+      { skillName: 'future-skill', changed: false },
+    ]);
+    expect(preinstallNoop.settingsChanges).toEqual([]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    const preinstallEnable = await persistDisabledSkillsBatch!(
+      workspace,
+      ['orphan'],
+      true,
+    );
+    expect(preinstallEnable.outcomes).toEqual([
+      { skillName: 'orphan', changed: true },
+    ]);
+    expect(preinstallEnable.settingsChanges).toEqual([
+      { key: 'skills.disabled', value: ['review', 'alpha'] },
+    ]);
+    expect(setValues).toHaveBeenCalledTimes(2);
+
     const enableResult = await persistDisabledSkillsBatch!(
       workspace,
       ['opt-in'],
@@ -929,16 +953,12 @@ describe('workspace skill settings persistence', () => {
         value: ['opt-in'],
       },
     ]);
-    expect(setValues).toHaveBeenCalledTimes(2);
+    expect(setValues).toHaveBeenCalledTimes(3);
 
     const savedAfterEnable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled: string[] } };
-    expect(savedAfterEnable.skills.disabled).toEqual([
-      'orphan',
-      'review',
-      'alpha',
-    ]);
+    expect(savedAfterEnable.skills.disabled).toEqual(['review', 'alpha']);
     expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
 
     const guard = vi.fn();
@@ -4277,11 +4297,41 @@ describe('runQwenServe runtime startup failures', () => {
     try {
       await handle.runtimeReady;
       const bridgeOptions = createBridge.mock.calls[0]?.[0] as
-        | { childEnvOverrides?: Record<string, string | undefined> }
+        | {
+            childEnvOverrides?: Record<string, string | undefined>;
+            externalToolGuard?: unknown;
+          }
         | undefined;
       expect(bridgeOptions?.childEnvOverrides).toMatchObject({
         QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
+        QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD: 'required-v1',
       });
+      // No external provider is configured in this test: the child must see
+      // the guard plumbing marker but NOT the provider-attached marker.
+      expect(bridgeOptions?.childEnvOverrides).toHaveProperty(
+        'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER',
+        undefined,
+      );
+      expect(createBridge.mock.calls.length).toBeGreaterThan(0);
+      for (const call of createBridge.mock.calls) {
+        const options = call[0] as { externalToolGuard?: unknown };
+        expect(options.externalToolGuard).toEqual(expect.any(Function));
+      }
+      const daemonGuard = bridgeOptions?.externalToolGuard as (
+        request: Record<string, unknown>,
+      ) => Promise<{ allowed: boolean; reason?: string }>;
+      await expect(
+        daemonGuard({
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: {
+            command: `git -C ${path.join(os.tmpdir(), 'outside-repo')} reset --hard`,
+          },
+          effectiveCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ allowed: false });
     } finally {
       if (originalClientMcpOverWs === undefined) {
         delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
@@ -4294,6 +4344,79 @@ describe('runQwenServe runtime startup failures', () => {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
       }
       await handle.close();
+    }
+  });
+
+  // The negative side of the provider marker is asserted above. This is the
+  // attached side, driven by a real handshake against a loopback provider so
+  // the marker, the composed guard and the child env are all exercised.
+  it('forwards the provider-attached marker when a real provider handshakes', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-provider-')),
+    );
+    const provider = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+          protocolVersion: number;
+          nonce?: string;
+        };
+        response.statusCode = 200;
+        response.setHeader('content-type', 'application/json');
+        response.end(
+          JSON.stringify({
+            protocolVersion: body.protocolVersion,
+            nonce: body.nonce,
+            capabilities: { prepare: true },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      provider.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = provider.address() as import('node:net').AddressInfo;
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: `http://127.0.0.1:${port}`,
+          token: 'guard-token',
+        },
+      } as Parameters<typeof runQwenServe>[0],
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const bridgeOptions = createBridge.mock.calls[0]?.[0] as
+        | {
+            childEnvOverrides?: Record<string, string | undefined>;
+            externalToolGuard?: unknown;
+          }
+        | undefined;
+      expect(bridgeOptions?.childEnvOverrides).toMatchObject({
+        QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD: 'required-v1',
+        QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER: 'attached-v1',
+      });
+      expect(bridgeOptions?.externalToolGuard).toEqual(expect.any(Function));
+    } finally {
+      await handle.close();
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
     }
   });
 

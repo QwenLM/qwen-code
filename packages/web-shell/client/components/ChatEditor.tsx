@@ -1473,8 +1473,15 @@ export const ChatEditor = memo(
       renderComposerTagTooltip,
       onComposerTagClick,
       parseUserMessageContent,
+      builtinAtProviders: contextBuiltinAtProviders,
+      atProviders: contextAtProviders,
       fileUploadEnabled,
     } = useWebShellCustomization();
+    // Props win when set (main composer). Split-view ChatPane omits them and
+    // falls back to the App-level customization context.
+    const resolvedBuiltinAtProviders =
+      builtinAtProviders ?? contextBuiltinAtProviders;
+    const resolvedAtProviders = atProviders ?? contextAtProviders;
 
     // File-upload picker. The @ panel's "Upload file" item reports the browsed
     // directory; we click a hidden <input type="file"> so the browser treats it
@@ -1580,8 +1587,8 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
-      builtinAtProviders,
-      atProviders,
+      builtinAtProviders: resolvedBuiltinAtProviders,
+      atProviders: resolvedAtProviders,
       atWorkspaceCwd,
       composerTagIcons,
       parseUserMessageContent,
