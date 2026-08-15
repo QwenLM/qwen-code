@@ -83,6 +83,7 @@ import {
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
+  appendReattachParts,
   buildReattachParts,
   countAllInlineImages,
   replaceImagePayloadsInPlace,
@@ -1163,6 +1164,18 @@ function isValidContentPart(part: Part): boolean {
 // substring check would false-positive on legitimate mentions.
 const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
 
+// Single construction site for the placeholder InvalidStreamError: four
+// call sites convert/throw this error (send-loop catch-convert, the
+// stream-error completed-placeholder discard, and the two post-stream
+// gates). A shared factory keeps the message and type strings from
+// drifting between sites (#8938 review).
+function degradedPlaceholderError(): InvalidStreamError {
+  return new InvalidStreamError(
+    'Model response is an upstream fail-fast placeholder.',
+    'UPSTREAM_DEGRADED_RESPONSE',
+  );
+}
+
 // Non-thought text of a part list, trimmed. Both placeholder gates — the
 // per-chunk hold during iteration and the completed-placeholder drop on the
 // stream-error path — must agree on what counts as the turn's text, so they
@@ -1975,14 +1988,7 @@ export class GeminiChat {
         requestHistory,
         this.imagePayloadStore,
       );
-      if (reattachParts.length > 0) {
-        const last = requestHistory.at(-1);
-        if (last?.role === 'user') {
-          last.parts = [...(last.parts ?? []), ...reattachParts];
-        } else {
-          requestHistory.push({ role: 'user', parts: reattachParts });
-        }
-      }
+      appendReattachParts(requestHistory, reattachParts);
       return requestHistory;
     }
     const requestHistory = curatedHistory.map(copyContentContainer);
@@ -2003,14 +2009,7 @@ export class GeminiChat {
             this.imagePayloadStore,
           )
         : [];
-    if (reattachParts.length > 0) {
-      const last = requestHistory.at(-1);
-      if (last?.role === 'user') {
-        last.parts = [...(last.parts ?? []), ...reattachParts];
-      } else {
-        requestHistory.push({ role: 'user', parts: reattachParts });
-      }
-    }
+    appendReattachParts(requestHistory, reattachParts);
     return requestHistory;
   }
 
@@ -3131,10 +3130,7 @@ export class GeminiChat {
               // the continuation reset (the loop prelude's
               // resetTransportContinuation) like every other placeholder
               // shape raised from inside the try.
-              convertedPlaceholderError = new InvalidStreamError(
-                'Model response is an upstream fail-fast placeholder.',
-                'UPSTREAM_DEGRADED_RESPONSE',
-              );
+              convertedPlaceholderError = degradedPlaceholderError();
               lastError = convertedPlaceholderError;
             }
             const canContinueAfterTransportCut =
@@ -4941,10 +4937,7 @@ export class GeminiChat {
         // until that budget exhausted. The invalid-stream error takes the
         // budget handler, which retries fresh with the continuation reset
         // (#8938 review).
-        streamError = new InvalidStreamError(
-          'Model response is an upstream fail-fast placeholder.',
-          'UPSTREAM_DEGRADED_RESPONSE',
-        );
+        streamError = degradedPlaceholderError();
       } else {
         for (const pendingChunk of pendingPreValidationChunks) {
           yield pendingChunk;
@@ -5184,10 +5177,7 @@ export class GeminiChat {
       !hasToolCall &&
       contentText === UPSTREAM_DEGRADED_PLACEHOLDER
     ) {
-      throw new InvalidStreamError(
-        'Model response is an upstream fail-fast placeholder.',
-        'UPSTREAM_DEGRADED_RESPONSE',
-      );
+      throw degradedPlaceholderError();
     }
     // Transport-continuation merge (issue #8094). `allModelParts` is
     // per-attempt, so a continuation's parts carry the resumed remainder only.
@@ -5250,10 +5240,7 @@ export class GeminiChat {
       !hasToolCall &&
       contentText === UPSTREAM_DEGRADED_PLACEHOLDER
     ) {
-      throw new InvalidStreamError(
-        'Model response is an upstream fail-fast placeholder.',
-        'UPSTREAM_DEGRADED_RESPONSE',
-      );
+      throw degradedPlaceholderError();
     }
     // Arrival order: everything pending predates any yielded chunk. Yield
     // detached copies — the consolidation above merged adjacent text parts

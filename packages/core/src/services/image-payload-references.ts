@@ -192,6 +192,25 @@ export function buildReattachParts(
   ];
 }
 
+/**
+ * Appends reattach parts to the outgoing request history: onto the last
+ * user turn when there is one, else as a fresh user turn. Shared by both
+ * request-history branches so the append shape cannot drift between them
+ * (#8938 review).
+ */
+export function appendReattachParts(
+  requestHistory: Content[],
+  reattachParts: Part[],
+): void {
+  if (reattachParts.length === 0) return;
+  const last = requestHistory.at(-1);
+  if (last?.role === 'user') {
+    last.parts = [...(last.parts ?? []), ...reattachParts];
+  } else {
+    requestHistory.push({ role: 'user', parts: reattachParts });
+  }
+}
+
 export function prepareImagePayloadsForRequest(
   contents: Content[],
   options: {
