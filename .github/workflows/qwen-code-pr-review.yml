@@ -483,11 +483,14 @@ jobs:
         if: "steps.checkout.outcome == 'failure'"
         run: |-
           set -uo pipefail
-          # The step shell starts in GITHUB_WORKSPACE; leave before deleting it.
-          cd /
-          rm -rf "${GITHUB_WORKSPACE:?}" 2>/dev/null || sudo -n rm -rf "${GITHUB_WORKSPACE:?}" || echo "::warning::could not wipe the workspace; the retry checkout may fail again"
-          mkdir -p "$GITHUB_WORKSPACE"
-          echo "::warning::first checkout failed; wiped the workspace for a clean retry"
+          # Pool wipe idiom (serve-ab.yml, qwen-triage.yml): empties the
+          # workspace but keeps the directory itself for the retry checkout,
+          # so no cd-escape and no recreation are needed.
+          if find "${GITHUB_WORKSPACE:?}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || sudo -n find "${GITHUB_WORKSPACE:?}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
+            echo "::warning::first checkout failed; wiped the workspace for a clean retry"
+          else
+            echo "::warning::could not wipe the workspace; the retry checkout may fail again"
+          fi
 
       - name: 'Checkout base branch (retry)'
         if: "steps.checkout.outcome == 'failure'"

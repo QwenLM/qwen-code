@@ -2578,6 +2578,16 @@ describe('checkout self-heal', () => {
   const first = steps[nameIndex(FIRST)];
   const wipe = steps[nameIndex(WIPE)];
   const retry = steps[nameIndex(RETRY)];
+  // Runs the real wipe script under the runner's shell flags: GitHub Actions
+  // executes `run:` blocks with `-eo pipefail`, and that implicit errexit is
+  // what kills a heal step ending on a nonzero status in production, so the
+  // exec tests must reproduce it instead of hiding it behind bare `bash -c`.
+  const runWipe = (env, options = {}) =>
+    execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+      ...options,
+    });
 
   it('makes the first checkout failure survivable and addressable', () => {
     // Without continue-on-error the job dies on the first failure and the
@@ -2585,6 +2595,9 @@ describe('checkout self-heal', () => {
     // outcome at all.
     expect(first.id).toBe('checkout');
     expect(first['continue-on-error']).toBe(true);
+    // Symmetric half of the invariant: a double checkout failure must stay
+    // red so the job never proceeds into review without code.
+    expect(retry['continue-on-error']).toBeUndefined();
   });
 
   it('wipes and retries exactly when the first checkout fails', () => {
@@ -2599,24 +2612,34 @@ describe('checkout self-heal', () => {
 
   it('retries with the identical checkout', () => {
     // A drift here silently changes what the review runs against — dropping
-    // fetch-depth on the retry would hand the review a shallow clone.
+    // fetch-depth on the retry would hand the review a shallow clone. The
+    // equality checks alone cannot catch a coordinated drift of BOTH steps,
+    // so the first checkout is pinned to its required absolute values too.
     expect(retry.uses).toBe(first.uses);
     expect(retry.with).toEqual(first.with);
+    expect(first.uses).toBe(
+      'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+    );
+    expect(first.with.ref).toBe(
+      '${{ github.event.repository.default_branch }}',
+    );
+    expect(first.with['fetch-depth']).toBe(0);
   });
 
-  it('wipes the whole workspace and recreates it', () => {
+  it('wipes the whole workspace, hidden entries included', () => {
     // Executes the REAL wipe script against a disposable workspace: it must
     // remove the directory contents (not just .git — a hostile tree must not
     // trip the re-clone) and leave the directory itself behind for the
-    // retry.
+    // retry. Hidden entries are the regression case: a glob-shaped wipe
+    // skips dotfiles and would leave exactly the .git this heal exists to
+    // remove.
     const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-'));
     try {
       mkdirSync(join(dir, 'leftover-dir'));
       writeFileSync(join(dir, 'leftover'), 'x');
-      execFileSync('bash', ['-c', wipe.run], {
-        encoding: 'utf8',
-        env: { ...process.env, GITHUB_WORKSPACE: dir },
-      });
+      mkdirSync(join(dir, '.git'));
+      writeFileSync(join(dir, '.git', 'HEAD'), 'x');
+      runWipe({ GITHUB_WORKSPACE: dir });
       expect(existsSync(dir)).toBe(true);
       expect(readdirSync(dir)).toEqual([]);
     } finally {
@@ -2624,15 +2647,29 @@ describe('checkout self-heal', () => {
     }
   });
 
+  it('still exits 0 when the wipe cannot remove the workspace', () => {
+    // The wipe step has no continue-on-error, so its own never-fail exit
+    // contract is what keeps the heal chain alive: a permission-blocked wipe
+    // must warn and exit 0 so the retry checkout still runs.
+    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-lock-'));
+    const dir = join(parent, 'workspace');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'leftover'), 'x');
+    // A read-only dir cannot have entries unlinked, so both wipe legs fail.
+    chmodSync(dir, 0o500);
+    try {
+      runWipe({ GITHUB_WORKSPACE: dir }); // must not throw
+    } finally {
+      chmodSync(dir, 0o755);
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to wipe when GITHUB_WORKSPACE is unset or empty', () => {
     // The `:?` guard is what keeps this from ever running rm against a
     // surprise expansion; a dropped GITHUB_WORKSPACE must fail loudly.
     expect(() =>
-      execFileSync('bash', ['-c', wipe.run], {
-        encoding: 'utf8',
-        env: { ...process.env, GITHUB_WORKSPACE: '' },
-        stdio: 'pipe',
-      }),
+      runWipe({ GITHUB_WORKSPACE: '' }, { stdio: 'pipe' }),
     ).toThrow();
   });
 });
