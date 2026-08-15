@@ -101,7 +101,11 @@ export interface WorktreeResidue {
  *   `probe_dir/` entry, and every recovery this pipeline prints — `git show
  *   HEAD:`, `git checkout HEAD --` — fails on a directory. The contamination
  *   shape this exists to catch (an agent dropping probe files into a new
- *   folder) is exactly the shape `normal` renders unactionable.
+ *   folder) is exactly the shape `normal` renders unactionable. One directory
+ *   shape survives the flag: git will not recurse into an untracked directory
+ *   that holds its own `.git`, so a cloned fixture still arrives as a single
+ *   `dir/` entry — detected and disclosed, but recoverable only by `rm -rf`,
+ *   which is what both renderers tell the reader to use for untracked residue.
  * - `maxBuffer` because the default is 1 MB and `spawnSync` answers ENOBUFS by
  *   returning no stdout — which this function would have read as "clean". The
  *   overload case is the one where the tree is dirtiest.
@@ -109,6 +113,11 @@ export interface WorktreeResidue {
  * Ignored files are excluded (`node_modules`, `dist`: every review builds).
  * Empty on any git failure: this is a diagnostic, and a diagnostic that throws
  * would fail the build it is only commenting on.
+ *
+ * One limit the NUL format does not remove: `encoding: 'utf8'` maps an invalid
+ * UTF-8 byte in a filename to U+FFFD, so such a path is reported but no longer
+ * resolves on disk. No string form of it can — Node's fs API takes strings here
+ * — so the name is disclosed as git rendered it rather than silently dropped.
  */
 export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   const r = spawnSync(
@@ -221,7 +230,16 @@ function farmNodeModules(
   const target = join(targetDir, 'node_modules');
   if (!existsSync(source)) return;
   if (existsSync(target)) {
-    done.alreadyPresent = true;
+    // A standing farm counts only if it holds something. An EMPTY `node_modules`
+    // is what a previous call leaves behind when the source had nothing
+    // linkable, and it is gitignored, so the reset spares it — without the
+    // emptiness check the second call would report "already in place" (harness
+    // ready) about the exact state the first call correctly called unusable.
+    try {
+      if (readdirSync(target).length > 0) done.alreadyPresent = true;
+    } catch {
+      // Unreadable: not a farm anyone can rely on, so not one to claim.
+    }
     return;
   }
   mkdirSync(target);

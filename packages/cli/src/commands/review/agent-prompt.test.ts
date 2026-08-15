@@ -2478,6 +2478,21 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // A relative --worktree would resolve against the agent's cwd, which IS the
     // worktree — the trap Agent 7's block already documents.
     expect(p).not.toMatch(/--worktree \.qwen/);
+    // And the ESCAPE, not just the wrap: a plain `'…'` wrap passes this
+    // fixture and still breaks on `~/Documents/John's Projects/…`, which is
+    // the workspace shape `shellQuotePath` exists for.
+    expect(
+      buildRoleBrief(
+        { ...PR_PLAN, worktreePath: "/tmp/John's Projects/wt" },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain(
+      `--worktree '${resolve("/tmp/John's Projects/wt")}'`.replace(
+        "John's",
+        "John'\\''s",
+      ),
+    );
     // Two shards of one round must not be handed one tree.
     expect(
       buildRoleBrief(PR_PLAN, 'verify', { key: 'verify--round-2--0badc0de' }),
@@ -2524,6 +2539,29 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       residue: { paths: ['a.ts'], total: 9 },
     });
     expect(capped).toContain('8 more not listed here');
+    // The full set needs `--untracked-files=all`: the default collapses a whole
+    // probe directory to one entry, so the count the note promises would not
+    // be reachable by the command it names.
+    expect(capped).toContain('--untracked-files=all');
+
+    // A control byte in a residue path must not reach the brief (or, below, a
+    // terminal): git reports names verbatim in the `-z` format this now reads.
+    expect(
+      buildRoleBrief(PR_PLAN, '1a', {
+        residue: { paths: ['a\u001b[31m.ts'], total: 1 },
+      }),
+    ).not.toContain('\u001b');
+
+    // Agent 7 does not review code, so it gets no reader rule — but residue
+    // reaches its build and its test run, where a `[build]`/`[test]` finding is
+    // pre-confirmed and skips verification. It is told which paths are not the
+    // PR's, and that a failure confined to them is not a finding.
+    const agent7 = buildRoleBrief(PR_PLAN, '7', {
+      residue: { paths: ['__probe__.test.ts'], total: 1 },
+    });
+    expect(agent7).toContain('And right now it is not clean');
+    expect(agent7).toContain('is not a finding');
+    expect(agent7).not.toContain('Your working directory is a SHARED review');
 
     // `git show HEAD:` cannot produce an UNTRACKED path — the prototypical
     // residue. The rule has to say what that answer means, or it hands the
@@ -2563,11 +2601,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildRoleBrief(PLAN, '1a')).not.toContain(
       'Your working directory is a SHARED review worktree',
     );
-    // Not for Agent 7 either: it owns the build, and its own commands are the
-    // only writes it will see.
+    // The RULE is still not Agent 7's: it runs commands, it does not judge code.
     expect(buildRoleBrief(PR_PLAN, '7')).not.toContain(
       'Your working directory is a SHARED review worktree',
     );
+    expect(buildRoleBrief(PR_PLAN, '7')).not.toContain('it is not clean');
   });
 
   it('carries the command-aware subprocess-injection correction into Agent 2', () => {

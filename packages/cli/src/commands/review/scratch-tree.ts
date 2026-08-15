@@ -41,6 +41,7 @@ import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   assertWritableOutPath,
+  inertPath,
   scratchLabel,
   scratchWorktreePath,
 } from './lib/paths.js';
@@ -121,7 +122,8 @@ function git(cwd: string, ...args: string[]): void {
  * probe left" — a mutant surviving into the next finding's probe is a wrong
  * verdict with a deterministic source tag on it, which is the worst failure
  * this command could have. `checkout --force` reverts the tracked edits and
- * `clean -fd` removes the probe files; ignored paths are deliberately spared,
+ * `clean -ffd` removes the probe files, nested repositories a probe cloned or
+ * `git init`-ed included; ignored paths are deliberately spared,
  * because that is where the dependency farm lives and rebuilding it every call
  * is the whole cost this reuse path exists to avoid.
  */
@@ -200,17 +202,23 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   const sharedTreeResidue = residue.paths;
   const residueNote =
     sharedTreeResidue.length > 0
-      ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue.join(', ')} ` +
+      ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue
+          .map(inertPath)
+          .join(', ')} ` +
         `${sharedTreeResidue.length === 1 ? 'is' : 'are'} not in ${headSha.slice(0, 9)}` +
         (residue.total > sharedTreeResidue.length
           ? `, and ${residue.total - sharedTreeResidue.length} more paths not listed here ` +
-            '(run `git status --porcelain` in that worktree for the full set)'
+            '(run `git status --porcelain --untracked-files=all` in that worktree for the ' +
+            'full set — without that flag it collapses a whole probe directory to one entry)'
           : '') +
         '. Other agents are reading that tree right now and will take those lines for the ' +
-        "PR's own code. Restore it before you do anything else — " +
-        '`git checkout HEAD -- <path>` for anything tracked (plain `git checkout --` ' +
-        'restores from the INDEX, so it leaves STAGED residue in place), ' +
-        'delete anything untracked.'
+        "PR's own code. Restore it before you do anything else, by shape: " +
+        '`git checkout HEAD -- <path>` for a tracked file (plain `git checkout --` restores ' +
+        'from the INDEX, so it leaves STAGED residue in place); `rm -rf <path>` for anything ' +
+        'untracked, including a directory entry (git reports an untracked directory that ' +
+        'holds its own `.git` as one `dir/` entry it will not recurse into); and for a path ' +
+        'STAGED as new (`A` in `git status`) or a staged rename, `git checkout HEAD --` ' +
+        'cannot match it at all — `git rm --cached <path>` first, then delete it.'
       : '';
 
   const tree = scratchWorktreePath(worktree, label);

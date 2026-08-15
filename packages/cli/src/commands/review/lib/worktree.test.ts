@@ -195,7 +195,7 @@ describe('exposeDependencies', () => {
     const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
     const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
     mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
-    mkdirSync(join(probe, 'node_modules'), { recursive: true });
+    mkdirSync(join(probe, 'node_modules', 'standing-pkg'), { recursive: true });
 
     // `alreadyPresent` is the half `{0, 0}` alone cannot say: a farm that was
     // already standing and a source with nothing linkable read identically,
@@ -205,7 +205,25 @@ describe('exposeDependencies', () => {
       failed: 0,
       alreadyPresent: true,
     });
-    expect(readdirSync(join(probe, 'node_modules'))).toEqual([]);
+    expect(readdirSync(join(probe, 'node_modules'))).toEqual(['standing-pkg']);
+  });
+
+  it('does not call an EMPTY farm dir a standing farm', () => {
+    // The dir a previous call created when the source held nothing linkable —
+    // gitignored, so a scratch tree's reset spares it. Counting it as
+    // "already in place" flips the note from "no harness will start here" to
+    // "harness ready" with nothing having changed in between.
+    const root = mkdtempSync(join(tmpdir(), 'expose-empty-root-'));
+    const probe = mkdtempSync(join(tmpdir(), 'expose-empty-probe-'));
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', '.package-lock.json'), '{}');
+    mkdirSync(join(probe, 'node_modules'), { recursive: true });
+
+    expect(exposeDependencies(probe, root)).toEqual({
+      linked: 0,
+      failed: 0,
+      alreadyPresent: false,
+    });
   });
 });
 

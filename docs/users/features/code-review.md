@@ -147,7 +147,7 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - The worktree is automatically cleaned up after the review completes
 - If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
 - Review reports and cache are saved to the main project directory (not the worktree)
-- Steps that **modify** code to measure something — the test-efficacy probe's mutants, and a verifier's probe of a specific finding — each run in their own throwaway worktree beside it (`…-probe`, `…-scratch-<agent>`), so one agent's experiment is not visible to the others reading the shared tree. As a backstop, each wave of agents is also told which paths (if any) differ from the commit under review at the moment it was launched. All of these trees are swept along with the worktree at the end of the review.
+- Steps that **modify** code to measure something — the test-efficacy probe's mutants, and a verifier's probe of a specific finding — each run in their own throwaway worktree beside it (`…-probe`, `…-scratch-<agent>`), so one agent's experiment is not visible to the others reading the shared tree. As a backstop, every agent in each wave is also told which paths (if any) differ from the commit under review at the moment it was launched, and that a failure confined to those paths is not a finding. All of these trees are swept along with the worktree at the end of the review.
 
 ## Cross-repo PR Review
 

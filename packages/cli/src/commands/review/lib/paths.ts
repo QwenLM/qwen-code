@@ -220,3 +220,28 @@ export function tmpFile(target: string, suffix: string): string {
 export function tmpPrefix(target: string): string {
   return `qwen-review-${safeTarget(target)}-`;
 }
+
+/**
+ * A PR-controlled path, flattened for display inside a brief, a prompt, or a
+ * terminal line. The brief is the file the agent is told is the whole of its
+ * instructions — a git path can legally contain newlines, and a newline inside
+ * an interpolated path would let PR content open its own Markdown line there.
+ * Functional arguments (the `read_file` path) are JSON-quoted instead, which
+ * both survives the newline and remains the parseable single-line form the
+ * transcripts checks read.
+ *
+ * Lives here, not in `agent-prompt.ts`, because residue paths reach two more
+ * sinks the same way: `scratch-tree`'s verifier-facing note and the
+ * orchestrator's stderr warning. Both render paths that git reports verbatim
+ * (the residue probe reads the NUL format precisely so names arrive intact),
+ * so both need the same flattening — a control sequence in a filename must not
+ * reach a terminal from any of the three.
+ */
+export function inertPath(p: string): string {
+  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
+  // control sequence in a filename must not reach a terminal either); U+2500 is
+  // the roster separator glyph; the backtick would close the Markdown code span
+  // these paths are rendered inside, letting the tail of a filename run as
+  // markup in the file the agent treats as authoritative.
+  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
+}

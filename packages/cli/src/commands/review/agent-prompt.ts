@@ -91,7 +91,7 @@ import {
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
-import { scratchLabel } from './lib/paths.js';
+import { inertPath, scratchLabel } from './lib/paths.js';
 import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
 import {
   isTerritoryFanOut,
@@ -949,23 +949,6 @@ function tail(
  * increment is exactly the class of defect this checklist hunts, and it is
  * invisible in the file's text. The `-` lines are the only evidence it existed.
  */
-/**
- * A PR-controlled path, flattened for display inside a brief or prompt. The
- * brief is the file the agent is told is the whole of its instructions — a git
- * path can legally contain newlines, and a newline inside an interpolated path
- * would let PR content open its own Markdown line there. Functional arguments
- * (the `read_file` path) are JSON-quoted instead, which both survives the
- * newline and remains the parseable single-line form the transcripts checks read.
- */
-function inertPath(p: string): string {
-  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
-  // control sequence in a filename must not reach a terminal either); U+2500 is
-  // the roster separator glyph; the backtick would close the Markdown code span
-  // these paths are rendered inside, letting the tail of a filename run as
-  // markup in the file the agent treats as authoritative.
-  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
-}
-
 function invariantFileBlock(
   report: PlanReport,
   diffPath: string,
@@ -1092,24 +1075,33 @@ function worktreeResidueOf(report: PlanReport): WorktreeResidue {
 function worktreeEvidenceBlock(
   report: PlanReport,
   residue: WorktreeResidue | undefined,
+  opts: { rule?: boolean } = {},
 ): string[] {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return [];
-  const parts = [
-    '',
-    '**Your working directory is a SHARED review worktree.** Other agents read it ' +
-      'while you do, and Step 4 verifiers may write in it — their probes run in ' +
-      'their own throwaway trees, but a stray uncommitted change here is still ' +
-      'possible, and it is not part of the pull request. So: **code that is not in ' +
-      'the diff and not in the commit is not a finding.** Before reporting anything ' +
-      'that surprises you — a test file the diff never added, a line the diff never ' +
-      'touched — check it against the commit under review with ' +
-      '`git show HEAD:<path>` and judge THAT. **A path that command cannot produce ' +
-      "(`exists on disk, but not in 'HEAD'`) is not in the commit at all** — it is " +
-      "not the PR's code, so it is neither evidence nor a finding. (An auditor of a " +
-      "real run took a verifier's live probe for the PR's own code and came within a " +
-      'step of filing a Critical against it.)',
-  ];
+  const parts: string[] = [];
+  // The RULE is for agents that review code. The residue paragraph below is for
+  // everyone: Agent 7 does not read the tree, it BUILDS it, and residue that
+  // predates the round reaches its compile and its test run — where a
+  // `[build]`/`[test]` finding is pre-confirmed and skips verification, which
+  // is how a stray probe file becomes a merge-blocking phantom Critical.
+  if (opts.rule !== false) {
+    parts.push(
+      '',
+      '**Your working directory is a SHARED review worktree.** Other agents read it ' +
+        'while you do, and Step 4 verifiers may write in it — their probes run in ' +
+        'their own throwaway trees, but a stray uncommitted change here is still ' +
+        'possible, and it is not part of the pull request. So: **code that is not in ' +
+        'the diff and not in the commit is not a finding.** Before reporting anything ' +
+        'that surprises you — a test file the diff never added, a line the diff never ' +
+        'touched — check it against the commit under review with ' +
+        '`git show HEAD:<path>` and judge THAT. **A path that command cannot produce ' +
+        "(`exists on disk, but not in 'HEAD'`) is not in the commit at all** — it is " +
+        "not the PR's code, so it is neither evidence nor a finding. (An auditor of a " +
+        "real run took a verifier's live probe for the PR's own code and came within a " +
+        'step of filing a Critical against it.)',
+    );
+  }
   if (residue && residue.paths.length > 0) {
     const unlisted = residue.total - residue.paths.length;
     parts.push(
@@ -1117,13 +1109,18 @@ function worktreeEvidenceBlock(
       `**And right now it is not clean.** These paths differ from the commit under ` +
         `review: ${residue.paths.map((p) => `\`${inertPath(p)}\``).join(', ')}` +
         (unlisted > 0
-          ? `, and ${unlisted} more not listed here (\`git status --porcelain\` has the full set — this list is capped)`
+          ? `, and ${unlisted} more not listed here — this list is capped, and ` +
+            '`git status --porcelain --untracked-files=all` has the full set ' +
+            '(without `--untracked-files=all` it collapses a whole probe directory ' +
+            'to one entry)'
           : '') +
-        '. Take your evidence for them from `git show HEAD:<path>`, not from the ' +
-        'file on disk — and where that command reports the path is not in HEAD, it ' +
-        'is something written into the tree after the commit, which settles it: not ' +
-        "the PR's code. Say in your return that you saw them, so the orchestrator " +
-        'can have the tree cleared.',
+        ". None of it is the PR's code, so **a failure, a behaviour or a defect " +
+        'confined to those paths is not a finding** — a build or test failure they ' +
+        'cause included. Take your evidence for them from `git show HEAD:<path>`, ' +
+        'not from the file on disk; where that command answers that the path is not ' +
+        'in HEAD, it was written into the tree after the commit, which settles it. ' +
+        'Say in your return that you saw them, so the orchestrator can have the ' +
+        'tree cleared.',
     );
   }
   return parts;
@@ -1319,12 +1316,17 @@ export function buildRoleBrief(
   }
 
   // The other side of the same coin: in worktree mode there IS a tree, and it is
-  // shared with agents that write into it. Every code-reading role gets the rule
-  // (#9207); Agent 7 does not, because it owns the build and its own commands are
-  // the only writes it will see.
-  if (brief.reviewsCode) {
-    parts.push(...worktreeEvidenceBlock(report, opts.residue));
-  }
+  // shared with agents that write into it (#9207). The RULE goes to the roles
+  // that review code; the residue paragraph goes to every role, Agent 7
+  // included — residue that predates the round lands in the build and the test
+  // run it owns, and a `[build]`/`[test]` finding is pre-confirmed downstream,
+  // so a stray probe file would arrive as a merge-blocking Critical nothing
+  // verifies.
+  parts.push(
+    ...worktreeEvidenceBlock(report, opts.residue, {
+      rule: !!brief.reviewsCode,
+    }),
+  );
 
   // The verifier is the review's one WRITING agent, so it gets a tree of its own
   // — the command welded in with its path and its per-shard label, the way Agent
@@ -2747,12 +2749,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   if (residue.paths.length > 0) {
     const unlisted = residue.total - residue.paths.length;
     writeStderrLine(
-      `warning: the review worktree carries changes its commit does not: ${residue.paths.join(', ')}` +
-        (unlisted > 0 ? ` (and ${unlisted} more — this list is capped)` : '') +
-        '. Every CODE-READING agent built by this call is told to take its evidence for those ' +
-        'paths from `git show HEAD:<path>` — Agent 7, which builds and tests this tree, is ' +
-        'not, and neither is anything else that does not review code. Restore them before the ' +
-        "next round: a probe left in the shared tree reads to an auditor as the PR's own code.",
+      `warning: the review worktree carries changes its commit does not: ${residue.paths
+        .map(inertPath)
+        .join(', ')}` +
+        (unlisted > 0
+          ? ` (and ${unlisted} more — this list is capped; \`git status --porcelain --untracked-files=all\` has the full set)`
+          : '') +
+        '. Every brief built by this call names those paths and says a defect confined to them ' +
+        'is not a finding; the code-reading ones also carry the rule that evidence comes from ' +
+        '`git show HEAD:<path>`. Restore them BEFORE launching this wave rather than after it — ' +
+        "a probe left in the shared tree reads to an auditor as the PR's own code, and to " +
+        "Agent 7's build and test run as the PR's own failure.",
     );
   }
 

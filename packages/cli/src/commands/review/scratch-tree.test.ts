@@ -29,10 +29,11 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 
@@ -225,6 +226,27 @@ describe('runScratchTree', () => {
     expect(r.note).not.toContain('already in place');
   });
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'says linking FAILED rather than "no node_modules" when the farm throws',
+    () => {
+      // Folding a link failure into the same `null` the absent case uses told
+      // the verifier the worktree had no `node_modules` — about a worktree that
+      // has one — sending it to install a tree that only needed a retry.
+      const nm = join(worktree, 'node_modules');
+      mkdirSync(join(nm, 'vitest'), { recursive: true });
+      chmodSync(nm, 0o000); // readdirSync throws EACCES inside the farm
+      try {
+        const r = run();
+        expect(r.available).toBe(true);
+        expect(r.dependencies).toBeNull();
+        expect(r.note).toContain("Linking the review worktree's dependencies");
+        expect(r.note).not.toContain('has no `node_modules`');
+      } finally {
+        chmodSync(nm, 0o755);
+      }
+    },
+  );
+
   it('is unavailable — with its reason — when the worktree is not a checkout', () => {
     // Outside any repository, so git cannot discover one by walking up.
     const plain = mkdtempSync(join(tmpdir(), 'qwen-not-a-checkout-'));
@@ -262,6 +284,31 @@ describe('runScratchTree', () => {
     expect(r.sharedTreeResidueTotal).toBe(2);
     expect(r.note).toContain('the shared review worktree is NOT clean');
     expect(r.note).toContain('__probe__.test.ts');
+  });
+
+  it('says how many dirty paths it did NOT list', () => {
+    // A capped list presented as the complete one is a verifier restoring the
+    // twelve it was shown and leaving the thirteenth in the tree the next round
+    // reads.
+    for (let i = 0; i < 13; i++) {
+      writeFileSync(join(worktree, `f${i}.ts`), 'x\n');
+    }
+    const r = run();
+    expect(r.sharedTreeResidueTotal).toBe(13);
+    expect(r.sharedTreeResidue).toHaveLength(12);
+    expect(r.note).toContain('1 more paths not listed here');
+    expect(r.note).toContain('--untracked-files=all');
+  });
+
+  it('names every residue shape its own recovery, including the staged ones', () => {
+    // `git checkout -- <path>` restores from the INDEX, so it leaves staged
+    // residue in place; and for a path staged as NEW it cannot match at all.
+    // Both shapes are ones `worktreeResidue` reports.
+    writeFileSync(join(worktree, 'a.ts'), 'export const x = 2;\n');
+    const r = run();
+    expect(r.note).toContain('git checkout HEAD -- <path>');
+    expect(r.note).toContain('git rm --cached <path>');
+    expect(r.note).toContain('rm -rf <path>');
   });
 
   it('says nothing about residue when the shared worktree is clean', () => {
@@ -305,26 +352,36 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('does not exist');
   });
 
-  it('keeps the measured residue when the tree could not be created', () => {
-    // The failure path must not collapse to the empty-residue default: a note
-    // that names contaminated paths beside a `sharedTreeResidue: []` field
-    // tells a reader and a script two different things.
-    if (process.getuid?.() === 0) return; // root ignores the mode bits below
-    writeFileSync(join(worktree, '__probe__.test.ts'), 'it("x", () => {});');
-    const parent = join(repo, '.qwen', 'tmp');
-    chmodSync(parent, 0o555); // `git worktree add` cannot create the directory
-    try {
-      const r = runScratchTree({ worktree, label: 'verify--round-1--zzz' });
-      expect(r.available).toBe(false);
-      expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
-      expect(r.note).toContain('NOT clean');
-      expect(r.note).toContain(
-        'Do NOT fall back to probing in the review worktree',
-      );
-    } finally {
-      chmodSync(parent, 0o755);
-    }
-  });
+  // Windows as well as root: `chmodSync` on a directory there sets only the
+  // read-only attribute, which does not stop `git worktree add` from creating a
+  // subdirectory — the guard would be a no-op and the assertion below would fail
+  // on the merge-queue-only Windows leg. Every other chmod-permission test in
+  // this repo skips win32 for the same reason.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps the measured residue when the tree could not be created',
+    () => {
+      // The failure path must not collapse to the empty-residue default: a note
+      // that names contaminated paths beside a `sharedTreeResidue: []` field
+      // tells a reader and a script two different things.
+      writeFileSync(join(worktree, '__probe__.test.ts'), 'it("x", () => {});');
+      const parent = join(repo, '.qwen', 'tmp');
+      chmodSync(parent, 0o555); // `git worktree add` cannot create the directory
+      try {
+        const r = runScratchTree({ worktree, label: 'verify--round-1--zzz' });
+        expect(r.available).toBe(false);
+        expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
+        // The total belongs to the same report: a list longer than its own total
+        // contradicts what the field documents.
+        expect(r.sharedTreeResidueTotal).toBe(1);
+        expect(r.note).toContain('NOT clean');
+        expect(r.note).toContain(
+          'Do NOT fall back to probing in the review worktree',
+        );
+      } finally {
+        chmodSync(parent, 0o755);
+      }
+    },
+  );
 
   describe('the command handler', () => {
     beforeEach(() => {
@@ -366,6 +423,27 @@ describe('runScratchTree', () => {
       expect(JSON.parse(readFileSync(out, 'utf8')).path).toBe(
         scratchWorktreePath(worktree, 'verify--round-1--out'),
       );
+    });
+
+    it('keeps the report on stdout when the side-file write dies — and exits 1', () => {
+      // The ordering is load-bearing, and both statements happening in either
+      // order satisfies the test above. A self-referential symlink passes the
+      // pre-check (`existsSync` is false through ELOOP) and throws at the write,
+      // which is also the only exit-1 arm: without it, `exitCode = 2` as a
+      // constant would pass every other case and tell a caller to repair a
+      // sound invocation.
+      const out = join(repo, 'reports', 'loop.json');
+      mkdirSync(dirname(out), { recursive: true });
+      symlinkSync(out, out);
+      (scratchTreeCommand.handler as (a: unknown) => void)({
+        worktree,
+        label: 'verify--round-1--loop',
+        out,
+      });
+      expect(process.exitCode).toBe(1);
+      const printed = (writeStdoutLine as unknown as ReturnType<typeof vi.fn>)
+        .mock.calls[0][0] as string;
+      expect(JSON.parse(printed).available).toBe(true);
     });
   });
 });
