@@ -76,6 +76,21 @@ describe('buildReviewPrompt', () => {
     );
   });
 
+  it('combines --resume with every other flag, in order', () => {
+    // The CI retry's documented shape is `--comment --resume`; without a
+    // combination case, an `if` → `else if` slip that binds the resume push
+    // to the comment branch ships green and silently drops the flag —
+    // re-running from scratch, the exact waste this series exists to stop.
+    expect(
+      buildReviewPrompt({
+        target: '7724',
+        effort: 'low',
+        comment: true,
+        resume: true,
+      }),
+    ).toBe('/review 7724 --effort low --comment --resume');
+  });
+
   it('threads --resume through, after the other flags', () => {
     expect(buildReviewPrompt({ target: '7724', resume: true })).toBe(
       '/review 7724 --resume',
