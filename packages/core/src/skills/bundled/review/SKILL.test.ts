@@ -95,6 +95,14 @@ describe('bundled review skill', () => {
     expect(body).toContain('If SHAs differ **but** model differs');
     expect(body).toContain("require the side file's `model` to equal");
     expect(body).toContain('recovers the findings work list but NO anchor');
+    // The branch-2 reprieve clause and the recovery edge's fall-away clause
+    // are pinned on their own: measured in round 5, deleting the reprieve or
+    // reverting the edge to the pre-PR ungated round-preference left every
+    // other assertion green.
+    expect(body).toContain(
+      'if ITS anchor passes the recovered-anchor gate below',
+    );
+    expect(body).toContain('an anchor that fails any check falls away');
   });
 
   it('launches the 3B convergence pair in the same response', () => {
