@@ -427,7 +427,10 @@ describe('runTestDelta', () => {
     // The report is a file anything may have edited. A field that is not a
     // string array must read as "this seam supplied no measurement" — the
     // fallback an absent field has always taken — never reach `.filter` as-is.
-    for (const bad of ['a string', [null], [{ file: 'x' }], 42]) {
+    // `[]` too: the producer omits the field when nothing parsed, so an empty
+    // array can only be hand-made — taken as authoritative it would skip the
+    // reparse and understate both sets.
+    for (const bad of ['a string', [null], [{ file: 'x' }], 42, []]) {
       const r = runWith(
         [
           cmd({

@@ -12,6 +12,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -211,9 +212,13 @@ describe('runBuildTest', () => {
     expect(rep).toEqual({
       toolchain: 'unsupported',
       // The identity a future --resume verifies rides every adapter-routed
-      // report; this plan carries no sha, so the root and the tree
-      // fingerprint do.
-      run: { root, tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) } },
+      // report; this plan carries no sha, so the root, the tree fingerprint
+      // and the plan mtime do.
+      run: {
+        root,
+        tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) },
+        plan: Math.round(statSync(planPath).mtimeMs),
+      },
       affected: [],
       buildSet: [],
       widenedWith: [],
@@ -2763,6 +2768,7 @@ describe('runBuildTest', () => {
       run: {
         root,
         tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) },
+        plan: Math.round(statSync(planPath).mtimeMs),
       },
     });
     runSpy.mockRestore();
@@ -2898,6 +2904,8 @@ describe('runBuildTest', () => {
     const runId = (dir: string = root): object => ({
       root: dir,
       tree: treeOf(dir),
+      // The per-round discriminator: the plan the fixture just wrote.
+      plan: Math.round(statSync(planPath).mtimeMs),
     });
 
     const threePackages = (): void => {
@@ -3379,6 +3387,115 @@ describe('runBuildTest', () => {
       expect(clean.note).toContain('Every suite in scope has now run');
     });
 
+    it('retires its own clause whole across a SECOND resume', () => {
+      // The clause is one segment on purpose: retirement re-parses the stored
+      // caveat by '; ', and a clause that emitted the separator internally
+      // was cut in half on the next resume — the head retired, the tail
+      // ("N still to run: …") surviving into a report whose note says
+      // everything ran. Two continuations are routine on this repo.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a', 'packages/b'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'the whole-call budget was spent with 2 suite(s) still to run',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/a', 'packages/b'],
+            caveat:
+              'the whole-call budget (61s) was spent with 2 suite(s) still ' +
+              'to run — not run: packages/a, packages/b',
+          },
+        }),
+      );
+
+      // Resume 1: the budget admits one suite, then falls below the floor.
+      const first = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        budget: 16,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+          return okResult(command);
+        },
+      });
+      expect(first.testScope?.caveat).toContain('still to run: packages/b');
+      expect(first.testScope?.caveat).not.toContain('; ');
+      writeFileSync(outPath, JSON.stringify(first));
+
+      // Resume 2 finishes the chain: nothing stale may survive.
+      const second = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: okResult,
+      });
+      expect(second.testScope?.caveat).toBeUndefined();
+      expect(second.testScope?.notRun).toBeUndefined();
+      expect(second.note).toContain('Every suite in scope has now run');
+    });
+
+    it('cannot be talked out of a LIVE limitation by a PR-authored name', () => {
+      // Caveat segments interpolate paths from the reviewed diff, and the
+      // retirement regex used to substring-match its phrases anywhere in the
+      // segment — so a file named `whole-call budget.mjs` retired the live
+      // disclosure quoting it. Anchored to the producers' own grammar at the
+      // segment start, the interpolated name is just text.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const live =
+        '2 changed file(s) could not be mapped to a workspace (e.g. ' +
+        'whole-call budget.mjs) — their own suites were not run';
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'n',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/a'],
+            caveat: live,
+          },
+        }),
+      );
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: okResult,
+      });
+      expect(rep.testScope?.caveat).toBe(live);
+    });
+
     it('carries the install-failure framing through the merge', () => {
       // The framing exists because the structured field alone was judged
       // insufficient: the brief's standing rule is to correlate failures with
@@ -3522,6 +3639,49 @@ describe('runBuildTest', () => {
       expect(attempt).toThrow(/PREVIOUS instance/);
     });
 
+    it("refuses a LOCAL stale report — the rewritten plan is the round's edge", () => {
+      // A local review recreates nothing the other clauses can see: no sha,
+      // and the worktree is the project root — same path, same inode, same
+      // birth time across rounds. The plan is the one thing every round
+      // writes afresh, so its mtime is the discriminator that stops an
+      // interrupted round's report from certifying pre-edit results for the
+      // edited tree.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'in flight',
+          testScope: { workspaces: ['packages/core'], notRun: ['packages/a'] },
+        }),
+      );
+      // The next round captures its plan afresh at the same path.
+      writePlan(['packages/core/src/a.ts']);
+      utimesSync(planPath, new Date(), new Date(Date.now() + 5000));
+
+      expect(() =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        }),
+      ).toThrow(/previous round's plan/);
+    });
+
     it('stamps the run identity a future resume will verify', () => {
       // The guard above can only work if every fresh report carries what it
       // checks. Plan sha rides when the plan has one; the root always does.
@@ -3548,6 +3708,7 @@ describe('runBuildTest', () => {
         root,
         sha: 'feedbeef2222',
         tree: treeOf(root),
+        plan: Math.round(statSync(shaPlan).mtimeMs),
       });
       // And the round trip: write it, resume it, no refusal.
       writeFileSync(outPath, JSON.stringify(rep));
@@ -3564,6 +3725,7 @@ describe('runBuildTest', () => {
         root,
         sha: 'feedbeef2222',
         tree: treeOf(root),
+        plan: Math.round(statSync(shaPlan).mtimeMs),
       });
     });
 
@@ -3620,6 +3782,28 @@ describe('runBuildTest', () => {
           build: [],
           timedOut: [],
           testScope: { workspaces: [42] },
+        }),
+        // Element CONTENT, not only type: '' workspaces resolve npm to the
+        // root suite — a different measurement wearing the requested one's
+        // name — and a null in timedOut crashes the merge's filter.
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [null],
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          testScope: { workspaces: [''] },
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [{ command: '' }],
+          build: [],
+          timedOut: [],
         }),
       ]) {
         writeFileSync(outPath, corrupt);

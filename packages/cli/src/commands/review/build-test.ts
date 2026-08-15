@@ -164,6 +164,15 @@ export interface BuildTestReport {
    * certifying old-commit passes for the new commit — and skip the install
    * the fresh worktree never had.
    *
+   * `plan` is the per-round discriminator every mode has. A LOCAL review
+   * recreates nothing the other two clauses can see — its plan carries no
+   * sha, and its worktree is the project root, never destroyed — so a stale
+   * report from an interrupted local round matched all three and certified
+   * pre-edit results for the edited tree. Every round writes its plan afresh
+   * (capture-local locally, fetch-pr for a PR), so the plan file's mtime
+   * separates rounds in both modes; within one round nothing rewrites it
+   * between the fresh call and a resume.
+   *
    * `tree` is the part path and sha cannot supply: `fetch-pr` DESTROYS and
    * recreates the worktree every round, at the same path, for the same sha —
    * so a stale report from an interrupted round matches both and is admitted
@@ -174,7 +183,13 @@ export interface BuildTestReport {
    * crosses a recreation — the valid resumes all happen inside one round,
    * on the tree the first call ran in.
    */
-  run?: { sha?: string; root: string; tree?: { ino: number; birth: number } };
+  run?: {
+    sha?: string;
+    root: string;
+    tree?: { ino: number; birth: number };
+    /** The plan file's mtimeMs, rounded — the per-round discriminator. */
+    plan?: number;
+  };
 }
 
 /** Output kept per command: the head and tail, which is where a failure names itself. */
@@ -464,7 +479,8 @@ function previousReport(out: string | undefined): BuildTestReport {
         !!e &&
         typeof e === 'object' &&
         !Array.isArray(e) &&
-        typeof (e as { command?: unknown }).command === 'string',
+        typeof (e as { command?: unknown }).command === 'string' &&
+        (e as { command: string }).command.length > 0,
     );
   // `testScope` is optional — a build-only or single-root report carries none —
   // but a PRESENT one is walked for both of its lists, so a truthy non-object
@@ -474,8 +490,11 @@ function previousReport(out: string | undefined): BuildTestReport {
   // Element shapes too, not only the lists: `notRun` entries become shell
   // commands (`npm test --workspace=<dir>`), so a `[null]` that cleared an
   // arrays-only check crashed in the escaper instead of refusing here.
+  // Non-empty, not merely string-typed: a '' workspace becomes the command
+  // `npm test --workspace=""`, which npm resolves to the root suite — a
+  // different measurement wearing the requested one's name.
   const strings = (v: unknown): boolean =>
-    Array.isArray(v) && v.every((e) => typeof e === 'string');
+    Array.isArray(v) && v.every((e) => typeof e === 'string' && e.length > 0);
   const scopeOk =
     scope === undefined ||
     (typeof scope === 'object' &&
@@ -486,7 +505,7 @@ function previousReport(out: string | undefined): BuildTestReport {
   if (
     !commandsOk(shape.test) ||
     !commandsOk(shape.build) ||
-    !Array.isArray(shape.timedOut) ||
+    !strings(shape.timedOut) ||
     !scopeOk
   ) {
     throw new Error(
@@ -518,9 +537,19 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     sha?: string;
     root: string;
     tree?: { ino: number; birth: number };
+    plan?: number;
   } = {
     ...((sha) => (sha ? { sha } : {}))(planShaFrom(args.plan)),
     root,
+    ...(() => {
+      try {
+        return { plan: Math.round(statSync(args.plan).mtimeMs) };
+      } catch {
+        // changedFilesFrom already threw the descriptive error for an
+        // unreadable plan; an unstatable one cannot reach here.
+        return {};
+      }
+    })(),
     ...(() => {
       try {
         const st = statSync(root);
@@ -556,11 +585,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         runIdentity.tree !== undefined &&
         (prev.tree.ino !== runIdentity.tree.ino ||
           prev.tree.birth !== runIdentity.tree.birth));
+    const planMismatch = (prev?.plan ?? null) !== (runIdentity.plan ?? null);
     if (
       !prev ||
       prev.root !== runIdentity.root ||
       (prev.sha ?? null) !== (runIdentity.sha ?? null) ||
-      treeMismatch
+      treeMismatch ||
+      planMismatch
     ) {
       throw new Error(
         `build-test: --resume found a report at ${args.out} from a different ` +
@@ -570,7 +601,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
                 ? `it ran in a PREVIOUS instance of ${prev.root} — the ` +
                   `worktree has been recreated since (fetch-pr rebuilds it ` +
                   `every round), so its installed and compiled state is gone`
-                : `it ran in ${prev.root}${prev.sha ? ` at ${prev.sha}` : ''}`
+                : planMismatch &&
+                    prev.root === runIdentity.root &&
+                    !treeMismatch
+                  ? `it ran against a previous round's plan — each round ` +
+                    `captures its own, so its results describe the tree ` +
+                    `before this round's changes`
+                  : `it ran in ${prev.root}${prev.sha ? ` at ${prev.sha}` : ''}`
               : 'it records no run identity'
           }; this run is in ${runIdentity.root}${
             runIdentity.sha ? ` at ${runIdentity.sha}` : ''

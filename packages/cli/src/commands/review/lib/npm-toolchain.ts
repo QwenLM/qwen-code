@@ -258,16 +258,29 @@ function resumeNpmToolchain(
     // while work actually remains, and a chain that finishes with no live
     // limitation ends with the caveat ABSENT, which is the field's own
     // contract for "the run covers everything the diff can break".
+    // ANCHORED to the segment start, on the producers' own grammar. An
+    // unanchored substring match read PR-authored content: caveat segments
+    // interpolate file paths and workspace dirs from the reviewed diff, and a
+    // file named `whole-call budget.mjs` retired the LIVE limitation quoting
+    // it — untrusted input silently certifying scope. A path that embeds a
+    // `; ` plus this exact grammar can still fabricate a segment boundary,
+    // but what it retires is then bounded to the attacker-authored tail of a
+    // segment already quoting attacker text.
     const SUPERSEDED_SEGMENT_RE =
-      /whole-call budget|the build phase reached|a --resume call/;
+      /^the whole-call budget( \(\d+s\))? was spent |^the build phase reached the whole-call budget|^a --resume call /;
     const liveSegments = (prevScope.caveat ?? '')
       .split('; ')
       .filter((seg) => seg.trim() !== '' && !SUPERSEDED_SEGMENT_RE.test(seg));
     const outstanding = [...stillPending, ...unattemptedRetries];
     if (outstanding.length > 0) {
+      // ONE segment, so no '; ' inside it: retirement re-parses the stored
+      // caveat by that separator, and a clause that emits it internally is
+      // cut in half on the NEXT resume — the head (matching the resume
+      // grammar) retired, the tail ("N still to run: …") surviving into a
+      // report whose note says everything ran.
       liveSegments.push(
         `a --resume call ran ${ranDirs.length + replaced.size} more ` +
-          `command(s); ${outstanding.length} still to run: ` +
+          `command(s), ${outstanding.length} still to run: ` +
           outstanding.join(', '),
       );
     } else if (stillClamped.length > 0) {

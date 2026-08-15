@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   budgetStopEntry,
+  budgetStopEntryZh,
   writeBudgetStop,
   writeRoundCapStop,
 } from './lib/deadline.js';
@@ -4497,10 +4498,27 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(relayed.body)?.sha).toBe('deadbeef00112233');
 
+    // The Chinese body relays the Chinese pair — same machine text, same
+    // exemption.
+    const relayedZh = composeWith([budgetStopEntryZh(3)]);
+    expect(relayedZh.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(relayedZh.body)?.sha).toBe('deadbeef00112233');
+
     // Non-compliant: the entry is dropped. Same machine state, same anchor.
     const dropped = composeWith([]);
     expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
+
+    // A LINE-COVERAGE claim whose whiffed scope IS the reverse audit: same
+    // head, mentions the phrase, marker present — and it must withhold. The
+    // exemption is text-anchored to the exact entries the machinery mints,
+    // because anything looser also covers this, and the phrase splice removes
+    // it from the rendered body so nothing else would ever disclose it again.
+    const whiffed = composeWith([
+      'reverse audit — the review time budget ended the round before the chunk-2 relaunch returned evidence',
+    ]);
+    expect(whiffed.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(whiffed.body)?.sha).toBeUndefined();
   });
 
   it('gives stop-shaped PROSE no exemption when no marker backs it', () => {

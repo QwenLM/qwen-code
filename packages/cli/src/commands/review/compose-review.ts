@@ -35,6 +35,10 @@ import {
   BUDGET_STOP_PHRASE,
   ROUND_CAP_PHRASE,
   budgetStopDisclosure,
+  budgetStopEntry,
+  budgetStopEntryZh,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
   roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
@@ -742,20 +746,33 @@ function composeReviewBody(
    * decision therefore reads the LIVE list plus these.
    */
   const splicedForBudgetPhrase: string[] = [];
-  /**
-   * True when the machine's own budget-stop marker exists — set below, read by
-   * the anchor decision. The stop's relayed entry must classify the same
-   * whether the orchestrator relayed it or not: the marker is the machine
-   * state, the entry is its echo, and the stderr instruction MANDATES the
-   * echo — so a rule that reads only the prose withholds the anchor from
-   * every compliant run and carries it for every non-compliant one.
-   */
-  let budgetStopMarkerPresent = false;
+  /** The exact entries the stop machinery mints — the ONLY exempt relays.
+   *  Non-null iff the machine's own budget-stop marker exists: the exemption
+   *  is marker-anchored, so stop-shaped prose with no marker behind it buys
+   *  nothing. */
+  let canonicalStopEntries: Set<string> | null = null;
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
-      budgetStopMarkerPresent = true;
+      canonicalStopEntries =
+        stop.cause === 'round-cap'
+          ? new Set([
+              roundCapStopEntry(
+                typeof stop.cap === 'number'
+                  ? stop.cap
+                  : MAX_REVERSE_AUDIT_ROUNDS,
+              ),
+              roundCapStopEntryZh(
+                typeof stop.cap === 'number'
+                  ? stop.cap
+                  : MAX_REVERSE_AUDIT_ROUNDS,
+              ),
+            ])
+          : new Set([
+              budgetStopEntry(stop.round ?? undefined),
+              budgetStopEntryZh(stop.round ?? undefined),
+            ]);
       // A round-cap stop and a time-budget stop both cap the verdict, but
       // read differently and dedup against a different relayed phrase. The
       // marker's `cause` picks which; an absent cause is a time stop, for
@@ -1261,25 +1278,21 @@ function composeReviewBody(
   // pushed from the marker whether or not the orchestrator relayed the entry.
   // Without this the outcome was relay-dependent: a compliant run (entry
   // relayed, as stderr mandates) withheld the anchor while an identical run
-  // that dropped the entry carried it. The exemption is marker-anchored on
-  // purpose — no marker, no exemption — so prose that merely LOOKS like a
-  // stop entry cannot buy an anchor the machine state does not support, and a
-  // lens entry that mentions the phrase in its free-form reason still
-  // withholds: its head names the lens, not the reverse audit.
-  const isRelayedStopEntry = (entry: string): boolean => {
-    if (!budgetStopMarkerPresent) return false;
-    const head = entry
-      .split(/[—–-]{1,2}\s|——/)[0]
-      .trim()
-      .toLowerCase();
-    return (
-      (head === 'reverse audit' || head === '反向审计') &&
-      (entry.includes(BUDGET_STOP_PHRASE) ||
-        entry.includes(ROUND_CAP_PHRASE) ||
-        entry.includes('评审时间预算') ||
-        entry.includes('反审轮数上限'))
-    );
-  };
+  // that dropped the entry carried it.
+  //
+  // Exempt on the EXACT machine text, nothing looser. The first cut matched
+  // head-plus-phrase, and that shape also covers a genuine line-coverage claim
+  // whose whiffed scope IS the reverse audit — `reverse audit — the review
+  // time budget ended the round before the chunk-2 relaunch returned
+  // evidence` — which the phrase splice then also removes from the rendered
+  // body, so the anchor rode past a whiffed audit while the posted review
+  // showed only the benign disclosure. The machinery mints its entries from
+  // one generator pair, the stderr instruction relays them verbatim, and only
+  // that text is exempt: marker-anchored (no marker, no exemption) AND
+  // text-anchored (an edited or paraphrased entry withholds — over-withholding
+  // is the safe direction).
+  const isRelayedStopEntry = (entry: string): boolean =>
+    canonicalStopEntries?.has(entry.trim()) ?? false;
   const dimensionGapsAreDepthOnly = [
     ...unreviewed,
     ...splicedForBudgetPhrase,

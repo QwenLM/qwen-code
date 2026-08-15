@@ -286,8 +286,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // array reached `.filter` as-is and threw where the honest reading is
     // "this seam supplied no measurement" — the same fallback an absent field
     // has always taken.
+    // Non-empty too: the producer OMITS the field when nothing failed to
+    // parse, so an empty array can only be hand-made — and taking it as
+    // authoritative would skip the reparse and understate both sets.
     const measured =
       Array.isArray(t.failingFiles) &&
+      t.failingFiles.length > 0 &&
       t.failingFiles.every((f) => typeof f === 'string')
         ? t.failingFiles
         : undefined;
