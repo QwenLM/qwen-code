@@ -20,9 +20,7 @@ const doc = parse(readFileSync(workflowPath, 'utf8'));
 const minimizeJob = doc.jobs.minimize;
 const steps = minimizeJob.steps;
 const checkoutStep = steps.find((s) => s.uses?.startsWith('actions/checkout'));
-const minimizeStep = steps.find((s) =>
-  s.name?.includes('Minimize comments'),
-);
+const minimizeStep = steps.find((s) => s.name?.includes('Minimize comments'));
 
 describe('auto-minimize-spam: repository guard', () => {
   it('gates the job on the canonical repository', () => {
@@ -58,16 +56,17 @@ describe('auto-minimize-spam: credential scoping', () => {
     assert.equal(checkoutStep.with['persist-credentials'], false);
   });
 
-  it('scopes GH_TOKEN to step-level env, not job-level', () => {
+  it('uses the repository-scoped GitHub token in the minimize step', () => {
     assert.equal(
       minimizeJob.env,
       undefined,
       'job-level env would expose GH_TOKEN to every step',
     );
     assert.ok(minimizeStep, 'minimize step must exist');
-    assert.ok(
+    assert.equal(
       minimizeStep.env?.GH_TOKEN,
-      'GH_TOKEN must be set in the minimize step env',
+      '${{ github.token }}',
+      'the classic bot PAT lacks the scope required by minimizeComment',
     );
   });
 });
