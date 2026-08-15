@@ -171,6 +171,35 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
   return `${loc}${agg} — [${entry.source}] ${entry.title}`;
 }
 
+/**
+ * The per-entry bound every deferral-channel exit applies — deferred AND
+ * relocated: collapse newlines, cap at MAX_DEFERRED_SUGGESTION_CHARS
+ * without splitting a surrogate pair, mark a trim with an ellipsis. The
+ * relocation exit once bypassed all of it (round-9 finding): twenty-five
+ * relocated 4,000-char titles spliced ~100 KB of unbounded model text into
+ * the body — the whole review lost at GitHub's 65,536 limit, precisely what
+ * the cap on the deferred exit was added to prevent.
+ */
+function boundDeferredLine(rendered: string): string {
+  const collapsed = rendered
+    .split('\n')
+    .map((seg) => seg.trim())
+    .filter((seg) => seg !== '')
+    .join(' ');
+  let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
+  // The cap slices UTF-16 code units; a cut landing inside a surrogate pair
+  // leaves a lone high surrogate that serializes as U+FFFD into the posted
+  // body — and the zh clause keeps titles untranslated, so astral CJK/emoji
+  // at the boundary are a real input, not a curiosity.
+  if (/[\uD800-\uDBFF]/.test(oneLine.charAt(oneLine.length - 1))) {
+    oneLine = oneLine.slice(0, -1);
+  }
+  // A trimmed entry must say so — a claim cut mid-sentence otherwise renders
+  // as a complete finding line on the PR record.
+  if (oneLine.length < collapsed.length) oneLine += '…';
+  return oneLine;
+}
+
 function toDeferredEntries(value: unknown): DeferredEntry[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -266,7 +295,7 @@ function splitDeferralChannel(raw: unknown): {
     deferred: entries.filter((e) => e.severity !== 'Critical'),
     relocated: relocatedEntries.map(
       (e) =>
-        `${renderDeferredEntry(e)} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
+        `${mdField(boundDeferredLine(renderDeferredEntry(e)))} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
     ),
     relocatedDeterministic: relocatedEntries.filter((e) =>
       DETERMINISTIC_SOURCES.has(e.source),
@@ -1924,25 +1953,7 @@ function composeReviewBody(
   const deferredShown = deferredSuggestions
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
     .map(renderDeferredEntry)
-    .map((entry) => {
-      const collapsed = entry
-        .split('\n')
-        .map((seg) => seg.trim())
-        .filter((seg) => seg !== '')
-        .join(' ');
-      let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
-      // The cap slices UTF-16 code units; a cut landing inside a surrogate
-      // pair leaves a lone high surrogate that serializes as U+FFFD into the
-      // posted body — and the zh clause keeps titles untranslated, so astral
-      // CJK/emoji at the boundary are a real input, not a curiosity.
-      if (/[\uD800-\uDBFF]/.test(oneLine.charAt(oneLine.length - 1))) {
-        oneLine = oneLine.slice(0, -1);
-      }
-      // A trimmed entry must say so — a claim cut mid-sentence otherwise
-      // renders as a complete finding line on the PR record.
-      if (oneLine.length < collapsed.length) oneLine += '…';
-      return oneLine;
-    });
+    .map(boundDeferredLine);
   const deferredMore = deferredSuggestions.length - deferredShown.length;
   const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
   // The unlicensed-deferral disclosure precedes the list it disclaims: the

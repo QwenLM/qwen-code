@@ -4645,7 +4645,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.deferredCount).toBe(0);
     expect(r.body).toContain(
-      '**[Critical]** src/auth.ts:88 — [review] auth bypass _(relocated from the deferral channel',
+      '**[Critical]** `src/auth.ts:88 — [review] auth bypass` _(relocated from the deferral channel',
     );
     expect(parseLedger(r.body)?.findings.some((f) => f.sev === 'C')).toBe(true);
     // A relocation-only run (no floor echoed) incurs no licence cap — the
@@ -4691,6 +4691,32 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     });
     expect(genuine.cappedBy).not.toContain('criticals-unverified');
     expect(genuine.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('a relocated Critical is bounded like its deferred siblings — no unbounded feed into the body', () => {
+    // Round-9 finding: relocation bypassed the per-entry cap, the newline
+    // collapse, the surrogate trim and the Markdown neutralization that the
+    // deferred exit applies; twenty-five 4,000-char relocated titles would
+    // splice ~100 KB into the body and lose the review at GitHub's limit.
+    const r = composeReview(
+      base({
+        deferredSuggestions: [
+          nit({
+            severity: 'Critical',
+            title: `${'x'.repeat(4000)}\nsecond line @mention #123`,
+          }),
+        ],
+      }),
+    );
+    const bodyLine = r.body
+      .split('\n')
+      .find((l) => l.startsWith('**[Critical]**'))!;
+    // marker + backticked bounded line + relocation note: well under 4,000.
+    expect(bodyLine.length).toBeLessThan(400);
+    expect(bodyLine).toContain('…');
+    expect(bodyLine).not.toContain('\nsecond');
+    // Neutralized: the title rides inside a code span.
+    expect(bodyLine).toMatch(/\*\*\[Critical\]\*\* `a\.ts:1 — \[review\] x+…`/);
   });
 
   it('refuses a malformed entry — the channel that un-posts findings is not guessed at', () => {

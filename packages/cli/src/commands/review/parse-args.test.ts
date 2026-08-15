@@ -506,10 +506,23 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
         number: 6711,
       });
     }
-    // Two spellings of the SAME PR are one candidate, not an ambiguity.
+    // Two spellings of the SAME PR are one candidate, not an ambiguity —
+    // and not an extra argument either: the restated spelling must not
+    // surface as `extraTokens` / "Ignoring extra argument(s)" (round-9).
     const dup = parseReviewArgs('--severity-floor 6711 --effort=6711');
     expect(dup.target).toEqual({ type: 'pr-number', number: 6711 });
     expect(dup.warnings.some((w) => w.includes('Ambiguous'))).toBe(false);
+    expect(dup.extraTokens).toEqual([]);
+    expect(dup.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
+    // Identity is the resolved TARGET, not the raw string: a bare number and
+    // a same-number URL name one PR (round-9 finding — a raw-token Set read
+    // them as two and fell back to the local tree).
+    const mixed = parseReviewArgs(
+      '--severity-floor 6711 --effort https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(mixed.target).toMatchObject({ number: 6711 });
+    expect(mixed.warnings.some((w) => w.includes('Ambiguous'))).toBe(false);
+    expect(mixed.extraTokens).toEqual([]);
   });
 
   it('an invalid configured floor stays silent on a non-PR target', () => {

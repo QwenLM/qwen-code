@@ -456,35 +456,58 @@ export function parseReviewArgs(
   // is the same typed PR number — `--severity-floor=6711 --effort 6712`
   // must be exactly as ambiguous as the all-spaced spelling, or the guard
   // is defeated by which syntax happened to be typed.
-  // Distinct values, not occurrences: `--severity-floor 6711 --effort 6711`
-  // names ONE PR twice and is unambiguous. Both flag syntaxes already
-  // landed in `kept` above, so the pool sees every spelling.
-  const prShapedPool = [
+  // Distinct TARGETS, not distinct strings: `--severity-floor 6711 --effort
+  // https://github.com/o/r/pull/6711` are two spellings of one PR and are
+  // unambiguous (round-9 finding: a raw-token Set read them as two and
+  // silently fell back to the local tree — the very harm the guard exists
+  // to prevent). The identity is the classified target's number plus, for
+  // a URL, its host/owner/repo. Both flag syntaxes already landed in `kept`
+  // above, so the pool sees every spelling.
+  const targetKey = (token: string): string => {
+    const shape = classifyToken(token);
+    if (shape === null || shape === 'invalid-url') return `raw:${token}`;
+    if (shape.type === 'pr-number') return `pr:${shape.number}`;
+    if (shape.type === 'pr-url')
+      return `pr:${shape.number}@${shape.host}/${shape.owner}/${shape.repo}`;
+    return `raw:${token}`;
+  };
+  const prShapedKeys = [
     ...new Set(
       kept
         .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
-        .map((k) => k.token),
+        .map((k) => targetKey(k.token)),
     ),
   ];
-  if (!hasValidCandidate && prShapedPool.length > 1) {
+  // A bare number and a same-number URL name one PR when no other repo is
+  // in play: collapse `pr:N` into `pr:N@…` for the count.
+  const distinctPr = new Set(prShapedKeys.map((k) => k.replace(/@.*$/, '')));
+  if (!hasValidCandidate && distinctPr.size > 1) {
+    const shown = kept
+      .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
+      .map((k) => JSON.stringify(k.token));
     warnings.push(
-      `Ambiguous target: ${prShapedPool
-        .map((t) => JSON.stringify(t))
-        .join(
-          ' and ',
-        )} arrived as invalid flag values and all look like PR targets; refusing to choose between them.`,
+      `Ambiguous target: ${shown.join(' and ')} arrived as invalid flag values and name different PRs; refusing to choose between them.`,
     );
   }
   const targetTokens: string[] = [];
+  // Of several spellings of the SAME rescued PR, exactly one becomes the
+  // target; the rest are the same intent restated, not extra arguments —
+  // pushing them all left the operator told "Ignoring extra argument(s)"
+  // on the very invocation the dedupe blesses (round-9 finding).
+  let rescuedPr = false;
   for (const k of kept) {
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
     if (k.invalidValueOf !== undefined) {
       const survives = isPrShaped(k.token)
-        ? !hasValidCandidate && prShapedPool.length === 1
+        ? !hasValidCandidate && distinctPr.size === 1
         : soleCandidate;
       if (!survives) {
         issues.push({ kind: 'discarded', value: k.token });
         continue;
+      }
+      if (isPrShaped(k.token)) {
+        if (rescuedPr) continue; // same PR, restated — not an extra token
+        rescuedPr = true;
       }
       issues.push({ kind: 'kept-as-target', value: k.token });
     }
