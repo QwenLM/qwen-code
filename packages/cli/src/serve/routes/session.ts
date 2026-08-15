@@ -34,6 +34,7 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
@@ -2558,53 +2559,43 @@ export function registerSessionRoutes(
             name = name.slice(0, 200);
           }
         }
+        const atRecordId = body?.['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          res.status(400).json({
+            error: '`atRecordId` must be a string',
+            code: 'branch_point_invalid',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const result = await runtime.bridge.branchSession(
           sessionId,
-          { name },
+          {
+            name,
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+          },
           { clientId },
         );
-        try {
-          runtime.generationGuard?.assertOpen();
-        } catch (error) {
-          if (!result.attached) {
-            await runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => false);
-          } else {
+        if (atRecordId === undefined) {
+          const restored = result as BridgeBranchedSession;
+          const releaseLiveBranch = async () => {
+            if (restored.attached) {
+              await runtime.bridge
+                .detachClient(restored.sessionId, restored.clientId)
+                .catch(() => {});
+              return;
+            }
             await runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {});
+              .killSession(restored.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
+          };
+          if (!res.writable) {
+            void releaseLiveBranch();
+            return;
           }
-          throw error;
         }
-        if (!res.writable) {
-          if (!result.attached) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
-          } else {
-            runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          }
-          return;
-        }
+        if (!res.writable) return;
         res.status(201).json(result);
       },
     ),

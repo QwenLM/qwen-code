@@ -1,4 +1,4 @@
-import { memo, useContext, type ReactElement } from 'react';
+import { memo, useContext, useMemo, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
@@ -37,7 +37,8 @@ interface MessageItemProps {
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onBranchSession?: () => void;
+  onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+  branchRecordId?: string;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
@@ -57,6 +58,7 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onBranchSession,
+  branchRecordId,
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
@@ -64,6 +66,13 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  const boundBranchSession = useMemo(
+    () =>
+      onBranchSession && branchRecordId
+        ? () => onBranchSession(branchRecordId)
+        : undefined,
+    [onBranchSession, branchRecordId],
+  );
   const compactMode = useContext(CompactModeContext);
   const body = ((): ReactElement | null => {
     switch (message.role) {
@@ -85,7 +94,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
-            onBranchSession={onBranchSession}
+            onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
@@ -95,7 +104,6 @@ export const MessageItem = memo(function MessageItem({
       case 'thinking':
         return (
           <ThinkingMessage
-            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
@@ -107,9 +115,11 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ToolGroup
             tools={message.tools}
+            thoughts={message.thoughts}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
             isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'plan':
@@ -279,6 +289,7 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
+  if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
@@ -371,6 +382,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
     case 'tool_group':
       return (
         next.role === 'tool_group' &&
+        areToolGroupThoughtsEqual(prev.thoughts, next.thoughts) &&
         prev.tools.length === next.tools.length &&
         prev.tools.every((tool, index) =>
           areToolCallsEqual(tool, next.tools[index]),
@@ -416,6 +428,32 @@ function areToolCallsEqual(
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)
+  );
+}
+
+function areToolGroupThoughtsEqual(
+  prev:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+  next:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every(
+    (thought, index) =>
+      thought.content === next[index]?.content &&
+      thought.isStreaming === next[index]?.isStreaming &&
+      thought.beforeToolCallId === next[index]?.beforeToolCallId,
   );
 }
 

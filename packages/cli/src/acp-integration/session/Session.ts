@@ -51,6 +51,7 @@ import type {
   InvocationContextV1,
   TurnResultRecordPayload,
   WorkflowApproval,
+  BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -581,6 +582,8 @@ type QueueToolResultRecord = (
   fc: FunctionCall,
   record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
 ) => void;
+
+type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
 
 export type DaemonToolLoopState = {
   totalToolCalls: number;
@@ -1669,6 +1672,7 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private historyMutationActive = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -1722,6 +1726,9 @@ export class Session implements SessionContext {
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
+    private readonly runExclusiveAutomaticHistoryMutation: HistoryMutationRunner = (
+      operation,
+    ) => operation(),
     /**
      * Invoked whenever work this Session owns may have started or finished.
      * The owner (one reporter per ACP channel) coalesces these and republishes
@@ -1989,6 +1996,13 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.goalQueue.length === 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainGoalQueueExclusive(),
+    );
+  }
+
+  async #drainGoalQueueExclusive(): Promise<void> {
     if (
       this.disposed ||
       this.closing ||
@@ -2913,6 +2927,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     try {
       await this.config.assertCanStartTurn();
     } catch (error) {
@@ -2926,14 +2946,20 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
+  }
+
+  isTurnIdle(): boolean {
+    return !this.closing && !this.#hasActiveTurn();
   }
 
   isIdle(): boolean {
-    return (
-      !this.closing &&
-      !this.#hasActiveTurn() &&
-      this.collectActiveWorkHolds().length === 0
-    );
+    return this.isTurnIdle() && this.collectActiveWorkHolds().length === 0;
   }
 
   /**
@@ -2994,6 +3020,7 @@ export class Session implements SessionContext {
   #hasActiveTurn(): boolean {
     return Boolean(
       this.pendingPrompt ||
+        this.historyMutationActive ||
         this.pendingPromptCompletion ||
         this.goalProcessing ||
         this.cronProcessing ||
@@ -3003,6 +3030,27 @@ export class Session implements SessionContext {
         this.notificationAbortController ||
         this.notificationCompletion,
     );
+  }
+
+  beginHistoryMutation(): () => void {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.#hasActiveTurn()) {
+      throw new RequestError(-32602, 'Session is busy processing a turn', {
+        errorKind: 'session_busy',
+      });
+    }
+    this.historyMutationActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.historyMutationActive = false;
+      if (this.disposed) return;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
   }
 
   beginClose(): () => void {
@@ -3518,6 +3566,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     if (modelPrompt !== undefined && invocationContext === undefined) {
       throw RequestError.invalidParams(
         undefined,
@@ -3540,6 +3594,12 @@ export class Session implements SessionContext {
     }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
     }
     if (admissionCancellation?.aborted) {
       return { stopReason: 'cancelled' };
@@ -3704,6 +3764,16 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
+    const recording = this.config.getChatRecordingService();
+    const branchCheckpointCursor =
+      scheduledGoalTurn === undefined && !channelPromptTurn
+        ? recording?.getBranchCheckpointCursor()
+        : undefined;
+
     if (todoStopGuardPreparation.startsWorkChain) {
       this.#clearTodoStopGuardQueuedPromptWait();
       this.todoStopGuard.startOrdinaryPrompt();
@@ -3717,10 +3787,6 @@ export class Session implements SessionContext {
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
-    const channelPromptTurn =
-      (params as { _meta?: Record<string, unknown> })._meta?.[
-        CHANNEL_PROMPT_META_KEY
-      ] === true;
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
     // #executePromptInner. Only the authenticated channel-prompt marker
@@ -3761,13 +3827,39 @@ export class Session implements SessionContext {
         goalTurn,
         channelPromptTurn,
       );
-      promptResult = result;
+      let branchPoint: BranchPoint | undefined;
+      if (recording && branchCheckpointCursor) {
+        try {
+          branchPoint = await recording.recordBranchCheckpointTransaction({
+            cursor: branchCheckpointCursor,
+            stopReason: result.stopReason,
+          });
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to record branch checkpoint; completing the turn without a branch point',
+            error,
+          );
+        }
+      }
+      const completedResult: PromptResponse = branchPoint
+        ? {
+            ...result,
+            _meta: {
+              ...result._meta,
+              'qwen.branchPoint': {
+                assistantRecordUuid: branchPoint.assistantRecordUuid,
+                checkpointUuid: branchPoint.checkpointUuid,
+              },
+            },
+          }
+        : result;
+      promptResult = completedResult;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
-      this.#maybeEmitFollowupSuggestion(result);
-      if (channelDelivery && result.stopReason === 'end_turn') {
+      this.#maybeEmitFollowupSuggestion(completedResult);
+      if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
           sessionId: this.sessionId,
           deliveryId: channelDelivery.deliveryId,
@@ -3779,7 +3871,7 @@ export class Session implements SessionContext {
           promptId: channelDelivery.deliveryId,
         });
       }
-      return result;
+      return completedResult;
     } catch (error) {
       promptFailed = true;
       if (error instanceof SessionWriterError) {
@@ -6827,6 +6919,16 @@ export class Session implements SessionContext {
     if (this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainCronQueueExclusive(),
+    );
+  }
+
+  async #drainCronQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingPrompt || this.notificationProcessing) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.#nextCronQueueIndex() < 0) return;
     try {
       await this.assertCanStartTurn();
     } catch (error) {
@@ -7626,6 +7728,20 @@ export class Session implements SessionContext {
       this.cronProcessing ||
       this.cronAbortController
     ) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.notificationQueue.length === 0) return;
+    if (this.#nextNotificationQueueIndex() < 0) return;
+
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainNotificationQueueExclusive(),
+    );
+  }
+
+  async #drainNotificationQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -10294,6 +10410,13 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                // Same identity and execution scope `CoreToolScheduler`
+                // supplies. This is the path daemon ACP sessions actually
+                // take, so without them a host policy that falls back to the
+                // session — or reasons about where the tool runs — sees
+                // neither on every call made here.
+                sessionId: this.config.getSessionId(),
+                cwd: this.config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );
