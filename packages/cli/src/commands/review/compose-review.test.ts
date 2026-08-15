@@ -1238,8 +1238,15 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body).toContain(
       '3 Suggestion-level finding(s) this review confirmed are already reported on this PR and are not repeated:',
     );
+    // Every entry must render, not just the first: the count sentence reads
+    // the array's length independently of the rendered entries, so a list
+    // truncation would overclaim it while a first-item assertion stayed green.
     expect(r.body).toContain(
-      '- R1-1 precheck-pr pin — already reported (comment 3788857375)',
+      [
+        '- R1-1 precheck-pr pin — already reported (comment 3788857375)',
+        '- R1-2 loose review-config pins — already reported (comment 3788857379)',
+        '- R1-3 unpinned authorize join — already reported (comment 3788857379)',
+      ].join('\n'),
     );
     expect(r.body).not.toContain('could not be anchored');
     expect(r.body).not.toContain('Suggestions are inline.');
@@ -2064,6 +2071,48 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         (JSON.parse(readFileSync(outPath, 'utf8')) as { baseEvent: string })
           .baseEvent,
       ).toBe('REQUEST_CHANGES');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carries duplicate-dropped Suggestions through the --input seam', async () => {
+    // The seam strips caller keys with explicit `delete parsed.<key>`
+    // statements, then spreads the rest into composeReview. The field rides
+    // the spread today; if it ever joins them, `compose-review --input`
+    // computes `s` without the duplicates — the persisted verdict reads
+    // clean while `submit`, recomposing from the same state, posts COMMENT
+    // with the paragraph: the terminal-vs-posted divergence this module
+    // exists to kill. The body is the observable: with no plan, the
+    // missing-plan cap posts COMMENT whatever the counts.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-dup-seam-'));
+    try {
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'comments.json');
+      const outPath = join(dir, 'composed.json');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({
+          modelId: MODEL,
+          suggestionsDroppedAsDuplicates: [
+            'R1-1 pin gap — already reported (comment 1)',
+          ],
+        }),
+        'utf8',
+      );
+      writeFileSync(commentsPath, '[]', 'utf8');
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      expect(written.body).toContain(
+        '1 Suggestion-level finding(s) this review confirmed',
+      );
+      expect(written.event).not.toBe('APPROVE');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
