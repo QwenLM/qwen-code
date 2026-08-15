@@ -23,6 +23,15 @@ describe('genai compatibility values', () => {
     expect(FinishReason).toEqual({
       STOP: SdkFinishReason.STOP,
       MAX_TOKENS: SdkFinishReason.MAX_TOKENS,
+      // Content-filter family the quiet-completion gate keeps fatal.
+      SAFETY: SdkFinishReason.SAFETY,
+      RECITATION: SdkFinishReason.RECITATION,
+      BLOCKLIST: SdkFinishReason.BLOCKLIST,
+      PROHIBITED_CONTENT: SdkFinishReason.PROHIBITED_CONTENT,
+      SPII: SdkFinishReason.SPII,
+      IMAGE_SAFETY: SdkFinishReason.IMAGE_SAFETY,
+      IMAGE_RECITATION: SdkFinishReason.IMAGE_RECITATION,
+      IMAGE_PROHIBITED_CONTENT: SdkFinishReason.IMAGE_PROHIBITED_CONTENT,
     });
     expect(FunctionCallingConfigMode).toEqual({
       ANY: SdkFunctionCallingConfigMode.ANY,

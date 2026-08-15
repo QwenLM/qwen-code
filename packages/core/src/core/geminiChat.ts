@@ -486,6 +486,22 @@ const INVALID_STREAM_RETRY_CONFIG = {
   initialDelayMs: 2000,
 };
 
+// Finish reasons that represent a provider content-filtering decision.
+// Mirrors the 'content_filter' family in mapGeminiFinishReasonToOpenAI
+// (openaiContentGenerator/converter.ts). Quiet continuations ending with
+// any of these must stay fatal — accepting them would mask the provider's
+// decision with an "(empty content)" turn.
+const CONTENT_FILTER_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
+  FinishReason.SAFETY,
+  FinishReason.RECITATION,
+  FinishReason.BLOCKLIST,
+  FinishReason.PROHIBITED_CONTENT,
+  FinishReason.SPII,
+  FinishReason.IMAGE_SAFETY,
+  FinishReason.IMAGE_RECITATION,
+  FinishReason.IMAGE_PROHIBITED_CONTENT,
+]);
+
 const TRANSPORT_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
@@ -2620,13 +2636,14 @@ export class GeminiChat {
         // last one the exhausted invalid-stream budget allows, so keep the
         // one-shot quiet-completion acceptance armed for it (#9026).
         const rearmQuietAcceptanceIfBudgetSpent = () => {
-          // Mirror the arming condition: either per-type budget can be the
-          // one that exhausted and armed the final attempt.
+          // Keyed to the transient bucket only: quiet completions surface
+          // as NO_TOOL_RESULT_PROGRESS (a transient type), so only a spent
+          // transient budget entitles the next attempt to acceptance. A
+          // tag-leak-only exhaustion must not arm — a quiet ending still
+          // has its full retry-first budget ahead of it (#7039).
           if (
             transientInvalidStreamRetryCount >=
-              INVALID_STREAM_RETRY_CONFIG.transientMaxRetries ||
-            protocolTagLeakRetryCount >=
-              INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+            INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
           ) {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
@@ -3244,16 +3261,13 @@ export class GeminiChat {
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
               }
-              if (nextInvalidStreamRetryCount === maxInvalidStreamRetries) {
-                // The attempt this retry schedules is the LAST one. If it
-                // still ends quietly after the tool result, accept that as
-                // a completion instead of re-throwing (#9026). Type-agnostic:
-                // the accept gate independently requires a tool-result
-                // continuation with no visible progress and a non-MAX_TOKENS
-                // finish, and the transient budget is shared across the
-                // invalid-stream types, so a mixed final error must arm too.
-                acceptQuietToolResultCompletionOnNextAttempt = true;
-              }
+              // The armed attempt itself can fail with an invalid-stream
+              // error and be rescheduled here; rearm so the acceptance is
+              // not lost across error types (a tag-leak retry scheduled
+              // after the transient budget is spent must still land armed).
+              // Transient-keyed, so a tag-leak-only exhaustion never arms
+              // prematurely (#9026, #7039 retry-first).
+              rearmQuietAcceptanceIfBudgetSpent();
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
                 nextInvalidStreamRetryCount;
@@ -3383,12 +3397,14 @@ export class GeminiChat {
               } else {
                 transientRetryCount = nextContinuationRetryCount;
               }
-              if (nextContinuationRetryCount === maxContinuationRetries) {
-                // Same final-retry quiet-completion acceptance as the main
-                // send loop (#9026) — continuation streams hit the same
-                // guard through the same processStreamResponse path, with
-                // the same type-agnostic arming (the accept gate itself
-                // checks the tool-result shape and finish reason).
+              // Same arming rule as the main send loop (#9026): keyed to
+              // the transient bucket only (quiet completions surface as a
+              // transient-type error), so a tag-leak-only exhaustion does
+              // not arm prematurely (#7039 retry-first).
+              if (
+                transientRetryCount >=
+                INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+              ) {
                 acceptQuietToolResultCompletionOnNextAttempt = true;
               }
               const delayMs =
@@ -4924,16 +4940,18 @@ export class GeminiChat {
       if (lacksVisibleToolResultProgress) {
         const truncatedAtMaxTokens =
           deferredFinishReason === FinishReason.MAX_TOKENS;
-        // Safety-blocked continuations carry no user-visible output by
-        // definition; accepting them silently would end the turn with no
-        // signal at all (content_filter maps to SAFETY on OpenAI/Anthropic
-        // routes). Keep them fatal like MAX_TOKENS.
-        const blockedBySafetyFilter =
-          deferredFinishReason === 'SAFETY' ||
-          deferredFinishReason === 'RECITATION';
+        // Content-filter-blocked continuations carry no user-visible
+        // output by definition; accepting them silently would end the turn
+        // with no signal at all and mask the provider's filtering
+        // decision. Keep the whole content-filter family fatal like
+        // MAX_TOKENS (OpenAI/Anthropic routes already map content_filter
+        // to SAFETY, which is in the family).
+        const blockedByContentFilter =
+          deferredFinishReason !== undefined &&
+          CONTENT_FILTER_FINISH_REASONS.has(deferredFinishReason);
         if (
           truncatedAtMaxTokens ||
-          blockedBySafetyFilter ||
+          blockedByContentFilter ||
           !acceptQuietToolResultCompletion
         ) {
           throw new InvalidStreamError(
@@ -4945,15 +4963,12 @@ export class GeminiChat {
         }
         // Retry budget exhausted and the model still ends the turn quietly
         // with a valid finish reason (#9026). Accept it as completion.
-        // When the attempt produced nothing at all, surface the canonical
-        // placeholder as the turn's text: it keeps user/model alternation
-        // well-formed for the next request, is already filtered out of
-        // tool-result continuation rendering, and rides into the JSONL
-        // record through `contentText` so transcript and history agree.
+        // When the attempt produced nothing at all, the canonical
+        // placeholder is appended to `acceptedTurnParts` below — the
+        // single source for both the JSONL record and the history push,
+        // keeping user/model alternation well-formed for the next request
+        // while transcript and history agree.
         acceptedQuietToolResultCompletion = true;
-        if (!thoughtContentPart && consolidatedHistoryParts.length === 0) {
-          contentText = GEMINI_EMPTY_CONTENT_PLACEHOLDER;
-        }
         debugLogger.warn(
           'Accepting quiet post-tool-result completion after retry budget ' +
             'exhaustion (#9026)',
