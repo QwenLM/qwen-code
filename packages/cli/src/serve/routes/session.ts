@@ -93,6 +93,7 @@ import {
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
@@ -2413,7 +2414,9 @@ export function registerSessionRoutes(
             }
           }
         }
-        res.status(200).json(session);
+        // The load response embeds the replay snapshot inline; redact the
+        // skill bodies there just like the SSE egress does (#9234).
+        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
       } catch (err) {
         sendBridgeError(res, err, {
           route,

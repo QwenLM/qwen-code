@@ -11881,6 +11881,77 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('redacts skill bodies from the load response replay arrays (#9234)', async () => {
+      const commandsEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'persisted-replay',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Help' }],
+            _meta: {
+              availableSkills: ['bugfix'],
+              availableSkillDetails: [
+                { name: 'bugfix', body: 'x'.repeat(600_000) },
+              ],
+            },
+          },
+        },
+      } satisfies BridgeEvent;
+      const textEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'persisted-replay',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'hi' },
+          },
+        },
+      } satisfies BridgeEvent;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-load',
+          state: {},
+          compactedReplay: [commandsEvent],
+          liveJournal: [textEvent],
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-replay/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      const replay = res.body.compactedReplay as Array<{
+        data: { update: Record<string, unknown> };
+      }>;
+      const update = replay[0]!.data.update;
+      expect(update['sessionUpdate']).toBe('available_commands_update');
+      expect(update['availableCommands']).toEqual([
+        { name: 'help', description: 'Help' },
+      ]);
+      const meta = update['_meta'] as Record<string, unknown>;
+      expect(meta['availableSkills']).toEqual(['bugfix']);
+      expect(meta).not.toHaveProperty('availableSkillDetails');
+      expect(res.body.liveJournal).toEqual([textEvent]);
+      expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+      // Bus events are shared with other subscribers (e.g. the /acp pump);
+      // the redaction must reshape immutably, never mutate the source.
+      expect(
+        (commandsEvent.data.update._meta as Record<string, unknown>)[
+          'availableSkillDetails'
+        ],
+      ).toBeDefined();
+    });
+
     it('passes client identity headers through to load/resume bridge calls', async () => {
       for (const action of ['load', 'resume'] as const) {
         const bridge = fakeBridge();
@@ -25547,6 +25618,133 @@ describe('GET /session/:id/events (SSE)', () => {
     });
     expect(frames[1]?.id).toBe('2');
     expect(JSON.parse(frames[1]!.data!)).not.toHaveProperty('promptId');
+  });
+
+  it('omits skill bodies from available_commands_update frames (#9234)', async () => {
+    // The daemon-side snapshot embeds every skill's full SKILL.md body for
+    // ACP clients; the SSE surface must strip it while keeping the command
+    // entries and the skill name list.
+    const sharedUpdate = {
+      sessionUpdate: 'available_commands_update',
+      availableCommands: [{ name: 'help', description: 'Help' }],
+      _meta: {
+        availableSkills: ['bugfix'],
+        availableSkillDetails: [
+          {
+            name: 'bugfix',
+            description: 'Fix a bug',
+            body: 'x'.repeat(600_000),
+            filePath: '/skills/bugfix/SKILL.md',
+            level: 'project',
+            modelInvocable: true,
+          },
+        ],
+      },
+    };
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { sessionId: 'sess-A', update: sharedUpdate },
+        };
+        yield {
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'sess-A',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'hi' },
+            },
+          },
+        };
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+
+    const res = await request(app)
+      .get('/session/sess-A/events')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(res.status).toBe(200);
+    const payloads = res.text
+      .split('\n\n')
+      .map((raw) => {
+        const dataLine = raw
+          .split('\n')
+          .find((line) => line.startsWith('data: '));
+        // Skip non-frame prelude lines such as `retry: 3000`.
+        if (!dataLine) return undefined;
+        return JSON.parse(dataLine.slice('data: '.length)) as {
+          id?: number;
+          data?: { update?: Record<string, unknown> };
+        };
+      })
+      .filter(
+        (
+          payload,
+        ): payload is {
+          id?: number;
+          data?: { update?: Record<string, unknown> };
+        } => payload !== undefined,
+      );
+    expect(payloads).toHaveLength(2);
+    const commandsUpdate = payloads[0]!.data!.update!;
+    expect(commandsUpdate['sessionUpdate']).toBe('available_commands_update');
+    expect(commandsUpdate['availableCommands']).toEqual([
+      { name: 'help', description: 'Help' },
+    ]);
+    const meta = commandsUpdate['_meta'] as Record<string, unknown>;
+    expect(meta['availableSkills']).toEqual(['bugfix']);
+    expect(meta).not.toHaveProperty('availableSkillDetails');
+    expect(payloads[1]!.data!.update).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'hi' },
+    });
+    expect(res.text).not.toContain('x'.repeat(64));
+    // Bus events are shared with other subscribers (e.g. the /acp pump);
+    // the strip must reshape immutably, never mutate the source event.
+    expect(sharedUpdate._meta).toHaveProperty('availableSkillDetails');
+  });
+
+  it('drops an available_commands_update _meta left empty by skill-detail stripping (#9234)', async () => {
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'sess-A',
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [{ name: 'help', description: 'Help' }],
+              _meta: {
+                availableSkillDetails: [{ name: 'bugfix', body: 'body' }],
+              },
+            },
+          },
+        };
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+
+    const res = await request(app)
+      .get('/session/sess-A/events')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(res.status).toBe(200);
+    const dataLine = res.text
+      .split('\n')
+      .find((line) => line.startsWith('data: '));
+    expect(dataLine).toBeDefined();
+    const payload = JSON.parse(dataLine!.slice('data: '.length)) as {
+      data?: { update?: Record<string, unknown> };
+    };
+    expect(payload.data!.update).not.toHaveProperty('_meta');
   });
 
   it('correlates the SSE response, daemon lifecycle log, and request span', async () => {
