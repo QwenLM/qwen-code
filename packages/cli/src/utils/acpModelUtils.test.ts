@@ -308,10 +308,13 @@ describe('acpModelUtils', () => {
     // #8136 R4-1: catch-branch (new URL throws) prose '@' after whitespace must
     // not become the strip point - strip the credential, keep host + prose.
     ['https://user:pass@host - ping admin@', 'https://host - ping admin@'],
-    [
-      'https://user@host - contact admin@exam%zz.com',
-      'https://host - contact admin@exam%zz.com',
-    ],
+    // R9-7 KNOWN RESIDUAL: a real host + prose email with a VALID email domain
+    // is indistinguishable from a real credential whose terminator is that
+    // email's '@' - the prose email's host replaces the real host. (A '%zz'
+    // invalid domain makes CLEAN_HOST_AFTER fail and passes spuriously; this
+    // pins the real-domain behavior instead.) Same class as R5-1, pending
+    // maintainer sign-off.
+    ['https://user@host - contact admin@example.com', 'https://example.com'],
     // #8136 R4-3: whitespace-less multi-'@' prose - the FIRST '@' ends the
     // userinfo; the prose email's '@' is not a terminator.
     [
@@ -398,6 +401,11 @@ describe('acpModelUtils', () => {
     [
       'https://api.example:8443/v1 - contact admin@example.com',
       'https://api.example:8443/v1 - contact admin@example.com',
+    ],
+    // #8136 repro-1 verbatim (em-dash as in the issue) also stays unchanged.
+    [
+      'https://api.example:8443/v1 — contact admin@example.com',
+      'https://api.example:8443/v1 — contact admin@example.com',
     ],
     // URL-throwing shapes (invalid %, space in host) + prose email: do not
     // strip the prose '@'. #8136 R2-2.

@@ -396,16 +396,11 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
     const backslash = baseUrl.indexOf('\\', authorityStart);
     if (backslash !== -1 && backslash < end) {
       // A Windows `domain\user:pass@` credential is a single userinfo run with
-      // NO whitespace between the backslash and the '@'. Bound the scan so a
-      // later prose `a:b@c` is not mistaken for credentials. #8136 R5-12.
-      const separators = [' ', '/', '?', '#'];
-      let scanLimit = end;
-      for (const sep of separators) {
-        const idx = baseUrl.indexOf(sep, backslash + 1);
-        if (idx !== -1 && idx < scanLimit) {
-          scanLimit = idx;
-        }
-      }
+      // NO whitespace between the backslash and the '@'. Bound the scan at the
+      // first whitespace so a later prose `a:b@c` is not mistaken for
+      // credentials ('/' '?' '#' already bound `end` above). #8136 R5-12.
+      const wsAfter = baseUrl.indexOf(' ', backslash + 1);
+      const scanLimit = wsAfter === -1 || wsAfter > end ? end : wsAfter;
       const colonAfter = baseUrl.indexOf(':', backslash + 1);
       const atAfter = baseUrl.indexOf('@', backslash + 1);
       const windowsCred =
