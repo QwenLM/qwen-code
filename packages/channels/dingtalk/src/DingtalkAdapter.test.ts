@@ -4059,6 +4059,102 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('detects adjacent image and file markers before replacing either', async () => {
+    const file = createTempFile();
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `[FILE: ${file.path}][IMAGE: ${image.path}]`,
+      );
+
+      expect(uploadCalls()).toHaveLength(2);
+      expect(fileCalls()).toHaveLength(1);
+      const markdownBody = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdownBody.markdown.text).toContain('[File sent: report.txt]');
+      expect(markdownBody.markdown.text).toContain(
+        '![image](@lAL-file-media-1)',
+      );
+      expect(markdownBody.markdown.text).not.toContain(file.path);
+      expect(markdownBody.markdown.text).not.toContain(image.path);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reassembles a file marker split across block-streamed messages', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ blockStreaming: 'on', cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await getResponseHook(channel)(
+        'cid123',
+        'Answer follows. [FILE:',
+        'session-1',
+      );
+      await getResponseHook(channel)(
+        'cid123',
+        `${file.path}] done`,
+        'session-1',
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      const markdown = markdownCalls()
+        .map((call) => JSON.parse(String((call[1] as RequestInit).body)))
+        .map((body) => String(body.markdown.text))
+        .join('\n');
+      expect(markdown).toContain('[File sent: report.txt]');
+      expect(markdown).not.toContain(file.path);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an incomplete file marker when block streaming ends', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const { markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+    await getResponseHook(channel)('cid123', '[FILE:', 'session-1');
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid123',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      },
+      'completed',
+    );
+
+    expect(uploadCalls()).toHaveLength(0);
+    expect(markdownCalls()).toHaveLength(1);
+    const body = JSON.parse(
+      String((markdownCalls()[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(body.markdown.text).toBe(
+      '[File delivery failed: incomplete marker]',
+    );
+  });
+
   it('does not upload a file when the reply webhook is unavailable', async () => {
     const file = createTempFile();
     try {

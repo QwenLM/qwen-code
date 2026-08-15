@@ -66,6 +66,26 @@ describe('outbound media markers', () => {
         '[Image pending]',
       ),
     ).toBe('[IMAGE: processing [1/2] done]');
+    expect(
+      stripPartialOutboundMediaMarker(
+        'before [IMAGE:\n/tmp/private.png] after',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('before [IMAGE:\n/tmp/private.png] after');
+  });
+
+  it('does not throw on Unicode lookalikes of marker names', () => {
+    expect(
+      stripPartialOutboundMediaMarker(
+        'see [ımage: /tmp/a',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('see [ımage: /tmp/a');
+    expect(
+      stripPartialOutboundMediaMarker('see [fıle: /tmp/a', 'FILE', ''),
+    ).toBe('see [fıle: /tmp/a');
   });
 
   it('keeps truncation boundaries outside partial markers', () => {
@@ -88,5 +108,12 @@ describe('outbound media markers', () => {
         truncationMarker,
       ),
     ).toHaveLength(80);
+    expect(
+      truncateOutboundMediaText(
+        `${'A'.repeat(500)}[FILE: ${'B'.repeat(20_500)}`,
+        20_000,
+        '[Earlier output truncated]\n',
+      ),
+    ).toContain('B');
   });
 });

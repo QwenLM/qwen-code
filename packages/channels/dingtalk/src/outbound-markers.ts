@@ -23,10 +23,11 @@ function markerOpeningsInCode(
   let instrumented = text;
   for (let index = openings.length - 1; index >= 0; index--) {
     const opening = openings[index]!;
+    const markerPrefixLength = opening[0].trimEnd().length;
     instrumented =
       instrumented.slice(0, opening.index) +
       sentinels[index] +
-      instrumented.slice(opening.index! + opening[0].length);
+      instrumented.slice(opening.index! + markerPrefixLength);
   }
 
   const codeOpenings = new Set<number>();
@@ -114,7 +115,9 @@ function markerSafeTruncationStart(text: string, start: number): number {
       );
       const close = findMarkerClose(text, pathStart, boundary);
       if (close >= start) return close + 1;
-      if (close === -1 && boundary >= start) return boundary;
+      if (close === -1 && boundary >= start && boundary < text.length) {
+        return boundary;
+      }
     }
     open = previousOpenBracket(before, open);
   }
@@ -221,13 +224,20 @@ export function stripPartialOutboundMediaMarker(
         continue;
       }
     } else {
-      const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu)!;
+      const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
+      if (!opening) {
+        searchFrom = open + 1;
+        continue;
+      }
       const pathStart = open + opening[0].length;
       const nextMarkerOffset = text
-        .slice(pathStart, lineEnd)
+        .slice(pathStart)
         .search(MEDIA_MARKER_PATTERN);
-      const boundary =
-        nextMarkerOffset === -1 ? lineEnd : pathStart + nextMarkerOffset;
+      const boundary = markerBoundary(
+        text,
+        pathStart,
+        nextMarkerOffset === -1 ? undefined : pathStart + nextMarkerOffset,
+      );
       if (findMarkerClose(text, pathStart, boundary) !== -1) {
         searchFrom = open + 1;
         continue;
@@ -250,8 +260,7 @@ export function sanitizeOutboundMediaMarkers(
   replacement: string,
 ): string {
   let result = text;
-  const passes = [...text.matchAll(MEDIA_MARKER_PATTERN)].length + 1;
-  for (let pass = 0; pass < passes; pass++) {
+  while (true) {
     const markers = findOutboundMediaMarkers(result, markerName, true);
     const next = stripPartialOutboundMediaMarker(
       replaceOutboundMediaMarkers(
@@ -265,5 +274,49 @@ export function sanitizeOutboundMediaMarkers(
     if (next === result) return result;
     result = next;
   }
-  return result;
+}
+
+export interface TrailingPartialOutboundMediaMarker {
+  start: number;
+  markerName: 'IMAGE' | 'FILE';
+}
+
+export function findTrailingPartialOutboundMediaMarker(
+  text: string,
+): TrailingPartialOutboundMediaMarker | undefined {
+  let open = text.lastIndexOf('[');
+  while (open !== -1) {
+    const lineBreak = text.slice(open + 1).search(/[\r\n]/u);
+    const lineEnd = lineBreak === -1 ? text.length : open + 1 + lineBreak;
+    const candidate = text.slice(open + 1, lineEnd);
+    for (const markerName of ['IMAGE', 'FILE'] as const) {
+      const prefix = `${markerName}:`;
+      if (
+        lineEnd === text.length &&
+        candidate &&
+        prefix.toLowerCase().startsWith(candidate.toLowerCase())
+      ) {
+        return { start: open, markerName };
+      }
+      const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
+      if (opening?.[1]?.toUpperCase() !== markerName) continue;
+      const pathStart = open + opening[0].length;
+      const nextMarkerOffset = text
+        .slice(pathStart)
+        .search(MEDIA_MARKER_PATTERN);
+      const boundary = markerBoundary(
+        text,
+        pathStart,
+        nextMarkerOffset === -1 ? undefined : pathStart + nextMarkerOffset,
+      );
+      if (
+        boundary === text.length &&
+        findMarkerClose(text, pathStart, boundary) === -1
+      ) {
+        return { start: open, markerName };
+      }
+    }
+    open = previousOpenBracket(text, open);
+  }
+  return undefined;
 }

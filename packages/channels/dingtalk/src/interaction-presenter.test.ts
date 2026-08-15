@@ -818,6 +818,22 @@ describe('DingtalkInteractionPresenter', () => {
     expect(fallbackText).not.toContain('/Users/ben/private');
   });
 
+  it('neutralizes an image marker assembled by file sanitization', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      'x [IMAGE[FILE: /decoy]: /Users/ben/private/leak.png] y',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).toBe('x [Image pending] y');
+    expect(fallbackText).not.toContain('/Users/ben/private');
+  });
+
   it.each([
     [
       'tilde-fenced code',

@@ -84,6 +84,9 @@ describe('outbound file markers', () => {
         '`\u{e000}QWEN_MEDIA_MARKER_0\u{e001}`\n[FILE: /workspace/live.txt]',
       ).map(({ path }) => path),
     ).toEqual(['/workspace/live.txt']);
+    expect(
+      findFileMarkers('Send files with [FILE:\n\n \t[FILE: report.pdf]\n'),
+    ).toEqual([]);
   });
 
   it('hides complete and partial visible file paths while streaming', () => {
@@ -117,6 +120,7 @@ describe('outbound file markers', () => {
       'A [FILE: /Users/ben/secret [FILE: x]] B',
       '[FILE:[FILE: /a.pdf] /b.pdf]',
       '[FILE: /hid[FILE: /a] den /x]',
+      '[FILE[FILE[FILE: /a]: /b]: /c]',
     ]) {
       const sanitized = sanitizeStreamingFileMarkers(text);
       expect(findFileMarkers(sanitized)).toEqual([]);

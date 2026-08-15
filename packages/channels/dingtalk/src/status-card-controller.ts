@@ -65,7 +65,14 @@ function boundDisplayContent(content: string): string {
 }
 
 function sanitizeStreamingMediaMarkers(content: string): string {
-  return sanitizeStreamingFileMarkers(sanitizeStreamingImageMarkers(content));
+  let result = content;
+  while (true) {
+    const next = sanitizeStreamingFileMarkers(
+      sanitizeStreamingImageMarkers(result),
+    );
+    if (next === result) return result;
+    result = next;
+  }
 }
 
 export class StatusCardController {

@@ -190,6 +190,24 @@ describe('StatusCardController', () => {
     expect(streamContents.at(-1)).toBe('before  after');
   });
 
+  it('sanitizes marker kinds to a combined fixed point', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.replace(
+      segment(),
+      target,
+      'x [IMAGE[FILE: /decoy]: /Users/ben/private/leak.png] y',
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    const content = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.at(-1)?.[0].content;
+    expect(content).not.toContain('/Users/ben/private');
+    expect(content).not.toMatch(/\[IMAGE:/iu);
+  });
+
   it('does not expose a file path when truncation splits its marker', async () => {
     const { client, controller } = createHarness();
     const marker = '[FILE: /Users/ben/private/report.pdf]';

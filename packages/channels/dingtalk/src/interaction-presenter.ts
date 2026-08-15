@@ -7,7 +7,11 @@ import type {
   SessionTarget,
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
-import { stripPartialImageMarker } from './outbound-image.js';
+import {
+  findImageMarkers,
+  replaceImageMarkers,
+  stripPartialImageMarker,
+} from './outbound-image.js';
 import { sanitizeStreamingFileMarkers } from './outbound-file.js';
 import { truncateOutboundMediaText } from './outbound-markers.js';
 import type { QuestionCardController } from './question-card-controller.js';
@@ -45,9 +49,32 @@ export interface DingtalkInteractionPresenterOptions {
 }
 
 function sanitizeFallbackOutput(text: string): string {
-  return stripPartialImageMarker(
-    sanitizeStreamingFileMarkers(stripPartialImageMarker(text)),
-  );
+  const originalImages = new Map<string, number>();
+  for (const marker of findImageMarkers(text)) {
+    const source = text.slice(marker.start, marker.end);
+    originalImages.set(source, (originalImages.get(source) ?? 0) + 1);
+  }
+
+  let result = text;
+  while (true) {
+    const withoutFiles = sanitizeStreamingFileMarkers(
+      stripPartialImageMarker(result),
+    );
+    const retainedImages = new Map(originalImages);
+    const markers = findImageMarkers(withoutFiles);
+    const replacements = markers.map((marker) => {
+      const source = withoutFiles.slice(marker.start, marker.end);
+      const remaining = retainedImages.get(source) ?? 0;
+      if (remaining === 0) return '[Image pending]';
+      retainedImages.set(source, remaining - 1);
+      return source;
+    });
+    const next = stripPartialImageMarker(
+      replaceImageMarkers(withoutFiles, markers, replacements),
+    );
+    if (next === result) return result;
+    result = next;
+  }
 }
 
 export interface DingtalkCardSender {

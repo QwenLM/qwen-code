@@ -111,6 +111,11 @@ describe('streaming image markers', () => {
     expect(
       sanitizeStreamingImageMarkers('before [IMAGE: /Users/ben/[private/image'),
     ).toBe('before [Image pending]');
+    expect(
+      sanitizeStreamingImageMarkers(
+        'before [IMAGE:\n/Users/ben/private/image.png] after',
+      ),
+    ).toBe('before [Image pending] after');
   });
 
   it('scrubs image marker paths inside code', () => {
