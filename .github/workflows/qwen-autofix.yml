@@ -4529,14 +4529,13 @@ jobs:
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           [[ "${NET_MEASURED}" != 'true' ]] &&
             echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
-          # The marker's window field is spelled `key=`, NOT `win=`, on
-          # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
-          # the breaker PRIOR_HEADS) attribute comments to windows by the
-          # WHOLE-BODY substring `win=<key> -->`, and this marker can
-          # legitimately carry a different window key than its comment's
-          # autofix-eval marker (a supersede-exempt conflict round reporting
-          # after a re-arm). Any token embedding "win=" would double-attribute
-          # that comment to both windows.
+          # The marker's window field is spelled `key=`, NOT `win=`: this
+          # marker can legitimately carry a different window key than its
+          # comment's autofix-eval marker (a supersede-exempt conflict round
+          # reporting after a re-arm). The window censuses attribute
+          # positionally (last-wins) over their own scan-parsed eval
+          # markers, and the distinct token stays as defense in depth for
+          # any future substring consumer.
           # A stale-base auto-update merges current main into the branch,
           # moving the merge base the nets are measured against: overlap
           # resolutions then shift the measurement with no agent push. An
@@ -4993,8 +4992,8 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(((.body // "") | contains("win=" + $key + " -->"))
-                    or ($key == "none" and (((.body // "") | contains("win=")) | not)))
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                    | ($wins | length) > 0 and (($wins | last) == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
@@ -5229,6 +5228,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5348,6 +5351,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5950,8 +5957,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
               if [[ -z "${WIN_HEADS}" ]]; then
@@ -6423,8 +6430,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
