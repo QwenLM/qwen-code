@@ -3075,6 +3075,15 @@ jobs:
                 group_dirs+=('.')
                 group_cmds+=("node --test $(printf '%q' "./$f")")
                 ;;
+              packages/desktop/*|docs-site/*)
+                # Outside the npm-workspace install set (root workspaces
+                # exclude packages/desktop; docs-site is standalone), so the
+                # gate's vitest can never collect them — and desktop's
+                # nested apps each carry a package.json plus a BUILD
+                # vite.config.ts that would otherwise fool the generic
+                # resolver into treating bun-family tests as runnable.
+                add_skip "$f" 'outside the npm-workspace install set (unsupported runner family), skipped'
+                ;;
               *)
                 # Generic vitest resolution keyed on the OWNING PACKAGE, not
                 # a path prefix: root npm workspaces outside packages/**
@@ -3144,7 +3153,6 @@ jobs:
           rounds_done=0
           timed_out=false
           infra_exits=0
-          uncollected=0
           round=1
           # Reset BEFORE round 1 too: PR lifecycle scripts (npm ci/build,
           # run as node) may have mutated the tree since the list was
@@ -3189,7 +3197,6 @@ jobs:
                 infra_exits=$((infra_exits + 1))
               elif [ "$status" -ne 0 ] && grep -q 'No test files found' "$out"; then
                 mark='N'
-                uncollected=$((uncollected + 1))
               elif [ "$status" -ne 0 ]; then
                 mark='F'
               fi
@@ -3861,11 +3868,24 @@ jobs:
             # victim, or copy INTO a planted directory so the log vanishes
             # from the pinned publisher path.
             pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [ -n "$(ps -o pid=,stat= -u node 2>/dev/null | awk '$2 !~ /^Z/')" ] || break
+              sleep 1
+              pkill -KILL -u node 2>/dev/null || true
+            done
             if [ -L "$RUNNER_TEMP/verify-results" ] ||
                { [ -e "$RUNNER_TEMP/verify-results" ] && [ ! -d "$RUNNER_TEMP/verify-results" ]; }; then
               rm -rf -- "$RUNNER_TEMP/verify-results"
             fi
             mkdir -p "$RUNNER_TEMP/verify-results"
+            # Revoke the replant premise outright: the agent era owned this
+            # directory as the build user. Once root owns the names, even a
+            # kill-race survivor (setsid daemon, continuous forker — pkill
+            # scans /proc once) can no longer unlink the staged file or
+            # replant a symlink between this copy and upload-artifact's
+            # enumeration, which FOLLOWS links — that window was a
+            # root-readable-file exfiltration into the public comment.
+            chown -R root:root "$RUNNER_TEMP/verify-results"
             rm -rf -- "$RUNNER_TEMP/verify-results/flake-gate.log"
             cp -f "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"
           fi
@@ -4430,26 +4450,51 @@ jobs:
           # report — they only replace this run's own "running" status (see
           # the upsert below). Real outcomes (report, prepare-fail) upsert.
           WEAK_BODY=false
+          # The gate verdict travels via job outputs: it survives a later
+          # agent-step failure, a job timeout, and a cancellation. A
+          # recorded `flaky` must demote the headline in EVERY terminal
+          # branch — these two used to post the neutral notice and silently
+          # drop the demotion the download-failure branch already honors.
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: ⚠️ incomplete — cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The verification job was cancelled before producing a report.\n\n'
-              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 已取消</summary>\n\n'
-              printf '验证作业在生成报告前被取消。\n\n'
-              printf '</details>\n\n'
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); job cancelled before the report** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf 'The job was cancelled before producing a report, but the deterministic flakiness gate had already observed run-to-run divergence — the per-round matrix is in the gate step output of the workflow run log.\n\n'
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；作业在报告前被取消</summary>\n\n'
+                printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf '作业在生成报告前被取消，但确定性抖动门已观测到轮间分歧——各轮矩阵见工作流运行日志中 gate step 的输出。\n\n'
+                printf '</details>\n\n'
+              else
+                printf '**Sandboxed verification: ⚠️ incomplete — cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The verification job was cancelled before producing a report.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 已取消</summary>\n\n'
+                printf '验证作业在生成报告前被取消。\n\n'
+                printf '</details>\n\n'
+              fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
-              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
-              printf '验证作业未完成（检出、runner 或初始化错误），未生成报告。详见工作流运行日志。\n\n'
-              printf '</details>\n\n'
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); the job then failed before the report** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf 'The verification job did not complete, but the deterministic flakiness gate had already observed run-to-run divergence — the per-round matrix is in the gate step output of the workflow run log.\n\n'
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；作业随后在报告前失败</summary>\n\n'
+                printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf '验证作业未完成，但确定性抖动门已观测到轮间分歧——各轮矩阵见工作流运行日志中 gate step 的输出。\n\n'
+                printf '</details>\n\n'
+              else
+                printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
+                printf '验证作业未完成（检出、runner 或初始化错误），未生成报告。详见工作流运行日志。\n\n'
+                printf '</details>\n\n'
+              fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
