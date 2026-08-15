@@ -639,6 +639,100 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
   });
 
+  it.each([
+    [
+      'an ASCII comma',
+      'No new issues were found, re-walked the retry cap and both changed ' +
+        "exports' call sites; every gap I checked was already confirmed.",
+    ],
+    [
+      'an ASCII semicolon',
+      'No new issues found; re-walked the retry cap and both changed ' +
+        "exports' call sites.",
+    ],
+    [
+      'a full-width period',
+      '未发现问题。重新走查了重连状态机与两个已改导出的全部调用点,' +
+        '每个疑点都已在确认清单中。',
+    ],
+    [
+      'a full-width semicolon',
+      '未发现新问题；重新走查了重连状态机与两个已改导出的全部调用点，' +
+        '每个疑点都已在确认清单中。',
+    ],
+  ])(
+    'a receipt separated by %s is dry, like the period and full-width comma (#9206)',
+    (_label, receipt) => {
+      // The widened class admits six new separators; the suite must pin
+      // every one it admits. Dropping any of these four from the class
+      // reads such receipts `unknown` again — chunks silently never
+      // retire, the exact #9206 failure mode, and no test fails.
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([]);
+      expect(r3.converged).toBe(true);
+    },
+  );
+
+  it('a hedged receipt is not dry — a clause that CONTRADICTS the phrase proves no walk (#9206)', () => {
+    // The widening admitted sentence punctuation; the substance floor
+    // measures length and objects, never polarity — so an auditor that
+    // admitted it never checked still cleared the floor and retired the
+    // chunk. Probed pre-guard: the receipt read `dry` and the chunk
+    // retired; under the pre-widening class both reads were `unknown`.
+    const hedged =
+      'No new issues were found, but I could not open the generated files ' +
+      'and did not check them.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('a dash-led hedge is not dry either — the polarity guard covers every separator path (#9206)', () => {
+    const hedged =
+      'No new issues were found — but the generated files would not open ' +
+      'and I did not check them.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('a Chinese hedged receipt is not dry, exactly like the English one (#9206)', () => {
+    const hedged = '未发现新问题，但是我未能打开生成的文件，没有检查它们。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('quoting the stock phrase to NEGATE it is not a receipt (#9206)', () => {
+    // A return that names the phrase inside a negation matched mid-text
+    // once the stops widened: the quoted phrase opened a clause out of
+    // the negation's own tail, and the chunk retired on the sentence
+    // that said it was not checked. Sentence-punctuation separators open
+    // a clause only when the phrase LEADS the return — a quotation is
+    // never the lead.
+    const quoted =
+      'I cannot write "No new issues were found." I could not open the ' +
+      'generated files and did not check them.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), quoted);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), quoted);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
   it('the bare stock sentence stays unknown through the widened class (#9206)', () => {
     // The widening admits the stop; the substance floor still refuses the
     // clause. `No issues found.` opens an EMPTY clause, and a receipt with
@@ -699,6 +793,87 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([13]);
     expect(r3.diagnostics).toEqual([]);
+  });
+
+  it('diagnoses a launch that never read the diff (#9206)', () => {
+    // A successful call ELSEWHERE (the brief) clears the tool-call bar
+    // but not the diff-read bar; the diagnostic must name the second one
+    // — a rename or a swap of the two bars would otherwise send the
+    // reader hunting the wrong mismatch.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        DRY,
+        1,
+        join(dir, 'brief.md'),
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: no read of the diff; round 2: no read of the diff',
+    ]);
+  });
+
+  it('diagnoses a diff read that missed the baked territory (#9206)', () => {
+    // The record bakes the chunk's window; the auditor read elsewhere in
+    // the file. The territory bar names the miss.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk — ` +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
+      );
+      transcript(built, DRY, 1, diff, 0, 50);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: territory read missing; round 2: territory read missing',
+    ]);
+  });
+
+  it('diagnoses a receipt whose clause names nothing (#9206)', () => {
+    // The receipt matches and every tool-call bar clears — but the clause
+    // after the separator names no territory, so the substance floor is
+    // the bar that fell, and the diagnostic says so.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No new issues found — all good.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause not substantive; round 2: receipt clause not substantive',
+    ]);
+  });
+
+  it('diagnoses an ambiguous launch — one transcript matching several records (#9206)', () => {
+    // Two same-round records (a repair rebuild), ONE transcript handed
+    // both blocks: it certifies neither, and the diagnostic names the
+    // ambiguity instead of leaving an unexplained `unknown`.
+    for (const r of [1, 2]) {
+      const a = record(r, 13, `chunk 13 round ${r} walk`, 'aaa111');
+      const b = record(
+        r,
+        13,
+        `chunk 13 round ${r} rules-corrected rebuild walk`,
+        'fff999',
+      );
+      transcript([a, b].join('\n\n'), DRY);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: launch matched multiple records; round 2: launch matched multiple records',
+    ]);
   });
 
   it("parroting the brief's own example receipt is not dry", () => {

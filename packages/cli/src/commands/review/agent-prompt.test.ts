@@ -4301,6 +4301,80 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(msg).toContain('CONVERGED');
   });
+
+  it('a per-chunk build prints the chunk\u2019s own certification failures (#9206)', () => {
+    // Rounds built one auditor at a time (the measured per-chunk flow)
+    // must carry the SAME note the round builder prints — the schedule's
+    // diagnostics used to die on this twin path, re-silencing the exact
+    // never-retire shape this suite exists to name. Rounds 1-2 are built
+    // per chunk and answered by NO transcript, so round 3's schedule
+    // names the bar both rounds fell at.
+    for (const round of [1, 2]) {
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        chunk: 13,
+        round,
+      });
+    }
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+
+    expect(process.exitCode).toBeUndefined();
+    const err = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement certified nothing');
+    expect(err).toContain(
+      'chunk 13 \u2014 round 1: no matching transcript; round 2: no matching transcript',
+    );
+    // The chunk still builds — the diagnostic rides stderr beside it.
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('You are review agent');
+    expect(keysOf(3)).toHaveLength(1);
+  });
+
+  it('a per-chunk build with no readable transcripts names itself too (#9206)', () => {
+    // Mirror of the all-chunks catch test for the --chunk twin: an
+    // unreadable history degrades to building the auditor — never to
+    // refusing it — and the round says why nothing can retire.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+
+    expect(process.exitCode).toBeUndefined();
+    const err = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement unavailable this round');
+    expect(err).toContain('auditing the chunk');
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('You are review agent');
+    expect(keysOf(3)).toHaveLength(1);
+  });
 });
 
 describe('the tool budget in the briefs', () => {

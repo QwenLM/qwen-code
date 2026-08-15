@@ -45,8 +45,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
-  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -61,7 +59,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { agentPromptCommand } from './agent-prompt.js';
-import { promptRecordDir } from './lib/prompt-record.js';
+import { promptRecordDir, readRecordedPrompts } from './lib/prompt-record.js';
 import { readBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { runCleanup } from './cleanup.js';
 
@@ -192,12 +190,12 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
 
   /** The recorded launch prompt for one (round, chunk). */
   function recordOf(round: number, chunk: number): string {
-    const recordDir = promptRecordDir(plan);
-    for (const name of readdirSync(recordDir)) {
-      if (!name.endsWith('.txt')) continue;
-      const key = decodeURIComponent(name.slice(0, -4));
+    // The exported production reader owns record naming and encoding — a
+    // hand-rolled scan here drifts from it silently (the sibling harness
+    // in agent-prompt.test.ts calls it for exactly this purpose).
+    for (const [key, prompt] of readRecordedPrompts(plan)) {
       if (key.startsWith(`reverse-audit--chunk-${chunk}--round-${round}--`)) {
-        return readFileSync(join(recordDir, name), 'utf8');
+        return prompt;
       }
     }
     throw new Error(`no record for chunk ${chunk} round ${round}`);
@@ -369,6 +367,68 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
   afterEach(() => {
     process.chdir(savedCwd);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a previous run\u2019s marked stop survives a retry at the same plan path (#9206)', () => {
+    // Run A stops without converging (cap marker written) and is killed
+    // before Step 9; the CI retry re-captures the plan at the SAME path,
+    // so the plan's fresh mtime fences run A's marker out of the
+    // verdict-oriented reader. Retention must not key on that fence — the
+    // marker is exactly the evidence it exists to keep — or the sweep
+    // deletes run A's history with no Kept line: the evidence loss this
+    // issue reports, recurring for the killed-run shape.
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    const planPath = join(
+      dir,
+      '.qwen',
+      'tmp',
+      'qwen-review-pr-9206-fetch.json',
+    );
+    writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
+    const recordDir = promptRecordDir(planPath);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'reverse-audit--chunk-1--round-1--abc123.txt'),
+      'a recorded launch prompt — the certification history',
+    );
+    writeRoundCapStop(planPath, 5, 6);
+    // The retry's fresh capture dates the plan AFTER run A's marker.
+    const fresh = new Date(Date.now() + 60 * 60 * 1000);
+    utimesSync(planPath, fresh, fresh);
+    expect(readBudgetStop(planPath)).toBeNull(); // fenced out — verdict side
+
+    runCleanup('pr-9206');
+
+    expect(existsSync(recordDir)).toBe(true);
+  });
+
+  it('a killed run\u2019s marker-LESS record directory survives too (#9206)', () => {
+    // A loop killed mid-round stops without converging and leaves NO
+    // marker — only refusals (round cap, budget) write one. Its records
+    // predate the retry's plan capture and are the only certification
+    // history of the killed run; the sweep must keep them on that signal
+    // alone.
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    const planPath = join(
+      dir,
+      '.qwen',
+      'tmp',
+      'qwen-review-pr-9206-fetch.json',
+    );
+    writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
+    const recordDir = promptRecordDir(planPath);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'reverse-audit--chunk-1--round-1--abc123.txt'),
+      'a recorded launch prompt — the certification history',
+    );
+    // The retry's fresh capture dates the plan after run A's records.
+    const fresh = new Date(Date.now() + 60 * 60 * 1000);
+    utimesSync(planPath, fresh, fresh);
+
+    runCleanup('pr-9206');
+
+    expect(existsSync(recordDir)).toBe(true);
   });
 
   it('a non-converged run (round cap hit) keeps its prompt-record directory', () => {

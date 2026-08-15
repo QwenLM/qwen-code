@@ -203,33 +203,58 @@ const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
  * beside the English ones.
  *
  * The separator admits an em/en dash anywhere (`——` doubled included), a
- * colon in either width, an ASCII hyphen only when it stands alone —
+ * colon in either width, and an ASCII hyphen only when it stands alone —
  * space-led or doubled — so the dash inside `retry-cap` never opens a clause
- * mid-word, and sentence punctuation in either width — period, comma,
- * semicolon. The punctuation expansion is #9206's fix: a run whose cold
- * chunks returned `No new issues were found. Re-walked …` (period) and
- * `未发现新问题，重新走查了…` (full-width comma) never retired one of them,
- * because the clause — the part that PROVES the walk — sat behind a stop
- * the class did not admit. The separator's only job is to show a clause
- * exists; the substance floor below is what judges it, so the bare
- * stock sentence still fails it — `No issues found.` leaves an EMPTY
- * clause whatever separator set opens it. Closing emphasis and quotation
- * may sit between the phrase and the separator — auditors bold the phrase
- * (`**No issues found** — …`, `**未发现新问题** —— …`) in the same
- * `**File:**` / `**Severity:**` idiom the rest of the pipeline writes in,
- * and a receipt refused on a bold mark reads `unknown` and never retires,
- * on exactly the budgeted runs the optimization exists for. The filler
- * between phrase and separator (`were found`, `were detected`, a
+ * mid-word. Sentence punctuation in either width — period, comma, semicolon
+ * — opens a clause TOO, but only when the phrase LEADS the return: a run
+ * whose cold chunks returned `No new issues were found. Re-walked …`
+ * (period) and `未发现新问题，重新走查了…` (full-width comma) never
+ * retired one of them, because the clause — the part that PROVES the walk —
+ * sat behind a stop the class did not admit (#9206's fix). Anchoring the
+ * punctuation path to the return's start keeps a quotation of the phrase
+ * from opening a clause out of its own negation — `I cannot write "No new
+ * issues were found." I could not open the files` matched mid-text the
+ * moment the stops widened, and retired a chunk on the sentence that said
+ * it was not checked; a dash or colon inside such a return still opens its
+ * clause, exactly as before the widening. The separator's only job is to
+ * show a clause exists; the substance floor below is what judges it — the
+ * bare stock sentence still fails it (`No issues found.` leaves an EMPTY
+ * clause whatever separator set opens it), and a clause that CONTRADICTS
+ * the phrase fails the polarity guard beside it. Closing emphasis and
+ * quotation may sit between the phrase and the separator — auditors bold
+ * the phrase (`**No issues found** — …`, `**未发现新问题** —— …`) in the
+ * same `**File:**` / `**Severity:**` idiom the rest of the pipeline writes
+ * in, and a receipt refused on a bold mark reads `unknown` and never
+ * retires, on exactly the budgeted runs the optimization exists for. The
+ * filler between phrase and separator (`were found`, `were detected`, a
  * parenthesised scope) is capped and word-only apart from parentheses:
  * other markdown in between is a new sentence, not this receipt.
  */
-const DRY_RECEIPT_RE = new RegExp(
+const DRY_RECEIPT_PHRASE =
   '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w()]{0,32}?' +
-    '|未发现(?:新的?)?(?:问题|发现)' +
-    '|无新的?(?:问题|发现)' +
-    '|没有(?:发现)?(?:新的?)?问题)' +
-    '\\s*[*_)\\]"”’]*\\s*(?:[—–]+|[:：]|--+|-+\\s|[.,;。，；])\\s*' +
+  '|未发现(?:新的?)?(?:问题|发现)' +
+  '|无新的?(?:问题|发现)' +
+  '|没有(?:发现)?(?:新的?)?问题)';
+
+/** Closing emphasis/quotation that may sit between the phrase and the stop. */
+const DRY_RECEIPT_TAIL = '\\s*[*_)\\]"”’]*\\s*';
+
+/** The dash/colon/hyphen separators — admitted anywhere in the return. */
+const DRY_RECEIPT_RE = new RegExp(
+  DRY_RECEIPT_PHRASE +
+    DRY_RECEIPT_TAIL +
+    '(?:[—–]+|[:：]|--+|-+\\s)\\s*' +
     '([\\s\\S]*)',
+  'i',
+);
+
+/**
+ * The sentence-punctuation separators — admitted only when the phrase
+ * LEADS the return (see the class comment): a quotation of the phrase is
+ * never the lead, so a negation cannot borrow the receipt's clause.
+ */
+const DRY_RECEIPT_START_RE = new RegExp(
+  '^' + DRY_RECEIPT_PHRASE + DRY_RECEIPT_TAIL + '[.,;。，；]\\s*([\\s\\S]*)',
   'i',
 );
 
@@ -245,6 +270,17 @@ const CJK_RE = /[一-鿿]/g;
 const EXAMPLE_RECEIPT_CLAUSE = (
   DRY_RECEIPT_RE.exec(REVERSE_AUDIT_EXAMPLE_RECEIPT)?.[1] ?? ''
 ).trim();
+
+/**
+ * A clause that CONTRADICTS the phrase proves no walk, however long:
+ * `…found, but I could not open the generated files` clears every length
+ * and object floor on the admission's own words. The widening that admitted
+ * sentence punctuation made such hedged returns match at all, and both
+ * separator paths share this guard — a dash-led hedge is the same shape.
+ * Misjudging here fails the way everything in this module fails — the
+ * receipt reads `unknown` and the chunk stays under audit.
+ */
+const CONTRAST_RE = /\b(?:but|however|although|except)\b|但是|不过|然而/i;
 
 /**
  * Does the clause after the receipt's separator name anything? An ENCLOSED
@@ -266,6 +302,7 @@ const EXAMPLE_RECEIPT_CLAUSE = (
 function substantiveClause(clause: string): boolean {
   const c = clause.replace(/\s+/g, ' ').trim();
   if (c.length === 0) return false;
+  if (CONTRAST_RE.test(c)) return false;
   if (EXAMPLE_RECEIPT_CLAUSE.length > 0 && c.includes(EXAMPLE_RECEIPT_CLAUSE)) {
     return false;
   }
@@ -376,7 +413,8 @@ function classifyReturn(
   // rules on it; retirement certifies the audit that DID happen, not the
   // exploration that did not.
   const judged = stripBudgetGapLines(text);
-  const receipt = DRY_RECEIPT_RE.exec(judged);
+  const receipt =
+    DRY_RECEIPT_RE.exec(judged) ?? DRY_RECEIPT_START_RE.exec(judged);
   // The clause is cut at any INLINE disclosure marker before its substance
   // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
   // slips past the line-based strip, and the `[\s\S]*` capture would

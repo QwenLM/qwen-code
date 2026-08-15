@@ -1991,6 +1991,27 @@ function refuseConverged(planPath: string): void {
   process.exitCode = 5;
 }
 
+/**
+ * The stderr NOTE naming the bar each twice-audited chunk fell at (#9206),
+ * shared by the round builder and the per-chunk rebuild path so the two
+ * cannot drift on the spelling. `diagnostics` is already narrowed to the
+ * chunk(s) this build covers; stdout stays the deliverable the orchestrator
+ * pastes.
+ */
+function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
+  if (diagnostics.length === 0) return;
+  writeStderrLine(
+    `NOTE: reverse-audit retirement certified nothing for ` +
+      `${diagnostics.length} twice-audited chunk(s) — they stay under ` +
+      `audit (the safe direction), but a chunk that looks dry and never ` +
+      `retires is the cost this schedule exists to stop paying. The bar ` +
+      `each round fell at:\n` +
+      diagnostics.join('\n') +
+      `\nCompare the recorded prompts in ${promptRecordDir(planPath)} ` +
+      `against this session's subagent transcripts to see the mismatch.`,
+  );
+}
+
 function runAllChunks(
   report: PlanReport,
   planPath: string,
@@ -2054,17 +2075,8 @@ function runAllChunks(
   // the silent version of this ran a 12-chunk loop five rounds to the cap
   // with no word of why nothing retired). stderr, never stdout: the round
   // blocks below are the deliverable the orchestrator pastes.
-  if (schedule !== null && schedule.diagnostics.length > 0) {
-    writeStderrLine(
-      `NOTE: reverse-audit retirement certified nothing for ` +
-        `${schedule.diagnostics.length} twice-audited chunk(s) — they stay ` +
-        `under audit (the safe direction), but a chunk that looks dry and ` +
-        `never retires is the cost this schedule exists to stop paying. ` +
-        `The bar each round fell at:\n` +
-        schedule.diagnostics.join('\n') +
-        `\nCompare the recorded prompts in ${promptRecordDir(planPath)} ` +
-        `against this session's subagent transcripts to see the mismatch.`,
-    );
+  if (schedule !== null) {
+    noteUncertifiedChunks(planPath, schedule.diagnostics);
   }
 
   // The budget gate, deferred here from the single-build path for
@@ -2579,6 +2591,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       if (schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
         return;
+      }
+      // The round builder's diagnostic, narrowed to this chunk (#9213 on
+      // #9206): rounds built one auditor at a time used to drop it,
+      // re-silencing the never-retire shape exactly when delivery is
+      // degraded.
+      if (schedule !== null && typeof args.chunk === 'number') {
+        const prefix = `chunk ${args.chunk} — `;
+        noteUncertifiedChunks(
+          args.plan,
+          schedule.diagnostics.filter((d) => d.startsWith(prefix)),
+        );
       }
     }
     if (

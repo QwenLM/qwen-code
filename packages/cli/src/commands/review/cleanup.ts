@@ -14,14 +14,21 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
-import { readBudgetStop } from './lib/deadline.js';
+import { readBudgetStopUnfenced, runEpochMs } from './lib/deadline.js';
+import { promptRecordDir } from './lib/prompt-record.js';
 import {
   worktreePath,
   probeWorktreePath,
@@ -466,11 +473,26 @@ export function runCleanup(target: string): void {
   // #9206: a prompt-record directory whose loop STOPPED WITHOUT CONVERGING
   // is the only certification history there is — the evidence a
   // never-retiring reverse-audit loop needs to diagnose itself, which the
-  // sweep would otherwise destroy unread. The loop writes its stop marker
-  // (round-cap or budget) inside that directory, and a clean convergence
-  // clears it, so a marker on disk names the non-converged stop exactly.
-  // The decision is made BEFORE the sweep runs: the plan file the marker's
-  // epoch fence reads is itself one of the swept entries.
+  // sweep would otherwise destroy unread. Two signals name such a stop,
+  // and neither implies the other:
+  //
+  // - A stop MARKER on disk, from ANY run. The loop writes one inside the
+  //   record directory when a round is refused (round-cap or budget), and
+  //   a clean convergence clears only its OWN run's marker — so a marker
+  //   that is still there is a stop that never converged. Retention reads
+  //   it WITHOUT the run-epoch fence the verdict consumers read through:
+  //   that fence keeps a previous run's stop from capping THIS run's
+  //   verdict, but here a previous run's marker is exactly the evidence
+  //   to keep — the CI retry re-captures the plan at the same path, and
+  //   fencing the marker out would re-create the loss #9206 reports.
+  // - Records this run cannot have written: a loop KILLED or crashed
+  //   mid-round stops without converging and leaves NO marker (only
+  //   refusals write one), but its records predate the retry's fresh plan
+  //   capture — nothing clears the record dir between runs. A file older
+  //   than the plan's own mtime is a previous run's.
+  //
+  // The decision is made BEFORE the sweep runs: the plan file the epoch
+  // reads is itself one of the swept entries.
   const preserved = new Set<string>();
   for (const file of tmpEntries) {
     if (!file.startsWith(prefix) || !file.endsWith('-prompts')) continue;
@@ -478,7 +500,12 @@ export function runCleanup(target: string): void {
       REVIEW_TMP_DIR,
       `${file.slice(0, -'-prompts'.length)}.json`,
     );
-    if (readBudgetStop(planCandidate) !== null) preserved.add(file);
+    if (
+      readBudgetStopUnfenced(planCandidate) !== null ||
+      hasPreviousRunRecords(planCandidate)
+    ) {
+      preserved.add(file);
+    }
   }
 
   for (const file of tmpEntries) {
@@ -486,9 +513,9 @@ export function runCleanup(target: string): void {
     const full = join(REVIEW_TMP_DIR, file);
     if (preserved.has(file)) {
       writeStdoutLine(
-        `Kept ${full}: this review's reverse audit stopped without ` +
-          `converging (stop marker on disk) — the record directory is the ` +
-          `evidence for diagnosing it; remove it manually once done.`,
+        `Kept ${full}: a reverse audit stopped here without converging — ` +
+          `the record directory is the evidence for diagnosing it; remove ` +
+          `it manually once done.`,
       );
       continue;
     }
@@ -515,6 +542,26 @@ export function runCleanup(target: string): void {
   // not get rid of it, and not when an entry was deliberately kept.
   if (!removedAny && !failedAny && preserved.size === 0) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
+  }
+}
+
+/**
+ * Whether the plan's record directory holds files older than the plan's
+ * own capture — records a PREVIOUS run wrote. Every run rewrites the plan
+ * at its Step 1 capture and nothing clears the record dir, so a file this
+ * run wrote is always newer than the plan; anything older belongs to a
+ * run that stopped and never cleaned up (#9206). Unreadable → false: the
+ * sweep proceeds as it always did.
+ */
+function hasPreviousRunRecords(planPath: string): boolean {
+  try {
+    const epoch = runEpochMs(planPath);
+    const dir = promptRecordDir(planPath);
+    return readdirSync(dir).some(
+      (name) => statSync(join(dir, name)).mtimeMs < epoch,
+    );
+  } catch {
+    return false;
   }
 }
 
