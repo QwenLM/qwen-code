@@ -2616,6 +2616,9 @@ describe('review_requested burst coalescing (#8945)', () => {
     expect(cond).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );
+  });
+});
+
 describe('qwen pr review retry --resume wiring', () => {
   // The retry's one behavioral change: attempt 1 runs the PROMPT verbatim,
   // attempt 2 carries `--resume` so fetch-pr can continue the dead attempt.

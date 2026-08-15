@@ -117,7 +117,11 @@ Based on the parsed `target.type`:
     # every downstream reader — the Step 3A/3B roster, check-coverage, and
     # compose-review's own coverage recomputation — reads it from there, so they
     # cannot disagree about which agents a medium review owed. Omit it only if
-    # the parser resolved the default high; passing it always is harmless.
+    # the parser resolved the default high. On a FRESH run passing it always
+    # is harmless; on a RESUME it is not — the ruling cannot tell a passed-
+    # through default from a user's explicit choice, so follow the resume
+    # bullet below: pass --effort only when the user chose a level in THIS
+    # invocation.
     # High-effort re-review with a cached anchor: append --since <lastCommitSha>
     # (the incremental check below) — the CLI validates the anchor and scopes
     # the diff and plan; never run git against an anchor yourself.
