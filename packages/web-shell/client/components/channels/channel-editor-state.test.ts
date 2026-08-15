@@ -56,6 +56,43 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'senderPolicy',
+      label: 'Sender Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+  ],
+};
+
 function configuredInstance(): DaemonChannelInstanceSnapshot {
   return {
     name: 'release-bot',
@@ -131,11 +168,264 @@ describe('Channel editor state', () => {
     });
   });
 
+  it('serializes sender and group allowlists in the runtime config shapes', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS) as ReturnType<
+      typeof createChannelEditorDraft
+    > & { allowedGroupIds?: string };
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.values.senderPolicy = 'allowlist';
+    draft.values.allowedUsers = 'staff-a, staff-b';
+    draft.values.groupPolicy = 'allowlist';
+    draft.values.sessionScope = 'chat_thread';
+    draft.allowedGroupIds = 'group-a, group-b';
+    draft.secrets.clientSecret = {
+      operation: 'replace',
+      value: 'ding-client-secret',
+    };
+
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'revision-access')
+        .config,
+    ).toEqual({
+      type: 'dingtalk',
+      clientId: 'ding-client-id',
+      senderPolicy: 'allowlist',
+      allowedUsers: ['staff-a', 'staff-b'],
+      groupPolicy: 'allowlist',
+      sessionScope: 'chat_thread',
+      groups: {
+        'group-a': {},
+        'group-b': {},
+      },
+    });
+  });
+
+  it('preserves the deprecated thread scope when editing', () => {
+    const instance = configuredInstance();
+
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+
+    expect(draft.values.sessionScope).toBe('thread');
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-session-scope',
+        instance,
+      ).config.sessionScope,
+    ).toBe('thread');
+  });
+
+  it('uses chat_thread for a new Channel whose plugin default is legacy thread', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+
+    expect(draft.values.sessionScope).toBe('chat_thread');
+  });
+
+  it('uses a visible scope for a new Channel without chat_thread support', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope'
+          ? {
+              ...field,
+              default: 'thread',
+              options: field.options?.filter(
+                (option) => option.value !== 'chat_thread',
+              ),
+            }
+          : field,
+      ),
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+
+    expect(draft.values.sessionScope).toBe('user');
+  });
+
+  it('preserves an inherited legacy thread default when editing', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+    const instance = configuredInstance();
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.sessionScope).toBe('thread');
+    expect(
+      buildChannelUpsertRequest(
+        descriptor,
+        draft,
+        'revision-session-scope',
+        instance,
+      ).config.sessionScope,
+    ).toBe('thread');
+  });
+
+  it('fills safe policy defaults when editing a legacy instance', () => {
+    const instance = configuredInstance();
+    delete instance.config.senderPolicy;
+
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+
+    expect(draft.values.senderPolicy).toBe('allowlist');
+    expect(draft.values.groupPolicy).toBe('disabled');
+    expect(validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, [])).toEqual(
+      {},
+    );
+  });
+
+  it('changes group allowlist membership without losing wildcard or retained group settings', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        senderPolicy: 'allowlist',
+        allowedUsers: ['staff-a'],
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { requireMention: false },
+          'group-a': { dispatchMode: 'collect' },
+          'group-removed': { requireMention: true },
+        },
+      },
+    };
+    const draft = createChannelEditorDraft(
+      DINGTALK_WITH_ACCESS,
+      instance,
+    ) as ReturnType<typeof createChannelEditorDraft> & {
+      allowedGroupIds?: string;
+    };
+
+    expect(draft.allowedGroupIds).toBe('group-a, group-removed');
+    draft.allowedGroupIds = 'group-a, group-new';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-groups',
+        instance,
+      ).config.groups,
+    ).toEqual({
+      '*': { requireMention: false },
+      'group-a': { dispatchMode: 'collect' },
+      'group-new': {},
+    });
+  });
+
+  it('rejects unsafe group allowlist keys before building the request', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.values.senderPolicy = 'allowlist';
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = '__proto__';
+    draft.secrets.clientSecret = {
+      operation: 'replace',
+      value: 'ding-client-secret',
+    };
+
+    expect(
+      validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, []),
+    ).toMatchObject({ allowedGroupIds: 'invalidGroupId' });
+  });
+
+  it('ignores a hidden group allowlist outside allowlist policy', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.values.senderPolicy = 'allowlist';
+    draft.values.groupPolicy = 'open';
+    draft.allowedGroupIds = '__proto__';
+    draft.secrets.clientSecret = {
+      operation: 'replace',
+      value: 'ding-client-secret',
+    };
+
+    expect(validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, [])).toEqual(
+      {},
+    );
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'revision-open')
+        .config,
+    ).not.toHaveProperty('groups');
+  });
+
+  it('removes allowlist-only groups but keeps behavior settings when leaving allowlist', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { requireMention: false },
+          'group-a': {},
+          'group-b': { requireMention: true },
+          'group-c': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+        },
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.values.groupPolicy = 'open';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-open',
+        instance,
+      ).config.groups,
+    ).toEqual({
+      '*': { requireMention: false },
+      'group-b': { requireMention: true },
+      'group-c': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    });
+  });
+
+  it('preserves stored group settings for an unchanged non-allowlist policy', () => {
+    const groups = {
+      '*': { requireMention: false },
+      'group-a': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'pairing',
+        groups,
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.values.clientId = 'updated-id';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-pairing',
+        instance,
+      ).config.groups,
+    ).toEqual(groups);
+  });
+
   it('shows the effective scope default for a legacy instance', () => {
     const instance = configuredInstance();
     delete instance.config.sessionScope;
 
-    const draft = createChannelEditorDraft(DINGTALK, instance);
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
 
     expect(draft.values.sessionScope).toBe('user');
   });
@@ -322,6 +612,7 @@ const GITHUB: DaemonChannelTypeDescriptor = {
       label: 'Group Policy',
       kind: 'enum',
       required: true,
+      default: 'open',
       options: [
         { value: 'open', label: 'Open' },
         { value: 'allowlist', label: 'Allowlist' },
@@ -333,6 +624,7 @@ const GITHUB: DaemonChannelTypeDescriptor = {
       label: 'Sender Policy',
       kind: 'enum',
       required: true,
+      default: 'allowlist',
       options: [
         { value: 'allowlist', label: 'Allowlist' },
         { value: 'pairing', label: 'Pairing' },
@@ -374,7 +666,7 @@ describe('Descriptor-driven senderPolicy', () => {
     expect(draft.values.allowedUsers).toBe('alice, bob');
   });
 
-  it('leaves enum fields empty when editing an instance that lacks them', () => {
+  it('uses runtime policy fallbacks when editing an instance that lacks them', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'legacy-bot',
       config: { type: 'github' },
@@ -383,8 +675,8 @@ describe('Descriptor-driven senderPolicy', () => {
       runtime: { state: 'stopped' },
     };
     const draft = createChannelEditorDraft(GITHUB, instance);
-    expect(draft.values.groupPolicy).toBe('');
-    expect(draft.values.senderPolicy).toBe('');
+    expect(draft.values.groupPolicy).toBe('disabled');
+    expect(draft.values.senderPolicy).toBe('allowlist');
   });
 
   it('writes senderPolicy via descriptor fields, not the hardcoded path', () => {

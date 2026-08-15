@@ -351,6 +351,20 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         this.makeHistoryTruncatedEvent(compactedTurns.length),
       );
     }
+    return {
+      compactedTurns,
+      liveJournal: this.liveJournalSnapshot(liveReplayMode),
+      lastEventId: this.lastEventId,
+    };
+  }
+
+  /**
+   * Snapshot of only the in-flight live journal — the events ingested
+   * since the last turn boundary (a boundary folds its turn into the
+   * replay window and resets the journal). Cheaper than `snapshot()`:
+   * no replay-window flatten.
+   */
+  liveJournalSnapshot(liveReplayMode: LiveReplayMode = 'full'): BridgeEvent[] {
     const journal =
       liveReplayMode === 'summary' ? this.summaryJournal : this.fullJournal;
     const journalRecordId =
@@ -389,11 +403,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         },
       });
     }
-    return {
-      compactedTurns,
-      liveJournal,
-      lastEventId: this.lastEventId,
-    };
+    return liveJournal;
   }
 
   seed(snapshot: { compactedTurns: BridgeEvent[]; lastEventId: number }): void {
