@@ -158,8 +158,8 @@ interface PresubmitArgs {
  * treats an unknown finding set as at-risk, so a malformed file downgrades
  * the verdict rather than proving a false all-clear. A shorter-than-real list
  * would be the dangerous outcome (a dropped finding reads as disjoint), so
- * any entry lacking a string `path` — or carrying a non-string or
- * misshapen `id` — rejects the WHOLE file rather than being skipped.
+ * any entry lacking a string `path` — or carrying a non-null, non-string
+ * or misshapen `id` — rejects the WHOLE file rather than being skipped.
  */
 export function parseFindingsFile(path: string): FindingAnchor[] | null {
   let parsed: unknown;
@@ -183,8 +183,12 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
     // malformed file, and silently ignoring it would let a carried re-post
     // read as a fresh duplicate at the very location it belongs (a typo'd
     // id can never match the extractor, silently disabling the exemption).
+    // `null` means "no id" — JSON has no `undefined`, so a producer that
+    // emits the key uniformly uses null for id-less findings; that is a
+    // missing optional field, not a malformed file.
     if (
       e.id !== undefined &&
+      e.id !== null &&
       (typeof e.id !== 'string' || !LEDGER_ID_SHAPE.test(e.id))
     ) {
       return null;

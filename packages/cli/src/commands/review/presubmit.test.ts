@@ -1132,6 +1132,9 @@ describe('parseFindingsFile (via mocked fs)', () => {
       [{ path: 'a.ts', line: 5, id: 'R3-2' }],
     ],
     ['[{"path":"a.ts","line":5,"id":42}]', null],
+    // `null` means "no id" (JSON has no undefined) — a missing optional
+    // field, not a malformed file; the entry survives without an id.
+    ['[{"path":"a.ts","line":5,"id":null}]', [{ path: 'a.ts', line: 5 }]],
     // Present-but-misshapen ids are rejected too: a typo'd id can never
     // match the extractor, and accepting it would silently disable the
     // re-post exemption (#9212 review).

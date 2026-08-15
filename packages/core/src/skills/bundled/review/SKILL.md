@@ -1003,7 +1003,12 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
   existingComments: {
     total: number;
     byBucket: { stale, resolved, overlap, repost, noConflict: number };
-    overlap: Comment[];          // BLOCK on submit if non-empty
+                                 // repost entries are a SUBSET of overlap and
+                                 // are counted in both: every re-post target
+                                 // is also an overlap
+    overlap: Comment[];          // BLOCK on submit — except a finding whose
+                                 // id matches a repost entry at the same
+                                 // location (see repost below)
     repost: (Comment & { matchedIds: string[] })[];
                                  // overlap comments whose body carries a
                                  // carried-id prefix matching a finding id at
