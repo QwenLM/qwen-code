@@ -818,7 +818,7 @@ async function classifyImageContent(
     // past the 100 MB gate.
     handle = await fs.promises.open(
       filePath,
-      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NONBLOCK ?? 0),
     );
     if ((await handle.stat()).size > IMAGE_MAX_SOURCE_BYTES) return 'image';
     const sample = Buffer.alloc(IMAGE_SNIFF_BYTES);
