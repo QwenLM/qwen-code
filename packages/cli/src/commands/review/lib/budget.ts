@@ -247,7 +247,12 @@ export function reverseAuditRoundTier(size: DiffSize): number {
   }
   const effective = effectiveLines(src, total);
   if (effective >= HUGE_DIFF_FLOOR) return HUGE_REVERSE_AUDIT_ROUNDS;
-  return isTerritoryFanOut(size)
+  // The validated pair, not `size` again. Re-reading the raw object here would
+  // give the huge gate and the topology gate two independent derivations of
+  // the same two numbers inside one function — which is exactly the shape of
+  // the defect this function was just repaired for, where one derivation
+  // laundered garbage the other rejected.
+  return isTerritoryFanOut({ srcDiffLines: src, diffLines: total })
     ? LARGE_REVERSE_AUDIT_ROUNDS
     : SMALL_REVERSE_AUDIT_ROUNDS;
 }

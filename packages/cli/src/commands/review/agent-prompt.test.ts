@@ -484,6 +484,74 @@ describe('agent-prompt (command boundary)', () => {
     }
   });
 
+  it('takes the round cap from the plan topology at the --chunk gate too', () => {
+    // The fourth of the four cap call sites, and the only one with no tier-10
+    // coverage: a 3A-sized plan can carry chunks (the chunk budget is 400
+    // lines while the 3A gate admits 3200 total), so a round rebuilt or
+    // repaired one --chunk at a time on a small plan reaches THIS gate. A
+    // regression touching only it would stay green suite-wide.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-chunk-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      delete process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+
+      const small = join(dir, 'small.json');
+      writeFileSync(
+        small,
+        JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({
+        plan: small,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 6,
+      });
+      expect(process.exitCode).toBeUndefined();
+      expect(readRecordedPrompts(small).size).toBe(1);
+
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({
+        plan: small,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 11,
+      });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 10');
+
+      const large = join(dir, 'large.json');
+      writeFileSync(
+        large,
+        JSON.stringify({ ...PLAN, srcDiffLines: 900, diffLines: 900 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({
+        plan: large,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 6,
+      });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 5');
+      expect(readRecordedPrompts(large).size).toBe(0);
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('lets --role reverse-audit --chunk N through and keys the record by its chunk', () => {
     // The unit tests build the launch prompt directly, bypassing the guard and the
     // key derivation. This drives the real handler: the guard must let the one legal
@@ -3791,6 +3859,30 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain('chunk 13 — retired: dry in rounds 3 and 4');
     expect(out).toContain('certificate final');
     expect(out).not.toContain('next cold check round 6');
+  });
+
+  it('the cap in the retirement note is the plan’s tier, not a constant', () => {
+    // The third of the four cap call sites. Same history as the cap-5 test
+    // above, on a 3A-sized plan: round 5's retirement schedules its cold check
+    // for round 6, which the 3A tier ALLOWS — so the note must promise that
+    // check rather than close the certificate. The two tests are the same
+    // scenario with opposite outcomes, which is what makes this site's read of
+    // the plan observable at all.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(4, { 13: DRY, 14: YIELD, 15: YIELD });
+
+    const out = runRound(5);
+    expect(out).toContain('chunk 13 — retired: dry in rounds 3 and 4');
+    expect(out).toContain('next cold check round 6');
+    expect(out).not.toContain('certificate final');
   });
 
   it('the cold check comes due on parity — the retired chunk is built again', () => {
