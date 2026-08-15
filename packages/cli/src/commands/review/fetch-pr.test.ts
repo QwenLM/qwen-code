@@ -356,6 +356,7 @@ vi.mock('./lib/run-ledger.js', async (importOriginal) => {
     priorSessionIds: vi.fn(() => []),
     sessionEntryCount: vi.fn(() => 1),
     ledgerResumeCount: vi.fn(() => 0),
+    resumeBookkeepingRefused: vi.fn(() => false),
     readResumeMarker: vi.fn(() => ({
       schemaVersion: 1,
       resumes: [],
@@ -3648,10 +3649,12 @@ describe('fetch-pr --resume', () => {
       readResumeMarker,
       ledgerResumeCount,
       sessionEntryCount,
+      resumeBookkeepingRefused,
     } = await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
     vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
     vi.mocked(sessionEntryCount).mockImplementation(() => 1);
+    vi.mocked(resumeBookkeepingRefused).mockImplementation(() => false);
     const { untrustedLocalConfig, plantedHooks, gitWithInput } = await import(
       './lib/git.js'
     );
@@ -4002,6 +4005,18 @@ describe('fetch-pr --resume', () => {
     await run();
     const lines = await stdoutJsonLines();
     expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
+  it('refuses the resume outright when the bookkeeping tree is refused', async () => {
+    // Both counters read zero through a redirected record tree, so the cap
+    // silently un-caps; a cap that cannot read its bookkeeping fails CLOSED.
+    const { resumeBookkeepingRefused } = await import('./lib/run-ledger.js');
+    vi.mocked(resumeBookkeepingRefused).mockReturnValue(true);
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'bookkeeping-unreadable' },
+    ]);
   });
 
   it('a same-session retry at the cap is the SAME resume in both terms', async () => {
@@ -4822,10 +4837,12 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       readResumeMarker,
       ledgerResumeCount,
       sessionEntryCount,
+      resumeBookkeepingRefused,
     } = await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
     vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
     vi.mocked(sessionEntryCount).mockImplementation(() => 1);
+    vi.mocked(resumeBookkeepingRefused).mockImplementation(() => false);
     const { untrustedLocalConfig, plantedHooks, gitWithInput } = await import(
       './lib/git.js'
     );

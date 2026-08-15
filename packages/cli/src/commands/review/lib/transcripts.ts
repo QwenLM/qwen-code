@@ -692,11 +692,7 @@ export function priorSessionDirs(
   for (const { sessionId, endsAtMs } of priorSessionEntries(planPath, env)) {
     // The harness writes the directory under the SANITIZED id, so the lookup
     // applies the same mapping before the containment walk.
-    const dir = join(
-      root,
-      'subagents',
-      sanitizeFilenameComponent(sessionId),
-    );
+    const dir = join(root, 'subagents', sanitizeFilenameComponent(sessionId));
     // Every component from the project dir down — `subagents` included. The
     // final-component check this replaced left the shared parent open: one
     // link at `subagents` redirects every prior session at once, and each

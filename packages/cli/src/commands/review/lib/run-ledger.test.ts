@@ -42,6 +42,9 @@ import {
   resumeMarkerPath,
   RESUME_MAX,
   currentSessionEntry,
+  sessionLedgerRefused,
+  resumeBookkeepingRefused,
+  resumeBookkeepingAnomaly,
 } from './run-ledger.js';
 
 let root: string;
@@ -938,6 +941,43 @@ describe('the properties the threat model rests on', () => {
     },
     5000,
   );
+
+  it('reports an ABSENT record dir as no ledger, not as a refusal', () => {
+    // A plan built outside a session, or a read-only tmp where the swallowed
+    // writes never landed: no `<plan>-prompts` at all is the ordinary state,
+    // and the accounting layer must not print the refusal sentence (nor mark
+    // the ledger a floor) over it.
+    expect(sessionLedgerRefused(plan)).toBe(false);
+    expect(resumeBookkeepingRefused(plan)).toBe(false);
+    expect(resumeBookkeepingAnomaly(plan, envOf('S1'))).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'flags a REDIRECTED record dir as refused bookkeeping',
+    () => {
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'else-')));
+      try {
+        symlinkSync(elsewhere, join(root, 'qwen-review-pr-7-fetch-prompts'));
+        expect(resumeBookkeepingRefused(plan)).toBe(true);
+        expect(resumeBookkeepingAnomaly(plan, envOf('S1'))).toContain(
+          'could not be read',
+        );
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('flags a deleted marker beside a multi-attempt ledger', () => {
+    // The canonical deletion attack: the ledger proves earlier attempts, the
+    // marker that authorizes reading them is gone, and the prior iteration
+    // silently empties — this is the one place that can say so.
+    appendRunSession(plan, envOf('S0'));
+    appendRunSession(plan, envOf('S1'));
+    expect(resumeBookkeepingAnomaly(plan, envOf('S1'))).toContain(
+      'resume marker is missing',
+    );
+  });
 
   it('drops an entry older than the slack window', () => {
     const mtimeMs = statSync(plan).mtimeMs;

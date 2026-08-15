@@ -53,8 +53,7 @@ import {
 import {
   currentSessionEntry,
   priorSessionEntries,
-  runSessionsPath,
-  sessionLedgerRefused,
+  resumeBookkeepingAnomaly,
 } from './lib/run-ledger.js';
 
 interface CostLedgerArgs {
@@ -504,14 +503,20 @@ export function computeLedger(
   // summary would present a current-session-only figure as the whole review's
   // cost. It also drops the billing floor back to the plan's mtime, which
   // bills the session's pre-review turns.
-  if (sessionLedgerRefused(planPath, env)) {
-    missingStreams++;
-    writeStderrLineSafe(
-      `WARNING: this run's session ledger at ${runSessionsPath(planPath)} ` +
-        `could not be read as a contained regular file; any earlier attempt ` +
-        `of this review is missing from this ledger, and the billing floor ` +
-        `falls back to the plan's own timestamp.`,
-    );
+  {
+    // Any cell of the ledger×marker matrix that empties the prior iteration
+    // while the other half proves there was something to iterate: a refused
+    // or deleted half renders a resumed review as a fresh single-session
+    // run, and this is the only place that can say so.
+    const anomaly = resumeBookkeepingAnomaly(planPath, env);
+    if (anomaly !== null) {
+      missingStreams++;
+      writeStderrLineSafe(
+        `WARNING: ${anomaly}; any earlier attempt of this review may be ` +
+          `missing from this ledger, and the billing floor may fall back ` +
+          `to the plan's own timestamp.`,
+      );
+    }
   }
   for (const entry of priorSessionEntries(planPath, env)) {
     const paths = priorDirs.get(entry.sessionId);

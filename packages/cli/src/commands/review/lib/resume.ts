@@ -61,7 +61,8 @@ export type ResumeRefusal =
   | 'window-corrupt' // auditSince/fetchedAt unparsable or in the future
   | 'empty-diff-mismatch' // the report's emptyDiff disagrees with the derived diff
   | 'head-moved' // the PR head advanced — the once-per-review restart case
-  | 'resume-cap'; // this review has already resumed RESUME_MAX times
+  | 'resume-cap' // this review has already resumed RESUME_MAX times
+  | 'bookkeeping-unreadable'; // the ledger/marker tree is present but refused
 
 export type ResumeAssessment =
   | { ok: true }

@@ -36,7 +36,6 @@ import {
   atomicWriteFileSync,
   sanitizeFilenameComponent,
 } from '@qwen-code/qwen-code-core';
-import type { ContainedReadError } from './contained-read.js';
 import {
   ContainedReadError,
   MAX_LEDGER_BYTES,
@@ -229,6 +228,8 @@ function ledgerOccupant(planPath: string, path: string): LedgerOccupant {
     };
   } catch (err) {
     if (err instanceof ContainedReadError) {
+      // The ordinary first-write state — the type names it directly.
+      if (err.reason === 'absent') return { kind: 'absent' };
       // Not a regular file (directory, FIFO, device — this module never
       // writes one) or over the byte ceiling (a legitimate ledger is ≤64
       // capped entries, a few KB): provably a plant, healable.
@@ -236,10 +237,9 @@ function ledgerOccupant(planPath: string, path: string): LedgerOccupant {
         return { kind: 'plant' };
       }
       if (err.reason === 'open-failed') {
-        const code = (err.cause as { code?: unknown } | undefined)?.code;
-        if (code === 'ENOENT') return { kind: 'absent' };
         // ELOOP is `O_NOFOLLOW` refusing a planted symlink — the noFollow
         // atomic write replaces it, so it heals like the other plants.
+        const code = (err.cause as { code?: unknown } | undefined)?.code;
         if (code === 'ELOOP') return { kind: 'plant' };
       }
     }
@@ -312,6 +312,66 @@ export function sessionLedgerRefused(
   return (
     readLedgerFileResult(planPath, runSessionsPath(planPath)).kind === 'refused'
   );
+}
+
+/**
+ * The resume bookkeeping's health, as one fact per anomaly cell.
+ *
+ * The two files vouch for each other: a refused or missing HALF empties the
+ * prior-session iteration at its source while the other half proves there was
+ * something to iterate — and each such cell renders a resumed review as a
+ * fresh single-session run with no warning anywhere. The accounting layer
+ * discloses on these; the CAP consumer refuses resumes outright on `refused`
+ * (a bookkeeping tree it cannot read is a cap it cannot enforce — fail
+ * CLOSED, toward a fresh run).
+ */
+/**
+ * Is either bookkeeping file PRESENT-but-unreadable (or its tree redirected)?
+ *
+ * The cap consumer refuses resumes on this outright: with both counters
+ * reading zero through a refused tree, `max(0, 0)` silently un-caps the
+ * resume chain — the two-counter redundancy collapsing to a single point of
+ * failure, the containment verdict of one directory. A cap that cannot read
+ * its own bookkeeping fails CLOSED, toward a fresh run.
+ */
+export function resumeBookkeepingRefused(planPath: string): boolean {
+  return (
+    readLedgerFileResult(planPath, runSessionsPath(planPath)).kind ===
+      'refused' ||
+    readLedgerFileResult(planPath, resumeMarkerPath(planPath)).kind ===
+      'refused'
+  );
+}
+
+export function resumeBookkeepingAnomaly(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const sessions = readLedgerFileResult(planPath, runSessionsPath(planPath));
+  const marker = readLedgerFileResult(planPath, resumeMarkerPath(planPath));
+  if (sessions.kind === 'refused') {
+    return 'the session ledger could not be read as a contained regular file';
+  }
+  if (marker.kind === 'refused') {
+    return 'the resume marker could not be read as a contained regular file';
+  }
+  if (marker.kind === 'absent' && sessionEntryCount(planPath) >= 2) {
+    return (
+      'the session ledger records earlier attempts but the resume marker is ' +
+      'missing (deleted, or its write was swallowed)'
+    );
+  }
+  if (
+    sessions.kind === 'absent' &&
+    marker.kind === 'ok' &&
+    resumeAuthorized(planPath, env)
+  ) {
+    return (
+      'the resume marker authorizes this session but the session ledger is ' +
+      'missing'
+    );
+  }
+  return null;
 }
 
 /**
