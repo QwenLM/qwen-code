@@ -665,23 +665,39 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   //
   // Minus one: the ledger's first entry is the original run's own session,
   // which is not a resume.
-  const ledgerResumes = Math.max(0, sessionEntryCount(out) - 1);
-  // The current session is excluded from BOTH terms or neither. `recordResume`
-  // dedupes per session — a second `--resume` in the same session is the same
-  // resume — so counting this session's own marker entry refuses its retry as
-  // `resume-cap`, and the fall-through then force-removes the worktree and
-  // rewrites the plan, fencing out every attempt's evidence. A retry of the
-  // last permitted resume must be that same resume, not one past the cap.
-  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']
-    ?.trim()
-    .toLowerCase();
+  // The current session is excluded from BOTH terms or neither — stated
+  // below, and previously true of only the marker term: a resume leaves the
+  // plan untouched, so a resumed session's own ledger entry stays inside the
+  // fence, and counting it pushed a same-session retry of the LAST permitted
+  // resume over the cap. The retry's fresh fall-through then force-removed
+  // the very worktree being resumed.
+  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
+  const ledgerResumes = Math.max(
+    0,
+    sessionEntryCount(out, { excludeSessionId: currentSessionId }) - 1,
+  );
+  // `recordResume` dedupes per session — a second `--resume` in the same
+  // session is the same resume — so counting this session's own marker entry
+  // refuses its retry as `resume-cap`. A retry of the last permitted resume
+  // must be that same resume, not one past the cap.
+  const currentKey = currentSessionId?.toLowerCase();
   const markerResumes = marker.resumes.filter(
-    (r) => r.sessionId.toLowerCase() !== currentSessionId,
+    (r) => r.sessionId.toLowerCase() !== currentKey,
   ).length;
   // `--porcelain` prints nothing on a clean tree. A null (the command could
   // not run at all) is treated as dirty by `assessResume`: an unverifiable
   // tree is not a clean one.
-  const status = gitOpt('-C', wt, 'status', '--porcelain');
+  // `--untracked-files=normal` EXPLICITLY: `status.showUntrackedFiles=no` (a
+  // common large-repo tuning) hides untracked files from a bare
+  // `--porcelain`, and untracked residue is exactly the dirty state no other
+  // probe can see — resuming there reviews files that are not in the PR.
+  const status = gitOpt(
+    '-C',
+    wt,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  );
   const ruling = assessResume(prev, {
     prNumber,
     worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),

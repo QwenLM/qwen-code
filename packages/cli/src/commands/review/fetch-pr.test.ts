@@ -3312,7 +3312,12 @@ describe('fetch-pr --resume', () => {
     // Read UNGATED: the gated accessor cannot answer at ruling time, because
     // the record that satisfies its gate is written only after the ruling.
     const { sessionEntryCount } = await import('./lib/run-ledger.js');
-    vi.mocked(sessionEntryCount).mockReturnValue(3);
+    // The ruling passes the CURRENT session for exclusion; a deleted-marker
+    // attack arrives as a session the ledger does not name, so nothing is
+    // excluded and the full count bites.
+    vi.mocked(sessionEntryCount).mockImplementation((_p, opts) =>
+      opts?.excludeSessionId === undefined ? 3 : 3,
+    );
     await run();
     expect(reportWritten()).toBe(true);
     const lines = await stdoutJsonLines();
@@ -3327,6 +3332,30 @@ describe('fetch-pr --resume', () => {
     // difference, because there `length` and `length - 1` rule alike.
     const { sessionEntryCount } = await import('./lib/run-ledger.js');
     vi.mocked(sessionEntryCount).mockReturnValue(2);
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
+  it('a same-session retry at the cap is the SAME resume in both terms', async () => {
+    // Sessions S0/S1/S2 all inside the fence (a resume never rewrites the
+    // plan), marker [S1, S2], current session S2 retrying: the ledger term
+    // must exclude S2 too — 3−1 counted raw pushed the retry to the cap, and
+    // the fresh fall-through force-removed the worktree being resumed.
+    const { readResumeMarker, sessionEntryCount } = await import(
+      './lib/run-ledger.js'
+    );
+    vi.mocked(sessionEntryCount).mockImplementation((_p, opts) =>
+      opts?.excludeSessionId?.toLowerCase() === 's-test' ? 2 : 3,
+    );
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [
+        { sessionId: 'S-prev', atMs: Date.now() },
+        { sessionId: 'S-test', atMs: Date.now() },
+      ],
+      restarts: [],
+    });
     await run();
     const lines = await stdoutJsonLines();
     expect(lines[0]).toMatchObject({ resumed: true });
@@ -3350,6 +3379,18 @@ describe('fetch-pr --resume', () => {
     await run();
     const lines = await stdoutJsonLines();
     expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
+  it('asks git for untracked files EXPLICITLY, immune to user config', async () => {
+    // `status.showUntrackedFiles=no` hides untracked residue from a bare
+    // `--porcelain`, and untracked files are the one dirty state no other
+    // probe can see.
+    await run();
+    const { gitOpt } = await import('./lib/git.js');
+    const statusCall = vi
+      .mocked(gitOpt)
+      .mock.calls.find((c) => c.includes('status'));
+    expect(statusCall).toContain('--untracked-files=normal');
   });
 
   it('refuses on an explicit effort different from the recorded run', async () => {

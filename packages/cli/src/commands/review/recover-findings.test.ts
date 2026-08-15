@@ -79,7 +79,12 @@ function transcript(
   session: string,
   id: string,
   launch: string,
-  opts: { opens?: string[]; finalText?: string } = {},
+  opts: {
+    opens?: string[];
+    finalText?: string;
+    /** Append one more tool call AFTER the text — the died-mid-work shape. */
+    trailingCall?: boolean;
+  } = {},
 ): void {
   const base = {
     agentId: id,
@@ -132,6 +137,22 @@ function transcript(
       },
     }),
   );
+  if (opts.trailingCall) {
+    // One more tool call AFTER the text: the died-mid-work shape, which
+    // marks the text as progress rather than a return.
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: '/x' } } },
+          ],
+        },
+      }),
+    );
+  }
   writeFileSync(
     join(dir, 'subagents', session, `agent-${id}.jsonl`),
     lines.join('\n') + '\n',
@@ -349,9 +370,19 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     // recovery certifies a verifier that skipped the read and compose then
     // rules the very same key `findings-unread`.
     const key = 'verify';
-    const prompt = built(key);
     const findings = findingsFilePath(plan, key);
     writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+    // Production shape: the POINTER rides the recorded prompt (post-#8597),
+    // and the floor keys on that pointer — not on a path derived from the
+    // record key, which never matches for per-chunk reverse-audit keys.
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${findings}")\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
 
     transcript('S0', 'a0', prompt, {
       opens: [briefPath(plan, key)],
@@ -365,6 +396,63 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     transcript('S0', 'a1', prompt, {
       opens: [briefPath(plan, key), findings],
       finalText: 'Verified, with the list read.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      key,
+    ]);
+  });
+
+  it('refuses a record whose text is progress, not a return', () => {
+    // finalText keeps the last non-empty assistant message, including
+    // narration between tool calls; handing a mid-flight-dead agent's
+    // narration to the resumed orchestrator as certified final text is the
+    // exact fabrication recovery exists to prevent.
+    const prompt = built('1a');
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, '1a')],
+      finalText: 'Reading the brief now…',
+      trailingCall: true,
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+  });
+
+  it('applies the findings floor to PER-CHUNK reverse-audit keys', () => {
+    // Their findings file is keyed WITHOUT the chunk, so a key-derived path
+    // never matches and the floor silently vanished for exactly these
+    // auditors — compose-time then ruled the same key `findings-unread`.
+    // The floor keys on the pointer the recorded prompt names.
+    const key = 'reverse-audit--chunk-3--round-1--abc123def456';
+    const roundList = findingsFilePath(
+      plan,
+      'reverse-audit--round-1--abc123def456',
+    );
+    writeFileSync(roundList, '- **[Critical]** x.ts:1 — y');
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, 'The brief.');
+    const prompt =
+      `You are review agent \`${key}\` — chunk 3 of 9.\n` +
+      `read_file(file_path="${roundList}")\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+
+    // Skips the round list → refused.
+    transcript('S0', 'a0', prompt, {
+      opens: [brief],
+      finalText: 'No issues found — re-walked chunk 3.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+
+    // Reads it (and the diff — the chunk branch's territory proof) →
+    // recovered.
+    transcript('S0', 'a1', prompt, {
+      opens: [brief, roundList, DIFF],
+      finalText: 'No issues found — re-walked chunk 3, list compared.',
     });
     expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
       key,

@@ -20,13 +20,7 @@
 // hard failure is missing transcript infrastructure — a resume with no
 // evidence to read should say so rather than print an empty recovery.
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
@@ -43,7 +37,7 @@ import {
   flattenPrompt,
   promptLines,
   briefPath,
-  findingsFilePath,
+  findingsPointerOf,
 } from './lib/prompt-record.js';
 import { priorSessionIds } from './lib/run-ledger.js';
 import { assignedChunk } from './lib/coverage.js';
@@ -115,7 +109,17 @@ function chunkOfKey(key: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-function meetsBar(rec: AgentRecord, planPath: string, key: string): boolean {
+function meetsBar(
+  rec: AgentRecord,
+  planPath: string,
+  key: string,
+  builtPrompt: string,
+): boolean {
+  // RETURNED first, like every certification consumer: `finalText` keeps the
+  // last non-empty assistant text, which includes progress narrated between
+  // tool calls, and a mid-flight-dead agent's narration must not be handed
+  // to the resumed orchestrator as certified final text.
+  if (!rec.returned) return false;
   // Coverage infers the assignment from the launch prompt because that is all
   // it has; recovery is matching a record to a KEY the CLI built, which says
   // the same thing directly. Fall back to the prompt for a record whose key
@@ -132,22 +136,30 @@ function meetsBar(rec: AgentRecord, planPath: string, key: string): boolean {
   if (declared !== null && chunk !== null && Number(declared[1]) === chunk) {
     return false;
   }
+  // EVERY role opens its brief — the live walk gates `ok` on `unreadBriefs`
+  // for chunk agents too: the brief carries the severity bar, the finding
+  // format and the project's own rules, and a chunk agent that skipped it
+  // reviewed against rules it never saw.
   const openedBrief = rec.successfulCallArgs.some((a) =>
     a.includes(JSON.stringify(briefPath(planPath, key))),
   );
-  if (chunk !== null) {
-    // A chunk agent's proof is the diff it opened, not the brief it was
-    // pointed at.
+  if (!openedBrief) return false;
+  if (chunk !== null && !key.startsWith('reverse-audit')) {
+    // A chunk agent's proof of TERRITORY is the diff it opened.
     return rec.diffToolCalls > 0;
   }
-  // Every other role: the brief, plus — where the pipeline demands it of this
-  // key — the findings list the brief tells it to read.
-  if (!openedBrief) return false;
-  const findingsPath = findingsFilePath(planPath, key);
-  if (!existsSync(findingsPath)) return true;
-  return rec.successfulReadFileArgs.some((a) =>
-    a.includes(JSON.stringify(findingsPath)),
+  // The findings floor keys on the POINTER the recorded prompt names — not a
+  // path derived from the record key, which never matches for per-chunk
+  // reverse-audit keys (their findings file is keyed without the chunk).
+  // Deriving from the key made the floor silently vanish for exactly those
+  // auditors, and compose-time then ruled the same key `findings-unread`.
+  const pointer = findingsPointerOf(builtPrompt);
+  if (pointer === null) return chunk !== null ? rec.diffToolCalls > 0 : true;
+  const readList = rec.successfulReadFileArgs.some((a) =>
+    a.includes(JSON.stringify(pointer)),
   );
+  if (!readList) return false;
+  return chunk !== null ? rec.diffToolCalls > 0 : true;
 }
 
 export function recoverFindings(
@@ -208,7 +220,7 @@ export function recoverFindings(
   for (const [rec, keys] of matchesOf) {
     if (keys.length !== 1) continue; // unmatched, or the injectivity refusal
     const key = keys[0];
-    if (!meetsBar(rec, planPath, key)) continue;
+    if (!meetsBar(rec, planPath, key, built.get(key) ?? '')) continue;
     if (rec.finalText.trim() === '') continue;
     // Prefer the newest certified transcript per key — a relaunch supersedes
     // the launch it repaired.
