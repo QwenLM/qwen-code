@@ -2647,22 +2647,87 @@ describe('checkout self-heal', () => {
     }
   });
 
-  it('still exits 0 when the wipe cannot remove the workspace', () => {
-    // The wipe step has no continue-on-error, so its own never-fail exit
-    // contract is what keeps the heal chain alive: a permission-blocked wipe
-    // must warn and exit 0 so the retry checkout still runs.
+  // Fronts PATH with a `sudo` stub so the sudo leg behaves identically on
+  // every lane: the real pool splits between members WITH passwordless sudo
+  // (the leg runs as root) and members without it (the leg dies with "a
+  // password is required"), so a test leaning on the real sudo silently
+  // covers a different branch on each machine.
+  const stubSudo = (exitCode, markerPath) => {
+    const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
+    const body = markerPath
+      ? `#!/bin/sh\necho called >> '${markerPath}'\nexit ${exitCode}\n`
+      : `#!/bin/sh\nexit ${exitCode}\n`;
+    writeFileSync(join(bin, 'sudo'), body);
+    chmodSync(join(bin, 'sudo'), 0o755);
+    return bin;
+  };
+
+  // A workspace whose entries the owning user cannot unlink: find -exec rm
+  // exits nonzero, so the user-mode wipe leg fails deterministically.
+  const lockFixture = () => {
     const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-lock-'));
     const dir = join(parent, 'workspace');
     mkdirSync(dir);
     writeFileSync(join(dir, 'leftover'), 'x');
-    // A read-only dir cannot have entries unlinked, so both wipe legs fail.
     chmodSync(dir, 0o500);
+    return { parent, dir };
+  };
+  const unlock = ({ parent, dir }) => {
+    chmodSync(dir, 0o755);
+    rmSync(parent, { recursive: true, force: true });
+  };
+
+  it('exits 0 and keeps survivors when BOTH wipe legs fail', () => {
+    // The wipe step has no continue-on-error, so its own never-fail exit
+    // contract is what keeps the heal chain alive: a permission-blocked wipe
+    // must warn and exit 0 so the retry checkout still runs, with the
+    // survivors left in place — the retry runs against them, and a double
+    // checkout failure is what turns the job red. The stubbed sudo makes
+    // the else branch reachable even on lanes with passwordless sudo.
+    const fixture = lockFixture();
+    const bin = stubSudo(1);
     try {
-      runWipe({ GITHUB_WORKSPACE: dir }); // must not throw
+      const out = runWipe({
+        GITHUB_WORKSPACE: fixture.dir,
+        PATH: `${bin}:${process.env.PATH}`,
+      }); // must not throw
+      expect(readdirSync(fixture.dir)).toContain('leftover');
+      // The retry must not run blind: survivors get an oncall-visible
+      // annotation naming them, not just the generic wipe-failed warning.
+      expect(out).toContain('survived the workspace wipe');
     } finally {
-      chmodSync(dir, 0o755);
-      rmSync(parent, { recursive: true, force: true });
+      unlock(fixture);
+      rmSync(bin, { recursive: true, force: true });
     }
+  });
+
+  it('escalates to the sudo leg when the user-mode wipe fails', () => {
+    // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
+    // turn this red: the marker only appears when the sudo leg actually
+    // runs. The stub exits 0 without removing anything, so the then-branch
+    // is pinned without depending on any real sudo.
+    const fixture = lockFixture();
+    const marker = join(fixture.parent, 'sudo-called');
+    const bin = stubSudo(0, marker);
+    try {
+      runWipe({
+        GITHUB_WORKSPACE: fixture.dir,
+        PATH: `${bin}:${process.env.PATH}`,
+      });
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      unlock(fixture);
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe suspicious workspace paths', () => {
+    // The pool idiom's path guard, reused: a mangled GITHUB_WORKSPACE that
+    // expands to a system path must fail the heal step loudly rather than
+    // rm -rf its contents.
+    expect(() =>
+      runWipe({ GITHUB_WORKSPACE: '/home' }, { stdio: 'pipe' }),
+    ).toThrow();
   });
 
   it('refuses to wipe when GITHUB_WORKSPACE is unset or empty', () => {
