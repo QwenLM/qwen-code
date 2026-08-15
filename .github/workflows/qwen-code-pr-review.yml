@@ -503,6 +503,9 @@ jobs:
           # root-owned poisoning degrades to warn-and-retry — the heal chain
           # must never fail, so the retry still runs against survivors.
           WS="${GITHUB_WORKSPACE:?}"
+          # Trailing slashes slip past the exact-match case arms below
+          # (`/home/` would pass the guard and reach the rm), so strip them.
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: $WS"; exit 1 ;;
           esac
@@ -515,7 +518,8 @@ jobs:
           # alive for the retry, so survivors only get a signal.
           remaining="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | wc -l | tr -d ' ')"
           if [ "$remaining" != '0' ]; then
-            echo "::warning::${remaining} entries survived the workspace wipe; the retry checkout runs against them"
+            survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\n' ' ' | cut -c1-500)"
+            echo "::warning::${remaining} entries survived the workspace wipe: ${survivors}; the retry checkout runs against them"
           fi
 
       - name: 'Checkout base branch (retry)'

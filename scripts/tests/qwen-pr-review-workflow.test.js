@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -2644,6 +2644,10 @@ describe('checkout self-heal', () => {
     // Symmetric half of the invariant: a double checkout failure must stay
     // red so the job never proceeds into review without code.
     expect(retry['continue-on-error']).toBeUndefined();
+    // The wipe step must fail loud the same way: its path guard's exit 1 is
+    // the chain's only refusal, and continue-on-error would demote it to a
+    // log annotation — the retry checkout would then wipe the refused path.
+    expect(wipe['continue-on-error']).toBeUndefined();
   });
 
   it('wipes and retries exactly when the first checkout fails', () => {
@@ -2701,7 +2705,7 @@ describe('checkout self-heal', () => {
   const stubSudo = (exitCode, markerPath) => {
     const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
     const body = markerPath
-      ? `#!/bin/sh\necho called >> '${markerPath}'\nexit ${exitCode}\n`
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" >> '${markerPath}'\nexit ${exitCode}\n`
       : `#!/bin/sh\nexit ${exitCode}\n`;
     writeFileSync(join(bin, 'sudo'), body);
     chmodSync(join(bin, 'sudo'), 0o755);
@@ -2709,7 +2713,9 @@ describe('checkout self-heal', () => {
   };
 
   // A workspace whose entries the owning user cannot unlink: find -exec rm
-  // exits nonzero, so the user-mode wipe leg fails deterministically.
+  // exits nonzero, so the user-mode wipe leg fails deterministically. Root
+  // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
+  // skip there, and win32 has no POSIX permission bits to honor.
   const lockFixture = () => {
     const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-lock-'));
     const dir = join(parent, 'workspace');
@@ -2723,57 +2729,121 @@ describe('checkout self-heal', () => {
     rmSync(parent, { recursive: true, force: true });
   };
 
-  it('exits 0 and keeps survivors when BOTH wipe legs fail', () => {
-    // The wipe step has no continue-on-error, so its own never-fail exit
-    // contract is what keeps the heal chain alive: a permission-blocked wipe
-    // must warn and exit 0 so the retry checkout still runs, with the
-    // survivors left in place — the retry runs against them, and a double
-    // checkout failure is what turns the job red. The stubbed sudo makes
-    // the else branch reachable even on lanes with passwordless sudo.
-    const fixture = lockFixture();
-    const bin = stubSudo(1);
-    try {
-      const out = runWipe({
-        GITHUB_WORKSPACE: fixture.dir,
-        PATH: `${bin}:${process.env.PATH}`,
-      }); // must not throw
-      expect(readdirSync(fixture.dir)).toContain('leftover');
-      // The retry must not run blind: survivors get an oncall-visible
-      // annotation naming them, not just the generic wipe-failed warning.
-      expect(out).toContain('survived the workspace wipe');
-    } finally {
-      unlock(fixture);
-      rmSync(bin, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'exits 0 and keeps survivors when BOTH wipe legs fail',
+    () => {
+      // The wipe step has no continue-on-error, so its own never-fail exit
+      // contract is what keeps the heal chain alive: a permission-blocked
+      // wipe must warn and exit 0 so the retry checkout still runs, with
+      // the survivors left in place — the retry runs against them, and a
+      // double checkout failure is what turns the job red. The stubbed sudo
+      // makes the else branch reachable even on lanes with passwordless
+      // sudo.
+      const fixture = lockFixture();
+      const bin = stubSudo(1);
+      try {
+        const out = runWipe({
+          GITHUB_WORKSPACE: fixture.dir,
+          PATH: `${bin}:${process.env.PATH}`,
+        }); // must not throw
+        expect(readdirSync(fixture.dir)).toContain('leftover');
+        // The retry must not run blind: survivors get an oncall-visible
+        // annotation naming them, not just the generic wipe-failed warning.
+        expect(out).toContain('survived the workspace wipe');
+        expect(out).toContain('leftover');
+      } finally {
+        unlock(fixture);
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it('escalates to the sudo leg when the user-mode wipe fails', () => {
-    // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
-    // turn this red: the marker only appears when the sudo leg actually
-    // runs. The stub exits 0 without removing anything, so the then-branch
-    // is pinned without depending on any real sudo.
-    const fixture = lockFixture();
-    const marker = join(fixture.parent, 'sudo-called');
-    const bin = stubSudo(0, marker);
-    try {
-      runWipe({
-        GITHUB_WORKSPACE: fixture.dir,
-        PATH: `${bin}:${process.env.PATH}`,
-      });
-      expect(existsSync(marker)).toBe(true);
-    } finally {
-      unlock(fixture);
-      rmSync(bin, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'escalates to the sudo leg when the user-mode wipe fails',
+    () => {
+      // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
+      // turn this red: the marker only appears when the sudo leg actually
+      // runs, and its recorded argv must target the workspace — a refactor
+      // drifting the leg's path shipped green before the argv was pinned.
+      // The stub exits 0 without removing anything, so the then-branch is
+      // pinned without depending on any real sudo.
+      const fixture = lockFixture();
+      const marker = join(fixture.parent, 'sudo-called');
+      const bin = stubSudo(0, marker);
+      try {
+        runWipe({
+          GITHUB_WORKSPACE: fixture.dir,
+          PATH: `${bin}:${process.env.PATH}`,
+        });
+        expect(existsSync(marker)).toBe(true);
+        // Exact argv entry, not substring: a drifted target like
+        // "$WS/does-not-exist" still CONTAINS the workspace path.
+        expect(readFileSync(marker, 'utf8').split('\n')).toContain(fixture.dir);
+      } finally {
+        unlock(fixture);
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it('refuses to wipe suspicious workspace paths', () => {
-    // The pool idiom's path guard, reused: a mangled GITHUB_WORKSPACE that
-    // expands to a system path must fail the heal step loudly rather than
-    // rm -rf its contents.
-    expect(() =>
-      runWipe({ GITHUB_WORKSPACE: '/home' }, { stdio: 'pipe' }),
-    ).toThrow();
+  // The guard must be exercised with the REAL dangerous paths, but pointing
+  // a live `rm -rf` at them detonates the moment the guard regresses — the
+  // exact moment the test must protect (the triage suite's guard-mutation
+  // run spent six minutes trying to delete `/` before it was killed). So
+  // `rm` is a PATH-fronted recorder: with the guard gone, the call log
+  // shows the attempted delete and the test fails having deleted nothing.
+  // The trailing-slash variants pin the normalization: the case arms are
+  // exact matches, so `/home/` would otherwise slip past the guard.
+  it('refuses suspicious workspace paths without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: bad,
+            },
+          },
+        );
+        // Non-zero, not exactly 1: the case guard exits 1 for a named path,
+        // while an empty one never reaches it because
+        // `${GITHUB_WORKSPACE:?}` aborts the shell first.
+        expect(res.status, `path ${bad || '<empty>'} was not refused`).not.toBe(
+          0,
+        );
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('refuses to wipe when GITHUB_WORKSPACE is unset or empty', () => {
