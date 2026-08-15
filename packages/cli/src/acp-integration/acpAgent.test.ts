@@ -13166,6 +13166,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.getProjectRoot.mockReturnValue('/tmp/after-cd');
+    let releaseFlush!: () => void;
+    const flushGate = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const recording = innerConfig.getChatRecordingService();
+    recording.flush.mockReturnValue(flushGate);
+    const releaseHistoryMutation = vi.fn();
     const artifactSnapshot = {
       v: 1,
       sessionId,
@@ -13197,19 +13204,25 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     lastSessionMock!.isIdle.mockReturnValue(false);
-    const response = await agent.extMethod('rewindSession', {
+    lastSessionMock!.beginHistoryMutation.mockReturnValue(
+      releaseHistoryMutation,
+    );
+    const rewind = agent.extMethod('rewindSession', {
       sessionId,
       targetTurnIndex: 1,
       cwd: '/tmp',
     });
 
+    await vi.waitFor(() => expect(recording.flush).toHaveBeenCalledOnce());
+    expect(releaseHistoryMutation).not.toHaveBeenCalled();
+    releaseFlush();
+    const response = await rewind;
+
     expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
       rewindFiles: true,
     });
     expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalledOnce();
-    expect(
-      lastSessionMock?.beginHistoryMutation.mock.results[0]?.value,
-    ).toHaveBeenCalledOnce();
+    expect(releaseHistoryMutation).toHaveBeenCalledOnce();
     expect(SessionService).toHaveBeenCalledWith('/tmp');
     expect(innerConfig.getSessionService).toHaveBeenCalled();
     expect(response).toEqual({
@@ -13528,16 +13541,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalled(),
     );
 
-    await expect(
-      agent.extMethod('rewindSession', {
-        sessionId,
-        promptId: 'not-a-valid-prompt-id',
-        cwd: '/tmp',
-      }),
-    ).rejects.toMatchObject({
-      code: -32602,
-      data: { errorKind: 'invalid_rewind_target' },
-    });
+    for (const promptId of ['not-a-valid-prompt-id', 123, null]) {
+      await expect(
+        agent.extMethod('rewindSession', {
+          sessionId,
+          promptId,
+          cwd: '/tmp',
+        }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'invalid_rewind_target' },
+      });
+    }
     expect(lastSessionMock?.rewindToTurn).not.toHaveBeenCalled();
 
     releaseFork();

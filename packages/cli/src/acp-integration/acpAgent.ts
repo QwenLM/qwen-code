@@ -5967,10 +5967,10 @@ class QwenAgent implements Agent {
         throw error;
       }
     }
-    // Prompt calls queued at the history-mutation gate are tracked in
+    // Prompt calls still waiting at Session admission are tracked in
     // activePromptCalls but have no session pendingPrompt yet, so
     // cancelPendingPrompt cannot see them. Abort their controllers too, or a
-    // cancelled prompt would run in full once the gate frees.
+    // cancelled prompt would run in full once admission frees.
     for (const call of this.activePromptCalls.get(sessionId) ?? []) {
       call.controller.abort();
     }
@@ -11280,21 +11280,28 @@ class QwenAgent implements Agent {
         // queueing behind an active mutation and surfacing as a bridge
         // timeout (which for a destructive op means "may have executed").
         // Only the snapshot-index resolution needs the gate.
-        const promptId = params['promptId'] as string | undefined;
+        const rawPromptId = params['promptId'];
+        if (rawPromptId !== undefined && typeof rawPromptId !== 'string') {
+          throw new RequestError(-32602, 'Invalid promptId format', {
+            errorKind: 'invalid_rewind_target',
+          });
+        }
+        const promptId =
+          typeof rawPromptId === 'string' ? rawPromptId : undefined;
         let turnIndex: number | undefined = params['targetTurnIndex'] as
           | number
           | undefined;
-        const resolveFromPromptId = Boolean(
-          promptId && (turnIndex === undefined || turnIndex === null),
-        );
+        const resolveFromPromptId =
+          promptId !== undefined &&
+          (turnIndex === undefined || turnIndex === null);
         if (resolveFromPromptId) {
           const prefix = sessionId + '########';
-          if (!(promptId as string).startsWith(prefix)) {
+          if (!promptId.startsWith(prefix)) {
             throw new RequestError(-32602, 'Invalid promptId format', {
               errorKind: 'invalid_rewind_target',
             });
           }
-          const suffix = (promptId as string).slice(prefix.length);
+          const suffix = promptId.slice(prefix.length);
           if (!/^\d+$/.test(suffix)) {
             throw new RequestError(
               -32602,

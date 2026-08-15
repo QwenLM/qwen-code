@@ -6588,6 +6588,48 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('does not report a concurrent branch request as a failure', async () => {
+    const branch = deferred<{
+      sessionId: string;
+      displayName: string;
+      switchStarted: boolean;
+    }>();
+    mockSessionActions.branchSession
+      .mockReturnValueOnce(branch.promise)
+      .mockRejectedValueOnce(
+        new DOMException(
+          'A branch request is already in progress',
+          'InvalidStateError',
+        ),
+      );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    let first: void | Promise<void>;
+    let second: void | Promise<void>;
+    act(() => {
+      first =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      second =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-2');
+    });
+
+    await act(async () => {
+      await second;
+    });
+    expect(onToast).not.toHaveBeenCalled();
+
+    branch.resolve({
+      sessionId: 'branch-1',
+      displayName: 'Historical branch',
+      switchStarted: true,
+    });
+    await act(async () => {
+      await first;
+    });
+  });
+
   it('does not claim a late branch result switched sessions', async () => {
     mockSessionActions.branchSession.mockResolvedValue({
       sessionId: 'branch-1',

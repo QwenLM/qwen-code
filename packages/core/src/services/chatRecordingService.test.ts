@@ -480,6 +480,8 @@ describe('ChatRecordingService', () => {
           stopReason: 'end_turn',
         });
 
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
       expect(second?.startExclusiveRecordUuid).toBe(first?.checkpointUuid);
       expect(mockConfig.getSessionService).not.toHaveBeenCalled();
     });

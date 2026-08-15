@@ -2425,13 +2425,18 @@ describe('transcript record provenance compaction', () => {
     engine.ingest(withSources(makeTextChunk(2, 'two'), ['assistant-record']));
     engine.ingest(makeTurnComplete(3));
 
-    const textEvent = engine
+    const textEvents = engine
       .snapshot()
-      .compactedTurns.find(
+      .compactedTurns.filter(
         (event) =>
           event.type === 'session_update' &&
           updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
       );
+    expect(textEvents).toHaveLength(1);
+    const textEvent = textEvents[0]!;
+    expect((updateOf(textEvent)['content'] as { text: string }).text).toBe(
+      'one two',
+    );
     expect(updateOf(textEvent!)['_meta']).toMatchObject({
       qwenTranscript: {
         sourceRecordIds: ['assistant-record'],

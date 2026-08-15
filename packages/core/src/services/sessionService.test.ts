@@ -3866,7 +3866,7 @@ describe('SessionService', () => {
 
       const result = await service.forkSession(oldId, newId, {
         atRecordId: 'checkpoint-2',
-        source: { sourceType: 'side-task' },
+        source: { sourceType: 'side_task' },
       });
       const written = fs
         .readFileSync(result.filePath, 'utf8')
@@ -5171,6 +5171,7 @@ describe('SessionService', () => {
       vi.mocked(statSyncSpy).mockRestore?.();
       vi.mocked(statPromiseSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(rmSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(
         realPath.join(realOs.tmpdir(), 'find-titles-prefix-'),
@@ -5397,6 +5398,7 @@ describe('SessionService', () => {
       vi.mocked(statSyncSpy).mockRestore?.();
       vi.mocked(statPromiseSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(rmSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(
         realPath.join(realOs.tmpdir(), 'parent-session-id-'),

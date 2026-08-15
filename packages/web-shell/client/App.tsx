@@ -7577,6 +7577,13 @@ export function App({
           ]);
         })
         .catch(async (error: unknown) => {
+          if (
+            error instanceof DOMException &&
+            error.name === 'InvalidStateError' &&
+            error.message === 'A branch request is already in progress'
+          ) {
+            return;
+          }
           if (isStaleBranchPointError(error)) {
             if (!transcriptReloadSupported) {
               pushToast('error', t('branch.staleUnsupported'));

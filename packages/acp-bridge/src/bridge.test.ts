@@ -13917,6 +13917,10 @@ describe('createAcpSessionBridge', () => {
 
         closeGate.resolve({});
         await close;
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({ method }),
+        );
         await bridge.shutdown();
       },
     );
