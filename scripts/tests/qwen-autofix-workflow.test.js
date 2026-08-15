@@ -6220,6 +6220,155 @@ exit 1
     expect(skill).toContain('Deferred non-Critical feedback');
   });
 
+  it('runs the verification gate in an ephemeral container that cannot reach the PAT or the host verdict file', () => {
+    // #9089: the gate executes the branch's OWN build/test. On the host that
+    // code shares the OS user, $HOME, $GITHUB_ENV and $GITHUB_OUTPUT with the
+    // later PAT-bearing steps, and BASH_ENV/LD_PRELOAD fire before any in-step
+    // guard. In a container none of that is reachable — docker does not
+    // inherit the host environment, so the isolation is by construction.
+    const wrapper = readFileSync(
+      '.github/scripts/run-autofix-gate-container.sh',
+      'utf8',
+    );
+    // Both gate steps invoke the WRAPPER, never the gate script directly, and
+    // digest-verify both staged scripts before executing either.
+    for (const gate of [verificationGateSteps[1], repairVerificationGateStep]) {
+      expect(gate).toContain(
+        'bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
+      );
+      expect(gate).not.toMatch(
+        /bash "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/,
+      );
+      expect(gate).toContain(
+        'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null',
+      );
+      // The image comes from the resolve step's OUTPUT (expression context),
+      // not $GITHUB_ENV, which an earlier step can append to.
+      expect(gate).toContain(
+        "GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'",
+      );
+      expect(gate).not.toContain('QWEN_SANDBOX_IMAGE');
+    }
+    expect(workflow).toContain(
+      "- name: 'Resolve sandbox image'\n        # id + step output",
+    );
+    expect(workflow).toContain(
+      'cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
+    );
+    expect(workflow).toContain('echo "gate_container_sha256=$(sha256sum ');
+    // The container env is an explicit ALLOWLIST: everything unnamed is
+    // absent inside, which is the isolation. The PAT, the host $GITHUB_ENV
+    // and the runner's real $GITHUB_OUTPUT must never appear in it.
+    const dockerRun =
+      wrapper.match(/docker run --rm[\s\S]*?"\$\{GATE_IMAGE\}"/)?.[0] ?? '';
+    expect(dockerRun).toBeTruthy();
+    const passedEnv = [...dockerRun.matchAll(/--env ([A-Z_]+)=/g)].map(
+      (m) => m[1],
+    );
+    expect(passedEnv.sort()).toEqual([
+      'BRANCH',
+      'FOOTPRINT_ENFORCE',
+      'GITHUB_OUTPUT',
+      'HOME',
+      'RUNNER_TEMP',
+      'WORKDIR',
+    ]);
+    // …and the two it does pass by those names are REDIRECTED, not the host's.
+    expect(dockerRun).toContain('--env GITHUB_OUTPUT="${VERDICT}"');
+    expect(dockerRun).toContain('--env RUNNER_TEMP="${CTEMP}"');
+    expect(dockerRun).toContain('--env HOME="${CTEMP}"');
+    expect(dockerRun).not.toContain('CI_DEV_BOT_PAT');
+    expect(dockerRun).not.toContain('GITHUB_ENV');
+    // Only three paths are mounted: the workspace, the round's workdir, and
+    // the container's own staging copy. The real RUNNER_TEMP (staged agent
+    // runner, the PAT steps' throwaway configs) is never mounted.
+    const mounts = [...dockerRun.matchAll(/--volume "([^:]+):/g)].map(
+      (m) => m[1],
+    );
+    expect(mounts.sort()).toEqual([
+      '${CTEMP}',
+      '${GITHUB_WORKSPACE}',
+      '${WORKDIR}',
+    ]);
+    expect(dockerRun).toContain('--user "$(id -u):$(id -g)"');
+    expect(dockerRun).toContain('--rm');
+
+    // Behavioural: the verdict translation is the security-critical half —
+    // branch code inside the container CAN append to the mounted verdict
+    // file, so a pass is accepted only on exit 0. Extract the translation and
+    // drive it with a controlled exit code + verdict (no docker needed).
+    const translate = wrapper.match(/verdict_value\(\) \{[\s\S]*?\nesac/)?.[0];
+    expect(translate).toBeTruthy();
+    // The translation leans on `[[ … ]] && echo` guards, which return 1 when
+    // the flag is absent — under `set -e` that would abort the translation
+    // half-written. The wrapper must stay errexit-free and end on its own
+    // explicit `exit "${GATE_RC}"` (the harness below appends `exit 0` for
+    // the same reason: it runs the fragment, not the whole script).
+    expect(wrapper).toContain('set -uo pipefail');
+    expect(wrapper).not.toMatch(/^set -e/m);
+    expect(wrapper.trimEnd().endsWith('exit "${GATE_RC}"')).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-gate-verdict-'));
+    const runTranslate = (rc, verdictLines) => {
+      const verdict = join(dir, 'verdict');
+      const out = join(dir, 'gh-output');
+      writeFileSync(verdict, verdictLines.join('\n') + '\n');
+      writeFileSync(out, '');
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nVERDICT='${verdict}'\nGITHUB_OUTPUT='${out}'\nGATE_RC=${rc}\n${translate}\nexit 0`,
+        ],
+        { encoding: 'utf8' },
+      );
+      return readFileSync(out, 'utf8').trim();
+    };
+    // A genuine pass carries through.
+    expect(
+      runTranslate(0, ['committed=true', 'outcome=fixed', 'verified_head=abc']),
+    ).toBe('committed=true\noutcome=fixed\nverified_head=abc');
+    // A FORGED pass on a failing gate is refused: exit 1 forces failed, and
+    // the routing flags (which only pick repair vs handoff, never a push)
+    // carry through. This is the R5-5 forgery the container closes.
+    expect(
+      runTranslate(1, ['outcome=fixed', 'outcome=failed', 'retryable=true']),
+    ).toBe('outcome=failed\nretryable=true');
+    // Even a verdict file that ONLY claims a pass cannot survive exit 1.
+    expect(runTranslate(1, ['outcome=fixed'])).toBe('outcome=failed');
+    // Exit 0 with no verdict is a crash, not a silent success: outcome stays
+    // unset so 'Finalize verification' retries on the next scan.
+    expect(runTranslate(0, [])).toBe('');
+    // A docker/infra failure (125) leaves outcome unset too.
+    expect(runTranslate(125, ['outcome=fixed'])).toBe('');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps branch-authored code out of every PAT-bearing step (trust-boundary invariant)', () => {
+    // Phase 2 of #9089: the durable property is not "the gate is hardened" but
+    // "the PAT is never in the same execution context as branch code". Assert
+    // it structurally, so a future step that adds a build/test next to the PAT
+    // fails here instead of silently re-opening the class.
+    const steps = workflow.split(/\n {6}- name: /).slice(1);
+    const branchCode =
+      /bash "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"|run-agent\.mjs|\bnpm (run|ci|test)\b|\bnpx /;
+    const offenders = [];
+    for (const step of steps) {
+      if (!step.includes('CI_DEV_BOT_PAT')) continue;
+      const name = step.split('\n')[0].replace(/'/g, '').trim();
+      const code = step
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      if (branchCode.test(code)) offenders.push(name);
+    }
+    // The ONE recorded exception: issue triage runs the agent while holding
+    // the PAT, but it runs BEFORE any branch is checked out — the working
+    // tree is still the trusted base, so the code it executes is not
+    // branch-authored. Listed explicitly so a NEW agent/build invocation in a
+    // PAT step shows up as a failure rather than joining a silent allowlist.
+    expect(offenders).toEqual(['Assess candidates']);
+  });
+
   it('escalates to a maintainer-decision handoff when the diff keeps growing past budget (non-convergence)', () => {
     // Critical-only only trims non-Criticals, so a Critical-driven diff keeps
     // growing anyway. The divergence detector reads this window's prior
@@ -8892,7 +9041,7 @@ exit 1
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
     const reviewVerificationGateStep = verificationGateSteps[1];
     expect(reviewVerificationGateStep).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
     );
     expect(reviewVerificationGateStep).not.toContain('npm run build');
     expect(reviewVerificationGateStep).not.toContain(
@@ -10774,7 +10923,7 @@ exit 1
       "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
     );
     expect(reviewVerificationGateStep).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
     );
     expect(reviewVerificationRunner).toContain('failure.md');
     expect(reviewVerificationRunner).toContain('outcome=failed');
@@ -10845,7 +10994,7 @@ exit 1
       "steps.repair.outputs.attempted == 'true'",
     );
     expect(repairVerificationGateStep).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
     );
     expect(
       reviewVerificationRunner.match(/retryable=true/g) ?? [],
@@ -13004,7 +13153,7 @@ exit 1
 
     const stepBlocks = jobBlock.split(/\n {6}- name: /).slice(1);
     const longSteps = stepBlocks.filter((b) =>
-      /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-review-verification\.sh/.test(
+      /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-gate-container\.sh/.test(
         b,
       ),
     );

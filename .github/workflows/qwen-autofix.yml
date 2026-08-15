@@ -3970,6 +3970,7 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
@@ -3984,6 +3985,7 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "gate_container_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-gate-container.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -4122,6 +4124,12 @@ jobs:
           qwen --version
 
       - name: 'Resolve sandbox image'
+        # id + step output: the verification gate runs in this image, and it
+        # must not be steerable by branch code. This step runs BEFORE prepare
+        # checks out the PR branch, so the package.json it reads is still the
+        # trusted base, and the resolved name rides the expression context
+        # rather than $GITHUB_ENV (which a later step can append to).
+        id: 'sandbox'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -5228,21 +5236,29 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          GATE_CONTAINER_SHA256: '${{ steps.stage.outputs.gate_container_sha256 }}'
+          # The image the gate runs in, from the resolve step's OUTPUT rather
+          # than $GITHUB_ENV: branch code must not be able to choose it.
+          GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
-          # The gate decides whether the PAT push runs, and the first pass
-          # executes the branch's own build/test on the host before the
-          # second — so pin PATH to the staged trusted value, drop the
-          # preload channels, and verify the staged runner's digest (recorded
-          # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
-          # or a mid-run overwrite lets the branch define its own verdict.
+          # The gate decides whether the PAT push runs, and it executes the
+          # branch's OWN build/test — so it runs inside an ephemeral container
+          # (#9089), never on this host: the PAT, $GITHUB_ENV and the real
+          # $GITHUB_OUTPUT are simply absent inside, so BASH_ENV/LD_PRELOAD
+          # and a forged verdict line have nothing to reach. Both staged
+          # scripts are digest-verified first (digests recorded in
+          # GITHUB_OUTPUT, unreachable from a disk write), with PATH pinned
+          # and the preload channels dropped so the sha256sum/bash doing the
+          # verifying cannot themselves be swapped.
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null
+          bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"
 
       - name: 'Repair deterministic rejection'
         id: 'repair'
@@ -5351,21 +5367,29 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          GATE_CONTAINER_SHA256: '${{ steps.stage.outputs.gate_container_sha256 }}'
+          # The image the gate runs in, from the resolve step's OUTPUT rather
+          # than $GITHUB_ENV: branch code must not be able to choose it.
+          GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
-          # The gate decides whether the PAT push runs, and the first pass
-          # executes the branch's own build/test on the host before the
-          # second — so pin PATH to the staged trusted value, drop the
-          # preload channels, and verify the staged runner's digest (recorded
-          # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
-          # or a mid-run overwrite lets the branch define its own verdict.
+          # The gate decides whether the PAT push runs, and it executes the
+          # branch's OWN build/test — so it runs inside an ephemeral container
+          # (#9089), never on this host: the PAT, $GITHUB_ENV and the real
+          # $GITHUB_OUTPUT are simply absent inside, so BASH_ENV/LD_PRELOAD
+          # and a forged verdict line have nothing to reach. Both staged
+          # scripts are digest-verified first (digests recorded in
+          # GITHUB_OUTPUT, unreachable from a disk write), with PATH pinned
+          # and the preload channels dropped so the sha256sum/bash doing the
+          # verifying cannot themselves be swapped.
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null
+          bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"
 
       - name: 'Finalize verification'
         id: 'final_verify'

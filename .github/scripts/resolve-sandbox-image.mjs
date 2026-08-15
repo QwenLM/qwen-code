@@ -113,6 +113,12 @@ function exportImage(image) {
   if (process.env.GITHUB_ENV) {
     appendFileSync(process.env.GITHUB_ENV, `QWEN_SANDBOX_IMAGE=${image}\n`);
   }
+  // Also as a step OUTPUT: $GITHUB_ENV is a file later steps can append to,
+  // so a consumer that must not be steered by branch code (the verification
+  // gate's container image) reads the expression-context value instead.
+  if (process.env.GITHUB_OUTPUT) {
+    appendFileSync(process.env.GITHUB_OUTPUT, `image=${image}\n`);
+  }
   console.log(`QWEN_SANDBOX_IMAGE=${image}`);
 }
 
