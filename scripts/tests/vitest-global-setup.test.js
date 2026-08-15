@@ -261,11 +261,17 @@ describe('subpath exports entries are probed', () => {
     const configPath = path.join(root, 'packages/cli', 'vitest.config.ts');
     writeFileSync(
       configPath,
-      "alias: { '@qwen-code/acp-bridge/status': 'x', '@qwen-code/sdk/daemon': 'y' }",
+      [
+        "alias: { '@qwen-code/acp-bridge/status': 'x', '@qwen-code/sdk/daemon': 'y' }",
+        "// '@qwen-code/acp-bridge/commented': 'x'",
+        "/* '@qwen-code/acp-bridge/blocked': 'x' */",
+      ].join('\n'),
     );
     const aliases = aliasedSpecifiers(configPath);
     expect(aliases.has('@qwen-code/acp-bridge/status')).toBe(true);
     expect(aliases.has('@qwen-code/sdk/daemon')).toBe(true);
+    expect(aliases.has('@qwen-code/acp-bridge/commented')).toBe(false);
+    expect(aliases.has('@qwen-code/acp-bridge/blocked')).toBe(false);
     // A missing config yields an empty set rather than throwing.
     expect(aliasedSpecifiers(path.join(root, 'nope.ts'))).toEqual(new Set());
   });

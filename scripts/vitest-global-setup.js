@@ -89,8 +89,11 @@ export function aliasedSpecifiers(configPath) {
   } catch {
     return new Set();
   }
+  // ponytail: lexical comment strip for checked-in vitest configs; use a TS
+  // parser if generated configs or exotic string literals need support.
+  const uncommented = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
   return new Set(
-    [...source.matchAll(/'([^']*\/[^']*)':/g)].map((match) => match[1]),
+    [...uncommented.matchAll(/'([^']*\/[^']*)':/g)].map((match) => match[1]),
   );
 }
 
