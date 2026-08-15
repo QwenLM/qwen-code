@@ -10,12 +10,11 @@ name: 'Auto-minimize spam comments'
 # line, case-insensitive, # for comments. No special API scopes
 # needed beyond issues:write + pull-requests:write.
 #
-# Note: the lookback window (LOOKBACK_HOURS) only filters issues —
-# the GraphQL pullRequests connection has no `since` filter, so PRs
-# are always scoped to the 100 most recently updated.
+# Note: the lookback window (LOOKBACK_HOURS) filters issues and inline
+# review comments. The GraphQL pullRequests connection has no `since`
+# filter, so PRs are always scoped to the 100 most recently updated.
 #
-# Coverage limits: only issue-style comments are scanned — PR review
-# (inline) comments, review bodies, and Discussions are not.
+# Coverage limits: review bodies and Discussions are not scanned.
 # comments(last: 30) means a >30-comment flood on a single thread is
 # only partially cleaned per run.
 
@@ -129,17 +128,40 @@ jobs:
             '
           )"
 
+          REVIEW_CANDIDATES="$(
+            gh api --method GET --paginate \
+              "repos/${REPO}/pulls/comments" \
+              -f since="$SINCE" \
+              -F per_page=100 \
+              --jq '
+                .[]
+                | select(.user != null and .node_id != null)
+                | "\(.user.login)\t\(.node_id)"
+              '
+          )"
+          ALL_CANDIDATES="${ALL_UNMINIMIZED}"$'\n'"${REVIEW_CANDIDATES}"
+
           MATCHED_IDS=""
           MATCHED_COUNT=0
           while IFS=$'\t' read -r login node_id; do
             [ -z "$login" ] && continue
             login_lc="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
             if printf '%s\n' "$BLOCKED_USERS" | grep -qxF "$login_lc"; then
+              is_minimized="$(
+                gh api graphql -F id="$node_id" -f query="
+                  query(\$id: ID!) {
+                    node(id: \$id) {
+                      ... on Minimizable { isMinimized }
+                    }
+                  }
+                " --jq '.data.node.isMinimized'
+              )"
+              [ "$is_minimized" = "true" ] && continue
               MATCHED_IDS="${MATCHED_IDS}${node_id}"$'\n'
               MATCHED_COUNT=$((MATCHED_COUNT + 1))
               echo "  matched: @${login} → ${node_id}"
             fi
-          done <<< "$ALL_UNMINIMIZED"
+          done <<< "$ALL_CANDIDATES"
 
           echo "Unminimized comments from blocklisted users: ${MATCHED_COUNT}"
           if [ "$MATCHED_COUNT" -eq 0 ]; then
