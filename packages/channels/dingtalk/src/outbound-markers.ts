@@ -1,9 +1,15 @@
 import MarkdownIt from 'markdown-it';
 
+export interface OutboundMediaMarkerCandidate {
+  end: number;
+  path: string;
+}
+
 export interface OutboundMediaMarker {
   start: number;
   end: number;
   path: string;
+  candidates?: OutboundMediaMarkerCandidate[];
 }
 
 const MEDIA_MARKER_PATTERN = /\[(IMAGE|FILE):\s*/giu;
@@ -12,6 +18,20 @@ const PARTIAL_MEDIA_MARKER_OPENING_PATTERN =
 const CODE_TOKEN_TYPES = new Set(['code_block', 'code_inline', 'fence']);
 const markdown = new MarkdownIt();
 type MarkdownToken = ReturnType<typeof markdown.parse>[number];
+
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 1;
+}
+
+function markerOpenings(text: string): RegExpMatchArray[] {
+  return [...text.matchAll(MEDIA_MARKER_PATTERN)].filter(
+    (opening) => opening.index !== undefined && !isEscaped(text, opening.index),
+  );
+}
 
 function markerOpeningsInCode(
   text: string,
@@ -53,7 +73,11 @@ function markerOpeningsInCode(
 }
 
 function bracketOpeningsInCode(text: string): Set<number> {
-  const openings = [...text.matchAll(PARTIAL_MEDIA_MARKER_OPENING_PATTERN)];
+  const openings = [
+    ...text.matchAll(PARTIAL_MEDIA_MARKER_OPENING_PATTERN),
+  ].filter(
+    (opening) => opening.index !== undefined && !isEscaped(text, opening.index),
+  );
   const codeOpenings = markerOpeningsInCode(text, openings);
   for (const opening of openings) {
     const lineStart = text.lastIndexOf('\n', opening.index! - 1) + 1;
@@ -114,10 +138,14 @@ function findMarkerClose(
 ): number {
   let close = text.indexOf(']', pathStart);
   let lastClose = -1;
+  const closes: number[] = [];
   while (close !== -1 && close < boundary) {
     lastClose = close;
-    if (isMarkerCloseBoundary(text, close, boundary)) return close;
+    closes.push(close);
     close = text.indexOf(']', close + 1);
+  }
+  for (const candidate of closes) {
+    if (isMarkerCloseBoundary(text, candidate, boundary)) return candidate;
   }
   return lastClose;
 }
@@ -181,7 +209,7 @@ export function findOutboundMediaMarkers(
   markerName: 'IMAGE' | 'FILE',
   includeCode = false,
 ): OutboundMediaMarker[] {
-  const openings = [...text.matchAll(MEDIA_MARKER_PATTERN)];
+  const openings = markerOpenings(text);
   const codeOpenings = includeCode
     ? new Set<number>()
     : markerOpeningsInCode(text, openings);
@@ -191,7 +219,7 @@ export function findOutboundMediaMarkers(
     const match = openings[i]!;
     if (
       match.index === undefined ||
-      match[1]?.toUpperCase() !== markerName ||
+      match[1]?.toLowerCase() !== markerName.toLowerCase() ||
       codeOpenings.has(match.index)
     ) {
       continue;
@@ -202,10 +230,20 @@ export function findOutboundMediaMarkers(
     if (close === -1) continue;
     const path = text.slice(pathStart, close).trim();
     if (!path) continue;
+    const candidates: OutboundMediaMarkerCandidate[] = [];
+    let candidateClose = text.indexOf(']', pathStart);
+    while (candidateClose !== -1 && candidateClose < boundary) {
+      const candidatePath = text.slice(pathStart, candidateClose).trim();
+      if (candidatePath) {
+        candidates.push({ end: candidateClose + 1, path: candidatePath });
+      }
+      candidateClose = text.indexOf(']', candidateClose + 1);
+    }
     markers.push({
       start: match.index,
       end: close + 1,
       path,
+      ...(candidates.length > 1 ? { candidates } : {}),
     });
   }
 
@@ -236,15 +274,22 @@ export function stripPartialOutboundMediaMarker(
   text: string,
   markerName: 'IMAGE' | 'FILE',
   pendingText: string,
+  includeCode = false,
 ): string {
-  const prefix = `${markerName}:`;
-  const codeOpenings = bracketOpeningsInCode(text);
+  const prefix = `${markerName.toLowerCase()}:`;
+  const codeOpenings = includeCode
+    ? new Set<number>()
+    : bracketOpeningsInCode(text);
   let cursor = 0;
   let searchFrom = 0;
   let result = '';
   while (searchFrom < text.length) {
     const open = text.indexOf('[', searchFrom);
     if (open === -1) break;
+    if (isEscaped(text, open)) {
+      searchFrom = open + 1;
+      continue;
+    }
     if (codeOpenings.has(open)) {
       searchFrom = open + 1;
       continue;
@@ -252,7 +297,7 @@ export function stripPartialOutboundMediaMarker(
     const lineEndMatch = text.slice(open + 1).search(/[\r\n]/u);
     const lineEnd = lineEndMatch === -1 ? text.length : open + 1 + lineEndMatch;
     const candidate = text.slice(open + 1, lineEnd);
-    const normalizedCandidate = candidate.toUpperCase();
+    const normalizedCandidate = candidate.toLowerCase();
     if (!normalizedCandidate) {
       searchFrom = open + 1;
       continue;
@@ -286,7 +331,9 @@ export function stripPartialOutboundMediaMarker(
     }
     const nextMarker = text.slice(end).match(/^\[(IMAGE|FILE):\s*/iu);
     const replacement =
-      nextMarker?.[1]?.toUpperCase() === markerName ? '' : pendingText;
+      nextMarker?.[1]?.toLowerCase() === markerName.toLowerCase()
+        ? ''
+        : pendingText;
     result += `${text.slice(cursor, open)}${replacement}`;
     cursor = end;
     searchFrom = end;
@@ -310,6 +357,7 @@ export function sanitizeOutboundMediaMarkers(
       ),
       markerName,
       replacement,
+      true,
     );
     if (next === result) return result;
     result = next;
@@ -327,6 +375,10 @@ export function findTrailingPartialOutboundMediaMarker(
   const codeOpenings = bracketOpeningsInCode(text);
   let open = text.lastIndexOf('[');
   while (open !== -1) {
+    if (isEscaped(text, open)) {
+      open = previousOpenBracket(text, open);
+      continue;
+    }
     if (codeOpenings.has(open)) {
       open = previousOpenBracket(text, open);
       continue;
@@ -345,7 +397,7 @@ export function findTrailingPartialOutboundMediaMarker(
         return { start: open, markerName };
       }
       const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
-      if (opening?.[1]?.toUpperCase() !== markerName) continue;
+      if (opening?.[1]?.toLowerCase() !== markerName.toLowerCase()) continue;
       const pathStart = open + opening[0].length;
       const nextMarkerOffset = text
         .slice(pathStart)
@@ -355,9 +407,14 @@ export function findTrailingPartialOutboundMediaMarker(
         pathStart,
         nextMarkerOffset === -1 ? undefined : pathStart + nextMarkerOffset,
       );
+      const close = findMarkerClose(text, pathStart, boundary);
+      const ambiguousBracketedPath =
+        close === text.length - 1 &&
+        text.slice(pathStart, close).includes('[') &&
+        text.indexOf(']', pathStart) === close;
       if (
         boundary === text.length &&
-        findMarkerClose(text, pathStart, boundary) === -1
+        (close === -1 || ambiguousBracketedPath)
       ) {
         return { start: open, markerName };
       }

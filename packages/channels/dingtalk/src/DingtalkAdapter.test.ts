@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
@@ -4065,6 +4065,88 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(events).toEqual(['upload-token', 'upload', 'markdown', 'file']);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the longest fully validated bracketed file path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dingtalk-bracketed-file-'));
+    const directory = join(root, 'dir [1] copy');
+    const path = join(directory, 'report.txt');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path, 'report');
+    try {
+      const channel = createChannel({ cwd: root });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage('cid123', `[FILE: ${path}]`);
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      expect(
+        JSON.parse(String((fileCalls()[0]![1] as RequestInit).body)),
+      ).toMatchObject({ file: { fileName: 'report.txt' } });
+      const markdown = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdown.markdown.text).not.toContain(directory);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a longer directory candidate and sends the valid file', async () => {
+    const file = createTempFile('file.txt');
+    mkdirSync(`${file.path}] tail`);
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}] tail]`);
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      expect(
+        JSON.parse(String((fileCalls()[0]![1] as RequestInit).body)),
+      ).toMatchObject({ file: { fileName: 'file.txt' } });
+      const markdown = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdown.markdown.text).toContain('[File sent: file.txt] tail]');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('holds an ambiguous bracketed stream until the full file path arrives', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dingtalk-stream-bracket-'));
+    const prefix = join(root, 'a[1');
+    const intended = `${prefix}].txt`;
+    writeFileSync(prefix, 'wrong');
+    writeFileSync(intended, 'right');
+    try {
+      const channel = createChannel({ blockStreaming: 'on', cwd: root });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, uploadCalls } = stubFileReplyFetch();
+
+      await getResponseHook(channel)(
+        'cid123',
+        `[FILE: ${prefix}]`,
+        'session-1',
+      );
+      expect(uploadCalls()).toHaveLength(0);
+      expect(fileCalls()).toHaveLength(0);
+
+      await getResponseHook(channel)('cid123', '.txt]', 'session-1');
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      expect(
+        JSON.parse(String((fileCalls()[0]![1] as RequestInit).body)),
+      ).toMatchObject({ file: { fileName: 'a_1_.txt' } });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

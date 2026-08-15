@@ -296,6 +296,8 @@ type ActivePrompt = {
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
+  drainStreaming?: () => Promise<void>;
+  terminalDelivery?: Promise<void>;
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
@@ -628,6 +630,7 @@ export abstract class ChannelBase {
     return (async () => {
       try {
         if (precedingSegment) {
+          await active.drainStreaming?.();
           await this.notifyOutputSegmentEnd(
             pending.target.chatId,
             pending.sessionId,
@@ -947,17 +950,37 @@ export abstract class ChannelBase {
     }
     active.cancellationEmitted = true;
     const segment = this.closeOutputSegment(sessionId, active);
-    void this.notifyOutputSegmentEnd(
-      active.chatId,
-      sessionId,
-      segment,
-      'cancelled',
-    );
-    this.emitTaskLifecycle({
-      ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
-      type: 'cancelled',
-      reason,
-    });
+    const drainStreaming = active.drainStreaming;
+    if (!drainStreaming) {
+      void this.notifyOutputSegmentEnd(
+        active.chatId,
+        sessionId,
+        segment,
+        'cancelled',
+      );
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
+        type: 'cancelled',
+        reason,
+      });
+      return;
+    }
+    const terminalDelivery = (async () => {
+      await drainStreaming();
+      await this.notifyOutputSegmentEnd(
+        active.chatId,
+        sessionId,
+        segment,
+        'cancelled',
+      );
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
+        type: 'cancelled',
+        reason,
+      });
+    })();
+    active.terminalDelivery = terminalDelivery;
+    void terminalDelivery;
   }
 
   private resolveIdentity(
@@ -5602,7 +5625,10 @@ export abstract class ChannelBase {
               this.sendResponseMessage(envelope.chatId, text, sessionId),
           })
         : null;
-      promptState.stopStreaming = () => streamer?.stop();
+      if (streamer) {
+        promptState.stopStreaming = () => streamer.stop();
+        promptState.drainStreaming = () => streamer.drain();
+      }
 
       // Chunks arriving while a cancel is PENDING are held here: pushing them
       // to any visible sink could send output the cancel can't recall. On a
@@ -5705,7 +5731,8 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
           const segment = this.closeOutputSegment(sessionId, promptState);
-          void this.notifyOutputSegmentEnd(
+          await streamer?.drain();
+          await this.notifyOutputSegmentEnd(
             envelope.chatId,
             sessionId,
             segment,
@@ -5730,7 +5757,8 @@ export abstract class ChannelBase {
         if (!promptState.cancelled) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
-          void this.notifyOutputSegmentEnd(
+          await streamer?.drain();
+          await this.notifyOutputSegmentEnd(
             envelope.chatId,
             sessionId,
             segment,
@@ -5762,6 +5790,7 @@ export abstract class ChannelBase {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
         streamer?.stop();
+        await promptState.terminalDelivery;
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own

@@ -35,8 +35,16 @@ export function replaceImageMarkers(
   return replaceOutboundMediaMarkers(text, markers, replacements);
 }
 
-export function stripPartialImageMarker(text: string): string {
-  return stripPartialOutboundMediaMarker(text, 'IMAGE', '[Image pending]');
+export function stripPartialImageMarker(
+  text: string,
+  includeCode = false,
+): string {
+  return stripPartialOutboundMediaMarker(
+    text,
+    'IMAGE',
+    '[Image pending]',
+    includeCode,
+  );
 }
 
 export function sanitizeStreamingImageMarkers(text: string): string {

@@ -306,6 +306,27 @@ describe('StatusCardController', () => {
     ).not.toContain('/Users/ben/private');
   });
 
+  it('hides unclosed markers in code from every card payload', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    const output =
+      '```text\n[IMAGE: /Users/ben/private/image.png\n```\n' +
+      '    [FILE: /Users/ben/private/report.pdf';
+
+    controller.replace(segment(), target, output);
+    await vi.advanceTimersByTimeAsync(500);
+    controller.cancelRun('run-1', 'cancel_command');
+    await vi.advanceTimersByTimeAsync(500);
+
+    const payloads = JSON.stringify({
+      create: vi.mocked(client.createAndDeliver).mock.calls,
+      stream: vi.mocked(client.openOrUpdateStream).mock.calls,
+      terminal: vi.mocked(client.updateInstance).mock.calls,
+    });
+    expect(payloads).not.toContain('/Users/ben/private');
+    expect(payloads).not.toMatch(/\[(?:IMAGE|FILE):/u);
+  });
+
   it('shows the configured model and refreshes elapsed time while idle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

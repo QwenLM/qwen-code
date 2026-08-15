@@ -52,17 +52,88 @@ export interface DingtalkInteractionPresenterOptions {
   sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
 }
 
+function isEscapedMarker(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 1;
+}
+
+function stripFileWrappersAroundImages(text: string): string {
+  const images = findImageMarkers(text);
+  const openings = [...text.matchAll(/\[FILE:\s*/giu)].filter(
+    (opening) =>
+      opening.index !== undefined && !isEscapedMarker(text, opening.index),
+  );
+  const wrappers = openings.flatMap((opening) => {
+    const start = opening.index!;
+    const pathStart = start + opening[0].length;
+    const lineBreak = text.slice(pathStart).search(/[\r\n]/u);
+    const lineEnd = lineBreak === -1 ? text.length : pathStart + lineBreak;
+    const nested = images.filter(
+      (image) => image.start >= pathStart && image.end <= lineEnd,
+    );
+    if (
+      nested.length === 0 ||
+      text.slice(pathStart, nested[0]!.start).includes(']')
+    ) {
+      return [];
+    }
+    const lastImage = nested.at(-1)!;
+    const lastClose = text.lastIndexOf(']', lineEnd - 1);
+    if (lastClose < lastImage.end) {
+      return [{ start, end: nested[0]!.start, replacement: '' }];
+    }
+    return [
+      {
+        start,
+        end: lastClose + 1,
+        replacement: nested
+          .map((image) => text.slice(image.start, image.end))
+          .join(' '),
+      },
+    ];
+  });
+  const nonOverlapping = wrappers
+    .sort((left, right) => left.start - right.start)
+    .filter(
+      (wrapper, index, sorted) =>
+        index === 0 || wrapper.start >= sorted[index - 1]!.end,
+    );
+  let result = text;
+  for (const wrapper of nonOverlapping.reverse()) {
+    result =
+      result.slice(0, wrapper.start) +
+      wrapper.replacement +
+      result.slice(wrapper.end);
+  }
+  return result;
+}
+
 function sanitizeFallbackOutput(text: string): string {
-  const imageMarkers = findImageMarkers(text);
+  const originalImageCounts = new Map<string, number>();
+  for (const marker of findImageMarkers(text)) {
+    const image = text.slice(marker.start, marker.end);
+    originalImageCounts.set(image, (originalImageCounts.get(image) ?? 0) + 1);
+  }
+  let result = sanitizeStreamingFileMarkers(
+    stripFileWrappersAroundImages(text),
+  );
+  const imageMarkers = findImageMarkers(result).flatMap((marker) => {
+    const image = result.slice(marker.start, marker.end);
+    const count = originalImageCounts.get(image) ?? 0;
+    if (count === 0) return [];
+    originalImageCounts.set(image, count - 1);
+    return [{ ...marker, replacementImage: image }];
+  });
   const sentinels = imageMarkers.map((_, index) => {
     let sentinel = `\u{e000}QWEN_FALLBACK_IMAGE_${index}\u{e001}`;
-    while (text.includes(sentinel)) sentinel += '\u{e002}';
+    while (result.includes(sentinel)) sentinel += '\u{e002}';
     return sentinel;
   });
-  const images = imageMarkers.map((marker) =>
-    text.slice(marker.start, marker.end),
-  );
-  let result = replaceImageMarkers(text, imageMarkers, sentinels);
+  const images = imageMarkers.map((marker) => marker.replacementImage);
+  result = replaceImageMarkers(result, imageMarkers, sentinels);
   while (true) {
     const withoutFiles = sanitizeStreamingFileMarkers(result);
     const markers = findOutboundMediaMarkers(withoutFiles, 'IMAGE', true);
@@ -72,12 +143,13 @@ function sanitizeFallbackOutput(text: string): string {
         markers,
         markers.map(() => '[Image pending]'),
       ),
+      true,
     );
     if (next === result) break;
     result = next;
   }
   for (const [index, sentinel] of sentinels.entries()) {
-    result = result.replace(sentinel, images[index]!);
+    result = result.replace(sentinel, () => images[index]!);
   }
   return result;
 }

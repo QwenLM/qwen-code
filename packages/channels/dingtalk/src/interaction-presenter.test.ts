@@ -850,6 +850,106 @@ describe('DingtalkInteractionPresenter', () => {
     expect(fallbackText).not.toContain('/Users/ben/private');
   });
 
+  it('restores image markers with replacement metacharacters literally', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    const marker = `[IMAGE: /tmp/$&-$'.png]`;
+    presenter.appendOutput(segment('segment-1'), marker);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith('cid-1', marker, 'session-1');
+  });
+
+  it.each([
+    ['fenced image', '```text\n[IMAGE: /Users/ben/private/image.png\n```'],
+    ['indented file', '    [FILE: /Users/ben/private/report.pdf'],
+  ])('scrubs an unclosed marker inside %s', async (_label, output) => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-1'), output);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallback = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallback).not.toContain('/Users/ben/private');
+    expect(fallback).not.toMatch(/\[(?:IMAGE|FILE):/u);
+  });
+
+  it('keeps a nested image available when stripping an outer file marker', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      'Report [FILE: unfinished [IMAGE: /tmp/chart.png]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'Report [IMAGE: /tmp/chart.png]',
+      'session-1',
+    );
+  });
+
+  it('keeps a nested image when a complete outer file marker wraps it', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '[FILE: report [IMAGE: /tmp/chart.png]]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      '[IMAGE: /tmp/chart.png]',
+      'session-1',
+    );
+  });
+
+  it('removes a complete outer file suffix around a nested image', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '[FILE: /outer [IMAGE: /tmp/chart.png] /Users/ben/private/report.pdf]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      '[IMAGE: /tmp/chart.png]',
+      'session-1',
+    );
+  });
+
+  it('keeps trailing text from an unclosed file wrapper around an image', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      'Report [FILE: [IMAGE: /tmp/chart.png] summary',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'Report [IMAGE: /tmp/chart.png] summary',
+      'session-1',
+    );
+  });
+
   it.each([
     [
       'tilde-fenced code',

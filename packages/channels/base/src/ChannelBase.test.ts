@@ -1621,6 +1621,64 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('drains queued block sends before presenting user input', async () => {
+      let releaseSend!: () => void;
+      const pendingSend = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      const order: string[] = [];
+      class InputDrainChannel extends TestChannel {
+        protected override async sendResponseMessage(): Promise<void> {
+          order.push('send:start');
+          await pendingSend;
+          order.push('send:end');
+        }
+
+        protected override onOutputSegmentEnd(
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ): void {
+          order.push(`segment:${reason}`);
+        }
+      }
+      const ch = new InputDrainChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+      ch.userInputPresentationHandler = async () => {
+        order.push('present');
+        return { kind: 'presented' };
+      };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        active.sessionId,
+        'first\n\n',
+      );
+      await vi.waitFor(() => expect(order).toContain('send:start'));
+      emitUserQuestion(active.sessionId, 'req-after-block');
+      await Promise.resolve();
+      expect(order).toEqual(['send:start']);
+      releaseSend();
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      expect(order).toEqual([
+        'send:start',
+        'send:end',
+        'segment:input_requested',
+        'present',
+      ]);
+      await active.finish();
+    });
+
     it('presents identified legacy user input from rawInput questions', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
@@ -13652,6 +13710,133 @@ describe('ChannelBase', () => {
         'boundary',
         'send:second:start',
         'send:second:end',
+      ]);
+    });
+
+    it('drains queued block sends before a failed segment and prompt end', async () => {
+      let releaseSend!: () => void;
+      const pendingSend = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      const order: string[] = [];
+      class FailedDrainChannel extends TestChannel {
+        protected override async sendResponseMessage(): Promise<void> {
+          order.push('send:start');
+          await pendingSend;
+          order.push('send:end');
+        }
+
+        protected override onOutputSegmentEnd(
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ): void {
+          order.push(`segment:${reason}`);
+        }
+
+        protected override onPromptEnd(): void {
+          order.push('prompt:end');
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first\n\n',
+          );
+          return Promise.reject(new Error('agent failed'));
+        },
+      );
+      const ch = new FailedDrainChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const running = ch.handleInbound(envelope());
+      await vi.waitFor(() => expect(order).toContain('send:start'));
+      expect(order).toEqual(['send:start']);
+      releaseSend();
+      await expect(running).rejects.toThrow('agent failed');
+
+      expect(order).toEqual([
+        'send:start',
+        'send:end',
+        'segment:failed',
+        'prompt:end',
+      ]);
+    });
+
+    it('drains queued block sends before a cancelled segment and prompt end', async () => {
+      let releaseSend!: () => void;
+      let finishPrompt!: (value: string) => void;
+      const pendingSend = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      const pendingPrompt = new Promise<string>((resolve) => {
+        finishPrompt = resolve;
+      });
+      const order: string[] = [];
+      class CancelledDrainChannel extends TestChannel {
+        protected override async sendResponseMessage(): Promise<void> {
+          order.push('send:start');
+          await pendingSend;
+          order.push('send:end');
+        }
+
+        protected override onOutputSegmentEnd(
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ): void {
+          order.push(`segment:${reason}`);
+        }
+
+        protected override onPromptEnd(): void {
+          order.push('prompt:end');
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first\n\n',
+          );
+          return pendingPrompt;
+        },
+      );
+      const ch = new CancelledDrainChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const running = ch.handleInbound(envelope());
+      await vi.waitFor(() => expect(order).toContain('send:start'));
+      await expect(ch.cancelPromptForTest('s-1')).resolves.toBe(true);
+      finishPrompt('ignored');
+      await Promise.resolve();
+      expect(order).toEqual(['send:start']);
+      releaseSend();
+      await running;
+
+      expect(order).toEqual([
+        'send:start',
+        'send:end',
+        'segment:cancelled',
+        'prompt:end',
       ]);
     });
 

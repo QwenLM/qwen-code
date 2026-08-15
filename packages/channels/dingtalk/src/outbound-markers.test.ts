@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   findTrailingPartialOutboundMediaMarker,
@@ -110,6 +113,43 @@ describe('outbound media markers', () => {
     expect(
       stripPartialOutboundMediaMarker('see [fıle: /tmp/a', 'FILE', ''),
     ).toBe('see [fıle: /tmp/a');
+    expect(
+      stripPartialOutboundMediaMarker('see [ım', 'IMAGE', '[Image pending]'),
+    ).toBe('see [ım');
+    expect(
+      stripPartialOutboundMediaMarker('a[ıma', 'IMAGE', '[Image pending]'),
+    ).toBe('a[ıma');
+  });
+
+  it('uses an existing bracketed path as the marker close oracle', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-marker-'));
+    const directory = join(root, 'dir [1] copy');
+    const file = join(directory, 'x.png');
+    try {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(file, 'image');
+      expect(
+        findOutboundMediaMarkers(`[IMAGE: ${file}]`, 'IMAGE')[0]?.candidates,
+      ).toContainEqual({ end: `[IMAGE: ${file}]`.length, path: file });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an ambiguous bracketed path in streaming carry', () => {
+    expect(findTrailingPartialOutboundMediaMarker('[IMAGE: /tmp/a[1]')).toEqual(
+      { start: 0, markerName: 'IMAGE' },
+    );
+  });
+
+  it('treats escaped marker syntax as literal text', () => {
+    const complete = String.raw`\[IMAGE: /tmp/private.png]`;
+    const partial = String.raw`\[FILE: /tmp/private`;
+    expect(findOutboundMediaMarkers(complete, 'IMAGE')).toEqual([]);
+    expect(
+      stripPartialOutboundMediaMarker(partial, 'FILE', '[File pending]'),
+    ).toBe(partial);
+    expect(findTrailingPartialOutboundMediaMarker(partial)).toBeUndefined();
   });
 
   it('keeps truncation boundaries outside partial markers', () => {

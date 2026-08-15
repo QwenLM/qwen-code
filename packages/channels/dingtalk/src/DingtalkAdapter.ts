@@ -638,17 +638,36 @@ export class DingtalkChannel extends ChannelBase {
 
   private async prepareImageReplacements(
     markers: readonly ImageMarker[],
-  ): Promise<string[]> {
+  ): Promise<{ markers: ImageMarker[]; replacements: string[] }> {
+    const resolvedMarkers: ImageMarker[] = [];
     const replacements: string[] = [];
     for (const marker of markers) {
-      const fileName =
+      let resolvedMarker = marker;
+      let fileName =
         basename(marker.path)
           .replace(/[\r\n[\]]+/g, '_')
           .slice(0, 100) || 'image';
       try {
-        const image = readValidatedImage(marker.path, {
-          workspaceDir: this.config.cwd,
-        });
+        let image: ReturnType<typeof readValidatedImage> | undefined;
+        let validationError: unknown;
+        for (const candidate of [
+          ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
+        ].sort((left, right) => right.end - left.end)) {
+          try {
+            image = readValidatedImage(candidate.path, {
+              workspaceDir: this.config.cwd,
+            });
+            resolvedMarker = { ...marker, ...candidate, candidates: undefined };
+            fileName =
+              basename(candidate.path)
+                .replace(/[\r\n[\]]+/g, '_')
+                .slice(0, 100) || 'image';
+            break;
+          } catch (error) {
+            validationError = error;
+          }
+        }
+        if (!image) throw validationError ?? new Error('Invalid image path');
         let mediaId: string | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           const token = await this.getProactiveToken();
@@ -683,38 +702,60 @@ export class DingtalkChannel extends ChannelBase {
         );
         replacements.push(`[Image delivery failed: ${fileName}]`);
       }
+      resolvedMarkers.push(resolvedMarker);
     }
-    return replacements;
+    return { markers: resolvedMarkers, replacements };
   }
 
   private async prepareOutgoingImages(text: string): Promise<string> {
     const markers = findImageMarkers(text);
     if (markers.length === 0) return stripPartialImageMarker(text);
-    const replacements = await this.prepareImageReplacements(markers);
+    const prepared = await this.prepareImageReplacements(markers);
 
     return stripPartialImageMarker(
-      replaceImageMarkers(text, markers, replacements),
+      replaceImageMarkers(text, prepared.markers, prepared.replacements),
     );
   }
 
   private async prepareFileReplacements(
     markers: readonly FileMarker[],
-  ): Promise<{ files: PreparedDingTalkFile[]; replacements: string[] }> {
+  ): Promise<{
+    files: PreparedDingTalkFile[];
+    markers: FileMarker[];
+    replacements: string[];
+  }> {
     const files: PreparedDingTalkFile[] = [];
+    const resolvedMarkers: FileMarker[] = [];
     const replacements: string[] = [];
     for (const [index, marker] of markers.entries()) {
       if (index >= MAX_FILES_PER_RESPONSE) {
+        resolvedMarkers.push(marker);
         replacements.push(
           '[File delivery failed: response file limit exceeded]',
         );
         continue;
       }
 
-      const fileName = safeFileName(marker.path);
+      let resolvedMarker = marker;
+      let fileName = safeFileName(marker.path);
       try {
-        const file = readValidatedFile(marker.path, {
-          workspaceDir: this.config.cwd,
-        });
+        let file: ReturnType<typeof readValidatedFile> | undefined;
+        let validationError: unknown;
+        for (const candidate of [
+          ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
+        ].sort((left, right) => right.end - left.end)) {
+          try {
+            file = readValidatedFile(candidate.path, {
+              workspaceDir: this.config.cwd,
+            });
+            resolvedMarker = { ...marker, ...candidate, candidates: undefined };
+            fileName = safeFileName(candidate.path);
+            break;
+          } catch (error) {
+            validationError = error;
+          }
+        }
+        if (!file) throw validationError ?? new Error('Invalid file path');
         let mediaId: string | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           const token = await this.getProactiveToken();
@@ -754,8 +795,9 @@ export class DingtalkChannel extends ChannelBase {
         );
         replacements.push(`[File delivery failed: ${fileName}]`);
       }
+      resolvedMarkers.push(resolvedMarker);
     }
-    return { files, replacements };
+    return { files, markers: resolvedMarkers, replacements };
   }
 
   private async prepareOutgoingContent(
@@ -767,11 +809,15 @@ export class DingtalkChannel extends ChannelBase {
       if (next === markerText) break;
       markerText = next;
     }
-    const imageMarkers = findImageMarkers(markerText);
-    const fileMarkers = findFileMarkers(markerText);
-    const imageReplacements = await this.prepareImageReplacements(imageMarkers);
-    const { files, replacements: fileReplacements } =
-      await this.prepareFileReplacements(fileMarkers);
+    const foundImageMarkers = findImageMarkers(markerText);
+    const foundFileMarkers = findFileMarkers(markerText);
+    const { markers: imageMarkers, replacements: imageReplacements } =
+      await this.prepareImageReplacements(foundImageMarkers);
+    const {
+      files,
+      markers: fileMarkers,
+      replacements: fileReplacements,
+    } = await this.prepareFileReplacements(foundFileMarkers);
     const media = [
       ...imageMarkers.map((marker, index) => ({
         marker,
