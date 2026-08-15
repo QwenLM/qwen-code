@@ -31,9 +31,11 @@
 //   with an exports map pointing elsewhere contributes no edge, same floor.
 // - `tsconfig` path aliases (`@/lib/utils`), `package.json#exports` subpath
 //   rewrites, and declaration-file references are not consulted — each is a
-//   per-repo config surface this scanner deliberately does not parse. Every
-//   one of these is a missed edge, never a wrong edge: the file simply keeps
-//   the pre-widening floor.
+//   per-repo config surface this scanner deliberately does not parse. An
+//   alias yields a missed edge (the file keeps the pre-widening floor). An
+//   exports map can also make the conventional-layout guesses below resolve
+//   a subpath to a file the map actually routes elsewhere — a WRONG edge,
+//   whose whole cost is one extra widened file; the scope never narrows.
 //
 // The scan reads files from the review worktree (post-change state), because
 // the question is whether the caller AS IT NOW STANDS uses what changed.
@@ -159,13 +161,18 @@ export function resolveSpecifier(
       const base = pkg.dir === '' ? sub : `${pkg.dir}/${sub}`;
       for (const c of candidatesFor(base)) if (membership.has(c)) return c;
       // Deep imports into a package's emitted tree (`dist/…`) name build
-      // output; strip that segment and try the conventional source root.
-      // Without the strip the remap produced `<pkg>/src/dist/…`, which
-      // matches no source path — the branch's one stated purpose was dead.
+      // output. Emit layouts differ per package — some emit `src/x.ts` to
+      // `dist/x.js` (strip dist, add src), this repo's packages emit it to
+      // `dist/src/x.js` (strip dist, keep the rest) — so try the stripped
+      // path both as-is and under `src/`. Without the strip at all, the
+      // remap produced `<pkg>/src/dist/…`, matching nothing.
       const srcSub = sub.startsWith('dist/') ? sub.slice('dist/'.length) : sub;
-      const srcBase =
-        pkg.dir === '' ? `src/${srcSub}` : `${pkg.dir}/src/${srcSub}`;
-      for (const c of candidatesFor(srcBase)) if (membership.has(c)) return c;
+      for (const base2 of [
+        pkg.dir === '' ? srcSub : `${pkg.dir}/${srcSub}`,
+        pkg.dir === '' ? `src/${srcSub}` : `${pkg.dir}/src/${srcSub}`,
+      ]) {
+        for (const c of candidatesFor(base2)) if (membership.has(c)) return c;
+      }
       return null;
     }
   }

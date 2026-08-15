@@ -237,8 +237,10 @@ describe('rescope', () => {
     seedHistory();
     const planPath = join(repo, 'plan.json');
     writeFileSync(planPath, JSON.stringify({ prNumber: '7' }));
+    const before = readFileSync(planPath, 'utf8');
     run(planPath, 'HEAD');
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
   });
 
   it('a delta file nobody imports widens nothing', () => {
@@ -315,8 +317,10 @@ describe('rescope — contract pins from review findings', () => {
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
     expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
     expect(plan.incremental.interaction.map((e) => e.path)).toEqual([CALLER]);
-    // deep.ts is two hops out: context, not interaction.
-    expect(plan.incremental.contextFileCount).toBeGreaterThan(0);
+    // deep.ts is two hops out: context, not interaction — and the count is
+    // EXACT (bystander + deep), so a flood-fill or a dropped exclusion
+    // cannot hide inside a `> 0`.
+    expect(plan.incremental.contextFileCount).toBe(2);
   });
 
   it('a test-file dependent stays OUT of the interaction set', () => {
@@ -386,7 +390,7 @@ describe('rescope — contract pins from review findings', () => {
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'round 1 rewrites big');
     const anchor2 = git('rev-parse', 'HEAD');
-    write('packages/app/src/big.ts', bigV2.replace('a0 = 2', 'a0 = 3'));
+    write('packages/app/src/big.ts', bigV2 + 'export const extra = 1;\n');
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'fix big');
     const head2 = git('rev-parse', 'HEAD');
@@ -404,7 +408,7 @@ describe('rescope — contract pins from review findings', () => {
     ).find((f) => f.path === 'packages/app/src/big.ts')!;
     // The degradation rescope exists to prevent: a null post-image resolver
     // zeroes fileLines and heavy never fires — invariant agents vanish.
-    expect(big.fileLines).toBe(600);
+    expect(big.fileLines).toBe(601); // the HEAD count, not the base or anchor
     expect(big.heavy).toBe(true);
     expect(big.addedRanges).toBeDefined();
   });
@@ -437,6 +441,107 @@ describe('rescope — contract pins from review findings', () => {
   it('an unreadable plan path exits 2, not a throw', () => {
     seedHistory();
     run(join(repo, 'no-such-plan.json'), 'HEAD');
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+  });
+});
+
+describe('rescope — round-2 findings', () => {
+  it('a rename in the fix round keeps its RENAME section — hunks stay a subset of the PR diff', () => {
+    const { base, anchor } = seedHistory();
+    // The fix round renames caller.ts (routine `git mv` on review feedback).
+    git('mv', CALLER, 'packages/app/src/renamed-caller.ts');
+    git('commit', '-q', '--no-verify', '-m', 'rename in fix round');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
+    // A pathspec-scoped re-capture cannot see the rename source and renders
+    // a whole-file ADD ('new file mode'); the byte-slice keeps the pairing.
+    expect(diff).toContain('rename to packages/app/src/renamed-caller.ts');
+    expect(diff).not.toContain('new file mode');
+  });
+
+  it('empty and zero-usable files[] both refuse with the plan untouched', () => {
+    const { base, anchor, head } = seedHistory();
+    for (const files of [[], [{}, { path: 42 }]]) {
+      process.exitCode = undefined;
+      const planPath = writeFetchedPlan(base, head);
+      const mangled = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      mangled['files'] = files;
+      writeFileSync(planPath, JSON.stringify(mangled));
+      const before = readFileSync(planPath, 'utf8');
+      run(planPath, anchor);
+      expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+      expect(readFileSync(planPath, 'utf8')).toBe(before);
+    }
+  });
+
+  it('a delta file restored to its merge-base state is reconciled out of deltaFiles', () => {
+    const { base, anchor } = seedHistory();
+    // The fix round restores changed.ts to its merge-base content: it is in
+    // the interdiff, but the PR's own diff has no section for it.
+    write(CHANGED, 'export const v = 1;\n');
+    write(BYSTANDER, 'export const b = 9;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'restore + touch bystander');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    // bystander changed for real; the restored file names no phantom scope —
+    // but its importer still re-enters through the widening.
+    expect(plan.incremental.deltaFiles).toEqual([BYSTANDER]);
+    expect(plan.incremental.interaction.map((e) => e.path)).toContain(CALLER);
+    const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
+    expect(diff).not.toContain('changed.ts');
+  });
+
+  it('runs correctly from a cwd OUTSIDE the worktree — the documented production shape', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    // Rewrite the plan's diff path to absolute (fetch-pr always records it).
+    const plan0 = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan0['diffPathAbsolute'] = join(repo, plan0['diffPath'] as string);
+    writeFileSync(planPath, JSON.stringify(plan0));
+    const checkout = realpathSync(
+      mkdtempSync(join(tmpdir(), 'main-checkout-')),
+    );
+    const prev = process.cwd();
+    process.chdir(checkout);
+    try {
+      run(planPath, anchor);
+      expect(process.exitCode ?? 0).toBe(0);
+      const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+      expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
+      // The interaction hunks are present — the -C pin, not the cwd, decides.
+      const diff = readFileSync(join(checkout, plan.diffPath), 'utf8');
+      expect(diff).toContain('caller.ts');
+    } finally {
+      process.chdir(prev);
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it('an unwritable --out exits 2 instead of throwing', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const blocked = join(repo, 'blocked');
+    writeFileSync(blocked, 'a plain file where a directory must go');
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      out: join(blocked, 'nested', 'plan.json'),
+      maxChunkLines: 400,
+    });
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
   });
 });

@@ -4772,6 +4772,63 @@ describe('incremental-scope briefs', () => {
     expect(p).toContain('the scope class WINS');
   });
 
+  it('caps the scope lists at 30 entries and 8 edges per entry', () => {
+    const wide = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        anchor: 'abc1234def567890',
+        deltaFiles: Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`),
+        interaction: [
+          {
+            path: 'src/hub.ts',
+            importsChanged: Array.from(
+              { length: 20 },
+              (_, i) => `src/d${i}.ts`,
+            ),
+          },
+        ],
+      },
+    };
+    const p = buildRoleBrief(wide, '2');
+    expect(p).toContain('(+10 more)'); // 40 entries − 30 cap
+    expect(p).toContain('(+12 more)'); // 20 edges − 8 cap
+  });
+
+  it('an interaction entry whose edges are all EMPTY strings degrades away', () => {
+    const mangled = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        anchor: 'abc1234def567890',
+        deltaFiles: [],
+        interaction: [{ path: 'src/caller.ts', importsChanged: ['', ''] }],
+      },
+    };
+    expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
+  });
+
+  it('a chunk whose files carry NO scope class gets no incremental frame', () => {
+    // The block validates globally, but a frame with zero bullets implies
+    // the chunk is out of scope — say nothing instead.
+    const foreign = {
+      ...INCREMENTAL_PLAN,
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 10,
+          lines: 10,
+          chars: 400,
+          maxLineChars: 80,
+          oversized: false,
+          files: [{ path: 'src/unrelated.ts', newStart: 1, newEnd: 10 }],
+        },
+      ],
+    };
+    expect(buildChunkAgentPrompt(foreign, 1)).not.toContain(
+      'INCREMENTAL round',
+    );
+  });
+
   it('whole-diff briefs name each file with its scope class', () => {
     const p = buildRoleBrief(INCREMENTAL_PLAN, '2');
     expect(p).toContain(
