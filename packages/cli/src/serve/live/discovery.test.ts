@@ -243,6 +243,7 @@ describe('Live discovery file', () => {
         mode: 0o600,
       });
       let committed = false;
+      const wait = vi.fn(async () => undefined);
 
       await expect(
         handoffLiveDiscoveryOwner(
@@ -252,6 +253,8 @@ describe('Live discovery file', () => {
             committed = true;
           },
           {
+            wait,
+            handoffGraceMs: 37,
             isProcessAlive: (ownerPid) => {
               expect(ownerPid).toBe(previous.pid);
               return false;
@@ -260,6 +263,8 @@ describe('Live discovery file', () => {
         ),
       ).resolves.toEqual({ reclaimed: true });
       expect(committed).toBe(true);
+      expect(wait).toHaveBeenCalledOnce();
+      expect(wait).toHaveBeenCalledWith(37);
       await expect(fs.stat(discoveryPath)).rejects.toMatchObject({
         code: 'ENOENT',
       });

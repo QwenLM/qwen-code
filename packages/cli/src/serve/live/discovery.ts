@@ -16,6 +16,7 @@ import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 export const LIVE_DISCOVERY_RELATIVE_PATH = path.join('live', 'daemon.json');
 const MAX_DISCOVERY_BYTES = 16 * 1024;
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,256}$/;
+const DEFAULT_HANDOFF_GRACE_MS = 1_000;
 const LOCK_OPTIONS: LockOptions = {
   realpath: false,
   stale: 10_000,
@@ -148,6 +149,12 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 async function readExistingRecord(
@@ -406,7 +413,12 @@ export async function handoffLiveDiscoveryOwner(
   runtimeBaseDir: string,
   owner: LiveDiscoveryOwner,
   commitOwner: () => Promise<void>,
-  options: { isProcessAlive?: (pid: number) => boolean } = {},
+  options: {
+    isProcessAlive?: (pid: number) => boolean;
+    wait?: (milliseconds: number) => Promise<void>;
+    handoffGraceMs?: number;
+    waitForHandoffGrace?: boolean;
+  } = {},
 ): Promise<{ reclaimed: boolean }> {
   const target = await prepareDirectory(runtimeBaseDir, false);
   if (!target) {
@@ -472,6 +484,11 @@ export async function handoffLiveDiscoveryOwner(
     );
   }
   if (operationError) throw operationError;
+  if (result?.reclaimed && options.waitForHandoffGrace !== false) {
+    await (options.wait ?? delay)(
+      options.handoffGraceMs ?? DEFAULT_HANDOFF_GRACE_MS,
+    );
+  }
   return result!;
 }
 

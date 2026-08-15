@@ -6624,6 +6624,7 @@ async function runQwenServeImpl(
           .then(() => loadLiveDiscoveryRuntime())
           .then(
             async ({
+              handoffLiveDiscoveryOwner,
               LiveDiscoveryOwnerActiveError,
               LiveDiscoveryPublicationError,
               removeLiveDiscoveryFile,
@@ -6681,6 +6682,13 @@ async function runQwenServeImpl(
                     return;
                   }
                   try {
+                    if (runtimeBaseDir !== stableBaseDir) {
+                      await handoffLiveDiscoveryOwner(
+                        runtimeBaseDir,
+                        record,
+                        async () => undefined,
+                      );
+                    }
                     await writeLiveDiscoveryFile(runtimeBaseDir, record);
                     published.push({
                       runtimeBaseDir,

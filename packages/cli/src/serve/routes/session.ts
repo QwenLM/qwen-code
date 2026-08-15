@@ -1760,6 +1760,24 @@ export function registerSessionRoutes(
 
     let internalRuntime: WorkspaceRuntime | undefined;
     let hasInternalSession = false;
+    const hasOrdinarySession = async (sessionId: string): Promise<boolean> => {
+      for (const runtime of workspaceRegistry.list()) {
+        if (
+          await createWorkspaceRuntimeSessionService(
+            runtime,
+          ).sessionExistsInAnyState(sessionId)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const sendBatchWorkspaceConflict = (): void => {
+      res.status(409).json({
+        error: 'All sessions in this operation must share one workspace.',
+        code: 'session_workspace_conflict',
+      });
+    };
     for (const sessionId of sessionIds) {
       const candidates = new Set<WorkspaceRuntime>();
       const owner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
@@ -1808,11 +1826,11 @@ export function registerSessionRoutes(
       }
       if (candidates.size === 0) {
         if (hasInternalSession) {
-          res.status(409).json({
-            error: 'All sessions in this operation must share one workspace.',
-            code: 'session_workspace_conflict',
-          });
-          return undefined;
+          if (await hasOrdinarySession(sessionId)) {
+            sendBatchWorkspaceConflict();
+            return undefined;
+          }
+          throw new SessionNotFoundError(sessionId);
         }
         continue;
       }
@@ -1822,10 +1840,7 @@ export function registerSessionRoutes(
       }
       const candidate = [...candidates][0]!;
       if (internalRuntime && internalRuntime !== candidate) {
-        res.status(409).json({
-          error: 'All sessions in this operation must share one workspace.',
-          code: 'session_workspace_conflict',
-        });
+        sendBatchWorkspaceConflict();
         return undefined;
       }
       internalRuntime = candidate;
@@ -1840,22 +1855,18 @@ export function registerSessionRoutes(
     for (const sessionId of sessionIds) {
       const service = createWorkspaceRuntimeSessionService(internalRuntime);
       if (!(await service.sessionExistsInAnyState(sessionId))) {
-        res.status(409).json({
-          error: 'All sessions in this operation must share one workspace.',
-          code: 'session_workspace_conflict',
-        });
-        return undefined;
+        if (await hasOrdinarySession(sessionId)) {
+          sendBatchWorkspaceConflict();
+          return undefined;
+        }
+        throw new SessionNotFoundError(sessionId);
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
         (candidateId) => service.readCreationMetadata(candidateId),
       );
       if (!metadata) {
-        res.status(409).json({
-          error: 'All sessions in this operation must share one workspace.',
-          code: 'session_workspace_conflict',
-        });
-        return undefined;
+        throw new SessionNotFoundError(sessionId);
       }
     }
     const internalEntry = workspaceRegistry.getManagedEntryByWorkspaceCwd(

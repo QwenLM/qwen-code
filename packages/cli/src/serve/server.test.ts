@@ -29952,7 +29952,15 @@ describe('Live conversation runtime lifecycle', () => {
       .mockResolvedValue('active');
     const sessionExists = vi
       .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
-      .mockResolvedValue(true);
+      .mockImplementation(async function (candidateId) {
+        if (candidateId === 'ordinary-session') {
+          return this.getProjectRoot() === '/work/live-primary';
+        }
+        return (
+          this.getProjectRoot() === setup.root.canonicalRoot &&
+          candidateId !== 'missing-live-session'
+        );
+      });
     const readMetadata = vi
       .spyOn(SessionService.prototype, 'readCreationMetadata')
       .mockResolvedValue({
@@ -29993,6 +30001,34 @@ describe('Live conversation runtime lifecycle', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ sessionIds: [sessionId, 'not-live'] });
       expect(rejectedBatch.status).toBe(404);
+      expect(setup.liveBridge.closeCalls).toHaveLength(0);
+
+      for (const rejectedSessionId of ['not-live', 'missing-live-session']) {
+        const rejectedLegacyBatch = await request(setup.app)
+          .post('/sessions/delete')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: [sessionId, rejectedSessionId] });
+        expect(rejectedLegacyBatch.status).toBe(404);
+        expect(rejectedLegacyBatch.body).toMatchObject({
+          code: 'session_not_found',
+          sessionId: rejectedSessionId,
+        });
+      }
+      expect(setup.liveBridge.closeCalls).toHaveLength(0);
+
+      for (const sessionIds of [
+        [sessionId, 'ordinary-session'],
+        ['ordinary-session', sessionId],
+      ]) {
+        const rejectedMixedBatch = await request(setup.app)
+          .post('/sessions/delete')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds });
+        expect(rejectedMixedBatch.status).toBe(409);
+        expect(rejectedMixedBatch.body).toMatchObject({
+          code: 'session_workspace_conflict',
+        });
+      }
       expect(setup.liveBridge.closeCalls).toHaveLength(0);
 
       readMetadata.mockResolvedValue({ sourceType: 'channel' });

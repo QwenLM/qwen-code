@@ -85,6 +85,12 @@ export function requireSessionRuntime(opts: {
   }
 
   if (resolution.kind === 'not_found') {
+    if (
+      workspaceRegistry.primaryEntry.state !== 'active' ||
+      !workspaceRegistry.primaryEntry.current
+    ) {
+      return requirePrimarySessionRuntime(workspaceRegistry, res);
+    }
     daemonLog?.warn('session routing failed', {
       route,
       resolutionKind: 'not_found',

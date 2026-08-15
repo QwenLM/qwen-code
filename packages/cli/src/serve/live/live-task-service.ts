@@ -505,7 +505,7 @@ export class LiveTaskService {
     const all = (
       await Promise.all(
         this.options.workspaceRegistry
-          .list()
+          .listAll()
           .map((runtime) => this.listRuntimeThreads(runtime, limit)),
       )
     )

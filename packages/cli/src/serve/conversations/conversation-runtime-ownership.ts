@@ -394,7 +394,10 @@ class FileConversationRuntimeOwnership implements ConversationRuntimeOwnership {
         this.stableBaseDir,
         this.current,
         commitOwner,
-        { isProcessAlive: this.isProcessAlive },
+        {
+          isProcessAlive: this.isProcessAlive,
+          waitForHandoffGrace: false,
+        },
       );
       reclaimed ||= handoff.reclaimed;
     } catch (error) {

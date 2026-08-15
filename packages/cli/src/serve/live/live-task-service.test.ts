@@ -262,7 +262,8 @@ function makeHarness() {
     bridge: projectBridge,
   } as WorkspaceRuntime;
   const registry = {
-    list: () => [runtime, projectRuntime],
+    list: () => [projectRuntime],
+    listAll: () => [runtime, projectRuntime],
     getByWorkspaceId: (workspaceId: string) =>
       workspaceId === projectRuntime.workspaceId ? projectRuntime : undefined,
     resolveLiveSessionOwner: (sessionId: string) =>

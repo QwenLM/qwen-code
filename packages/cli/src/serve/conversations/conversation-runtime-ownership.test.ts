@@ -368,6 +368,43 @@ try {
     expect(wait).toHaveBeenCalledWith(41);
   });
 
+  it('waits one grace after reclaiming both ownership records', async () => {
+    const stableBaseDir = await temporaryStableBase();
+    const previous = createConversationRuntimeOwnership({
+      stableBaseDir,
+      pid: 999_995,
+      instanceNonce: 'conversation_owner_nonce_previous_04',
+      isProcessAlive: () => false,
+    });
+    await previous.acquire();
+    await writeLiveDiscoveryFile(stableBaseDir, {
+      url: 'http://127.0.0.1:3210',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+      pid: 999_994,
+      instanceNonce: 'legacy_live_owner_nonce_dead_0002',
+    });
+    const wait = vi.fn(async () => undefined);
+    const ownership = createConversationRuntimeOwnership({
+      stableBaseDir,
+      pid: process.pid,
+      instanceNonce: currentNonce,
+      isProcessAlive: () => false,
+      wait,
+      handoffGraceMs: 43,
+    });
+
+    await expect(ownership.acquire()).resolves.toEqual({ reclaimed: true });
+    expect(wait).toHaveBeenCalledOnce();
+    expect(wait).toHaveBeenCalledWith(43);
+    expect(await readRecord(stableBaseDir)).toMatchObject({
+      pid: process.pid,
+      instanceNonce: currentNonce,
+    });
+    await expect(
+      fs.stat(getLiveDiscoveryPath(stableBaseDir)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('never overwrites malformed or unknown-version state', async () => {
     const stableBaseDir = await temporaryStableBase();
     const ownerPath = getConversationRuntimeOwnerPath(stableBaseDir);
