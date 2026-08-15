@@ -216,40 +216,66 @@ describe('useSessionArtifacts', () => {
     ]);
   });
 
-  it('keeps the last-good artifacts and surfaces no error when a background refresh fails (#7427)', async () => {
-    // A transient `Failed to fetch` on an AUTOMATIC refresh (mount, prompt
-    // settling to idle, an artifactsVersion signal) is noise the user cannot
-    // act on. The panel must keep the last successfully loaded artifacts,
-    // clear `loading`, and expose no error state — before #7477's reshape the
-    // same hiccup surfaced an error-severity toast on every retry, spamming
-    // the panel for the whole outage.
+  it('keeps automatic refresh failures silent and recovers on the next refresh (#7427)', async () => {
+    // A transient `Failed to fetch` on an automatic refresh is noise the user
+    // cannot act on. The panel keeps last-good artifacts when it has them,
+    // clears `loading`, and exposes no error state.
     sdkMock.actions.loadArtifacts
+      .mockRejectedValueOnce(new Error('Failed to fetch'))
       .mockResolvedValueOnce({ artifacts: [artifact('current-artifact')] })
+      .mockRejectedValueOnce(new Error('Failed to fetch'))
       .mockRejectedValueOnce(new Error('Failed to fetch'))
       .mockResolvedValueOnce({ artifacts: [artifact('recovered-artifact')] });
 
     await renderHookHost();
-    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
-      'current-artifact',
-    ]);
-    expect(latestState?.loading).toBe(false);
 
-    // Background refresh #1 fails transiently.
+    // Automatic refresh #1: initial mount fails before any last-good data exists.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.error).toBeNull();
+    expect(latestState?.artifacts).toEqual([]);
+
+    // Automatic refresh #2: artifactsVersion recovers and establishes last-good.
     sdkMock.artifactsVersion = 1;
     await rerenderHookHost();
     await act(async () => {
       await Promise.resolve();
     });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+    expect(latestState?.loading).toBe(false);
 
-    // Last-good data survives, nothing is blanked out, no error surfaces.
+    // Automatic refresh #3: prompt settling back to idle fails transiently.
+    sdkMock.promptStatus = 'running';
+    await rerenderHookHost();
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(latestState?.loading).toBe(false);
     expect(latestState?.error).toBeNull();
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'current-artifact',
     ]);
 
-    // The panel is not wedged: the next background refresh recovers.
+    // Automatic refresh #4: artifactsVersion fails and still keeps last-good.
     sdkMock.artifactsVersion = 2;
+    await rerenderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.error).toBeNull();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+
+    // The panel is not wedged: the next automatic refresh recovers.
+    sdkMock.artifactsVersion = 3;
     await rerenderHookHost();
     await act(async () => {
       await Promise.resolve();
