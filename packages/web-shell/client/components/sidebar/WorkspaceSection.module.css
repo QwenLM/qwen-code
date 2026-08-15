@@ -117,24 +117,6 @@
   margin-bottom: 12px;
 }
 
-.showAllSessions {
-  align-self: flex-start;
-  margin-left: 26px;
-  padding: 2px 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 14px;
-  line-height: 22px;
-  cursor: pointer;
-}
-
-.showAllSessions:hover,
-.showAllSessions:focus-visible {
-  color: var(--sidebar-foreground);
-  outline: none;
-}
-
 .empty {
   padding: 4px 8px 4px 26px;
   font-size: 12px;

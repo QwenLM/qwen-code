@@ -39,7 +39,11 @@ export function migrateWorkspaceExpansionPreference(
     const previousKey = `${STORAGE_PREFIX}${previousId}`;
     const nextKey = `${STORAGE_PREFIX}${nextId}`;
     const stored = window.localStorage.getItem(previousKey);
-    if (stored === null || window.localStorage.getItem(nextKey) !== null) {
+    if (stored === null) return;
+    if (window.localStorage.getItem(nextKey) !== null) {
+      // The registered preference already won; drop the superseded
+      // provisional entry so it stops reading as a live preference.
+      window.localStorage.removeItem(previousKey);
       return;
     }
     window.localStorage.setItem(nextKey, stored);

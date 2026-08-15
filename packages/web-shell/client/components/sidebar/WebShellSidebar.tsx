@@ -567,6 +567,22 @@ function SessionMenu({
   );
 }
 
+// React fires no blur when a focused input unmounts (a poll re-sort or
+// preview slice removing the edited row), so the rename editor cancels on
+// unmount; otherwise its stale draft remounts when the row returns.
+function CancelOnUnmount({
+  onCancel,
+  children,
+}: {
+  onCancel: () => void;
+  children: ReactNode;
+}) {
+  const cancelRef = useRef(onCancel);
+  cancelRef.current = onCancel;
+  useEffect(() => () => cancelRef.current(), []);
+  return children;
+}
+
 function SidebarSessionSurface({
   collapsed,
   label,
@@ -592,10 +608,10 @@ function SidebarSessionSurface({
   const changeOpen = useCallback(
     (nextOpen: boolean) => {
       if (!nextOpen && isCloseBlocked()) return;
-      if (nextOpen) focusInsideSurfaceRef.current = false;
+      if (nextOpen && !open) focusInsideSurfaceRef.current = false;
       onOpenChange(nextOpen);
     },
-    [isCloseBlocked, onOpenChange],
+    [isCloseBlocked, onOpenChange, open],
   );
   const cancelClose = useCallback(
     () => window.clearTimeout(closeTimerRef.current),
@@ -1096,6 +1112,19 @@ export function WebShellSidebar({
   const handleSessionMenuOpenChange = useCallback((open: boolean) => {
     sessionMenuOpenRef.current = open;
     if (open) renameFocusSuppressRef.current = false;
+  }, []);
+  const handleSessionMenuPointerDownOutside = useCallback(() => {
+    sessionMenuPointerDismissRef.current = true;
+  }, []);
+  const handleSessionMenuCloseAutoFocus = useCallback((event: Event) => {
+    if (renameFocusSuppressRef.current) {
+      renameFocusSuppressRef.current = false;
+      event.preventDefault();
+      return;
+    }
+    if (!sessionMenuPointerDismissRef.current) return;
+    sessionMenuPointerDismissRef.current = false;
+    event.preventDefault();
   }, []);
   const isCollapsedCloseBlocked = useCallback(
     () => sessionMenuOpenRef.current || groupMenu !== null,
@@ -2118,6 +2147,14 @@ export function WebShellSidebar({
     editingSessionIdentityRef.current = null;
     setEditingName('');
   }, []);
+  const cancelRenameIfEditing = useCallback(
+    (sessionIdentity: string) => {
+      if (editingSessionIdentityRef.current === sessionIdentity) {
+        cancelRename();
+      }
+    },
+    [cancelRename],
+  );
 
   useEffect(() => {
     if (editingSession && !canRenameSession(editingSession)) {
@@ -3295,13 +3332,12 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
-        expanded?: boolean;
         // Some controls still depend on the active runtime even though
         // workspace-qualified actions can target trusted secondary rows.
         readOnly?: boolean;
       } = {},
     ) => {
-      const { isArchived = false, expanded = !collapsed } = options;
+      const { isArchived = false } = options;
       const readOnly = options.readOnly ?? isActiveSessionReadOnly(session);
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
@@ -3362,28 +3398,32 @@ export function WebShellSidebar({
             }
           >
             {isEditing ? (
-              <form
-                className={styles.renameForm}
-                onKeyDown={(event) => event.stopPropagation()}
-                onDoubleClick={(event) => event.stopPropagation()}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  saveRename();
-                }}
+              <CancelOnUnmount
+                onCancel={() => cancelRenameIfEditing(sessionIdentity)}
               >
-                <input
-                  autoFocus
-                  aria-label={`${t('sidebar.rename')}: ${label}`}
-                  className={styles.renameInput}
-                  maxLength={256}
-                  value={editingName}
-                  onChange={(event) => setEditingName(event.target.value)}
-                  onBlur={cancelRename}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') cancelRename();
+                <form
+                  className={styles.renameForm}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    saveRename();
                   }}
-                />
-              </form>
+                >
+                  <input
+                    autoFocus
+                    aria-label={`${t('sidebar.rename')}: ${label}`}
+                    className={styles.renameInput}
+                    maxLength={256}
+                    value={editingName}
+                    onChange={(event) => setEditingName(event.target.value)}
+                    onBlur={cancelRename}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') cancelRename();
+                    }}
+                  />
+                </form>
+              </CancelOnUnmount>
             ) : (
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
@@ -3414,19 +3454,8 @@ export function WebShellSidebar({
                       align="end"
                       className="w-auto min-w-40"
                       style={SESSION_MENU_PORTAL_STYLE}
-                      onPointerDownOutside={() => {
-                        sessionMenuPointerDismissRef.current = true;
-                      }}
-                      onCloseAutoFocus={(event) => {
-                        if (renameFocusSuppressRef.current) {
-                          renameFocusSuppressRef.current = false;
-                          event.preventDefault();
-                          return;
-                        }
-                        if (!sessionMenuPointerDismissRef.current) return;
-                        sessionMenuPointerDismissRef.current = false;
-                        event.preventDefault();
-                      }}
+                      onPointerDownOutside={handleSessionMenuPointerDownOutside}
+                      onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
                     >
                       <DropdownMenuGroup>
                         {showArchivedRename && (
@@ -3510,7 +3539,7 @@ export function WebShellSidebar({
             handleLoadSession(session.sessionId, session.workspaceCwd)
           }
           onDoubleClick={() => {
-            if (expanded && canRenameSession(session)) startRename(session);
+            if (canRenameSession(session)) startRename(session);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
@@ -3518,313 +3547,283 @@ export function WebShellSidebar({
             }
           }}
         >
-          {expanded && (
-            <>
-              <span className={styles.sessionStatusSlot}>
-                {completedUnread ? (
-                  <span
-                    className={styles.sessionStatusDot}
-                    aria-hidden="true"
-                  />
-                ) : null}
-              </span>
-              {isEditing && canRenameSession(session) ? (
-                <form
-                  className={styles.renameForm}
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => event.stopPropagation()}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    saveRename();
+          <span className={styles.sessionStatusSlot}>
+            {completedUnread ? (
+              <span className={styles.sessionStatusDot} aria-hidden="true" />
+            ) : null}
+          </span>
+          {isEditing && canRenameSession(session) ? (
+            <CancelOnUnmount
+              onCancel={() => cancelRenameIfEditing(sessionIdentity)}
+            >
+              <form
+                className={styles.renameForm}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  saveRename();
+                }}
+              >
+                <input
+                  autoFocus
+                  aria-label={`${t('sidebar.rename')}: ${label}`}
+                  className={styles.renameInput}
+                  maxLength={256}
+                  value={editingName}
+                  onChange={(event) => setEditingName(event.target.value)}
+                  onBlur={cancelRename}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      cancelRename();
+                    }
                   }}
-                >
-                  <input
-                    autoFocus
-                    aria-label={`${t('sidebar.rename')}: ${label}`}
-                    className={styles.renameInput}
-                    maxLength={256}
-                    value={editingName}
-                    onChange={(event) => setEditingName(event.target.value)}
-                    onBlur={cancelRename}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        cancelRename();
-                      }
-                    }}
-                  />
-                </form>
-              ) : (
-                <>
+                />
+              </form>
+            </CancelOnUnmount>
+          ) : (
+            <>
+              <span className={styles.sessionText} data-web-shell-session-title>
+                <span className={styles.sessionTextInner}>{label}</span>
+              </span>
+              <div className={styles.sessionMetaSlot}>
+                {attentionLabel && (
                   <span
-                    className={styles.sessionText}
-                    data-web-shell-session-title
-                  >
-                    <span className={styles.sessionTextInner}>{label}</span>
-                  </span>
-                  <div className={styles.sessionMetaSlot}>
-                    {attentionLabel && (
-                      <span
-                        className={cx(
-                          styles.sessionAttention,
-                          needsUserInput && styles.sessionAttentionUserInput,
-                        )}
-                        aria-label={attentionLabel}
-                      >
-                        {attentionLabel}
-                      </span>
+                    className={cx(
+                      styles.sessionAttention,
+                      needsUserInput && styles.sessionAttentionUserInput,
                     )}
-                    {session.hasActivePrompt ? (
-                      <span
-                        className={styles.sessionLoading}
-                        aria-label={t('sidebar.running')}
-                      />
-                    ) : !attentionLabel && gitIcon ? (
-                      <span className={styles.sessionGitIcon}>{gitIcon}</span>
-                    ) : null}
-                    {(!readOnly ||
-                      showPin ||
-                      showArchive ||
-                      showRename ||
-                      showExport ||
-                      showDelete ||
-                      canOrganizeSession(session, 'group')) && (
-                      <div
-                        className={styles.sessionActions}
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => event.stopPropagation()}
-                      >
-                        {(() => {
-                          const inlineActions: Array<{
-                            key: WebShellSidebarSessionInlineActionItem;
-                            icon?: ReactNode;
-                            label: string;
-                            disabled?: boolean;
-                            title?: string;
-                            active?: boolean;
-                            destructive?: boolean;
-                            visible: boolean;
-                            onClick: () => void;
-                          }> = [
-                            {
-                              key: 'pin',
-                              icon: <PinIcon size={16} strokeWidth={1.2} />,
-                              label: session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin'),
-                              disabled: busy,
-                              active: session.isPinned,
-                              visible: showPin && inlineActionItems.has('pin'),
-                              onClick: () => handleTogglePin(session),
-                            },
-                            {
-                              key: 'archive',
-                              icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
-                              label: t('sidebar.archive'),
-                              disabled: busy || isCurrent,
-                              title: isCurrent
-                                ? t('sidebar.archiveCurrentDisabled')
-                                : t('sidebar.archive'),
-                              visible:
-                                showArchive && inlineActionItems.has('archive'),
-                              onClick: () => handleArchive(session),
-                            },
-                            {
-                              key: 'rename',
-                              icon: <PencilIcon size={16} strokeWidth={1.2} />,
-                              label: t('sidebar.rename'),
-                              disabled: busy,
-                              visible:
-                                showRename && inlineActionItems.has('rename'),
-                              onClick: () => handleRenameFromMenu(session),
-                            },
-                            {
-                              key: 'export',
-                              icon: (
-                                <DownloadIcon size={16} strokeWidth={1.2} />
-                              ),
-                              label: t('sidebar.export'),
-                              disabled: exporting,
-                              visible:
-                                showExport && inlineActionItems.has('export'),
-                              onClick: () => handleExportSession(session),
-                            },
-                            {
-                              key: 'delete',
-                              icon: <Trash2Icon size={16} strokeWidth={1.2} />,
-                              label: t('sidebar.delete'),
-                              disabled: isCurrent,
-                              destructive: true,
-                              title: isCurrent
-                                ? t('sidebar.currentDeleteDisabled')
-                                : undefined,
-                              visible:
-                                showDelete && inlineActionItems.has('delete'),
-                              onClick: () => handleDeleteSession(session),
-                            },
-                          ];
-                          return inlineActions
-                            .filter((a) => a.visible)
-                            .map((action) => (
-                              <button
-                                key={action.key}
-                                className={cx(
-                                  styles.sessionActionButton,
-                                  action.active &&
-                                    styles.activeSessionActionButton,
-                                )}
-                                type="button"
-                                disabled={action.disabled}
-                                aria-label={action.label}
-                                title={action.title ?? action.label}
-                                onClick={action.onClick}
-                                style={
-                                  action.destructive && !action.disabled
-                                    ? {
-                                        color: 'var(--destructive, #dc2626)',
-                                      }
+                    aria-label={attentionLabel}
+                  >
+                    {attentionLabel}
+                  </span>
+                )}
+                {session.hasActivePrompt ? (
+                  <span
+                    className={styles.sessionLoading}
+                    aria-label={t('sidebar.running')}
+                  />
+                ) : !attentionLabel && gitIcon ? (
+                  <span className={styles.sessionGitIcon}>{gitIcon}</span>
+                ) : null}
+                {(!readOnly ||
+                  showPin ||
+                  showArchive ||
+                  showRename ||
+                  showExport ||
+                  showDelete ||
+                  canOrganizeSession(session, 'group')) && (
+                  <div
+                    className={styles.sessionActions}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    {(() => {
+                      const inlineActions: Array<{
+                        key: WebShellSidebarSessionInlineActionItem;
+                        icon?: ReactNode;
+                        label: string;
+                        disabled?: boolean;
+                        title?: string;
+                        active?: boolean;
+                        destructive?: boolean;
+                        visible: boolean;
+                        onClick: () => void;
+                      }> = [
+                        {
+                          key: 'pin',
+                          icon: <PinIcon size={16} strokeWidth={1.2} />,
+                          label: session.isPinned
+                            ? t('sidebar.unpin')
+                            : t('sidebar.pin'),
+                          disabled: busy,
+                          active: session.isPinned,
+                          visible: showPin && inlineActionItems.has('pin'),
+                          onClick: () => handleTogglePin(session),
+                        },
+                        {
+                          key: 'archive',
+                          icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.archive'),
+                          disabled: busy || isCurrent,
+                          title: isCurrent
+                            ? t('sidebar.archiveCurrentDisabled')
+                            : t('sidebar.archive'),
+                          visible:
+                            showArchive && inlineActionItems.has('archive'),
+                          onClick: () => handleArchive(session),
+                        },
+                        {
+                          key: 'rename',
+                          icon: <PencilIcon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.rename'),
+                          disabled: busy,
+                          visible:
+                            showRename && inlineActionItems.has('rename'),
+                          onClick: () => handleRenameFromMenu(session),
+                        },
+                        {
+                          key: 'export',
+                          icon: <DownloadIcon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.export'),
+                          disabled: exporting,
+                          visible:
+                            showExport && inlineActionItems.has('export'),
+                          onClick: () => handleExportSession(session),
+                        },
+                        {
+                          key: 'delete',
+                          icon: <Trash2Icon size={16} strokeWidth={1.2} />,
+                          label: t('sidebar.delete'),
+                          disabled: isCurrent,
+                          destructive: true,
+                          title: isCurrent
+                            ? t('sidebar.currentDeleteDisabled')
+                            : undefined,
+                          visible:
+                            showDelete && inlineActionItems.has('delete'),
+                          onClick: () => handleDeleteSession(session),
+                        },
+                      ];
+                      return inlineActions
+                        .filter((a) => a.visible)
+                        .map((action) => (
+                          <button
+                            key={action.key}
+                            className={cx(
+                              styles.sessionActionButton,
+                              action.active && styles.activeSessionActionButton,
+                            )}
+                            type="button"
+                            disabled={action.disabled}
+                            aria-label={action.label}
+                            title={action.title ?? action.label}
+                            onClick={action.onClick}
+                            style={
+                              action.destructive && !action.disabled
+                                ? {
+                                    color: 'var(--destructive, #dc2626)',
+                                  }
+                                : undefined
+                            }
+                          >
+                            {action.icon ?? (
+                              <span style={{ fontSize: 12 }}>
+                                {action.label}
+                              </span>
+                            )}
+                          </button>
+                        ));
+                    })()}
+                    {(showPin && !inlineActionItems.has('pin')) ||
+                    (showArchive && !inlineActionItems.has('archive')) ||
+                    (showRename && !inlineActionItems.has('rename')) ||
+                    canOrganizeSession(session, 'group') ||
+                    (showExport && !inlineActionItems.has('export')) ||
+                    (showDelete && !inlineActionItems.has('delete')) ? (
+                      <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            className={styles.sessionActionButton}
+                            type="button"
+                            aria-label={t('sidebar.moreActions')}
+                            title={t('sidebar.moreActions')}
+                          >
+                            <EllipsisVerticalIcon />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="end"
+                          className="w-auto min-w-40"
+                          style={SESSION_MENU_PORTAL_STYLE}
+                          onPointerDownOutside={
+                            handleSessionMenuPointerDownOutside
+                          }
+                          onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                        >
+                          <DropdownMenuGroup>
+                            {showPin && !inlineActionItems.has('pin') && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleTogglePin(session)}
+                              >
+                                <PinIcon />
+                                {session.isPinned
+                                  ? t('sidebar.unpin')
+                                  : t('sidebar.pin')}
+                              </DropdownMenuItem>
+                            )}
+                            {showArchive &&
+                              !inlineActionItems.has('archive') && (
+                                <DropdownMenuItem
+                                  disabled={busy || isCurrent}
+                                  title={
+                                    isCurrent
+                                      ? t('sidebar.archiveCurrentDisabled')
+                                      : undefined
+                                  }
+                                  onSelect={() => handleArchive(session)}
+                                >
+                                  <ArchiveIcon />
+                                  {t('sidebar.archive')}
+                                </DropdownMenuItem>
+                              )}
+                            {showRename && !inlineActionItems.has('rename') && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleRenameFromMenu(session)}
+                              >
+                                <PencilIcon />
+                                {t('sidebar.rename')}
+                              </DropdownMenuItem>
+                            )}
+                            {canOrganizeSession(session, 'group') && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={(event) =>
+                                  openGroupMenuFromAnchor(
+                                    event.currentTarget as HTMLElement,
+                                    session,
+                                  )
+                                }
+                              >
+                                <FolderInputIcon />
+                                {t('sidebar.sessionGroup')}
+                              </DropdownMenuItem>
+                            )}
+                            {showExport && !inlineActionItems.has('export') && (
+                              <DropdownMenuItem
+                                disabled={exporting}
+                                onSelect={() => handleExportSession(session)}
+                              >
+                                <DownloadIcon />
+                                {t('sidebar.export')}
+                              </DropdownMenuItem>
+                            )}
+                            {showDelete && !inlineActionItems.has('delete') && (
+                              <DropdownMenuItem
+                                variant="destructive"
+                                disabled={isCurrent}
+                                title={
+                                  isCurrent
+                                    ? t('sidebar.currentDeleteDisabled')
                                     : undefined
                                 }
+                                onSelect={() => handleDeleteSession(session)}
                               >
-                                {action.icon ?? (
-                                  <span style={{ fontSize: 12 }}>
-                                    {action.label}
-                                  </span>
-                                )}
-                              </button>
-                            ));
-                        })()}
-                        {(showPin && !inlineActionItems.has('pin')) ||
-                        (showArchive && !inlineActionItems.has('archive')) ||
-                        (showRename && !inlineActionItems.has('rename')) ||
-                        canOrganizeSession(session, 'group') ||
-                        (showExport && !inlineActionItems.has('export')) ||
-                        (showDelete && !inlineActionItems.has('delete')) ? (
-                          <SessionMenu
-                            onOpenChange={handleSessionMenuOpenChange}
-                          >
-                            <DropdownMenuTrigger asChild>
-                              <button
-                                className={styles.sessionActionButton}
-                                type="button"
-                                aria-label={t('sidebar.moreActions')}
-                                title={t('sidebar.moreActions')}
-                              >
-                                <EllipsisVerticalIcon />
-                              </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent
-                              align="end"
-                              className="w-auto min-w-40"
-                              style={SESSION_MENU_PORTAL_STYLE}
-                              onPointerDownOutside={() => {
-                                sessionMenuPointerDismissRef.current = true;
-                              }}
-                              onCloseAutoFocus={(event) => {
-                                if (renameFocusSuppressRef.current) {
-                                  renameFocusSuppressRef.current = false;
-                                  event.preventDefault();
-                                  return;
-                                }
-                                if (!sessionMenuPointerDismissRef.current)
-                                  return;
-                                sessionMenuPointerDismissRef.current = false;
-                                event.preventDefault();
-                              }}
-                            >
-                              <DropdownMenuGroup>
-                                {showPin && !inlineActionItems.has('pin') && (
-                                  <DropdownMenuItem
-                                    disabled={busy}
-                                    onSelect={() => handleTogglePin(session)}
-                                  >
-                                    <PinIcon />
-                                    {session.isPinned
-                                      ? t('sidebar.unpin')
-                                      : t('sidebar.pin')}
-                                  </DropdownMenuItem>
-                                )}
-                                {showArchive &&
-                                  !inlineActionItems.has('archive') && (
-                                    <DropdownMenuItem
-                                      disabled={busy || isCurrent}
-                                      title={
-                                        isCurrent
-                                          ? t('sidebar.archiveCurrentDisabled')
-                                          : undefined
-                                      }
-                                      onSelect={() => handleArchive(session)}
-                                    >
-                                      <ArchiveIcon />
-                                      {t('sidebar.archive')}
-                                    </DropdownMenuItem>
-                                  )}
-                                {showRename &&
-                                  !inlineActionItems.has('rename') && (
-                                    <DropdownMenuItem
-                                      disabled={busy}
-                                      onSelect={() =>
-                                        handleRenameFromMenu(session)
-                                      }
-                                    >
-                                      <PencilIcon />
-                                      {t('sidebar.rename')}
-                                    </DropdownMenuItem>
-                                  )}
-                                {canOrganizeSession(session, 'group') && (
-                                  <DropdownMenuItem
-                                    disabled={busy}
-                                    onSelect={(event) =>
-                                      openGroupMenuFromAnchor(
-                                        event.currentTarget as HTMLElement,
-                                        session,
-                                      )
-                                    }
-                                  >
-                                    <FolderInputIcon />
-                                    {t('sidebar.sessionGroup')}
-                                  </DropdownMenuItem>
-                                )}
-                                {showExport &&
-                                  !inlineActionItems.has('export') && (
-                                    <DropdownMenuItem
-                                      disabled={exporting}
-                                      onSelect={() =>
-                                        handleExportSession(session)
-                                      }
-                                    >
-                                      <DownloadIcon />
-                                      {t('sidebar.export')}
-                                    </DropdownMenuItem>
-                                  )}
-                                {showDelete &&
-                                  !inlineActionItems.has('delete') && (
-                                    <DropdownMenuItem
-                                      variant="destructive"
-                                      disabled={isCurrent}
-                                      title={
-                                        isCurrent
-                                          ? t('sidebar.currentDeleteDisabled')
-                                          : undefined
-                                      }
-                                      onSelect={() =>
-                                        handleDeleteSession(session)
-                                      }
-                                    >
-                                      <Trash2Icon />
-                                      {t('sidebar.delete')}
-                                    </DropdownMenuItem>
-                                  )}
-                              </DropdownMenuGroup>
-                            </DropdownMenuContent>
-                          </SessionMenu>
-                        ) : null}
-                      </div>
-                    )}
+                                <Trash2Icon />
+                                {t('sidebar.delete')}
+                              </DropdownMenuItem>
+                            )}
+                          </DropdownMenuGroup>
+                        </DropdownMenuContent>
+                      </SessionMenu>
+                    ) : null}
                   </div>
-                </>
-              )}
+                )}
+              </div>
             </>
           )}
         </div>,
@@ -3839,7 +3838,7 @@ export function WebShellSidebar({
       canUnarchiveSession,
       canMutateSessionArchive,
       cancelRename,
-      collapsed,
+      cancelRenameIfEditing,
       completedUnreadIds,
       editingName,
       editingSessionIdentity,
@@ -3853,7 +3852,9 @@ export function WebShellSidebar({
       handleExportSession,
       handleLoadSession,
       handleRenameFromMenu,
+      handleSessionMenuCloseAutoFocus,
       handleSessionMenuOpenChange,
+      handleSessionMenuPointerDownOutside,
       handleTogglePin,
       handleUnarchive,
       isCurrentSession,
@@ -3875,9 +3876,7 @@ export function WebShellSidebar({
         : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
       return (
         <>
-          {displayedSessions.map((session) =>
-            renderSessionRow(session, { expanded: true }),
-          )}
+          {displayedSessions.map((session) => renderSessionRow(session))}
           {!showAll &&
             filteredSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
               <button
@@ -3914,7 +3913,11 @@ export function WebShellSidebar({
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
-      return <div className={styles.notice}>{t('sidebar.noSessions')}</div>;
+      return (
+        <div className={styles.notice}>
+          {t(searchQuery.trim() ? 'sidebar.searchEmpty' : 'sidebar.noSessions')}
+        </div>
+      );
     }
     if (channelSessionSections) {
       return channelSessionSections.map((section) => (
@@ -3927,9 +3930,7 @@ export function WebShellSidebar({
           expanded={!collapsedSessionSectionIds.has(section.id)}
           onToggle={() => toggleSessionSection(section.id)}
         >
-          {section.sessions.map((session) =>
-            renderSessionRow(session, { expanded: true }),
-          )}
+          {section.sessions.map((session) => renderSessionRow(session))}
         </SessionGroupSection>
       ));
     }
@@ -3970,9 +3971,7 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) =>
-            renderSessionRow(session, { expanded: true }),
-          )}
+          {section.sessions.map((session) => renderSessionRow(session))}
         </SessionGroupSection>
       );
     });
@@ -4055,7 +4054,7 @@ export function WebShellSidebar({
       content = (
         <>
           {allArchivedSessions.map((session) =>
-            renderSessionRow(session, { isArchived: true, expanded: true }),
+            renderSessionRow(session, { isArchived: true }),
           )}
           {effectiveArchivedError && retry}
         </>
@@ -4652,7 +4651,6 @@ export function WebShellSidebar({
                     <div className={styles.pinnedSessionList}>
                       {pinnedSessions.map((session) =>
                         renderSessionRow(session, {
-                          expanded: true,
                           readOnly: isActiveSessionReadOnly(session),
                         }),
                       )}
@@ -4710,7 +4708,6 @@ export function WebShellSidebar({
                   renderSessionRow(
                     { ...session, workspaceCwd: ws.cwd },
                     {
-                      expanded: true,
                       readOnly: isActiveSessionReadOnly({
                         ...session,
                         workspaceCwd: ws.cwd,
@@ -4853,7 +4850,6 @@ export function WebShellSidebar({
                                 workspaceCwd: ws.cwd,
                               },
                               {
-                                expanded: true,
                                 readOnly: isActiveSessionReadOnly({
                                   ...session,
                                   workspaceCwd: ws.cwd,
@@ -4948,6 +4944,12 @@ export function WebShellSidebar({
                                       align="end"
                                       className="w-auto min-w-40"
                                       style={SESSION_MENU_PORTAL_STYLE}
+                                      onPointerDownOutside={
+                                        handleSessionMenuPointerDownOutside
+                                      }
+                                      onCloseAutoFocus={
+                                        handleSessionMenuCloseAutoFocus
+                                      }
                                     >
                                       <DropdownMenuItem
                                         variant="destructive"

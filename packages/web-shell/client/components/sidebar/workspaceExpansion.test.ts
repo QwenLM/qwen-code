@@ -45,5 +45,8 @@ describe('workspace expansion persistence', () => {
     );
 
     expect(readWorkspaceExpanded('primary:/tmp/primary')).toBe(true);
+    expect(hasWorkspaceExpansionPreference('primary:/tmp/connection')).toBe(
+      false,
+    );
   });
 });

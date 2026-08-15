@@ -39,6 +39,7 @@ import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
+import sidebarStyles from './WebShellSidebar.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
 import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 
@@ -657,7 +658,7 @@ export function WorkspaceSection({
                   visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
                     <button
                       type="button"
-                      className={styles.showAllSessions}
+                      className={sidebarStyles.showAllSessions}
                       onClick={() => setShowAllSessions(true)}
                     >
                       {t('sidebar.showAllSessions')}

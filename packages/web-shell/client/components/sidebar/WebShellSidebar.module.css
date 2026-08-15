@@ -667,10 +667,14 @@
   cursor: pointer;
 }
 
-.showAllSessions:hover,
+.showAllSessions:hover {
+  color: var(--sidebar-foreground);
+}
+
 .showAllSessions:focus-visible {
   color: var(--sidebar-foreground);
-  outline: none;
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
 }
 
 .sessionRow {
