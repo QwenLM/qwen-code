@@ -88,6 +88,7 @@ export function renderResult(sourceItems: readonly ContextItem[]): {
 } {
   const items: ContextItem[] = [];
   for (const source of sourceItems.slice(0, MAX_ITEMS)) {
+    if (!source.id || !source.content) continue;
     const item = compactItem(source);
     items.push(item);
     if (!fitNewestItem(items)) {
@@ -110,7 +111,9 @@ function compactItem(source: ContextItem): ContextItem {
   };
   if (source.title) item.title = truncate(source.title, 200);
   if (source.uri) item.uri = truncate(source.uri, 500);
-  if (source.score !== undefined) item.score = source.score;
+  if (source.score !== undefined && Number.isFinite(source.score)) {
+    item.score = source.score;
+  }
   if (source.updatedAt) item.updatedAt = truncate(source.updatedAt, 64);
   return item;
 }

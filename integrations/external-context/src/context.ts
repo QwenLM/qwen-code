@@ -30,6 +30,9 @@ export function renderExternalContext(
   const items: ExternalContextItem[] = [];
 
   for (const source of sourceItems.slice(0, MAX_EXTERNAL_CONTEXT_ITEMS)) {
+    if (!source.id || !source.content) {
+      continue;
+    }
     const item = compactItem(source);
     items.push(item);
     if (!fitNewestItemToBudget(items)) {
@@ -55,7 +58,7 @@ function compactItem(source: ExternalContextItem): ExternalContextItem {
   if (source.uri) {
     item.uri = truncate(source.uri, 500);
   }
-  if (source.score !== undefined) {
+  if (source.score !== undefined && Number.isFinite(source.score)) {
     item.score = source.score;
   }
   if (source.updatedAt) {

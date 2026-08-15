@@ -20,6 +20,7 @@
     "dist",
     "examples/*.json",
     "examples/provider-extension-local/README.md",
+    "examples/provider-extension-local/dist/main.js",
     "examples/provider-extension-local/package.json",
     "examples/provider-extension-local/qwen-extension.json",
     "examples/provider-extension-local/src",

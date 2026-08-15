@@ -74,28 +74,40 @@ describe('External Context Provider Extension Profile v1', () => {
         name: vector.name,
         valid: contextSearchInputSchema.safeParse(vector.value).success,
       }).toEqual({ name: vector.name, valid: true });
-      expect(exampleInputSchema.safeParse(vector.value).success).toBe(true);
+      expect({
+        name: vector.name,
+        valid: exampleInputSchema.safeParse(vector.value).success,
+      }).toEqual({ name: vector.name, valid: true });
     }
     for (const vector of vectors.invalidInputs) {
       expect({
         name: vector.name,
         valid: contextSearchInputSchema.safeParse(vector.value).success,
       }).toEqual({ name: vector.name, valid: false });
-      expect(exampleInputSchema.safeParse(vector.value).success).toBe(false);
+      expect({
+        name: vector.name,
+        valid: exampleInputSchema.safeParse(vector.value).success,
+      }).toEqual({ name: vector.name, valid: false });
     }
     for (const vector of vectors.validOutputs) {
       expect({
         name: vector.name,
         valid: contextSearchOutputSchema.safeParse(vector.value).success,
       }).toEqual({ name: vector.name, valid: true });
-      expect(exampleOutputSchema.safeParse(vector.value).success).toBe(true);
+      expect({
+        name: vector.name,
+        valid: exampleOutputSchema.safeParse(vector.value).success,
+      }).toEqual({ name: vector.name, valid: true });
     }
     for (const vector of vectors.invalidOutputs) {
       expect({
         name: vector.name,
         valid: contextSearchOutputSchema.safeParse(vector.value).success,
       }).toEqual({ name: vector.name, valid: false });
-      expect(exampleOutputSchema.safeParse(vector.value).success).toBe(false);
+      expect({
+        name: vector.name,
+        valid: exampleOutputSchema.safeParse(vector.value).success,
+      }).toEqual({ name: vector.name, valid: false });
     }
   });
 
