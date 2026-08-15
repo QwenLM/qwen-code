@@ -816,6 +816,9 @@ async function classifyImageContent(
       filePath,
       (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NONBLOCK ?? 0),
     );
+    // Above the image source limit the read is rejected as an oversized image;
+    // sniffing anyway would reclassify zero-filled/text payloads and route them
+    // past the 100 MB gate.
     if ((await handle.stat()).size > IMAGE_MAX_SOURCE_BYTES) return 'image';
     const sample = Buffer.alloc(IMAGE_SNIFF_BYTES);
     const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
