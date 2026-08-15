@@ -17,6 +17,7 @@ import {
   writeFileSync,
   existsSync,
   readFileSync,
+  mkdirSync,
   realpathSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -132,6 +133,13 @@ describe('capture-local — the withheld candidate is not announced', () => {
     const stale = join(
       repo,
       '.qwen/tmp/qwen-review-local-cache-candidate.json',
+    );
+    // PLANT an earlier round's candidate: without it the removal assertion
+    // passes even when the removal itself is deleted.
+    mkdirSync(join(repo, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      stale,
+      JSON.stringify({ v: 1, target: 'local', stale: true }),
     );
     captures.push({ diff: DIFF_A }, { diff: Buffer.from('moved mid-hash\n') });
     run();

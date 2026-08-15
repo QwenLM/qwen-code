@@ -55,7 +55,9 @@ function readJsonObject(path: string, what: string): Record<string, unknown> {
     );
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new Error(`cache-commit: ${what} at ${path} is not a JSON object`);
+    throw new Error(
+      `cache-commit: ${what} at ${inertText(path)} is not a JSON object`,
+    );
   }
   return raw as Record<string, unknown>;
 }
@@ -89,16 +91,31 @@ function runCacheCommit(args: CacheCommitArgs): void {
         'incremental anchor is a same-model contract.',
     );
   }
-  // The promoted cache is read back by two commands that print this value on
-  // a refusal; a control-charactered id would make the cache the intake for
-  // a forged terminal line. Refuse at the writing end, where a human is
-  // present, rather than escaping it at every reader.
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(ledgerModel)) {
+  // The promoted cache is read back by commands that print these values on a
+  // refusal, and the next round hands `lastCommitSha` to git as an argument;
+  // a control-charactered value would make the cache the intake for a forged
+  // terminal line. Refuse at the writing end, where a human is present,
+  // rather than escaping it at every reader. Every persisted STRING is
+  // checked — the ledger's model id and each candidate-owned anchor field —
+  // because the threat this command polices is a tampered candidate, and
+  // policing one field of it is policing none.
+  const controlled = (v: unknown): boolean =>
+    // eslint-disable-next-line no-control-regex
+    typeof v === 'string' && /[\u0000-\u001f\u007f]/.test(v);
+  if (controlled(ledgerModel)) {
     throw new Error(
       'cache-commit: `lastModelId` carries control characters — refusing to ' +
         'persist a value that forges terminal output when read back.',
     );
+  }
+  for (const key of CANDIDATE_FIELDS) {
+    if (controlled(candidate[key])) {
+      throw new Error(
+        `cache-commit: the candidate's \`${key}\` carries control ` +
+          'characters — refusing to persist a value that forges terminal ' +
+          'output (or a git argument) when read back.',
+      );
+    }
   }
 
   // Bind the promotion to its target: `pr-7`'s candidate committed to

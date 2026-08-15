@@ -36,6 +36,19 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
  */
 export function inertText(value: string, maxChars = 200): string {
   const clipped = value.length > maxChars ? value.slice(0, maxChars) : value;
-  const rendered = CONTROL.test(clipped) ? JSON.stringify(clipped) : clipped;
+  // `JSON.stringify` alone is not enough: it escapes the familiar control
+  // characters but passes DEL (U+007F) through verbatim, and DEL is a
+  // terminal control code like any other. Every control character is
+  // replaced explicitly, then the whole value is quoted so it cannot be
+  // read as prose.
+  const rendered = CONTROL.test(clipped)
+    ? JSON.stringify(
+        // eslint-disable-next-line no-control-regex
+        clipped.replace(/[\u0000-\u001f\u007f]/g, (c) => {
+          const hex = c.charCodeAt(0).toString(16).padStart(4, '0');
+          return `\\u${hex}`;
+        }),
+      )
+    : clipped;
   return clipped.length < value.length ? `${rendered}…` : rendered;
 }

@@ -210,6 +210,66 @@ describe('cache-commit', () => {
     ).toThrow(/FLATTENED repo-relative path/);
   });
 
+  it('refuses control characters in the ledger model AND in any candidate anchor field', () => {
+    // The command's stated posture: refuse at the writing end, where a human
+    // is present, rather than escaping at every reader. Policing one field of
+    // a tampered candidate is policing none — the next round hands
+    // lastCommitSha to git as an argument.
+    const esc = String.fromCharCode(0x1b);
+    const bad1 = seed({ v: 1, target: 'pr-7' }, { lastModelId: `m${esc}[31m` });
+    expect(() => run(bad1)).toThrow(/lastModelId. carries control/);
+    expect(existsSync(bad1['out'])).toBe(false);
+    const bad2 = seed(
+      { v: 1, target: 'pr-7', lastCommitSha: `abc${esc}[2J` },
+      { lastModelId: 'm1' },
+    );
+    expect(() => run(bad2)).toThrow(/lastCommitSha. carries control/);
+    expect(existsSync(bad2['out'])).toBe(false);
+  });
+
+  it('every refusal leaves NO cache file behind', () => {
+    const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: 'm1' });
+    expect(() => run({ ...argv, out: join(dir, 'cache/pr-8.json') })).toThrow();
+    expect(existsSync(join(dir, 'cache/pr-8.json'))).toBe(false);
+  });
+
+  it('preserves an explicitly-null candidate field (unborn HEAD)', () => {
+    const argv = seed(
+      { v: 1, target: 'local', headSha: null, files: {}, stateId: 's' },
+      { lastModelId: 'm1' },
+    );
+    argv['out'] = join(dir, 'cache/local.json');
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect('headSha' in cache).toBe(true);
+    expect(cache['headSha']).toBeNull();
+  });
+
+  it('carries mergeBaseSha and map-valued anchor fields through the merge', () => {
+    const argv = seed(
+      {
+        v: 1,
+        target: 'pr-7',
+        lastCommitSha: 'head-sha',
+        mergeBaseSha: 'base-sha',
+        fileVerdicts: { 'a.ts': { base: '100644 b', head: '100644 h' } },
+      },
+      { lastModelId: 'm1', round: 1 },
+    );
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['mergeBaseSha']).toBe('base-sha');
+    expect(cache['fileVerdicts']).toEqual({
+      'a.ts': { base: '100644 b', head: '100644 h' },
+    });
+  });
+
   it('refuses an EMPTY lastModelId, not just a missing one', () => {
     const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: '' });
     expect(() => run(argv)).toThrow(/lastModelId/);
