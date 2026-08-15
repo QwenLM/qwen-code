@@ -26,6 +26,7 @@ import {
   type RepositoryContextProvider,
 } from './lib/repository-context.js';
 import { repoContextCommand, runRepoContext } from './repo-context.js';
+import { stringifyPlanReport } from './lib/report.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   appendRunSession,
@@ -1061,6 +1062,46 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
     }
   });
 
+  it('skips the write entirely when the enrichment changes nothing', () => {
+    // The resumed-run common case the code comments on, unreachable from
+    // `planAt` fixtures: those write compact JSON while production plans are
+    // written by `stringifyPlanReport`, so `planUnchanged` was always false
+    // in this suite and the skip branch ran nowhere. Write the plan the way
+    // production does, with its context already attached, and assert no
+    // write happened at all — the strongest form of "the epoch cannot move"
+    // is that the commit-then-restore window never opens.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-skip-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = join(root, 'plan.json');
+      const context0 = context();
+      const planObj = {
+        files: [{ path: 'src/a.ts' }],
+        repositoryContext: context0,
+      };
+      writeFileSync(planPath, stringifyPlanReport(planObj as never));
+      const before = new Date(Date.now() - 3600_000);
+      utimesSync(planPath, before, before);
+      const inoBefore = statSync(planPath).ino;
+      const mtimeBefore = statSync(planPath).mtimeMs;
+
+      const same: RepositoryContextProvider = {
+        provide: () => context0,
+      };
+      runRepoContext(
+        { plan: planPath, worktree, out: join(root, 'ctx.json') },
+        [same],
+      );
+
+      // Same inode, same mtime: not restored — never rewritten.
+      expect(statSync(planPath).ino).toBe(inoBefore);
+      expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('aborts when the plan changed while providers were running', () => {
     // The plan path is shared per PR and providers take real time: a
     // concurrent capture can replace the file mid-computation, and this run
@@ -1131,9 +1172,11 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       }
       // The consequence that actually matters, asserted end to end rather
       // than inferred from a timestamp: the session entry `fetch-pr` wrote
-      // before this command ran is still THIS run's. A restore that lost the
-      // fraction moved the plan out from under the ledger's fence and this
-      // comes back empty.
+      // before this command ran is still THIS run's. Honest scope note: with
+      // the ledger fence tolerating 1ms, a `Date`-based restore (which loses
+      // strictly less than 1ms) would ALSO pass this assertion — the fence's
+      // tolerance is what makes that regression benign, and this test pins
+      // the end-to-end visibility, not the float restore itself.
       expect(priorSessionIds(planPath, { QWEN_CODE_SESSION_ID: 'S1' })).toEqual(
         ['S0'],
       );

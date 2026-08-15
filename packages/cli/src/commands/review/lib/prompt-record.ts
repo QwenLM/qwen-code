@@ -47,10 +47,13 @@ export const RUN_EPOCH_SLACK_MS = 2000;
 /**
  * The run's epoch: records older than this predate the run and are ignored.
  *
- * Every per-run artifact beside the plan keys on this — the deadline stamps,
- * the prompt records, the transcripts, the session ledger — because the plan
- * path is stable per PR while its mtime dates the run. One definition, so a
- * change to the fence cannot apply to some readers and not others. An
+ * The Date.now()-stamped artifacts key on this — the deadline stamps and the
+ * session ledger — where the slack absorbs the sub-millisecond skew between a
+ * file mtime and a wall-clock stamp. The FILE-mtime-fenced artifacts (prompt
+ * records, transcripts) compare against the plan's strict mtime instead:
+ * their timestamps and the plan's come off the same clock, so they need no
+ * slack, and giving them one would re-admit a dead attempt's records written
+ * in the two seconds before a re-capture. An
  * unstatable plan disables the fence (fail open, like every other malformed
  * input these readers take).
  */

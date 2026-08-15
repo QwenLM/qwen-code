@@ -2387,7 +2387,14 @@ describe('verificationGaps — a resumed run reads the prior attempt', () => {
 
     const r = verificationGaps(p, { postsFindings: true }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps).not.toEqual([]);
+    // BOTH steps come back owed, by name — "any gap exists" would stay green
+    // when only the reverse audit was refused while a dead verify agent was
+    // accepted, and `unverifiedFindings` would then ship findings as
+    // verified.
+    expect(r.gaps.map((g) => g.subject)).toEqual([
+      'verification and reverse audit',
+    ]);
+    expect(r.unverifiedFindings).toBe(true);
   });
 });
 
@@ -2563,6 +2570,31 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(false);
   });
 
+  it('counts recovered KEY-shaped work (verify/reverse-audit), not only chunks', () => {
+    // Every other recoveredAgents fixture is chunk-shaped; the key-shaped
+    // branch of `certifies()` — the one production uses for recovered
+    // whole-diff roles — was countable by nothing.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    const d = promptRecordDir(p);
+    mkdirSync(d, { recursive: true });
+    const key = 'reverse-audit';
+    const brief = briefPath(p, key);
+    writeFileSync(brief, 'The brief.');
+    const prompt =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('ra0', prompt, { calls: 2, opens: [brief] });
+    moveToSession('ra0', 'S0');
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.recoveredAgents).toBe(1);
+  });
+
   it('credits the prior attempt when this session launched nothing at all', () => {
     // The zero-launch continuation: the harness creates subagents/<session>
     // on the first launch, so a run that recovered everything has no dir.
@@ -2580,6 +2612,12 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     // everything) — the point of the continuation is that it does not.
     expect(r.ok).toBe(true);
     expect(r.coveredChunks).toEqual([1, 2]);
-    expect(r.recoveredAgents).toBeGreaterThanOrEqual(2);
+    // EXACT: the prior session holds three recoverable records — the two
+    // chunk agents plus the roster stand-in, which recovers through the
+    // whole-diff branch of `certifies()` (no `chunk N of M` in its launch).
+    // `>= 2` could not see that branch: deleting it read 3 as 2 and stayed
+    // green, silently dropping recovered whole-diff work (verify,
+    // reverse-audit) from the continuity count.
+    expect(r.recoveredAgents).toBe(3);
   });
 });

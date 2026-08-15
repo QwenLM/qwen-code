@@ -1443,7 +1443,9 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     runLedger(plan);
 
     expect(() => computeLedger(plan, env)).toThrow(
-      /no main-loop usage records at or after the plan/,
+      // The message names the boundary that actually filtered — on a
+      // resumed run that is this attempt's ledger entry, not the plan.
+      /no main-loop usage records at or after this attempt's start/,
     );
   });
 
@@ -1460,6 +1462,84 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
 
     const text = renderLedger(computeLedger(plan, env));
     expect(text).toContain('1 earlier session');
+  });
+
+  it('does not announce a prior session that contributed nothing', () => {
+    // The `contributed > 0` guard: S0 is ledgered and authorized but has
+    // neither a chat nor an agent dir. An unconditional increment renders
+    // "totals include 1 earlier session" over a session whose contribution
+    // is zero — and no fixture asserted the 0.
+    const { plan, env } = fixture();
+    runLedger(plan);
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(0);
+  });
+
+  it('folds TWO prior sessions, each inside its own window', () => {
+    // RESUME_MAX leaves headroom for a twice-resumed run, and nothing below
+    // hand-built render fixtures exercised N >= 2: the spans accumulation,
+    // the counting past 1, and the per-prior ceiling pairing.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+    );
+    writeFileSync(
+      join(project, 'chats', 'S0b.jsonl'),
+      event('2026-08-03T10:06:00Z', { input: 200, output: 20 }),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0b' },
+      Date.parse('2026-08-03T10:05:00Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(2);
+    expect(ledger.totals.inputTokens).toBe(1700);
+  });
+
+  it('bills the boundary instant to exactly one attempt', () => {
+    // The handoff operators: an event AT the prior session's ceiling belongs
+    // to the NEXT attempt (>= excludes), and an event AT the current floor
+    // belongs to the current one (>= includes). Both mutations shipped green
+    // with every fixture 40s-8h away from a boundary.
+    const { plan, project, env } = fixture();
+    const handoff = '2026-08-03T10:09:00.000Z';
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 1000, output: 100 }),
+        // Exactly at the ceiling: the next attempt's, not this one's.
+        event(handoff, { input: 7777, output: 1 }),
+      ].join(''),
+    );
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      // Exactly at the current floor: included.
+      event(handoff, { input: 500, output: 50 }),
+    );
+    runLedger(plan);
+
+    const ledger = computeLedger(plan, env);
+    // 1000 (prior, below the ceiling) + 500 (current, at the floor); the
+    // 7777 at the prior ceiling is excluded from the prior leg.
+    expect(ledger.totals.inputTokens).toBe(1500);
   });
 
   it("folds the interrupted attempt's main loop and agents into the totals", () => {

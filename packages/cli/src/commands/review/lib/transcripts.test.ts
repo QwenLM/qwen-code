@@ -400,6 +400,47 @@ describe('readRunTranscripts — the run across its sessions', () => {
     expect(recs.map((r) => r.agentId)).toEqual(['a9']);
   });
 
+  it('refuses a foreign-stamped transcript in a PRIOR directory', () => {
+    // The refusing side of the copy rule for prior dirs: every other fixture
+    // either matches the stamp or omits it. Deleting the guard shipped green.
+    const plan = planWithLedger('S0', 'S1');
+    priorFile(
+      'S0',
+      'agent-planted.jsonl',
+      JSON.stringify({
+        agentId: 'planted',
+        agentName: 'general-purpose',
+        sessionId: 'S9',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'launch planted' }] },
+      }) + '\n',
+    );
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
+  it('excludes a prior transcript written AFTER its attempt ended', () => {
+    // The refusing side of the per-attempt window: an operator who kept
+    // using the interrupted CLI session writes transcripts after the resume
+    // took over, and those are not this review's evidence. Every other
+    // fixture writes prior files before endsAtMs, so deleting the clamp
+    // shipped green.
+    const plan = planWithLedger('S0', 'S1');
+    priorFile('S0', 'agent-late.jsonl', transcript('late'));
+    // The prior attempt's window closed at the S1 entry (now + 1500 in the
+    // ledger fixture); stamp the file well past it.
+    const future = new Date(Date.now() + 3600_000);
+    utimesSync(
+      join(dir, 'subagents', 'S0', 'agent-late.jsonl'),
+      future,
+      future,
+    );
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
   it('lists each prior session once, and only those that exist', () => {
     const plan = planWithLedger('S0', 'S0', 'S1');
     // A prior session that exists on disk: the accessor skips a ledgered id
@@ -432,8 +473,11 @@ describe('readRunTranscripts — currentDirOptional', () => {
     );
 
     const env = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S-new' };
-    // Reading prior evidence requires this session's own authorized resume,
-    // stamped after the prior attempt's transcripts.
+    // Reading prior evidence requires this session's own authorized resume.
+    // (The stamp's position relative to the transcripts is fixture realism,
+    // not a requirement — no code compares a resume's atMs to any transcript
+    // mtime; the only time clamps on prior records are `since` and the next
+    // session's ledger `atMs`.)
     appendRunSession(plan, env, now + 1500);
     recordResume(plan, env, now + 1500);
     // Without the option: the current dir is still load-bearing.

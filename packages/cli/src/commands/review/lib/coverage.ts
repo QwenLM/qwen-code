@@ -1457,6 +1457,33 @@ export interface VerificationReport {
 }
 
 /**
+ * Drop a PRIOR attempt's agents that never returned.
+ *
+ * A session that died mid-flight left records whose findings never existed:
+ * the agent opened its brief, said nothing, and the process went away. Such a
+ * record still carries a recorded prompt and an opened brief, which is the
+ * whole of the Step 4/5 delivery floor — so left in, it certifies a
+ * verification nobody performed. An empty return in the CURRENT session is a
+ * different thing entirely: an agent still running, which the idle checks own.
+ *
+ * Every CERTIFYING gate goes through here — coverage and the Step 4/5
+ * floor. Two run-scoped readers deliberately do not: the layer-audit
+ * corroboration and the retirement scheduler consume receipts, where an
+ * empty return already contributes nothing (`parseLayerReceipts('')` is
+ * empty and `classifyReturn('')` is `unknown`), so for them the filter would
+ * be a second copy of a refusal they already make — and both fail SAFE
+ * without it, over-owing rather than releasing.
+ */
+function liveRecords(all: AgentRecord[]): AgentRecord[] {
+  // `returned`, not merely non-empty: `finalText` keeps the last non-empty
+  // assistant text, which includes progress narrated between tool calls — an
+  // agent that opened its inputs, said "reading the diff now…" and died
+  // carries plausible text that certifies nothing. A record with tool
+  // traffic after its text never returned.
+  return all.filter((r) => !(r.fromPriorSession && !r.returned));
+}
+
+/**
  * Did Step 4 (verify) and Step 5 (reverse audit) actually run, and read their
  * briefs?
  *
@@ -1482,30 +1509,6 @@ export interface VerificationReport {
  * CLI recorded building (`reverse-audit` / `reverse-audit--chunk-N` / `verify`) and
  * the harness's transcript of an agent launched with it that opened its brief.
  */
-/**
- * Drop a PRIOR attempt's agents that never returned.
- *
- * A session that died mid-flight left records whose findings never existed:
- * the agent opened its brief, said nothing, and the process went away. Such a
- * record still carries a recorded prompt and an opened brief, which is the
- * whole of the Step 4/5 delivery floor — so left in, it certifies a
- * verification nobody performed. An empty return in the CURRENT session is a
- * different thing entirely: an agent still running, which the idle checks own.
- *
- * Every gate that reads run-scoped evidence goes through here. The filter
- * lived at one read site and not the other, and the site without it was the
- * one that certifies Steps 4 and 5 — a gate reading a different evidence set
- * than its siblings is how a review certifies work nobody did.
- */
-function liveRecords(all: AgentRecord[]): AgentRecord[] {
-  // `returned`, not merely non-empty: `finalText` keeps the last non-empty
-  // assistant text, which includes progress narrated between tool calls — an
-  // agent that opened its inputs, said "reading the diff now…" and died
-  // carries plausible text that certifies nothing. A record with tool
-  // traffic after its text never returned.
-  return all.filter((r) => !(r.fromPriorSession && !r.returned));
-}
-
 export function verificationGaps(
   planPath: string,
   opts: { postsFindings: boolean },

@@ -61,7 +61,6 @@ import {
   readRecordedPrompts,
   wasDeliveredVerbatim,
   briefPath,
-  runEpochMs,
 } from './prompt-record.js';
 import {
   repositoryContextOf,
@@ -120,7 +119,7 @@ function readReverseAuditReturns(
     // launches a stale record's prompt verbatim gets `corroborated`
     // non-empty on a run whose builder never emitted an auditor. The failure
     // direction of a dropped corroboration is withhold, never release.
-    const built = readRecordedPrompts(planPath, runEpochMs(planPath));
+    const built = readRecordedPrompts(planPath, since);
     const delivered = (t: (typeof auditors)[number]): boolean => {
       for (const [key, prompt] of built) {
         if (prompt.trim() === '') continue;

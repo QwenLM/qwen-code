@@ -693,6 +693,38 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     );
   });
 
+  it('hashes the BYTES, not a utf8 decode of them', async () => {
+    // A pure-ASCII fixture cannot see the difference: digests of the Buffer
+    // and of its utf8-decoded string coincide for every valid-UTF-8 diff and
+    // diverge only on invalid bytes — which real diffs of binary-adjacent or
+    // latin1 files do contain. A regression to string-hashing would make the
+    // resume comparison refuse legitimate resumes on exactly those PRs.
+    const bytes = Buffer.concat([
+      Buffer.from('diff --git a/f b/f\n+'),
+      Buffer.from([0xff, 0xfe, 0x80]),
+      Buffer.from('\n'),
+    ]);
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? (bytes as unknown as Buffer) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const { createHash } = await import('node:crypto');
+    expect(report.diffSha256).toBe(
+      createHash('sha256').update(bytes).digest('hex'),
+    );
+    // The decode-then-hash digest differs; equality above rules it out.
+    expect(report.diffSha256).not.toBe(
+      createHash('sha256').update(bytes.toString('utf8')).digest('hex'),
+    );
+  });
+
   it('is null when no diff was captured', async () => {
     const { resolveMergeBase } = await import('./lib/merge-base.js');
     vi.mocked(resolveMergeBase).mockReturnValue({

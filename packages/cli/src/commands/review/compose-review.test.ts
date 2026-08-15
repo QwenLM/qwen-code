@@ -577,12 +577,12 @@ describe('composeReview — modeled-system defect-layer cap', () => {
   ];
   const walked = (...ids: string[]) =>
     ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
-  // A genuine reverse-audit auditor: the identity line, a real diff read
-  // (so `diffToolCalls > 0`), and the given receipts as its final text.
   // A GENUINE auditor: launched with the prompt the CLI recorded for the
-  // role, and it opened the brief that prompt points at. A receipt only
-  // counts from one of these — otherwise a compliant sibling's floor could
-  // carry a hand-written auditor's claims.
+  // role, and it opened the brief that prompt points at (plus a real diff
+  // read, receipts as final text). A receipt only counts from one of these —
+  // otherwise a compliant sibling's floor could carry a hand-written
+  // auditor's claims. (The earlier fixture matched on a bare IDENTITY
+  // constant; the gate no longer accepts that shape.)
   const auditor = (id: string, receipts: string) => {
     const planPath = join(dir, 'plan.json');
     const brief = briefPath(planPath, 'reverse-audit');

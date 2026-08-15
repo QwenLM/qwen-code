@@ -446,20 +446,23 @@ export function runRepoContext(
     atomicWriteFileSync(planPath, serialized);
     // Seconds as a FLOAT, not the `Date` objects: a `Date` carries integer
     // milliseconds, while APFS and ext4 keep nanoseconds — so restoring from
-    // `planStat.mtime` truncates the sub-millisecond remainder and lands on a
-    // timestamp that is close to the original but not equal to it. The exact
-    // `planMtimeMs === planMtime` fence in the run ledger reads that as a
-    // DIFFERENT plan and drops every session entry, silently emptying the
-    // resume ledger on a filesystem that keeps finer time than a `Date` can
-    // hold. Passing `mtimeMs / 1000` preserves the fraction.
+    // `planStat.mtime` truncates the sub-millisecond remainder and lands
+    // close to the original rather than on it. The run ledger's plan fence
+    // now tolerates 1ms (`PLAN_MTIME_TOLERANCE_MS`), so a truncated restore
+    // would no longer empty it — the float restore is kept because it is
+    // strictly more faithful, and because the strict `since` readers
+    // (prompt records, transcripts) have no tolerance at all.
     utimesSync(planPath, planStat.atimeMs / 1000, planStat.mtimeMs / 1000);
     // The rename commits a new mtime before the restore lands. Verify it:
     // an unrestored epoch fences out this run's own evidence, and a silent
     // one is worse than a loud one. Compared with a millisecond of tolerance
     // rather than exact float equality — `mtimeMs` is a float derived from a
     // nanosecond counter, and the last bits do not survive every filesystem's
-    // round trip. A whole millisecond of drift is far below the epoch slack
-    // and far above the representation noise this must not report as failure.
+    // round trip. One millisecond is exactly the ledger fence's own
+    // tolerance (`PLAN_MTIME_TOLERANCE_MS`) — the binding rail — so the
+    // warning fires precisely when the drift exceeds what that rail
+    // tolerates; the strict `since` readers bind tighter still, but a drift
+    // under 1ms cannot cross a whole-mtime boundary they compare against.
     if (Math.abs(statSync(planPath).mtimeMs - planStat.mtimeMs) > 1) {
       writeStderrLine(
         `WARNING: could not restore the plan's timestamp at ${planPath}; ` +

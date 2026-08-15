@@ -402,6 +402,141 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
     expect(out).toHaveLength(6);
   });
 
+  it('refuses a delivered auditor whose reads were OFF its territory', () => {
+    // The territory clause, discriminated on a fixture that PASSES
+    // delivered(): the only off-territory fixture elsewhere fails delivery
+    // first, so the clause could be deleted with the suite green.
+    ledger('S1');
+    auditorTranscript('S1', LAYERS);
+    const f = join(dir, 'subagents', 'S1', 'agent-ra-S1.jsonl');
+    // Move the diff read far off the baked offset=0..100 territory.
+    writeFileSync(
+      f,
+      readFileSync(f, 'utf8').replaceAll(
+        '"args":{"file_path":' +
+          JSON.stringify(diff) +
+          ',"offset":0,"limit":100}',
+        '"args":{"file_path":' +
+          JSON.stringify(diff) +
+          ',"offset":3300,"limit":100}',
+      ),
+    );
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(6);
+  });
+
+  it('ignores receipts from a delivered agent WITHOUT the identity line', () => {
+    // The identity filter, discriminated on a fixture that clears every
+    // other clause: a verifier-shaped record delivered verbatim, brief
+    // opened, diff read on territory, `Layer walked:` lines in its return —
+    // and no reverse-audit identity. It must contribute nothing.
+    ledger('S1');
+    const key = 'verify';
+    const brief = briefPath(plan, key);
+    const launch =
+      'You are review agent `verify` — rule on the findings.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${diff}", offset=0, limit=100)`;
+    mkdirSync(promptRecordDir(plan), { recursive: true });
+    writeFileSync(brief, 'The verify brief.');
+    recordPrompt(plan, key, launch);
+    const base = {
+      agentId: 'v-1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', 'agent-v-1.jsonl'),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { name: 'read_file', args: { file_path: brief } },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'brief' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: diff, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                text: LAYERS.map(
+                  (id) => `Layer walked: ${id} — examined.`,
+                ).join('\n'),
+              },
+            ],
+          },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    // A REAL auditor beside it, covering two layers: with the identity
+    // filter the verifier contributes nothing and four layers stay owed;
+    // without it the verifier's six receipts release everything. (A
+    // verifier-only fixture cannot discriminate — no auditor at all makes
+    // the gate defer, which is also `[]`.)
+    auditorTranscript('S1', ['lexing', 'expansion']);
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(4);
+  });
+
   it('sees nothing from a prior session the ledger never recorded', () => {
     // A PARTIAL walk is the discriminating shape: were the un-ledgered
     // transcript visible, one identity-matched auditor covering two layers

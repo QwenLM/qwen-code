@@ -16,18 +16,26 @@
 // can point somewhere flattering.
 //
 // So `fetch-pr` appends its own session id here, read back later from disk. The
-// entry is only ever an ADDRESS, never a verdict: a fabricated id can at most
-// point a reader at a directory inside the harness's own `subagents/` tree,
-// where credit still requires the content-shaped pairing (verbatim-delivered
-// prompt, opened brief, diff reads) that fabrication cannot satisfy.
+// entry is only ever an ADDRESS, never a verdict. For the CERTIFYING readers
+// a fabricated id can at most point at a directory inside the harness's own
+// `subagents/` tree, where credit still requires the content-shaped pairing
+// (verbatim-delivered prompt, opened brief, diff reads) that fabrication
+// cannot satisfy. Two consumers sit outside that sentence, deliberately: ids
+// also address `chats/<id>.jsonl`, and the COST ledger folds a session's
+// usage with no pairing at all — a forged id there can inflate a number the
+// review reports about itself, never a verdict it certifies about the code.
+// Cost is accounting, not evidence, and the honest claim stops there.
 //
 // The same file's sibling, `resume.json`, is the resume/restart bookkeeping the
 // skill used to hold only in transcript memory: how many times this review has
 // resumed, and whether it already restarted once for head movement.
 
-import { readFileSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import {
+  atomicWriteFileSync,
+  sanitizeFilenameComponent,
+} from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 const SESSIONS_FILE = 'run-sessions.json';
@@ -49,10 +57,25 @@ export const RESUME_MAX = 2;
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
- * How far ahead of NOW an entry may be stamped. The epoch fence's lower half
- * keeps a previous review's entries out; without an upper half, one
- * hand-written far-future entry survives every future rewrite of the same
- * plan and is read as belonging to every later run.
+ * The equivalence key under which two session ids are the SAME session: the
+ * path segment they become. Case folds on case-insensitive filesystems,
+ * Win32 strips trailing dots, and the harness sanitizes everything outside
+ * [A-Za-z0-9_-] to '_' when it creates the directory — so identity
+ * comparisons anywhere in this module must fold the same way, or a planted
+ * alias reads as a second session with the first one's evidence.
+ */
+function sessionPathKey(id: string): string {
+  return sanitizeFilenameComponent(id).toLowerCase();
+}
+
+/**
+ * How far ahead of NOW an entry may be stamped. Cross-run exclusion is owed
+ * to the exact plan-mtime fence, not to this ceiling — a rewrite moves the
+ * plan's mtime and the fence drops every earlier entry regardless of its
+ * stamp. What the ceiling refuses is a plausibility lie WITHIN a run: a
+ * forged future `atMs` would otherwise shift its session's billing window
+ * and its position in the attempt ordering, since nothing legitimate ever
+ * writes the future.
  */
 const FUTURE_SLACK_MS = 2000;
 
@@ -129,6 +152,22 @@ export function runSessionsPath(planPath: string): string {
 const MAX_LEDGER_BYTES = 256 * 1024;
 const MAX_LEDGER_ENTRIES = 64;
 
+/**
+ * Is there a REGULAR file at `path` that `readLedgerFile` refused? The
+ * clobber guard keys on this, not on bare existence: a planted symlink or
+ * FIFO is not previous state to preserve — the `noFollow` atomic write
+ * self-heals over it, and that behaviour is pinned — while a real file that
+ * failed to read (EMFILE, an AV scanner's EPERM) holds every previously
+ * recorded entry, and rewriting from the empty fallback would erase them.
+ */
+function unreadableRegularLedger(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function readLedgerFile(path: string): string | null {
   try {
     const st = lstatSync(path);
@@ -191,16 +230,25 @@ function readSessions(planPath: string): SessionEntry[] {
     // Deduplicate on READ, not only on append: the file lives in a directory
     // the orchestrator can reach, and a hand-written duplicate would make a
     // consumer that iterates entries (the cost ledger) bill one session
-    // twice. First occurrence wins — it carries the session's real start.
-    // Case-insensitively, because these ids become PATH segments: on APFS or
-    // Windows `s1` and `S1` are the same directory, so a case-variant entry
-    // would otherwise read as a second session and double-count everything
-    // inside it.
+    // twice. EARLIEST occurrence wins — sorted by time first, because "first
+    // in file order" hands a hand-written out-of-order duplicate the
+    // session's identity, and its later atMs then erases the window between
+    // the real start and itself from every consumer's billing.
+    //
+    // The equivalence key is the SANITIZED, lowercased id: these ids become
+    // path segments, and two ids are the same session exactly when they
+    // reach the same directory — case-insensitive filesystems fold case,
+    // Win32 strips trailing dots, and the harness's own sanitizer maps
+    // everything outside [A-Za-z0-9_-] to '_'. Folding on the raw id left
+    // every one of those aliases open as a second identity.
     const seen = new Set<string>();
-    return capped.filter((e) => {
-      const k = e.sessionId.toLowerCase();
-      return seen.has(k) ? false : (seen.add(k), true);
-    });
+    return capped
+      .slice()
+      .sort((x, y) => x.atMs - y.atMs)
+      .filter((e) => {
+        const k = sessionPathKey(e.sessionId);
+        return seen.has(k) ? false : (seen.add(k), true);
+      });
   } catch {
     return [];
   }
@@ -221,7 +269,11 @@ export function appendRunSession(
     const id = env['QWEN_CODE_SESSION_ID']?.trim();
     if (!id || !SESSION_ID_RE.test(id)) return;
     const entries = readSessions(planPath);
-    if (entries.some((e) => e.sessionId === id)) return;
+    // Same equivalence as the read side: a pre-planted case- or alias-variant
+    // otherwise passes this check, and first-write-wins hands it the
+    // session's identity.
+    if (entries.some((e) => sessionPathKey(e.sessionId) === sessionPathKey(id)))
+      return;
     const mtime = planMtimeMs(planPath);
     // No plan mtime, no entry. `readSessions` hard-requires the field — an
     // entry that cannot say which plan it saw is dropped on every read, and
@@ -230,6 +282,18 @@ export function appendRunSession(
     // that silently loses the id. Refusing up front is honest and identical
     // in effect, minus the false success.
     if (mtime === null) return;
+    // A ledger that EXISTS but could not be read is not an empty ledger:
+    // this append rewrites the whole file from what it read, so proceeding
+    // on a transient fault (EMFILE, an AV scanner's EPERM) would clobber
+    // every previously recorded entry — erasing attempt 1's address exactly
+    // when a resume needs it. Skipping the append loses one entry; the
+    // clobber loses them all.
+    if (
+      readLedgerFile(runSessionsPath(planPath)) === null &&
+      unreadableRegularLedger(runSessionsPath(planPath))
+    ) {
+      return;
+    }
     entries.push({ sessionId: id, atMs: nowMs, planMtimeMs: mtime });
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
@@ -285,11 +349,13 @@ export function currentSessionEntry(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): { sessionId: string; atMs: number } | null {
-  const current = env['QWEN_CODE_SESSION_ID']?.trim().toLowerCase();
-  if (!current) return null;
+  const raw = env['QWEN_CODE_SESSION_ID']?.trim();
+  if (!raw) return null;
+  const current = sessionPathKey(raw);
   return (
-    readSessions(planPath).find((e) => e.sessionId.toLowerCase() === current) ??
-    null
+    readSessions(planPath).find(
+      (e) => sessionPathKey(e.sessionId) === current,
+    ) ?? null
   );
 }
 
@@ -308,10 +374,11 @@ function resumeAuthorized(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  const current = env['QWEN_CODE_SESSION_ID']?.trim().toLowerCase();
-  if (!current) return false;
+  const raw = env['QWEN_CODE_SESSION_ID']?.trim();
+  if (!raw) return false;
+  const current = sessionPathKey(raw);
   return readResumeMarker(planPath).resumes.some(
-    (r) => r.sessionId.toLowerCase() === current,
+    (r) => sessionPathKey(r.sessionId) === current,
   );
 }
 
@@ -336,7 +403,8 @@ export function priorSessionEntries(
   // minting `recoveredAgents` and a resumed disclosure on a run that never
   // resumed, and folding the current chat into the prior totals.
   if (!resumeAuthorized(planPath, env)) return [];
-  const current = env['QWEN_CODE_SESSION_ID']?.trim().toLowerCase();
+  const current0 = env['QWEN_CODE_SESSION_ID']?.trim();
+  const current = current0 ? sessionPathKey(current0) : undefined;
   // Sort by time, not file order: `endsAtMs` is a COST CLAMP, and an
   // out-of-order (hand-written) ledger or a backwards wall-clock step
   // between attempts would otherwise invert it — a null or negative window
@@ -348,16 +416,16 @@ export function priorSessionEntries(
       atMs: e.atMs,
       endsAtMs: i + 1 < all.length ? all[i + 1].atMs : null,
     }))
-    .filter((e) => e.sessionId.toLowerCase() !== current);
+    .filter((e) => sessionPathKey(e.sessionId) !== current);
 }
 
 /** Resume/restart bookkeeping for one review run. */
 export interface ResumeMarker {
   schemaVersion: 1;
   /** Each successful `--resume` continuation, in order. */
-  resumes: Array<{ sessionId: string; atMs: number }>;
+  resumes: Array<{ sessionId: string; atMs: number; planMtimeMs?: number }>;
   /** Each restart-for-head-movement, in order. The skill's cap is one. */
-  restarts: Array<{ atMs: number; reason: string }>;
+  restarts: Array<{ atMs: number; reason: string; planMtimeMs?: number }>;
 }
 
 // A fresh object every time: callers mutate the arrays (`recordResume`
@@ -395,8 +463,10 @@ export function readResumeMarker(planPath: string): ResumeMarker {
     }
     const epoch = runEpochMs(planPath);
     const ceiling = runCeilingMs();
+    const planMtime = planMtimeMs(planPath);
     const raw = parsed as ResumeMarker;
     const seenResume = new Set<string>();
+    const seenRestart = new Set<string>();
     const resumes = Array.isArray(raw.resumes)
       ? raw.resumes
           .filter(
@@ -411,10 +481,18 @@ export function readResumeMarker(planPath: string): ResumeMarker {
               typeof e.atMs === 'number' &&
               e.atMs >= epoch &&
               e.atMs <= ceiling &&
+              // The same exact plan fence as the session ledger, for the
+              // same reason: the window alone is inexact by its own slack,
+              // and a previous run's resumes surviving into a fresh run
+              // arrive with the cap already spent — this reader's own doc
+              // promises "a fresh run always starts at zero".
+              typeof e.planMtimeMs === 'number' &&
+              planMtime !== null &&
+              Math.abs(e.planMtimeMs - planMtime) <= PLAN_MTIME_TOLERANCE_MS &&
               // Duplicates would each consume a RESUME_MAX slot and refuse a
               // legitimate continuation.
-              !seenResume.has(e.sessionId.toLowerCase()) &&
-              (seenResume.add(e.sessionId.toLowerCase()), true),
+              !seenResume.has(sessionPathKey(e.sessionId)) &&
+              (seenResume.add(sessionPathKey(e.sessionId)), true),
           )
           .slice(0, MAX_LEDGER_ENTRIES)
       : [];
@@ -427,7 +505,14 @@ export function readResumeMarker(planPath: string): ResumeMarker {
               typeof e.reason === 'string' &&
               typeof e.atMs === 'number' &&
               e.atMs >= epoch &&
-              e.atMs <= ceiling,
+              e.atMs <= ceiling &&
+              typeof e.planMtimeMs === 'number' &&
+              planMtime !== null &&
+              Math.abs(e.planMtimeMs - planMtime) <= PLAN_MTIME_TOLERANCE_MS &&
+              // Dedup for the same reason resumes dedup: each duplicate
+              // spends the once-per-review restart bound again.
+              !seenRestart.has(`${e.reason}@${e.atMs}`) &&
+              (seenRestart.add(`${e.reason}@${e.atMs}`), true),
           )
           // Validated first, like the ledger and the resumes above: sliced
           // raw, junk at the front hides the real restart and the
@@ -465,9 +550,26 @@ export function recordResume(
 ): void {
   const id = env['QWEN_CODE_SESSION_ID']?.trim();
   if (!id || !SESSION_ID_RE.test(id)) return;
+  const mtime = planMtimeMs(planPath);
+  // Same refusal as the session ledger: an entry that cannot say which plan
+  // it saw is dropped on every read, so writing it would be a dead write.
+  if (mtime === null) return;
+  if (
+    readLedgerFile(resumeMarkerPath(planPath)) === null &&
+    unreadableRegularLedger(resumeMarkerPath(planPath))
+  ) {
+    // Same clobber guard as the session ledger: an unreadable-but-present
+    // marker must not be rewritten from the empty default.
+    return;
+  }
   const marker = readResumeMarker(planPath);
-  if (marker.resumes.some((r) => r.sessionId === id)) return;
-  marker.resumes.push({ sessionId: id, atMs: nowMs });
+  if (
+    marker.resumes.some(
+      (r) => sessionPathKey(r.sessionId) === sessionPathKey(id),
+    )
+  )
+    return;
+  marker.resumes.push({ sessionId: id, atMs: nowMs, planMtimeMs: mtime });
   writeMarker(planPath, marker);
 }
 
@@ -481,8 +583,16 @@ export function recordRestart(
   reason: string,
   nowMs: number = Date.now(),
 ): void {
+  const mtime = planMtimeMs(planPath);
+  if (mtime === null) return;
+  if (
+    readLedgerFile(resumeMarkerPath(planPath)) === null &&
+    unreadableRegularLedger(resumeMarkerPath(planPath))
+  ) {
+    return;
+  }
   const marker = readResumeMarker(planPath);
   if (marker.restarts.some((r) => r.reason === reason)) return;
-  marker.restarts.push({ atMs: nowMs, reason });
+  marker.restarts.push({ atMs: nowMs, reason, planMtimeMs: mtime });
   writeMarker(planPath, marker);
 }

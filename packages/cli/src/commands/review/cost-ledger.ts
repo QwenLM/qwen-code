@@ -507,7 +507,13 @@ export function computeLedger(
   if (mainEvents.length === 0) {
     throw new Error(
       `could not read the chat transcript ${chatFile}: no main-loop usage ` +
-        'records at or after the plan',
+        // Name the boundary that actually filtered: on a resumed or
+        // long-lived session the floor is this attempt's ledger entry, not
+        // the plan — and an operator pointed at "after the plan" finds
+        // records plainly there and distrusts the refusal.
+        (own === null
+          ? 'records at or after the plan'
+          : `records at or after this attempt's start (its run-ledger entry)`),
     );
   }
 

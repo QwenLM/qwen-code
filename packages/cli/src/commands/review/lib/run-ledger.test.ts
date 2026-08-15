@@ -23,6 +23,8 @@ import {
   writeFileSync,
   readFileSync,
   utimesSync,
+  chmodSync,
+  existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,6 +39,7 @@ import {
   recordRestart,
   resumeMarkerPath,
   RESUME_MAX,
+  currentSessionEntry,
 } from './run-ledger.js';
 
 let root: string;
@@ -375,9 +378,11 @@ describe('the properties the threat model rests on', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
-  it('drops a FUTURE-dated entry, which would outlive every rewrite', () => {
-    // One-sided fences let a hand-written far-future entry read as belonging
-    // to every later run of the same PR.
+  it('drops a FUTURE-dated entry', () => {
+    // Not for cross-run survival — the exact plan fence already drops every
+    // entry on a rewrite — but because nothing legitimate writes the future:
+    // a forged future atMs shifts its session's billing window and its place
+    // in the attempt ordering.
     appendRunSession(plan, envOf('S1'), Date.now() + 3_600_000);
     authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
@@ -442,6 +447,243 @@ describe('the properties the threat model rests on', () => {
     writeFileSync(runSessionsPath(plan), JSON.stringify(raw));
     authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('reads an over-budget ledger as empty, before parsing it', () => {
+    // The byte bound: a planted multi-gigabyte file would otherwise be read
+    // fully into memory by every consumer. 256 KiB + 1 of valid JSON reads
+    // as no ledger at all.
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    const pad = 'x'.repeat(256 * 1024 + 1);
+    writeFileSync(runSessionsPath(plan), JSON.stringify([{ pad }]));
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+    expect(sessionEntryCount(plan)).toBe(0);
+  });
+
+  it('denies a session the marker names to every OTHER session', () => {
+    // The gate's per-session property: authorization granted to S3 must not
+    // open the ledger to S2. Degraded to "any resume exists", every test
+    // that reads as the session it authorized stays green.
+    appendRunSession(plan, envOf('S1'));
+    authorize('S3');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('currentSessionEntry finds its own entry without any authorization', () => {
+    // The third read export, previously untested anywhere: the cost floor
+    // depends on it, and on a FRESH run there is never a resume marker — a
+    // gated variant returns null exactly where the floor exists to act, and
+    // pre-review turns of a long-lived session bill as review cost.
+    appendRunSession(plan, envOf('S1'), Date.now());
+    const own = currentSessionEntry(plan, envOf('S1'));
+    expect(own?.sessionId).toBe('S1');
+    expect(typeof own?.atMs).toBe('number');
+    expect(currentSessionEntry(plan, envOf('S-absent'))).toBeNull();
+    expect(currentSessionEntry(plan, {})).toBeNull();
+  });
+
+  it('drops a traversal id at READ even when the fence would pass it', () => {
+    // The hand-planted entry must fail ONLY the charset gate: with
+    // planMtimeMs valid, deleting SESSION_ID_RE from readSessions is what
+    // this pins — traversal ids would otherwise flow into subagents/<id>
+    // path assembly.
+    appendRunSession(plan, envOf('S1'));
+    const raw = JSON.parse(
+      readFileSync(runSessionsPath(plan), 'utf8'),
+    ) as Array<Record<string, unknown>>;
+    raw.push({
+      sessionId: '../../etc',
+      atMs: Date.now(),
+      planMtimeMs: statSync(plan).mtimeMs,
+    });
+    writeFileSync(runSessionsPath(plan), JSON.stringify(raw));
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('keeps the EARLIEST duplicate, not the first in file order', () => {
+    // An out-of-order hand-written duplicate must not pick its survivor by
+    // file position: the later atMs would erase the window between the real
+    // start and itself from every consumer's billing.
+    // Backdate the plan so both timestamps sit inside the epoch window AND
+    // below the future ceiling — otherwise the ceiling drops the later
+    // duplicate and the ordering never gets to decide.
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
+    const mtime = statSync(plan).mtimeMs;
+    const base = Math.floor(mtime);
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    writeFileSync(
+      runSessionsPath(plan),
+      JSON.stringify([
+        { sessionId: 'S1', atMs: base + 120_000, planMtimeMs: mtime },
+        { sessionId: 'S1', atMs: base, planMtimeMs: mtime },
+      ]),
+    );
+    authorize('S2');
+    expect(priorSessionEntries(plan, envOf('S2'))[0]?.atMs).toBe(base);
+  });
+
+  it('folds path-equivalent id variants into one session', () => {
+    // `s1`, `S1` and `S1.` all reach the same directory (case folding,
+    // Win32 trailing-dot stripping, the harness sanitizer's '.' → '_'), so
+    // they are one session everywhere or an alias reads as a second session
+    // wearing the first one's evidence.
+    const mtime = statSync(plan).mtimeMs;
+    const base = Date.now();
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    writeFileSync(
+      runSessionsPath(plan),
+      JSON.stringify([
+        { sessionId: 'S1', atMs: base, planMtimeMs: mtime },
+        { sessionId: 's1', atMs: base + 1000, planMtimeMs: mtime },
+        // The sanitizer maps '.' to '_', so `S2.` and `S2_` are ONE
+        // directory — and note this also moots the Win32 trailing-dot alias:
+        // `S2.` never reaches `S2`, because the lookup never uses the raw
+        // name.
+        { sessionId: 'S2.', atMs: base + 2000, planMtimeMs: mtime },
+        { sessionId: 'S2_', atMs: base + 3000, planMtimeMs: mtime },
+      ]),
+    );
+    authorize('S9');
+    authorize('s1');
+    authorize('s2_');
+    expect(priorSessionIds(plan, envOf('S9'))).toEqual(['S1', 'S2.']);
+    // ...and the current-session exclusion folds the same way.
+    expect(priorSessionIds(plan, envOf('s1'))).toEqual(['S2.']);
+    expect(priorSessionIds(plan, envOf('s2_'))).toEqual(['S1']);
+  });
+
+  it('drops an entry whose plan mtime is NEWER than the plan, too', () => {
+    // The fence is symmetric by |diff|: pinned only from the older side, a
+    // signed comparison ships green while a forged future-plan entry reads
+    // as this run's.
+    appendRunSession(plan, envOf('S1'));
+    const raw = JSON.parse(
+      readFileSync(runSessionsPath(plan), 'utf8'),
+    ) as Array<Record<string, unknown>>;
+    (raw[0] as { planMtimeMs: number }).planMtimeMs += 50;
+    writeFileSync(runSessionsPath(plan), JSON.stringify(raw));
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('refuses to append over a ledger it could not read', () => {
+    // A present-but-unreadable REGULAR file holds every recorded entry, and
+    // this append rewrites the whole file from what it read — proceeding on
+    // a transient fault would clobber attempt 1's address exactly when a
+    // resume needs it.
+    appendRunSession(plan, envOf('S1'));
+    const before = readFileSync(runSessionsPath(plan), 'utf8');
+    chmodSync(runSessionsPath(plan), 0o000);
+    try {
+      appendRunSession(plan, envOf('S2'));
+    } finally {
+      chmodSync(runSessionsPath(plan), 0o644);
+    }
+    expect(readFileSync(runSessionsPath(plan), 'utf8')).toBe(before);
+    authorize('S3');
+    expect(priorSessionIds(plan, envOf('S3'))).toEqual(['S1']);
+  });
+
+  it('does not write at all when the id fails the charset gate', () => {
+    // The write-side guard, discriminated from the read-side one by looking
+    // at the FILE: with only the read gate, the bad id would be on disk.
+    appendRunSession(plan, envOf('../evil'));
+    expect(existsSync(runSessionsPath(plan))).toBe(false);
+  });
+
+  it('writes one marker entry for a same-session retry', () => {
+    // recordResume's write-side dedup, discriminated by reading the raw
+    // file: the read-side dedup would hide a double write.
+    recordResume(plan, envOf('S1'));
+    recordResume(plan, envOf('S1'));
+    const raw = JSON.parse(readFileSync(resumeMarkerPath(plan), 'utf8')) as {
+      resumes: unknown[];
+    };
+    expect(raw.resumes).toHaveLength(1);
+  });
+
+  it('drops marker entries from a previous run of the same PR', () => {
+    // The marker takes the same exact plan fence as the ledger, for the
+    // same reason: surviving a plan rewrite means arriving with the cap
+    // already spent, against this reader's own "a fresh run always starts
+    // at zero".
+    recordResume(plan, envOf('S1'));
+    expect(readResumeMarker(plan).resumes).toHaveLength(1);
+    // A fresh capture rewrites the plan (mtime moves — pushed past the
+    // tolerance explicitly, since two writes can land inside 1ms).
+    writeFileSync(plan, JSON.stringify({ diffLines: 2, chunks: [] }));
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(plan, later, later);
+    expect(readResumeMarker(plan).resumes).toEqual([]);
+  });
+
+  it('dedupes identical restart entries on read', () => {
+    // Each duplicate spends the once-per-review restart bound again.
+    recordRestart(plan, 'head-moved');
+    const raw = JSON.parse(readFileSync(resumeMarkerPath(plan), 'utf8')) as {
+      restarts: Array<Record<string, unknown>>;
+    };
+    raw.restarts.push({ ...raw.restarts[0] });
+    writeFileSync(resumeMarkerPath(plan), JSON.stringify(raw));
+    expect(readResumeMarker(plan).restarts).toHaveLength(1);
+  });
+
+  it('drops a v2 marker even when it carries entries', () => {
+    // The schemaVersion refusal, discriminated with POPULATED arrays: on an
+    // empty marker the refusal and the fallback are byte-identical.
+    recordResume(plan, envOf('S1'));
+    const raw = JSON.parse(
+      readFileSync(resumeMarkerPath(plan), 'utf8'),
+    ) as Record<string, unknown>;
+    raw['schemaVersion'] = 2;
+    writeFileSync(resumeMarkerPath(plan), JSON.stringify(raw));
+    expect(readResumeMarker(plan).resumes).toEqual([]);
+  });
+
+  it('folds case-variant marker resumes into one cap slot', () => {
+    recordResume(plan, envOf('S2'));
+    const raw = JSON.parse(readFileSync(resumeMarkerPath(plan), 'utf8')) as {
+      resumes: Array<Record<string, unknown>>;
+    };
+    raw.resumes.push({ ...raw.resumes[0], sessionId: 's2' });
+    writeFileSync(resumeMarkerPath(plan), JSON.stringify(raw));
+    expect(readResumeMarker(plan).resumes).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'writes the marker through a planted symlink without following it',
+    () => {
+      // The noFollow property, pinned for BOTH ledger writes as the sibling
+      // test's comment promises — this is the resume.json half.
+      mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+        recursive: true,
+      });
+      const target = join(root, 'marker-outside.json');
+      writeFileSync(target, '"untouched"');
+      symlinkSync(target, resumeMarkerPath(plan));
+      recordResume(plan, envOf('S1'));
+      expect(readFileSync(target, 'utf8')).toBe('"untouched"');
+      expect(lstatSync(resumeMarkerPath(plan)).isSymbolicLink()).toBe(false);
+      expect(readResumeMarker(plan).resumes).toHaveLength(1);
+    },
+  );
+
+  it('swallows a marker write into a colliding path, like the ledger', () => {
+    // The "bookkeeping never takes the review down" property, pinned for
+    // the writer that lacked it: a FILE standing where the record dir must
+    // be makes mkdir throw, and that throw must not escape.
+    writeFileSync(join(root, 'qwen-review-pr-7-fetch-prompts'), 'a file');
+    expect(() => recordResume(plan, envOf('S1'))).not.toThrow();
+    expect(() => recordRestart(plan, 'head-moved')).not.toThrow();
   });
 
   it('drops an entry older than the slack window', () => {
