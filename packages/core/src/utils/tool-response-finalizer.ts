@@ -312,23 +312,30 @@ export function toolResponseTextLength(parts: Part[]): number {
   ).reduce((total, slot) => total + slot.text.length, 0);
 }
 
+function allocateSlots(slots: TextSlot[], budget: number): number[] {
+  const reserved = slots.reduce(
+    (sum, slot) => sum + (slot.protectedPrefix?.length ?? 0),
+    0,
+  );
+  return allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    Math.max(0, budget - reserved),
+  );
+}
+
 export function enforceFunctionResponseBudget(
   entries: ToolResponseBudgetEntry[],
   budget: number,
 ): ToolResponseBudgetEntry[] {
   if (!Number.isFinite(budget) || budget <= 0) return entries;
   const slots = collectTextSlots(entries, false);
-  const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
+  const total = slots.reduce(
+    (sum, slot) => sum + slot.text.length + (slot.protectedPrefix?.length ?? 0),
+    0,
+  );
   if (total <= budget) return entries;
 
-  return replaceTextSlots(
-    entries,
-    slots,
-    allocateTextBudget(
-      slots.map((slot) => slot.text.length),
-      budget,
-    ),
-  );
+  return replaceTextSlots(entries, slots, allocateSlots(slots, budget));
 }
 
 export async function finalizeToolResponses(
@@ -381,7 +388,10 @@ export async function finalizeToolResponses(
   }
 
   const slots = collectTextSlots(entries);
-  const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
+  const total = slots.reduce(
+    (sum, slot) => sum + slot.text.length + (slot.protectedPrefix?.length ?? 0),
+    0,
+  );
   if (total <= budget) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
@@ -389,10 +399,7 @@ export async function finalizeToolResponses(
     return entries;
   }
 
-  const allocations = allocateTextBudget(
-    slots.map((slot) => slot.text.length),
-    budget,
-  );
+  const allocations = allocateSlots(slots, budget);
   const entriesToPersist = new Set<number>();
   for (let index = 0; index < slots.length; index++) {
     if (slots[index].text.length > allocations[index]) {
