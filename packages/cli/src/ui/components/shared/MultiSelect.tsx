@@ -34,6 +34,7 @@ export interface MultiSelectProps<T> {
   checkedText?: string;
   uncheckedText?: string;
   showActiveMarker?: boolean;
+  truncateLabels?: boolean;
 }
 
 const EMPTY_SELECTED_KEYS: string[] = [];
@@ -63,6 +64,7 @@ export function MultiSelect<T>({
   checkedText = '[✓]',
   uncheckedText = '[ ]',
   showActiveMarker = false,
+  truncateLabels = false,
 }: MultiSelectProps<T>): React.JSX.Element {
   const [scrollOffset, setScrollOffset] = useState(0);
   const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
@@ -179,7 +181,10 @@ export function MultiSelect<T>({
                 <Text> </Text>
               </Box>
               <Box flexGrow={1}>
-                <Text color={theme.text.secondary} wrap="truncate">
+                <Text
+                  color={theme.text.secondary}
+                  wrap={truncateLabels ? 'truncate' : 'wrap'}
+                >
                   {item.label}
                 </Text>
               </Box>
@@ -203,7 +208,10 @@ export function MultiSelect<T>({
               </Box>
             )}
             <Box flexGrow={1}>
-              <Text color={textColor} wrap="truncate">
+              <Text
+                color={textColor}
+                wrap={truncateLabels ? 'truncate' : 'wrap'}
+              >
                 {item.label}
               </Text>
             </Box>

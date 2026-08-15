@@ -8,7 +8,7 @@ import { act, type ComponentProps } from 'react';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
-import { LoadedSettings } from '../../../config/settings.js';
+import { LoadedSettings, SettingScope } from '../../../config/settings.js';
 import { setLanguageAsync } from '../../../i18n/index.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { SkillsManagerDialog } from './SkillsManagerDialog.js';
@@ -44,7 +44,11 @@ const manyLockedSkills: SkillConfig[] = Array.from({ length: 12 }, (_, i) => {
 });
 
 function createConfig(skills: SkillConfig[]): Config {
-  const skillManager = { listSkills: vi.fn().mockResolvedValue(skills) };
+  const skillManager = {
+    listSkills: vi.fn().mockResolvedValue(skills),
+    suppressNextSlashReload: vi.fn(),
+    notifyConfigChanged: vi.fn(async () => undefined),
+  };
   return { getSkillManager: () => skillManager } as unknown as Config;
 }
 
@@ -227,6 +231,54 @@ describe('SkillsManagerDialog', () => {
       'Locked by higher-scope settings (cannot toggle here):',
     );
     expect(lastFrame()).not.toContain('(+12 locked)');
+  });
+
+  it('shows locked-only search results without an empty state', async () => {
+    const { stdin, lastFrame } = renderDialog();
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    act(() => stdin.write('one'));
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    expect(lastFrame()).toContain(
+      'Locked by higher-scope settings (cannot toggle here):',
+    );
+    expect(lastFrame()).not.toContain('No skills match the search.');
+    expect(lastFrame()).not.toContain('[x]');
+  });
+
+  it('persists toggles and refreshes skills on escape', async () => {
+    const settings = createSettings();
+    const setValues = vi
+      .spyOn(settings, 'setValues')
+      .mockImplementation(() => undefined);
+    const config = createConfig(mixedSkills);
+    const skillManager = config.getSkillManager()!;
+    const reloadCommands = vi.fn();
+    const onClose = vi.fn();
+    const { stdin, lastFrame } = renderDialog({
+      settings,
+      config,
+      reloadCommands,
+      onClose,
+    });
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
+    act(() => stdin.write(' '));
+    await vi.waitFor(() => expect(lastFrame()).toContain('› [ ] eight'));
+    act(() => stdin.write('\u001B'));
+
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(setValues).toHaveBeenCalledWith([
+      {
+        scope: SettingScope.Workspace,
+        key: 'skills.disabled',
+        value: ['eight'],
+      },
+    ]);
+    expect(reloadCommands).toHaveBeenCalledTimes(1);
+    expect(skillManager.suppressNextSlashReload).toHaveBeenCalledTimes(1);
+    expect(skillManager.notifyConfigChanged).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the translated title on one row at narrow widths', async () => {

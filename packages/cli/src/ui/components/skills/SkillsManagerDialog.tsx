@@ -621,6 +621,7 @@ export function SkillsManagerDialog({
             showNumbers={false}
             checkedText="[x]"
             showActiveMarker
+            truncateLabels
             maxItemsToShow={maxItemsToShow}
           />
         ) : constrained && unlockedSkills.length === 0 ? (

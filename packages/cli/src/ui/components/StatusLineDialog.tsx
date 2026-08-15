@@ -146,8 +146,9 @@ export function StatusLineDialog({
     if (!hasFullLayout || !normalizedQuery) {
       return STATUS_LINE_OPTIONS;
     }
-    return STATUS_LINE_OPTIONS.filter(({ key, label }) =>
-      `${label} ${key}`.toLowerCase().includes(normalizedQuery),
+    return STATUS_LINE_OPTIONS.filter(
+      ({ key, label, separator }) =>
+        !separator && `${label} ${key}`.toLowerCase().includes(normalizedQuery),
     );
   }, [hasFullLayout, query]);
 
@@ -283,6 +284,7 @@ export function StatusLineDialog({
             showNumbers={false}
             checkedText="[x]"
             showActiveMarker
+            truncateLabels
             maxItemsToShow={maxItemsToShow}
           />
         ) : (

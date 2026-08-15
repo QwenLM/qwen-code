@@ -332,6 +332,17 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).not.toContain('> mk');
   });
 
+  it('excludes the separator from search results', async () => {
+    const { stdin, lastFrame } = renderDialog();
+
+    act(() => stdin.write('separator'));
+
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('No preset items match.'),
+    );
+    expect(lastFrame()).not.toMatch(/›\s+─/);
+  });
+
   it.each([
     [16, true],
     [15, false],
