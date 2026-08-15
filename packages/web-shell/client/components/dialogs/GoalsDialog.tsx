@@ -62,7 +62,10 @@ export function GoalsDialog({
   /** Sessions the daemon could not probe; their goals are missing from `goals`. */
   const [droppedCount, setDroppedCount] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const busySessionIdsRef = useRef<Set<string>>(new Set());
 
   const [showForm, setShowForm] = useState(false);
   const [editingGoal, setEditingGoal] = useState<DaemonGoal | null>(null);
@@ -140,6 +143,14 @@ export function GoalsDialog({
     setShowForm(false);
   }, []);
 
+  const setSessionBusy = useCallback((sessionId: string, busy: boolean) => {
+    const next = new Set(busySessionIdsRef.current);
+    if (busy) next.add(sessionId);
+    else next.delete(sessionId);
+    busySessionIdsRef.current = next;
+    if (mountedRef.current) setBusySessionIds(next);
+  }, []);
+
   const openEdit = useCallback((goal: DaemonGoal) => {
     setCondition(goal.snapshot.goal?.objective ?? '');
     setEditingGoal(goal);
@@ -153,6 +164,11 @@ export function GoalsDialog({
       setFormError(t('goals.error.emptyCondition'));
       return;
     }
+    const editingSessionId = editingGoal?.sessionId;
+    if (editingSessionId && busySessionIdsRef.current.has(editingSessionId)) {
+      return;
+    }
+    if (editingSessionId) setSessionBusy(editingSessionId, true);
     setSubmitting(true);
     setFormError(null);
     try {
@@ -183,6 +199,7 @@ export function GoalsDialog({
       if (editingGoal) await reload();
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (editingSessionId) setSessionBusy(editingSessionId, false);
       if (mountedRef.current) setSubmitting(false);
     }
   }, [
@@ -194,14 +211,15 @@ export function GoalsDialog({
     onError,
     reload,
     resetForm,
+    setSessionBusy,
     t,
   ]);
 
   const control = useCallback(
     async (item: DaemonGoal, action: 'pause' | 'resume' | 'clear') => {
       const goal = item.snapshot.goal;
-      if (!goal) return;
-      setBusySessionId(item.sessionId);
+      if (!goal || busySessionIdsRef.current.has(item.sessionId)) return;
+      setSessionBusy(item.sessionId, true);
       try {
         await actions.controlGoal(
           item.sessionId,
@@ -212,10 +230,10 @@ export function GoalsDialog({
         await reload();
         onError(err, t(`goals.error.${action}Failed`));
       } finally {
-        if (mountedRef.current) setBusySessionId(null);
+        setSessionBusy(item.sessionId, false);
       }
     },
-    [actions, onError, reload, t],
+    [actions, onError, reload, setSessionBusy, t],
   );
 
   return (
@@ -333,7 +351,7 @@ export function GoalsDialog({
         {(goals ?? []).map((item) => {
           const goal = item.snapshot.goal;
           if (!goal) return null;
-          const busy = busySessionId === item.sessionId;
+          const busy = busySessionIds.has(item.sessionId);
           const canPause = goal.status === 'active';
           const canResume =
             goal.status === 'paused' ||

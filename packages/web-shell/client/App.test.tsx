@@ -5188,6 +5188,21 @@ describe('App shell command queueing', () => {
     );
   });
 
+  it('runs an idle shell command immediately while a Goal is active', async () => {
+    mockConnection.goalState = activeGoalSnapshot('keep working');
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!pwd');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('pwd');
+      });
+    });
+
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
   it('blocks duplicate ! submission while session creation is in flight', async () => {
     mockConnection.sessionId = undefined;
     let resolveCreate!: () => void;
@@ -10282,6 +10297,34 @@ describe('App session callbacks', () => {
 
     expect(snapshots.at(-1)).toBeNull();
     expect(activeGoals.at(-1)).toBeNull();
+  });
+
+  it('restores the Goal snapshot when the same session learns its workspace', async () => {
+    const snapshots: unknown[] = [];
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.goalState = activeGoalSnapshot();
+    const { rerender } = renderApp({
+      renderFooter: (props) => {
+        snapshots.push(props.goalSnapshot);
+        return null;
+      },
+    });
+    await flush();
+
+    act(() => {
+      mockConnection.workspaceCwd = '/tmp/project';
+      rerender({
+        renderFooter: (props) => {
+          snapshots.push(props.goalSnapshot);
+          return null;
+        },
+      });
+    });
+    await flush();
+
+    expect(snapshots.at(-1)).toMatchObject({
+      goal: { goalId: 'goal-1', objective: 'ship it' },
+    });
   });
 
   it('gates direct submissions and dispatches compatible submit events', async () => {
@@ -19201,6 +19244,24 @@ describe('App /goal command', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
     expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('refuses non-set Goal controls without allocating a session', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal clear';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
+      '/goal clear',
+    );
   });
 
   it('replaces an existing goal with compare-and-swap identity', async () => {

@@ -570,7 +570,10 @@ export function ChatPane({
     canMutateMidTurn,
     canQueryMidTurn,
     streamingState,
-    holdQueuedPromptsLocally: connection.goalState?.goal?.status === 'active',
+    holdQueuedPromptsLocally:
+      connection.sessionId !== undefined &&
+      (connection.goalState === undefined ||
+        connection.goalState.goal?.status === 'active'),
     sessionActions: actions,
     store,
     editorRef,

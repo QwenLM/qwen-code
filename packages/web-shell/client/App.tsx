@@ -5883,7 +5883,11 @@ export function App({
     [pushToast],
   );
   const handleFailedPromptRetry = useCallback(() => {
-    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+    if (
+      sessionWriteBlockedRef.current ||
+      promptPreparationOwnerRef.current ||
+      goalSnapshotRef.current?.goal?.status === 'active'
+    ) {
       return;
     }
     let failed = failedPromptRef.current;
@@ -6047,7 +6051,10 @@ export function App({
     canMutateMidTurn,
     canQueryMidTurn,
     streamingState,
-    holdQueuedPromptsLocally: goalSnapshot?.goal?.status === 'active',
+    holdQueuedPromptsLocally:
+      connection.sessionId !== undefined &&
+      (connection.goalState === undefined ||
+        goalSnapshot?.goal?.status === 'active'),
     sessionActions,
     store,
     editorRef,
@@ -6818,7 +6825,10 @@ export function App({
           reloadWorkspaceSettings(),
         ]);
       };
-      if (streamingStateRef.current !== 'idle') {
+      if (
+        streamingStateRef.current !== 'idle' ||
+        goalSnapshotRef.current?.goal?.status === 'active'
+      ) {
         handleLanguageChange(previousLanguage);
         blockLocalCommandDuringTurn();
         return;
@@ -7313,7 +7323,7 @@ export function App({
 
   useEffect(() => {
     setGoalSnapshot(connection.goalState ?? null);
-  }, [connection.goalState, connection.sessionId]);
+  }, [connection.goalState, connection.sessionId, logicalSessionKey]);
 
   const connectionGoalComplete =
     connection.goalState?.goal?.status === 'complete';
@@ -8141,6 +8151,12 @@ export function App({
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
+        if (goalSnapshotRef.current?.goal?.status === 'active') {
+          reject(
+            new Error('Cannot start a scheduled task while Goal is active'),
+          );
+          return;
+        }
         let admitted = false;
         const admit = () => {
           if (admitted) return;
@@ -8416,6 +8432,9 @@ export function App({
       void (async () => {
         let allocatedSessionId: string | undefined;
         if (!connectionRef.current.sessionId) {
+          if (operation.kind !== 'set') {
+            throw new Error(t('localCommand.noSession'));
+          }
           allocatedSessionId = await ensureSessionForPrompt();
         }
         if (!connectionRef.current.sessionId && !allocatedSessionId) {
@@ -9494,7 +9513,7 @@ export function App({
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (promptBlocked) {
+        if (streamingStateRef.current !== 'idle') {
           queuedShellCommandsRef.current.push(cmd);
           pushToast('info', t('queue.shellQueued'));
           return true;
@@ -9742,7 +9761,11 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
-    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+    if (
+      sessionWriteBlockedRef.current ||
+      promptPreparationOwnerRef.current ||
+      goalSnapshotRef.current?.goal?.status === 'active'
+    ) {
       return;
     }
     if (
@@ -10322,7 +10345,10 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') {
+      if (
+        streamingState !== 'idle' ||
+        goalSnapshotRef.current?.goal?.status === 'active'
+      ) {
         blockLocalCommandDuringTurn();
         return;
       }

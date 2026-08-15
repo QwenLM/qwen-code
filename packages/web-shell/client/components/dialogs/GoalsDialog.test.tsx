@@ -333,6 +333,56 @@ describe('GoalsDialog', () => {
     await flush();
   });
 
+  it('keeps independent sessions busy until their own controls settle', async () => {
+    const first = baseGoal({ sessionId: 'sess-1', displayName: 'one' });
+    const second = baseGoal({
+      sessionId: 'sess-2',
+      displayName: 'two',
+      snapshot: {
+        ...baseGoal().snapshot,
+        goal: {
+          ...baseGoal().snapshot.goal,
+          goalId: 'goal-2',
+        },
+      },
+    });
+    await mount([first, second]);
+    const releases = new Map<string, () => void>();
+    actions.controlGoal.mockImplementation(
+      (sessionId: string) =>
+        new Promise((resolve) => {
+          releases.set(sessionId, () =>
+            resolve({ snapshot: { v: 2, activity: 'idle', goal: null } }),
+          );
+        }),
+    );
+    const cards = () =>
+      Array.from(document.querySelectorAll<HTMLElement>('[role="listitem"]'));
+    const clear = (index: number) =>
+      cards()[index]?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Clear goal"]',
+      );
+
+    click(clear(0));
+    click(clear(1));
+    await flush();
+    expect(actions.controlGoal).toHaveBeenCalledTimes(2);
+    expect(clear(0)?.disabled).toBe(true);
+    expect(clear(1)?.disabled).toBe(true);
+
+    await act(async () => {
+      releases.get('sess-1')?.();
+      await Promise.resolve();
+    });
+    expect(clear(0)?.disabled).toBe(false);
+    expect(clear(1)?.disabled).toBe(true);
+
+    await act(async () => {
+      releases.get('sess-2')?.();
+      await Promise.resolve();
+    });
+  });
+
   it('rejects an empty condition instead of submitting it', async () => {
     const onCreateGoal = vi.fn();
     await mount([], { onCreateGoal });

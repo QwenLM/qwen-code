@@ -97,6 +97,7 @@ interface HarnessOptions {
   canMutateMidTurn?: boolean;
   canQueryMidTurn?: boolean;
   streamingState?: DaemonStreamingState;
+  holdQueuedPromptsLocally?: boolean;
 }
 
 function createHarness() {
@@ -131,6 +132,7 @@ function createHarness() {
       canMutateMidTurn: opts.canMutateMidTurn ?? true,
       canQueryMidTurn: opts.canQueryMidTurn ?? true,
       streamingState: opts.streamingState ?? 'responding',
+      holdQueuedPromptsLocally: opts.holdQueuedPromptsLocally ?? false,
       sessionActions: sdkMock.actions as never,
       store: stableStore as never,
       editorRef: stableEditorRef,
@@ -916,6 +918,57 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.render({ streamingState: 'responding', connected: false });
       await harness.render({ streamingState: 'responding', connected: true });
       expect(harness.result().queuedPrompts).toHaveLength(1);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('reconciles a committed explicit insert after its response is lost', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('explicitly inserted');
+      });
+      await harness.render({
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      const queuedPromptId = harness.result().queuedPrompts[0]?.id;
+      expect(queuedPromptId).toEqual(expect.any(Number));
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      sdkMock.actions.getMidTurnMessages.mockImplementation(async () => {
+        const messageId =
+          sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+        return {
+          messages: [{ messageId, text: 'explicitly inserted' }],
+          settledMessageIds: [],
+          promotedMessageIds: [],
+        };
+      });
+      await act(async () => {
+        await harness.result().insertQueuedPrompt(queuedPromptId!);
+      });
+
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      expect(messageId).toEqual(expect.any(String));
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'explicitly inserted',
+          midTurnMessageId: messageId,
+          midTurnState: 'queued',
+          admissionOutcome: undefined,
+        }),
+      ]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }

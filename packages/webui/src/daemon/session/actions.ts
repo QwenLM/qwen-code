@@ -417,6 +417,7 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
+        goalState: undefined,
         error: undefined,
         errorStatus: undefined,
         missingSession: false,

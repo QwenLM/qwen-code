@@ -1142,12 +1142,37 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     const { render } = mount('responding', actions);
 
     act(() => latest.enqueuePrompt('wait for the Goal'));
-    render('idle', 'session-1', false, true, true);
+    render('idle', 'session-1', false, false, true);
     await act(async () => admission.resolve({ accepted: false }));
 
     expect(actions.submitPrompt).not.toHaveBeenCalled();
     expect(latest.queuedPrompts).toMatchObject([{ text: 'wait for the Goal' }]);
     expect(latest.queuedPrompts[0]).not.toHaveProperty('serverState');
+
+    render('idle', 'session-1', false, false, false);
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains a legacy explicit insert accepted after idle until Goal release', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('do not lose me'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, true);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'legacy-accepted' });
+      await insertion;
+    });
+
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'do not lose me' }]);
+    expect(latest.queuedPrompts[0]).not.toHaveProperty('serverState');
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
 
     render('idle', 'session-1', false, false, false);
     expect(actions.submitPrompt).toHaveBeenCalledTimes(1);

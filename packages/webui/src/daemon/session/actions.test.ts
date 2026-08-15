@@ -348,7 +348,11 @@ describe('createDaemonSessionActions', () => {
     const existingSession = createMockSession('session-a');
     const { actions, getConnection, pendingSessionLoadRef, sessionRef } =
       createActionsHarness({
-        connection: { status: 'connected', sessionId: 'session-a' },
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          goalState: { v: 2, goal: null, activity: 'idle' },
+        },
         session: existingSession,
       });
 
@@ -368,6 +372,7 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-b',
       requestTimeoutMs: 70_000,
     });
+    expect(getConnection().goalState).toBeUndefined();
   });
 
   it('carries the daemon-advertised restore budget into the load request', async () => {

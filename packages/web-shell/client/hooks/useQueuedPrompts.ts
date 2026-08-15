@@ -1084,7 +1084,9 @@ export function useQueuedPrompts({
 
   const fallbackToPendingPrompt = useCallback(
     (id: number) => {
-      if (writeBlockedRef.current) return;
+      if (writeBlockedRef.current || holdQueuedPromptsLocallyRef.current) {
+        return;
+      }
       const current = queuedPromptsRef.current;
       const index = current.findIndex(
         (prompt) => prompt.id === id && prompt.midTurnState !== undefined,
@@ -1503,7 +1505,13 @@ export function useQueuedPrompts({
       flags: Partial<
         Pick<
           QueuedPrompt,
-          'isEditing' | 'isRemoving' | 'isInserting' | 'midTurnFailedAction'
+          | 'isEditing'
+          | 'isRemoving'
+          | 'isInserting'
+          | 'midTurnFailedAction'
+          | 'midTurnMessageId'
+          | 'admissionOutcome'
+          | 'payloadAvailable'
         >
       >,
     ) => {
@@ -1796,21 +1804,32 @@ export function useQueuedPrompts({
           explicitInsertGenerationsRef.current.delete(prompt.id);
         }
       };
-      const clearInsertionFlag = () => {
-        setQueuedPromptFlags(prompt.id, { isInserting: false });
+      const clearInsertionFlag = (
+        flags: Partial<
+          Pick<
+            QueuedPrompt,
+            | 'isInserting'
+            | 'midTurnMessageId'
+            | 'admissionOutcome'
+            | 'payloadAvailable'
+          >
+        > = { isInserting: false },
+      ) => {
+        setQueuedPromptFlags(prompt.id, flags);
         if (!promptOwnerKey) return;
         const stashed = heldPromptsByOwnerRef.current.get(promptOwnerKey);
         if (!stashed) return;
         heldPromptsByOwnerRef.current.set(
           promptOwnerKey,
           stashed.map((item) =>
-            item.id === prompt.id ? { ...item, isInserting: false } : item,
+            item.id === prompt.id ? { ...item, ...flags } : item,
           ),
         );
       };
       setQueuedPromptFlags(prompt.id, {
         isInserting: true,
         isRemoving: false,
+        ...(messageId ? { midTurnMessageId: messageId } : {}),
       });
       const abort = new AbortController();
       explicitInsertAbortControllersRef.current.set(abort, promptOwnerKey);
@@ -1824,6 +1843,35 @@ export function useQueuedPrompts({
         });
       } catch (error) {
         if (!isCurrentInsertion()) return;
+        if (messageId) {
+          clearInsertionFlag({
+            isInserting: false,
+            midTurnMessageId: messageId,
+            admissionOutcome: 'unknown',
+            payloadAvailable: true,
+          });
+          finishInsertion();
+          if (
+            targetSessionId &&
+            queueOwnerKey(
+              latestWorkspaceCwdRef.current,
+              latestSessionIdRef.current,
+            ) === promptOwnerKey
+          ) {
+            const snapshot = await reconcileMidTurnMessages(
+              targetSessionId,
+            ).catch(() => undefined);
+            const reconciled =
+              snapshot !== undefined &&
+              (snapshot.messages.some(
+                (message) => message.messageId === messageId,
+              ) ||
+                snapshot.settledMessageIds.includes(messageId) ||
+                snapshot.promotedMessageIds.includes(messageId));
+            if (!reconciled) reportError(error, t('queue.admissionUnknown'));
+          }
+          return;
+        }
         clearInsertionFlag();
         finishInsertion();
         if (
@@ -1840,7 +1888,12 @@ export function useQueuedPrompts({
       }
       if (!isCurrentInsertion()) return;
       if (!result.accepted) {
-        clearInsertionFlag();
+        clearInsertionFlag({
+          isInserting: false,
+          midTurnMessageId: undefined,
+          admissionOutcome: undefined,
+          payloadAvailable: undefined,
+        });
         finishInsertion();
         if (
           queueOwnerKey(
@@ -1869,7 +1922,15 @@ export function useQueuedPrompts({
             heldPromptsByOwnerRef.current.set(
               promptOwnerKey,
               deliveredAtIdle
-                ? stashed.filter((item) => item.id !== prompt.id)
+                ? stashed.map((item) =>
+                    item.id === prompt.id
+                      ? {
+                          ...item,
+                          midTurnMessageId: undefined,
+                          isInserting: false,
+                        }
+                      : item,
+                  )
                 : stashed.map((item) =>
                     item.id === prompt.id
                       ? {
@@ -1884,7 +1945,7 @@ export function useQueuedPrompts({
           }
         }
         finishInsertion();
-        prompt.onAdmitted?.();
+        if (!deliveredAtIdle && canQueryMidTurn) prompt.onAdmitted?.();
         if (canQueryMidTurn && targetSessionId) {
           await reconcileMidTurnMessages(targetSessionId).catch((error) => {
             reportError(error, t('queue.insertFailed'));
@@ -1893,11 +1954,20 @@ export function useQueuedPrompts({
         return;
       }
       if (deliveredAtIdle) {
-        const next = current.filter((item) => item.id !== prompt.id);
+        const shouldHold =
+          writeBlockedRef.current || holdQueuedPromptsLocallyRef.current;
+        const pendingPrompt: QueuedPrompt = {
+          ...current[index]!,
+          midTurnMessageId: undefined,
+          isInserting: false,
+          ...(shouldHold ? {} : { serverState: 'submitting' }),
+        };
+        const next = [...current];
+        next[index] = pendingPrompt;
         queuedPromptsRef.current = next;
         setQueuedPrompts(next);
         finishInsertion();
-        prompt.onAdmitted?.();
+        if (!shouldHold) submitPendingPrompt(pendingPrompt);
         return;
       }
       if (!current[index]!.isInserting) {
@@ -1911,6 +1981,8 @@ export function useQueuedPrompts({
         serverState: undefined,
         midTurnState: 'queued',
         midTurnMessageId: result.messageId ?? messageId,
+        admissionOutcome: undefined,
+        payloadAvailable: undefined,
         isInserting: false,
       };
       queuedPromptsRef.current = next;
@@ -1931,6 +2003,7 @@ export function useQueuedPrompts({
       reportError,
       sessionActions,
       setQueuedPromptFlags,
+      submitPendingPrompt,
       t,
     ],
   );
