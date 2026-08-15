@@ -189,37 +189,73 @@ describe('serve-ab.yml runner routing', () => {
   });
 
   it('wipes only the reused A/B checkout dirs before checking out PR code', () => {
-    const wipe = serveAbDoc.jobs.ab.steps.find(
+    const steps = serveAbDoc.jobs.ab.steps;
+    const wipeIndex = steps.findIndex(
       (s) => s.name === 'Wipe stale workspace before checkout',
     );
-    assert.ok(wipe, 'self-hosted reuse must not bleed one PR into the next');
+    assert.ok(
+      wipeIndex !== -1,
+      'self-hosted reuse must not bleed one PR into the next',
+    );
+    const wipe = steps[wipeIndex];
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
+    assert.notEqual(
+      wipe['continue-on-error'],
+      true,
+      'a failed wipe must fail the job, not bleed into the next PR',
+    );
+    // The sudo-less wipe only works because ownership-restore ran first,
+    // and it must precede the checkouts or it deletes the freshly
+    // checked-out code instead of stale leftovers.
+    const stepIndex = (name) => steps.findIndex((s) => s.name === name);
+    assert.ok(
+      stepIndex('Restore workspace ownership') < wipeIndex,
+      'the wipe depends on ownership-restore running first',
+    );
     // Derive the wipe targets from the checkout steps so this pin cannot
     // drift from the paths the checkouts actually use.
-    const checkoutPaths = serveAbDoc.jobs.ab.steps
-      .filter(
-        (s) =>
-          String(s.uses || '').startsWith('actions/checkout') &&
-          s.with &&
-          s.with.path,
-      )
-      .map((s) => s.with.path);
+    const checkouts = steps.filter((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+    for (const checkout of checkouts) {
+      assert.ok(
+        steps.indexOf(checkout) > wipeIndex,
+        'the wipe must run before every checkout it protects',
+      );
+      assert.ok(
+        checkout.with && checkout.with.path,
+        'every checkout must declare a with.path the wipe can target',
+      );
+    }
+    const checkoutPaths = checkouts.map((s) => s.with.path);
     assert.ok(
       checkoutPaths.length >= 2,
       'expected at least two checkout paths',
     );
-    // A whole-workspace wipe also destroys the shared root .git, forcing the
-    // next job on this runner to re-fetch the full history from github.com —
-    // on the ECS pool's slow link that is the "hung runner" pathology. Pin
-    // exactly one executed (non-comment) rm line covering exactly the
-    // checkout dirs so the narrow scope cannot regress.
-    const expectedRm =
-      'rm -rf ' +
-      checkoutPaths.map((p) => '"${GITHUB_WORKSPACE:?}/' + p + '"').join(' ');
-    const rmLines = wipe.run
+    // A whole-workspace wipe destroys the shared root .git, forcing the
+    // next job on this runner to re-fetch the full history from
+    // github.com — on the ECS pool's slow link that is the "hung runner"
+    // pathology. Pin the wipe step's entire executed script: no extra
+    // removal may be added, and nothing may follow the rm — the script
+    // runs without `set -e`, so a trailing command would mask a failing
+    // rm.
+    const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
-      .filter((l) => l !== '' && !l.startsWith('#') && /\brm\b/.test(l));
-    assert.deepEqual(rmLines, [expectedRm]);
+      .filter((l) => l !== '' && !l.startsWith('#'));
+    assert.equal(executed.length, 2, 'expected `set -uo pipefail` + one rm');
+    assert.equal(executed[0], 'set -uo pipefail');
+    assert.ok(
+      executed[1].startsWith('rm -rf '),
+      'the wipe must be a single rm line',
+    );
+    const expectedTargets = checkoutPaths
+      .map((p) => '"${GITHUB_WORKSPACE:?}/' + p + '"')
+      .sort();
+    assert.deepEqual(
+      executed[1].slice('rm -rf '.length).split(' ').sort(),
+      expectedTargets,
+      'the rm must target exactly the checkout dirs',
+    );
   });
 });
