@@ -2620,14 +2620,14 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.output).not.toContain('should_run=true');
     // The check must query the labels endpoint, not trust the event payload:
     // the label is applied AFTER the triggering event fires. It must also
-    // read the live head SHA and the marker comments (#9219).
+    // read the live head SHA and the marker comments (#9193).
     expect(r.ghCalls).toContain('issues/4242/labels');
     expect(r.ghCalls).toContain('pulls/4242');
     expect(r.ghCalls).toContain('issues/4242/comments');
     // Pin the filter EXPRESSION, not just its substring: the stub does its
     // own author filtering, so a mutated jq that merely contains
     // '.user.login' (e.g. select(.user.login != "")) would otherwise pass
-    // here while silently accepting forged markers in production (#9219).
+    // here while silently accepting forged markers in production (#9193).
     expect(r.ghCalls).toContain(
       'select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot")',
     );
@@ -2640,7 +2640,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     // shape read FALSE once $MARKERS crossed the 64 KB pipe buffer: grep
     // -q exited at the first match, printf died on EPIPE with 141, and
     // pipefail surfaced the producer failure — on busy PRs the skip
-    // silently never fired while the summary claimed the opposite (#9219).
+    // silently never fired while the summary claimed the opposite (#9193).
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
@@ -2656,7 +2656,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     rmSync(r.dir, { recursive: true, force: true });
   });
 
-  it('a push after triage invalidates the pin — the new diff is reviewed (#9219)', () => {
+  it('a push after triage invalidates the pin — the new diff is reviewed (#9193)', () => {
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
@@ -2668,7 +2668,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     rmSync(r.dir, { recursive: true, force: true });
   });
 
-  it('a manually applied on-hold label without a marker never skips (#9219)', () => {
+  it('a manually applied on-hold label without a marker never skips (#9193)', () => {
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
@@ -2679,7 +2679,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     rmSync(r.dir, { recursive: true, force: true });
   });
 
-  it('ignores forged on-hold markers from non-bot comments (#9219)', () => {
+  it('ignores forged on-hold markers from non-bot comments (#9193)', () => {
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
@@ -2699,7 +2699,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     rmSync(r.dir, { recursive: true, force: true });
   });
 
-  it('fails open when the live head SHA is unreadable (#9219)', () => {
+  it('fails open when the live head SHA is unreadable (#9193)', () => {
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
@@ -2711,18 +2711,28 @@ describe('qwen pr review triage-only skip (#7411)', () => {
   });
 
   it('matches the label exactly — a lookalike label must not skip', () => {
+    // A genuine bot marker matching the live head is supplied so the
+    // exact-label match is the ONLY gate failing: relaxing it to substring
+    // matching would let the lookalike label + marker skip the review.
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold-extended'],
+      headSha: 'abc123def456',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
     });
     expect(r.output).toContain('should_run=true');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
   it('still reviews automatically when the label is absent', () => {
+    // A genuine bot marker matching the live head is supplied so the label
+    // gate is the ONLY gate failing: dropping it would let the marker alone
+    // skip the review.
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['type/bug'],
+      headSha: 'abc123def456',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
     });
     expect(r.output).toContain('should_run=true');
     expect(r.output).toContain('auto_review=true');
@@ -2736,6 +2746,18 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     });
     expect(r.output).toContain('should_run=true');
     rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('pins the GH_TOKEN env on the Resolve PR context step (#9193)', () => {
+    // The skip gate's `gh api` reads authenticate through this step-level
+    // env; the `run` block never references it textually, so deleting the
+    // line passes every behavioural test (the harness supplies its own
+    // GH_TOKEN) while the reads fail unauthenticated in production.
+    const doc = parse(workflow);
+    const step = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Resolve PR context',
+    );
+    expect(step.env?.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
   });
 
   it('never skips an explicit /review ask, whatever the labels say', () => {

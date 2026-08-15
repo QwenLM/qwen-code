@@ -6042,10 +6042,12 @@ describe('triage skill non-functional routing (#7411)', () => {
     expect(section).toContain('explicit triggers bypass the label check');
   });
 
-  it('pins the skip to the triaged head SHA with a marker comment (#9219)', () => {
+  it('pins the skip to the triaged head SHA with a marker comment (#9193)', () => {
     const section = stage1f();
     // The label alone would skip review for every future push; the marker
     // pins the skip to the triaged head so a later push re-enables review.
+    // The marker posts through the author-scoped upsert helper (never a bare
+    // `gh pr comment`) so a re-run PATCHes the existing pin in place.
     expect(section).toContain(
       "printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md",
     );

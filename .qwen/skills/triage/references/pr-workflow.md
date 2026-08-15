@@ -294,13 +294,19 @@ classification evidence — read the diff.
 1. Apply the existing label (never create one) AND pin the skip to the
    triaged head SHA with a marker comment — the review lane honours the
    label only while this pin matches the live head, so a later push
-   re-enables review automatically (#9219):
+   re-enables review automatically (#9193):
 
 ```bash
-gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
 printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md
 .github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' /tmp/qwen-triage-on-hold-marker.md
+gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
 ```
+
+   Fail closed, in this order: post the marker FIRST. If the upsert fails
+   (retries exhausted), stop — do not apply the label and do not post the
+   triage-only outcome. A label without the pin would skip review for every
+   future push, and the outcome comment's promise would post over a skip
+   that is no longer bounded to the triaged head.
 
    `<HEAD_SHA>` is the head commit you triaged — the same SHA quoted in the
    Stage 1 "Reviewed at" footer. Post the marker through the author-scoped
@@ -352,7 +358,9 @@ naturally with a substantive change, consider folding it in there.
 
 这是一个行为中性的维护性改动（<一句话证据，如"仅 N 个文件的注释/JSDoc 修正">），
 因此走轻量 triage-only 路径，不再自动进入完整评审：已添加 `status/on-hold`
-标签，不会自动发布评审结论。合并不受阻塞——maintainer 可随时用
+标签，不会自动发布评审结论<例外：当触发动作是 `ready_for_review`（PR 刚被标记为就绪）时，
+可能已有一个评审运行在路上——两条通道无法互相同步，此时改说"与该 pin 竞争的这次运行
+仍可能发布评审结论；pin 对后续运行生效"，不要给出绝对承诺>。合并不受阻塞——maintainer 可随时用
 `@qwen-code /review` 发起完整评审；移除该标签后，下次推送会恢复自动评审。
 如果这项清理适合随某个实质性改动一起提交，也可以考虑合并进去。
 
