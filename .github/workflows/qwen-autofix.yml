@@ -1512,7 +1512,12 @@ jobs:
           export GIT_CONFIG_COUNT=0
           export GIT_TERMINAL_PROMPT=0
           export GIT_CONFIG_SYSTEM=/dev/null
-          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+          # GATE_TMPDIR defaults to RUNNER_TEMP (host runs); the container sets it to a
+          # writable scratch mount, because there the staged scripts are mounted
+          # READ-ONLY — bash reads a script incrementally, so a writable copy of the
+          # running gate would let the branch code it executes rewrite its own remaining
+          # bytes and hand back a forged pass.
+          export GIT_CONFIG_GLOBAL="${GATE_TMPDIR:-${RUNNER_TEMP}}/autofix-gate-gitconfig"
           : > "${GIT_CONFIG_GLOBAL}"
           git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
           if [ -s /etc/gitconfig ]; then

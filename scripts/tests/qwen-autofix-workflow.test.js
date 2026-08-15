@@ -6267,16 +6267,22 @@ exit 1
     );
     expect(passedEnv.sort()).toEqual([
       'BRANCH',
+      'CI',
       'FOOTPRINT_ENFORCE',
+      'GATE_TMPDIR',
       'GITHUB_OUTPUT',
       'HOME',
       'RUNNER_TEMP',
       'WORKDIR',
     ]);
-    // …and the two it does pass by those names are REDIRECTED, not the host's.
+    // …and the ones it does pass by those names are REDIRECTED, not the host's.
     expect(dockerRun).toContain('--env GITHUB_OUTPUT="${VERDICT}"');
-    expect(dockerRun).toContain('--env RUNNER_TEMP="${CTEMP}"');
-    expect(dockerRun).toContain('--env HOME="${CTEMP}"');
+    expect(dockerRun).toContain('--env RUNNER_TEMP="${CBIN}"');
+    expect(dockerRun).toContain('--env HOME="${CRW}"');
+    // CI=true is set on every host step by Actions; without it the branch's
+    // own suites take their non-CI path (18 TUI tests that are suppressed on
+    // CI as timing-flaky would run, and a flake is charged to the round).
+    expect(dockerRun).toContain('--env CI=true');
     expect(dockerRun).not.toContain('CI_DEV_BOT_PAT');
     expect(dockerRun).not.toContain('GITHUB_ENV');
     // Only three paths are mounted: the workspace, the round's workdir, and
@@ -6286,12 +6292,28 @@ exit 1
       (m) => m[1],
     );
     expect(mounts.sort()).toEqual([
-      '${CTEMP}',
+      '${CBIN}',
+      '${CRW}',
       '${GITHUB_WORKSPACE}',
       '${WORKDIR}',
     ]);
+    // The staged scripts are READ-ONLY: bash reads a script incrementally, so
+    // a writable copy would let the branch code the gate executes rewrite the
+    // running gate's remaining bytes and hand back a forged pass — the exit
+    // code would stop being the unforgeable half. Everything the gate
+    // legitimately writes goes to the separate rw scratch mount.
+    expect(dockerRun).toContain('--volume "${CBIN}:${CBIN}:ro"');
+    expect(dockerRun).toContain('--volume "${CRW}:${CRW}"');
     expect(dockerRun).toContain('--user "$(id -u):$(id -g)"');
     expect(dockerRun).toContain('--rm');
+    // --rm only fires on a normal exit: a step timeout / job cap / cancel
+    // kills the docker CLIENT and would leave the container running as the
+    // runner uid with rw mounts on the shared workspace. Name it so the
+    // pool's qwen-code-* janitors can see it, and tear it down explicitly.
+    expect(dockerRun).toContain('--name "${GATE_CONTAINER}"');
+    expect(wrapper).toMatch(/GATE_CONTAINER="qwen-code-gate-/);
+    expect(wrapper).toContain('docker rm -f "${GATE_CONTAINER}"');
+    expect(wrapper).toMatch(/trap teardown EXIT INT TERM/);
 
     // Behavioural: the verdict translation is the security-critical half —
     // branch code inside the container CAN append to the mounted verdict
@@ -6327,14 +6349,20 @@ exit 1
     expect(
       runTranslate(0, ['committed=true', 'outcome=fixed', 'verified_head=abc']),
     ).toBe('committed=true\noutcome=fixed\nverified_head=abc');
-    // A FORGED pass on a failing gate is refused: exit 1 forces failed, and
-    // the routing flags (which only pick repair vs handoff, never a push)
-    // carry through. This is the R5-5 forgery the container closes.
+    // A real rejection (the gate wrote failed, then exited 1) carries through
+    // with its routing flags, which only pick repair vs handoff, never a push.
     expect(
       runTranslate(1, ['outcome=fixed', 'outcome=failed', 'retryable=true']),
     ).toBe('outcome=failed\nretryable=true');
-    // Even a verdict file that ONLY claims a pass cannot survive exit 1.
-    expect(runTranslate(1, ['outcome=fixed'])).toBe('outcome=failed');
+    // A FORGED pass cannot survive exit 1 — `fixed` is accepted only on exit
+    // 0 — and with no genuine `failed` in the file the outcome stays UNSET so
+    // the round retries rather than being handed off as evaluated.
+    expect(runTranslate(1, ['outcome=fixed'])).toBe('');
+    // The gate's deliberate exit-1-WITHOUT-verdict crash paths (the baseline
+    // A/B and bite tree-restore failures) must keep reaching the gate-crashed
+    // retry: synthesizing `failed` there would advance the watermark and hand
+    // the item off for good.
+    expect(runTranslate(1, [])).toBe('');
     // Exit 0 with no verdict is a crash, not a silent success: outcome stays
     // unset so 'Finalize verification' retries on the next scan.
     expect(runTranslate(0, [])).toBe('');
@@ -8552,8 +8580,12 @@ exit 1
     // host, and a branch-authored `git config --global` dies with the run
     // instead of poisoning the next one.
     for (const gate of verificationGateBodies) {
+      // GATE_TMPDIR defaults to RUNNER_TEMP on the host and points at the
+      // container's writable scratch when the gate runs containerized (its
+      // staged scripts are mounted read-only, so the throwaway config cannot
+      // live beside them).
       const globalRedirect = gate.indexOf(
-        'export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"',
+        'export GIT_CONFIG_GLOBAL="${GATE_TMPDIR:-${RUNNER_TEMP}}/autofix-gate-gitconfig"',
       );
       expect(gate).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
       expect(globalRedirect).toBeGreaterThan(-1);

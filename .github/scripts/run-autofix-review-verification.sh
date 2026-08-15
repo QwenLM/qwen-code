@@ -39,7 +39,12 @@ unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
 export GIT_CONFIG_COUNT=0
 export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_SYSTEM=/dev/null
-export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+# GATE_TMPDIR defaults to RUNNER_TEMP (host runs); the container sets it to a
+# writable scratch mount, because there the staged scripts are mounted
+# READ-ONLY — bash reads a script incrementally, so a writable copy of the
+# running gate would let the branch code it executes rewrite its own remaining
+# bytes and hand back a forged pass.
+export GIT_CONFIG_GLOBAL="${GATE_TMPDIR:-${RUNNER_TEMP}}/autofix-gate-gitconfig"
 : > "${GIT_CONFIG_GLOBAL}"
 git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
 if [ -s /etc/gitconfig ]; then
@@ -438,7 +443,7 @@ sensitive_class_of() {
       # the class ledger — fail CLOSED as its own class instead of open.
       echo 'suspicious-path' ;;
     .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml | .github/workflows/qwen-pr-safety-precheck.yml) echo 'autofix-loop' ;;
-    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs | .github/scripts/pr-safety-precheck.mjs) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh | .github/scripts/run-autofix-gate-container.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs | .github/scripts/pr-safety-precheck.mjs) echo 'autofix-loop' ;;
     .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
     .github/scripts/*) echo 'ci-scripts' ;;
     .github/*) echo 'gh-metadata' ;;

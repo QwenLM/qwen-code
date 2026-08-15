@@ -555,8 +555,10 @@ describe('package scripts', () => {
       );
     }
 
+    // The gate runs inside an ephemeral container (#9089); the step invokes
+    // the wrapper, which invokes the gate script in the container.
     expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
     );
   });
 });

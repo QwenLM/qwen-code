@@ -37,6 +37,21 @@ VERDICT="${WORKDIR}/gate-verdict"
 # steps use, none of which the gate needs and none of which branch code may
 # reach or tamper with.
 CTEMP="${RUNNER_TEMP}/gate-container-temp"
+# Split in two: the staged scripts are mounted READ-ONLY (bash reads a script
+# incrementally, so a writable copy of the running gate would let the branch
+# code the gate itself executes rewrite its own remaining bytes and hand back a
+# forged pass — the exit code would no longer be unforgeable), and a separate
+# scratch mount carries everything the gate legitimately writes ($HOME, the
+# throwaway git config via GATE_TMPDIR).
+CBIN="${CTEMP}/bin"
+CRW="${CTEMP}/rw"
+# Named so the pool's stale-container janitors (name=qwen-code-*) can see it,
+# and torn down explicitly: --rm only fires on a normal exit, but a step
+# timeout / job cap / cancel kills the docker CLIENT and leaves the container
+# running as the runner uid with rw mounts on the shared workspace.
+GATE_CONTAINER="qwen-code-gate-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+teardown() { docker rm -f "${GATE_CONTAINER}" > /dev/null 2>&1 || true; }
+trap teardown EXIT INT TERM
 
 if [[ -z "${GATE_IMAGE:-}" ]]; then
   echo "::error::GATE_IMAGE is empty — the sandbox image did not resolve; refusing to run the gate on the host."
@@ -48,10 +63,10 @@ fi
   exit 125
 }
 rm -rf "${CTEMP}"
-mkdir -p "${CTEMP}" || exit 125
+mkdir -p "${CBIN}" "${CRW}" || exit 125
 for staged in run-autofix-review-verification.sh check-settings-schema.sh \
   check-autofix-contracts.sh resolve-owning-packages.sh; do
-  cp "${RUNNER_TEMP}/${staged}" "${CTEMP}/${staged}" || {
+  cp "${RUNNER_TEMP}/${staged}" "${CBIN}/${staged}" || {
     echo "::error::could not stage ${staged} for the gate container"
     exit 125
   }
@@ -62,20 +77,23 @@ done
 # root-owned files — the same failure the job's ownership-restore step exists
 # for. --env is an explicit allowlist: anything not named here is simply
 # absent inside, which is the whole point.
-docker run --rm \
+docker run --rm --name "${GATE_CONTAINER}" \
   --user "$(id -u):$(id -g)" \
   --workdir "${GITHUB_WORKSPACE}" \
   --volume "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
   --volume "${WORKDIR}:${WORKDIR}" \
-  --volume "${CTEMP}:${CTEMP}" \
-  --env HOME="${CTEMP}" \
+  --volume "${CBIN}:${CBIN}:ro" \
+  --volume "${CRW}:${CRW}" \
+  --env HOME="${CRW}" \
   --env BRANCH="${BRANCH}" \
   --env WORKDIR="${WORKDIR}" \
-  --env RUNNER_TEMP="${CTEMP}" \
+  --env RUNNER_TEMP="${CBIN}" \
+  --env GATE_TMPDIR="${CRW}" \
   --env GITHUB_OUTPUT="${VERDICT}" \
   --env FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+  --env CI=true \
   "${GATE_IMAGE}" \
-  bash "${CTEMP}/run-autofix-review-verification.sh"
+  bash "${CBIN}/run-autofix-review-verification.sh"
 GATE_RC=$?
 
 echo "🧱 gate container exited ${GATE_RC}"
@@ -110,14 +128,21 @@ case "${GATE_RC}" in
     fi
     ;;
   1)
-    # The gate's own deterministic rejection: reject_fix always exits 1.
-    # Forced to failed regardless of the file, so a forged `outcome=fixed`
-    # cannot survive a red gate. The routing flags are forwarded because both
-    # branches they select (same-run repair, base-update handoff) stop short
-    # of a push.
-    echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-    [[ "${PREEXISTING}" == 'true' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
-    [[ "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
+    # A deterministic rejection: reject_fix writes outcome=failed to the file
+    # and exits 1. Take `failed` only from the FILE — the gate also has
+    # exit-1 paths that deliberately write NO verdict (the baseline-A/B and
+    # bite tree-restore failures), where an EVALUATED rejection would advance
+    # the watermark and hand the item off for good, and an unset outcome is
+    # what routes them to the gate-crashed retry instead. A forged
+    # `outcome=fixed` still cannot pass: `fixed` is accepted only on exit 0,
+    # so here it leaves the outcome unset and the round retries.
+    if [[ "${OUTCOME}" == 'failed' ]]; then
+      echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+      [[ "${PREEXISTING}" == 'true' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
+      [[ "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
+    else
+      echo "::warning::gate container exited 1 without a deterministic verdict (outcome='${OUTCOME}') — reporting as a gate crash so the next scan retries."
+    fi
     ;;
   *)
     # Docker itself failed (125/126/127), the container was killed (137), or
