@@ -6236,12 +6236,14 @@ exit 1
     expect(divBlock).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'autofix-diverge-'));
     // Markers carry round= (informational) and run= (GITHUB_RUN_ID) — deduped
-    // and ordered on run=, the per-workflow-run id: a retry re-posts one run's
-    // marker (same run → collapses) while distinct address runs have distinct,
-    // increasing run ids. round=/eval-watermark are NOT a safe identity — a
-    // state-triggered lane freezes both — so two distinct runs can share
-    // round= yet must still count twice. Each row also carries an author +
-    // created_at (the read filters to the bot and to post-base-update markers).
+    // on run= and ordered on measured= (the prepare-time instant; created_at
+    // fallback for legacy markers), the per-workflow-run id: a retry or a
+    // failed job's re-run re-posts one run's marker (same run → collapses to
+    // its latest measurement) while distinct address runs have distinct run
+    // ids. round=/eval-watermark are NOT a safe identity — a state-triggered
+    // lane freezes both — so two distinct runs can share round= yet must still
+    // count twice. Each row also carries an author + created_at (the read
+    // filters to the bot and to markers measured after the cutoff).
     const marker = (
       src,
       test,
@@ -6500,6 +6502,79 @@ exit 1
             run: 1001,
             measured: '2026-01-01T00:09:00Z',
           }),
+        ],
+      }),
+    ).toBe('false 0');
+    // Mirror of that case for the FAILURE path's inert marker: a re-run
+    // attempt that crashed BEFORE prepare posts over=false with NO measured=
+    // (MEASURED_AT empty), so its fallback is the comment's created_at —
+    // post-run, hence newer than the same run's prepare-time measured= from
+    // its earlier attempt. The collapse must prefer an explicit measured=
+    // over that fallback, or the inert marker erases the run's real
+    // over-budget count (#9192 R3-1).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 measured=2026-01-01T00:01:00Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
+    // Same defect at the handoff threshold: two real over-budget priors, the
+    // second erased by the inert marker — without the explicit-measured
+    // preference the count drops to 1 and the divergence handoff (div=2) is
+    // suppressed while the diff keeps climbing.
+    expect(
+      diverge({
+        src: 500,
+        test: 300,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T01:30:00Z',
+            body: '<!-- autofix-growth-now src=300 test=200 over=true round=1 run=1001 measured=2026-01-01T00:00:30Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=400 test=250 over=true round=2 run=1002 measured=2026-01-01T00:01:00Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=2 run=1002 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('true 2');
+    // …and two LEGACY markers for the same run (neither carries measured=)
+    // still collapse on the created_at fallback: the explicit-measured
+    // preference must not disturb fallback-vs-fallback ordering.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=300 test=150 over=true round=1 run=1001 key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=80 test=40 over=false round=1 run=1001 key=W1 -->',
+          },
         ],
       }),
     ).toBe('false 0');

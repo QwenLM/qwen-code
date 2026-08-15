@@ -4655,7 +4655,12 @@ jobs:
           # collapses to its LATEST measurement — and that collapse happens
           # BEFORE the over/window/cutoff filters, or a re-run that came back
           # under budget would still be represented by its stale over=true
-          # attempt. Every distinct address run has a fresh run_id.
+          # attempt. Within the collapse an explicit measured= beats the
+          # created_at fallback: a re-run attempt that crashed BEFORE prepare
+          # posts an inert over=false marker with no measured=, whose fallback
+          # (post-run) timestamp would otherwise outdate and erase the same
+          # run's real prepare-time measurement. Every distinct address run
+          # has a fresh run_id.
           # round=/eval-watermark are NOT a safe identity — a state-triggered
           # lane (a persistent merge conflict selects the PR every scan with no
           # new evaluable feedback) freezes both NEWEST and ROUND, so distinct
@@ -4682,8 +4687,8 @@ jobs:
             read -r OVER_ROUNDS_PRIOR PREV_SUM < <(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg cutoff "${GROWTH_NOW_CUTOFF}" --arg curr "${GITHUB_RUN_ID}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) (?:measured=([^ ]+) )?key=([^ ]+) -->") ] | .[]
-                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), measured: (.[5] // ($c.created_at // "")), win: .[6]} ]
-              | group_by(.run) | map(max_by(.measured))
+                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), measured: (.[5] // ($c.created_at // "")), explicit: (.[5] != null), win: .[6]} ]
+              | group_by(.run) | map(max_by([.explicit, .measured]))
               | map(select(.win == $key and .over == "true"))
               | map(select(.run != ($curr | tonumber)))
               | map(select($cutoff == "" or (.measured > $cutoff)))
