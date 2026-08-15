@@ -2128,6 +2128,25 @@ function enrichTerminalTurnStatus(
   };
 }
 
+/**
+ * Merge an overlay terminal with the child's persisted record for the same
+ * prompt. A bridge-synthesized error terminal (prompt deadline, teardown
+ * flush) is superseded on the poll surface once the child has settled and
+ * persisted a non-error outcome: the deadline releases the caller without
+ * killing the agent, so the persisted outcome is what actually happened.
+ * Every other combination keeps the overlay outcome and enriches it with
+ * persisted text.
+ */
+function mergeTerminalWithPersisted(
+  terminal: BridgeTurnStatus,
+  persisted: BridgeTurnStatus,
+): BridgeTurnStatus {
+  if (terminal.state === 'error' && persisted.state !== 'error') {
+    return persisted;
+  }
+  return enrichTerminalTurnStatus(terminal, persisted);
+}
+
 function latestTerminalTurnStatus(
   entry: SessionEntry,
 ): BridgeTurnStatus | undefined {
@@ -10163,13 +10182,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         : undefined;
       if (promptId !== undefined) {
         if (terminal && persisted) {
-          return enrichTerminalTurnStatus(terminal, persisted);
+          return mergeTerminalWithPersisted(terminal, persisted);
         }
         if (terminal) return terminal;
         if (persisted) return persisted;
       } else {
         if (terminal && persisted && terminal.promptId === persisted.promptId) {
-          return enrichTerminalTurnStatus(terminal, persisted);
+          return mergeTerminalWithPersisted(terminal, persisted);
         }
         if (terminal && persisted) {
           return (terminal.endedAt ?? 0) >= (persisted.endedAt ?? 0)

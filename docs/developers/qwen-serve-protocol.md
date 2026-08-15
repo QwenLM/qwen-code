@@ -2470,7 +2470,10 @@ If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` noti
 
 When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
 configured server deadline. Expiry emits a correlated `turn_error` with
-`errorKind: "prompt_deadline_exceeded"`.
+`errorKind: "prompt_deadline_exceeded"`. The deadline releases the caller
+without killing the agent; if the agent later settles, turn-status polls for
+that `promptId` return the settled transcript outcome instead of the deadline
+error.
 
 ### `POST /session/:id/cancel`
 

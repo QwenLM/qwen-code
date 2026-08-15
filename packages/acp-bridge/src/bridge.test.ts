@@ -15148,6 +15148,147 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('prefers the settled transcript outcome over a deadline error overlay', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+        cancelImpl: () => new Promise<void>(() => {}),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? {
+                v: 1,
+                sessionId: 'ignored',
+                turnResult: {
+                  promptId: 'prompt-deadline-settled',
+                  state: 'completed',
+                  stopReason: 'end_turn',
+                  endedAt: 1,
+                  resultText: 'late but real answer',
+                },
+              }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-deadline-settled', deadlineMs: 50 },
+      );
+      await expect(p1).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+
+      // The child settled after the deadline latch: both poll shapes return
+      // the persisted outcome, never the error overlay enriched with a
+      // successful resultText.
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-deadline-settled',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        stopReason: 'end_turn',
+        resultText: 'late but real answer',
+      });
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-deadline-settled',
+        resultText: 'late but real answer',
+      });
+      await bridge.shutdown();
+    });
+
+    it('keeps the deadline error poll until the child settles', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+        cancelImpl: () => new Promise<void>(() => {}),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? { v: 1, sessionId: 'ignored', turnResult: null }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-deadline-pending', deadlineMs: 50 },
+      );
+      await expect(p1).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+
+      // No persisted record yet: the overlay deadline error stands, and it
+      // must not be enriched with any resultText.
+      const status = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-deadline-pending',
+      );
+      expect(status).toMatchObject({
+        state: 'error',
+        promptId: 'prompt-deadline-pending',
+      });
+      expect(status?.error).toMatchObject({
+        code: 'prompt_deadline_exceeded',
+      });
+      expect(status?.resultText).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    it('keeps the overlay error when the persisted record is also an error', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+        cancelImpl: () => new Promise<void>(() => {}),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? {
+                v: 1,
+                sessionId: 'ignored',
+                turnResult: {
+                  promptId: 'prompt-both-error',
+                  state: 'error',
+                  error: { message: 'child exploded' },
+                  endedAt: 1,
+                },
+              }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-both-error', deadlineMs: 50 },
+      );
+      await expect(p1).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+
+      // Both sources disagree on the error text only; the caller-facing
+      // deadline terminal stays authoritative.
+      const status = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-both-error',
+      );
+      expect(status).toMatchObject({ state: 'error' });
+      expect(status?.error).toMatchObject({
+        code: 'prompt_deadline_exceeded',
+      });
+      await bridge.shutdown();
+    });
+
     it('keeps the trusted prompt display projection after persistence', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
