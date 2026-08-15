@@ -1527,8 +1527,15 @@ export const useSlashCommandProcessor = (
             resolvedCommandPath[0] ||
             trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
+          // The built-in /advisor is skipped by identity (kind + name) so a
+          // user-defined command shadowing the name is still recorded like
+          // any other custom command.
+          const isBuiltInAdvisor =
+            primaryCommand === 'advisor' &&
+            commandToExecute?.kind === CommandKind.BUILT_IN;
           const shouldRecord =
             !delegatedToRecursiveInvocation &&
+            !isBuiltInAdvisor &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {

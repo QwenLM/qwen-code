@@ -14957,6 +14957,9 @@ describe('Session', () => {
       });
 
       it('keeps replay records for other ACP slash-command messages', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
         let finish!: () => void;
         const delayed = new Promise<void>((resolve) => {
           finish = resolve;
@@ -14989,6 +14992,7 @@ describe('Session', () => {
 
         await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
 
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
         );

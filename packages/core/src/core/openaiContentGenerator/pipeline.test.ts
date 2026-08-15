@@ -4369,6 +4369,41 @@ describe('ContentGenerationPipeline', () => {
       const body = pipeline['buildResponseFormat'](jsonModeRequest);
       expect(body.response_format).toEqual({ type: 'json_object' });
     });
+
+    it('falls back to json_object when required is partial (goalJudge shape)', () => {
+      const body = pipeline['buildResponseFormat']({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              ok: { type: 'boolean' },
+              note: { type: 'string' },
+            },
+            required: ['ok'],
+          },
+        },
+      });
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
+
+    it('falls back to json_object when a property lacks a type', () => {
+      const body = pipeline['buildResponseFormat']({
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: { ok: {} },
+            required: ['ok'],
+          },
+        },
+      });
+      expect(body.response_format).toEqual({ type: 'json_object' });
+    });
   });
 
   describe('buildRequest', () => {

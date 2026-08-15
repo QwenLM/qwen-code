@@ -57,7 +57,6 @@ export const SLASH_COMMANDS_SKIP_RECORDING: ReadonlySet<string> = new Set([
   'delete',
   'branch',
   'btw',
-  'advisor',
   'history',
 ]);
 
