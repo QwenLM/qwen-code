@@ -12,6 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   ABSENT,
+  UNHASHABLE,
   changedSince,
   readLocalCache,
   sliceDiffByLines,
@@ -44,10 +45,23 @@ describe('changedSince', () => {
     expect(changed.sort()).toEqual(['gone.ts', 'mod.ts', 'new.ts']);
   });
 
-  it('a deletion recorded as absent matches an absent deletion', () => {
+  it('UNHASHABLE never compares equal — not even to itself', () => {
+    // "Could not capture it twice" is not "unchanged": a submodule pointer,
+    // a mangled filename, an unreadable file all re-enter scope every round.
+    expect(changedSince({ sub: UNHASHABLE }, { sub: UNHASHABLE })).toEqual([
+      'sub',
+    ]);
+  });
+
+  it('a legacy absent identity still compares as an ordinary stable value', () => {
     expect(changedSince({ 'del.ts': ABSENT }, { 'del.ts': ABSENT })).toEqual(
       [],
     );
+  });
+
+  it('prototype-member names behave as ordinary keys in the comparison', () => {
+    expect(changedSince({ toString: 'h1' }, { toString: 'h1' })).toEqual([]);
+    expect(changedSince({ toString: 'h1' }, {})).toEqual(['toString']);
   });
 });
 
@@ -108,6 +122,15 @@ describe('readLocalCache', () => {
         target: 't',
         headSha: null,
         files: null,
+        stateId: 's',
+      }),
+      // typeof [] === 'object': an array-shaped map must refuse, not pass
+      // with index-string keys.
+      JSON.stringify({
+        v: 1,
+        target: 't',
+        headSha: null,
+        files: ['blob-a'],
         stateId: 's',
       }),
     ]) {

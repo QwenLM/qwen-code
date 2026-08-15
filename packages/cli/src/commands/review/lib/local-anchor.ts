@@ -24,19 +24,30 @@
 // degrades to the full capture, with the reason said out loud.
 
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitOpt } from './git.js';
+import { gitOpt, gitWithInput } from './git.js';
 
-/** Per-file content ids. `absent` marks a deletion the diff still shows. */
+/** Per-file identity for a path with NO file: a deletion the diff still shows.
+ *  Stable across rounds on purpose — a deletion reviewed clean stays clean. */
 export const ABSENT = 'absent';
+/**
+ * Per-file identity for a path whose state CANNOT be captured: a directory
+ * (an embedded repo / submodule gitlink above all), a FIFO, an unreadable
+ * file, a plan path git C-quoted into something no stat can find. Never
+ * compares equal — not even to itself — so such a path re-enters the scope
+ * every round. Over-review is the affordable direction; the previous cut
+ * mapped all of these to `absent`, where a submodule pointer change compared
+ * "unchanged" forever and silently left incremental scope.
+ */
+export const UNHASHABLE = 'unhashable';
 
 export interface LocalCacheCandidate {
   v: 1;
   target: string;
   /** null on an unborn HEAD (repo with no commits). */
   headSha: string | null;
-  /** path → blob id (or `absent`), for every file the plan covered. */
+  /** path → `<mode>:<blob>` identity, for every file the plan covered. */
   files: Record<string, string>;
   /** Content-addressed id of the whole reviewed state, for display and logs. */
   stateId: string;
@@ -52,27 +63,76 @@ export interface LocalReviewCache extends LocalCacheCandidate {
 }
 
 /**
- * Hash the current worktree content of `paths`, batched.
+ * The per-file identity of `paths`' current worktree state, batched.
  *
- * `git hash-object` computes the blob id git WOULD store — content-addressed,
- * indifferent to mtime, mode bits and the index, which is exactly the identity
- * "the bytes the previous round reviewed" needs. Non-files (deleted, a
- * directory, a dangling symlink) map to `absent`; a file git refuses to hash
- * maps to `absent` too, which reads as "changed" downstream — the direction
- * that reviews rather than skips.
+ * An identity is `<mode>:<blob>` — `git hash-object` computes the blob id git
+ * WOULD store (content-addressed, indifferent to mtime and the index), and
+ * the mode prefix carries what content alone cannot: an exec-bit flip or a
+ * file↔symlink typechange is its own diff lines, so identical bytes under a
+ * different mode are NOT an identical change. Symlinks hash their link text
+ * at 120000, exactly what `git diff` renders. Anything that cannot be
+ * captured faithfully is `UNHASHABLE`, which never compares equal.
  */
 export function hashWorktreeFiles(
   repoRoot: string,
   paths: readonly string[],
 ): Record<string, string> {
-  const out: Record<string, string> = {};
+  // Null prototype: a file legally named `__proto__` must store and read as
+  // an ordinary own key. On a plain object the assignment hits the inherited
+  // setter (a silent no-op) and the read returns Object.prototype — the file
+  // could never enter a delta in any round.
+  const out: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   const hashable: string[] = [];
+  const modes: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   for (const p of paths) {
+    // `lstat`, not `stat`: a symlink's identity is its LINK TEXT at mode
+    // 120000 — exactly what `git diff` renders — not the target's bytes.
+    // Following the link let a retargeted symlink whose new target happened
+    // to hold equal content compare "unchanged".
+    let st;
     try {
-      if (statSync(join(repoRoot, p)).isFile()) hashable.push(p);
-      else out[p] = ABSENT;
+      st = lstatSync(join(repoRoot, p));
     } catch {
-      out[p] = ABSENT;
+      // No stat-able file. A genuine deletion lands here — but so does a
+      // plan path git C-quoted out of an invalid-UTF-8 filename, whose REAL
+      // file exists and changes. The two are indistinguishable at this
+      // layer, and treating both as a stable "absent" identity let the
+      // second kind compare unchanged forever. UNHASHABLE re-reviews both
+      // every round; a deletion's diff section is small, and over-review is
+      // the affordable direction.
+      out[p] = UNHASHABLE;
+      continue;
+    }
+    if (st.isSymbolicLink()) {
+      try {
+        const target = readlinkSync(join(repoRoot, p));
+        const oid = gitWithInput(Buffer.from(target, 'utf8'), [
+          '-C',
+          repoRoot,
+          'hash-object',
+          '--stdin',
+        ]);
+        out[p] = `120000:${oid}`;
+      } catch {
+        out[p] = UNHASHABLE;
+      }
+    } else if (st.isFile()) {
+      // The mode is part of the identity: `git diff` reports an exec-bit
+      // flip as its own lines, so identical bytes under a flipped bit are
+      // NOT an identical change. (On filesystems without a real exec bit
+      // the mode reads constant, which only ever compares equal — safe.)
+      modes[p] = (st.mode & 0o111) !== 0 ? '100755' : '100644';
+      hashable.push(p);
+    } else {
+      // Directories (embedded repos, submodule gitlinks the pinned diff
+      // flags deliberately keep visible), FIFOs, sockets: not capturable.
+      out[p] = UNHASHABLE;
     }
   }
   const BATCH = 200;
@@ -81,14 +141,15 @@ export function hashWorktreeFiles(
     const res = gitOpt('-C', repoRoot, 'hash-object', '--', ...batch);
     const lines = res === null ? null : res.split('\n');
     if (lines !== null && lines.length === batch.length) {
-      batch.forEach((p, j) => (out[p] = lines[j]));
+      batch.forEach((p, j) => (out[p] = `${modes[p]}:${lines[j]}`));
       continue;
     }
     // The batch failed as a unit (one unreadable file fails them all) —
     // re-try one by one so a single pathological file costs itself, not
     // its 199 neighbours.
     for (const p of batch) {
-      out[p] = gitOpt('-C', repoRoot, 'hash-object', '--', p) ?? ABSENT;
+      const oid = gitOpt('-C', repoRoot, 'hash-object', '--', p);
+      out[p] = oid === null ? UNHASHABLE : `${modes[p]}:${oid}`;
     }
   }
   return out;
@@ -137,11 +198,21 @@ export function readLocalCache(path: string): LocalReviewCache | null {
     (c.headSha !== null && typeof c.headSha !== 'string') ||
     typeof c.stateId !== 'string' ||
     typeof c.files !== 'object' ||
-    c.files === null
+    c.files === null ||
+    // `typeof [] === 'object'`: an array-shaped files map would pass with
+    // index-string keys and silently mark every real path changed instead
+    // of taking the loud refusal this validator promises.
+    Array.isArray(c.files)
   ) {
     return null;
   }
-  const files: Record<string, string> = {};
+  // Null prototype for the same `__proto__`-as-a-filename reason as
+  // `hashWorktreeFiles` — JSON.parse already made the keys own properties;
+  // keep them own properties here too.
+  const files: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   for (const [k, v] of Object.entries(c.files as Record<string, unknown>)) {
     if (typeof v !== 'string') return null;
     files[k] = v;
@@ -167,12 +238,22 @@ export function changedSince(
   cached: Record<string, string>,
   current: Record<string, string>,
 ): string[] {
+  // `Object.hasOwn`, never `in` or bare reads: both maps can be JSON-parsed
+  // or model-written, and a path named after any Object.prototype member
+  // (`toString`, `constructor`) must behave as an ordinary key.
+  const eq = (a: string | undefined, b: string | undefined): boolean =>
+    a !== undefined &&
+    a === b &&
+    // UNHASHABLE never equals — not even itself. It marks state that could
+    // not be captured, and "could not capture it twice" is not "unchanged".
+    a !== UNHASHABLE;
   const out: string[] = [];
-  for (const [path, hash] of Object.entries(current)) {
-    if (cached[path] !== hash) out.push(path);
+  for (const path of Object.keys(current)) {
+    const cachedId = Object.hasOwn(cached, path) ? cached[path] : undefined;
+    if (!eq(cachedId, current[path])) out.push(path);
   }
   for (const path of Object.keys(cached)) {
-    if (!(path in current)) out.push(path);
+    if (!Object.hasOwn(current, path)) out.push(path);
   }
   return out;
 }

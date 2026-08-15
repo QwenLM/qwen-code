@@ -10,7 +10,7 @@
 // one import hop of dependents; and every gate (model, HEAD, malformed cache)
 // degrades to the FULL capture with the reason said out loud, never to a skip.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
@@ -24,7 +24,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureLocalCommand } from './capture-local.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
-import type { IncrementalScope } from './lib/incremental.js';
+import type { IncrementalScope } from './lib/report.js';
+
+// The refusal contract is "every reason is said out loud" and SKILL.md
+// branches on specific stderr strings — so stderr is part of the interface
+// under test, recorded here rather than left to flow to the real terminal.
+const stderrLines: string[] = [];
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn((line: string) => {
+    stderrLines.push(line);
+  }),
+  writeStderrLineSafe: vi.fn(),
+}));
 
 let repo: string;
 let cwd: string;
@@ -41,6 +53,7 @@ function write(rel: string, content: string): void {
 }
 
 beforeEach(() => {
+  stderrLines.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-loc-inc-')));
   cwd = process.cwd();
   process.chdir(repo);
@@ -205,5 +218,143 @@ describe('capture-local — incremental local rounds', () => {
     const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
     expect(diff).toContain('new-untracked');
     expect(diff).not.toContain('bystander');
+  });
+});
+
+describe('capture-local — identity soundness and refusal contract', () => {
+  it('an exec-bit flip alone is a change — bytes equal, mode not', () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    execFileSync('chmod', ['+x', join(repo, CHANGED)]);
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+  });
+
+  it('a retargeted symlink whose new target holds equal bytes is a change', () => {
+    seedDirtyTree();
+    write('src/t1.txt', 'same\n');
+    write('src/t2.txt', 'same\n');
+    execFileSync('ln', ['-s', 't1.txt', join(repo, 'src/link')]);
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    rmSync(join(repo, 'src/link'));
+    execFileSync('ln', ['-s', 't2.txt', join(repo, 'src/link')]);
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental!.deltaFiles).toContain('src/link');
+  });
+
+  it('a file named __proto__ is tracked like any other', () => {
+    seedDirtyTree();
+    write('__proto__', 'p1\n');
+    const round1 = capture();
+    const candidate = JSON.parse(
+      readFileSync(round1.cacheCandidatePath, 'utf8'),
+    ) as { files: Record<string, string> };
+    expect(Object.keys(candidate.files)).toContain('__proto__');
+    const cachePath = promoteCandidate(round1, 'model-a');
+    write('__proto__', 'p2\n');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental!.deltaFiles).toEqual(['__proto__']);
+  });
+
+  it('an untracked file DELETED since the cached round re-opens its importer', () => {
+    seedDirtyTree();
+    write('src/n.ts', 'export const n = 1;\n');
+    write('src/c.ts', "import { n } from './n.js';\nexport const c2 = n;\n");
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    rmSync(join(repo, 'src/n.ts'));
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    // n.ts has no diff section left, but its disappearance is a change: the
+    // importer re-enters through the widening, and the round must NOT stop
+    // as "no changes".
+    expect(plan.incremental!.deltaFiles).toEqual([]);
+    expect(plan.incremental!.interaction.map((e) => e.path)).toContain(
+      'src/c.ts',
+    );
+    expect(stderrLines.join('\n')).not.toContain('No changes since the last');
+  });
+
+  it('a skipped (oversized) file refuses the incremental path out loud', () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    writeFileSync(join(repo, 'huge.bin'), Buffer.alloc(1_100_000, 7));
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental).toBeUndefined();
+    expect(plan.files.map((f) => f.path).sort()).toEqual([
+      BYSTANDER,
+      CALLER,
+      CHANGED,
+    ]);
+    const err = stderrLines.join('\n');
+    expect(err).toContain('SKIPPED');
+    expect(err).not.toContain('No changes since the last');
+  });
+
+  it('target and stateId integrity gates refuse, full plan preserved, reason out loud', () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    writeFileSync(cachePath, JSON.stringify({ ...cache, target: 'other.ts' }));
+    let plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('belongs to target');
+
+    stderrLines.length = 0;
+    const files = { ...(cache['files'] as Record<string, string>) };
+    const k = Object.keys(files)[0];
+    files[k] = '100644:0000000000000000000000000000000000000000';
+    writeFileSync(cachePath, JSON.stringify({ ...cache, files }));
+    plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental).toBeUndefined();
+    expect(plan.files.length).toBe(3);
+    expect(stderrLines.join('\n')).toContain('stateId does not match');
+  });
+
+  it('refusal reasons for model/HEAD/malformed gates reach stderr verbatim', () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    capture({ cache: cachePath, model: 'model-b' });
+    expect(stderrLines.join('\n')).toContain(
+      'was reviewed by model-a, not model-b',
+    );
+
+    stderrLines.length = 0;
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'move head');
+    write(CHANGED, 'export const v = 5;\n');
+    capture({ cache: cachePath, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain(
+      'HEAD moved since the last local round',
+    );
+  });
+
+  it('the no-change stop and the clean-tree warning stay distinct on stderr', () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    stderrLines.length = 0;
+    capture({ cache: cachePath, model: 'model-a' });
+    const err = stderrLines.join('\n');
+    expect(err).toContain('No changes since the last local review round');
+    expect(err).not.toContain('the working tree is clean');
+  });
+
+  it("a scoped round's candidate still covers EVERY captured file", () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    write(CHANGED, 'export const v = 2;\n');
+    const round2 = capture({ cache: cachePath, model: 'model-a' });
+    expect(round2.incremental).toBeDefined();
+    // The candidate is built from the FULL capture before scoping: promote
+    // a narrowed one and every scoped-out file reads as changed forever.
+    const candidate = JSON.parse(
+      readFileSync(round2.cacheCandidatePath, 'utf8'),
+    ) as { files: Record<string, string> };
+    expect(Object.keys(candidate.files).sort()).toEqual([
+      BYSTANDER,
+      CALLER,
+      CHANGED,
+    ]);
   });
 });

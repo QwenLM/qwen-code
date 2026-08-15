@@ -59,9 +59,9 @@ import {
   dependentsOfChanged,
   discoverWorkspacePackages,
 } from './lib/import-graph.js';
-import type { IncrementalScope } from './lib/incremental.js';
+import type { IncrementalScope } from './lib/report.js';
 
-export type { IncrementalScope } from './lib/incremental.js';
+export type { IncrementalScope } from './lib/report.js';
 
 /** Exit codes the skill branches on. Named so the prose and the code agree. */
 export const RESCOPE_EXIT_FULL_RANGE = 2;
