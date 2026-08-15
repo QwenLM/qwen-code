@@ -206,8 +206,10 @@ function oneOf<T extends string>(
 function normalizeSourceTag(value: unknown): unknown {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
-  const m = trimmed.match(/^\[\s*([^[\]]*)\s*\]$/);
-  return m ? m[1].trim() : trimmed;
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
 }
 
 function parseLocations(

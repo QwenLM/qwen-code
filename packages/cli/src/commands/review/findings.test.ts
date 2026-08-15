@@ -91,6 +91,12 @@ describe('validateFindings', () => {
     );
   });
 
+  it('rejects padded malformed source tags without regex backtracking (#9209)', () => {
+    expect(() =>
+      validateFindings([{ ...base, source: `[${' '.repeat(20_000)}bogus]` }]),
+    ).toThrow(/source/);
+  });
+
   it('accepts snake_case for the fields the prose format spells with a space', () => {
     const [f] = validateFindings([
       {
