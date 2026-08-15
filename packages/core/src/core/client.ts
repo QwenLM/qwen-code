@@ -2286,6 +2286,10 @@ export class GeminiClient {
     // The dispatched review settled without running (skipped/failed): merge
     // the retained window back so its signals can re-trigger a review
     // instead of being lost. Signals accumulated after dispatch are kept.
+    // Pending failures are NOT carried across the merge: the accumulator
+    // only tracks not-yet-succeeded failures, so a success that landed
+    // after dispatch cannot close a retained pre-dispatch failure —
+    // carrying it would let a stale failure latch a spurious retryArc.
     this.toolCallCount += pending.toolCallCount;
     this.userSteeredSinceReview ||= pending.userSteer;
     const current = this.experienceSignalsSinceReview;
@@ -2293,10 +2297,7 @@ export class GeminiClient {
       retryArc: current.retryArc || pending.signals.retryArc,
       hasSubstantiveWork:
         current.hasSubstantiveWork || pending.signals.hasSubstantiveWork,
-      failedToolNames: new Set([
-        ...current.failedToolNames,
-        ...pending.signals.failedToolNames,
-      ]),
+      failedToolNames: new Set(current.failedToolNames),
     };
   }
 

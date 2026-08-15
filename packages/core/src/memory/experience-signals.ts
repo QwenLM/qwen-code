@@ -57,6 +57,12 @@ function isFailedResponse(part: {
   if (!fr?.name || !fr.response) return null;
   const error = fr.response['error'];
   if (typeof error === 'string' && error.trim()) {
+    // Scheduler denials carry `executionStatus: 'not_started'` on the wire:
+    // classify structurally — the call never ran, so it is not a
+    // trial-and-error data point regardless of the error wording.
+    if (fr.response['executionStatus'] === 'not_started') {
+      return null;
+    }
     // Synthesized non-failure markers carry `error` but are not genuine
     // failures: per-tool cancellation, interrupted-turn orphan repair, and
     // never-executed calls (policy denials, duplicate provider IDs, suppressed

@@ -4181,6 +4181,19 @@ export const useGeminiStream = (
             return false;
           },
         );
+
+      // The dedup drop path and the main loop must classify completed calls
+      // identically — pre-PR these sites drifted apart, re-introducing the
+      // asymmetric counting this projection exists to prevent.
+      const toolCallProducedWork = (
+        tc: TrackedCompletedToolCall | TrackedCancelledToolCall,
+      ) =>
+        didToolCallProduceWork({
+          status: tc.status,
+          executionStatus: tc.response?.executionStatus,
+          responseParts: tc.response?.responseParts,
+        });
+
       // History-based dedup MUST run before the active-stream early-return.
       // If a synthetic `functionResponse` for this callId is already in
       // chat.history (planted on session-load by
@@ -4222,13 +4235,7 @@ export const useGeminiStream = (
         // use the same client-tool and never-ran filters as the main loop.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (
-            !didToolCallProduceWork({
-              status: tc.status,
-              executionStatus: tc.response?.executionStatus,
-              responseParts: tc.response?.responseParts,
-            })
-          ) {
+          if (!toolCallProducedWork(tc)) {
             continue;
           }
           geminiClient?.recordCompletedToolCall(
@@ -4639,13 +4646,7 @@ export const useGeminiStream = (
 
       for (const toolCall of geminiTools) {
         // Keep the skill-review window limited to calls that actually ran.
-        if (
-          !didToolCallProduceWork({
-            status: toolCall.status,
-            executionStatus: toolCall.response?.executionStatus,
-            responseParts: toolCall.response?.responseParts,
-          })
-        ) {
+        if (!toolCallProducedWork(toolCall)) {
           continue;
         }
         geminiClient?.recordCompletedToolCall(

@@ -86,7 +86,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR - 1,
         skillsModified: false,
         experienceSignals: SUBSTANTIVE_WINDOW,
-        threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });
@@ -108,7 +107,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
         experienceSignals: SUBSTANTIVE_WINDOW,
-        threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });
@@ -128,7 +126,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: 30, // Well above threshold
-        threshold: AUTO_SKILL_THRESHOLD,
         skillsModified: true,
         experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
@@ -304,7 +301,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount,
-        threshold,
         skillsModified: false,
         experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
@@ -358,7 +354,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
         skillsModified: false,
         experienceSignals: SUBSTANTIVE_WINDOW,
-        threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });
@@ -374,7 +369,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
         experienceSignals: SUBSTANTIVE_WINDOW,
-        threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });
@@ -390,7 +384,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: AUTO_SKILL_THRESHOLD + 1,
         skillsModified: false,
         experienceSignals: SUBSTANTIVE_WINDOW,
-        threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });
@@ -439,7 +432,6 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR,
         skillsModified: false,
         experienceSignals: RETRY_ARC_WINDOW,
-        threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });

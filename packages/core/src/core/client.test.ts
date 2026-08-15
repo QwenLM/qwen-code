@@ -6709,6 +6709,9 @@ hello
       expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
       expect(accept).toHaveBeenCalledOnce();
       expect(restore).not.toHaveBeenCalled();
+      // The steer text must actually reach the continuation turn's request —
+      // accept() alone does not prove delivery.
+      expect(getLastTurnRequestText()).toContain('steer goal continuation');
       expect(client['userSteeredSinceReview']).toBe(true);
       expect(finishTurn).toHaveBeenCalledWith(permit);
     });
@@ -8911,12 +8914,15 @@ hello
         expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
           true,
         );
-        // Both sides' failedToolNames survive the merge.
+        // Only current-side failures survive the merge: the retained
+        // window's pending failures are NOT carried across (a post-dispatch
+        // success cannot close them, so carrying them would latch a
+        // spurious retryArc).
         expect(
           client['experienceSignalsSinceReview'].failedToolNames.has(
             'run_shell_command',
           ),
-        ).toBe(true);
+        ).toBe(false);
         expect(
           client['experienceSignalsSinceReview'].failedToolNames.has('edit'),
         ).toBe(true);
@@ -8929,7 +8935,7 @@ hello
         client['toolCallCount'] = 9;
         client['userSteeredSinceReview'] = true;
         client['experienceSignalsSinceReview'] = {
-          retryArc: true,
+          retryArc: false,
           hasSubstantiveWork: false,
           failedToolNames: new Set(['edit']),
         };
@@ -8937,16 +8943,38 @@ hello
         await dispatchReview('prompt-id-autoskill-failed');
         expect(client['toolCallCount']).toBe(0);
 
+        // Signals accumulated after dispatch (current side) must survive
+        // the re-arm even though the retained window's own signals are
+        // false — the merge must not overwrite them with the pending side.
+        client['userSteeredSinceReview'] = false;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['write_file']),
+        };
+
         await settleReview(review.promise, () => {
           review.reject(new Error('planner timeout'));
         });
 
         expect(client['toolCallCount']).toBe(9);
+        // userSteer survives from the pending side (current side was false).
         expect(client['userSteeredSinceReview']).toBe(true);
+        // retryArc/hasSubstantiveWork survive from the current side (pending
+        // side was false).
         expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
+          true,
+        );
+        // Only current-side failures survive the merge.
+        expect(
+          client['experienceSignalsSinceReview'].failedToolNames.has(
+            'write_file',
+          ),
+        ).toBe(true);
         expect(
           client['experienceSignalsSinceReview'].failedToolNames.has('edit'),
-        ).toBe(true);
+        ).toBe(false);
         expect(client['pendingSkillReviewWindow']).toBeNull();
       });
 
@@ -8963,13 +8991,24 @@ hello
 
         const secondReview = deferReview('task-2');
         await dispatchReview('prompt-id-autoskill-fail-streak-2');
+        // Work accumulated while the second review was in flight must
+        // survive the destructive drop (only the retained window is lost).
+        client['toolCallCount'] = 5;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['edit']),
+        };
         await settleReview(secondReview.promise, () => {
           secondReview.reject(new Error('deterministic failure again'));
         });
         // Second consecutive failure drops the window instead of re-arming
         // it, so a deterministically failing review is not re-dispatched on
-        // every turn end.
-        expect(client['toolCallCount']).toBe(0);
+        // every turn end — but the in-flight work survives the drop.
+        expect(client['toolCallCount']).toBe(5);
+        expect(client['userSteeredSinceReview']).toBe(true);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
         expect(client['pendingSkillReviewWindow']).toBeNull();
         // The streak clears: the next window starts fresh.
         expect(client['skillReviewFailureStreak']).toBe(0);
@@ -8997,6 +9036,49 @@ hello
 
         reviewB.resolve({ status: 'completed', metadata: {} });
         await reviewB.promise;
+      });
+
+      it('should not let a replaced review that rejects or settles completed touch a later window', async () => {
+        const reviewA = deferReview('task-a2');
+        await dispatchReview('prompt-id-autoskill-stale-reject-a');
+        const reviewB = deferReview('task-b2');
+        await dispatchReview('prompt-id-autoskill-stale-reject-b');
+        const windowB = client['pendingSkillReviewWindow'];
+        expect(windowB?.taskId).toBe('task-b2');
+
+        // In-flight work under B: a stale streak bump or re-arm from A
+        // must be detectable against non-empty state.
+        client['toolCallCount'] = 4;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['edit']),
+        };
+
+        // A rejects late while B occupies the slot: B's window, streak and
+        // accumulated work must be untouched.
+        await settleReview(reviewA.promise, () => {
+          reviewA.reject(new Error('stale review failed late'));
+        });
+        expect(client['pendingSkillReviewWindow']).toBe(windowB);
+        expect(client['skillReviewFailureStreak']).toBe(0);
+        expect(client['toolCallCount']).toBe(4);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+
+        // A late 'completed' from a replaced review must not null the
+        // occupying window either.
+        const reviewC = deferReview('task-c2');
+        await dispatchReview('prompt-id-autoskill-stale-completed-c');
+        const windowC = client['pendingSkillReviewWindow'];
+        expect(windowC?.taskId).toBe('task-c2');
+        await settleReview(reviewB.promise, () => {
+          reviewB.resolve({ status: 'completed', metadata: {} });
+        });
+        expect(client['pendingSkillReviewWindow']).toBe(windowC);
+        expect(client['skillReviewFailureStreak']).toBe(0);
+
+        reviewC.resolve({ status: 'completed', metadata: {} });
+        await reviewC.promise;
       });
 
       it('should always reset skillsModifiedInSession after scheduleSkillReview check', async () => {
@@ -9237,6 +9319,98 @@ hello
         );
       });
 
+      it('should not double-scan an accepted Retry whose strip popped a re-submitted turn', async () => {
+        acceptTurns();
+        // A non-empty strip means the re-submitted content landed — and was
+        // already recorded — with its original push.
+        Object.assign(client.getChat(), {
+          getHistoryLength: vi.fn().mockReturnValue(2),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([{ role: 'user', parts: [{ text: 'popped' }] }]),
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+        client['experienceSignalsSinceReview'] = {
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(['read_file']),
+        };
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'ok' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'c2',
+                  name: 'read_file',
+                  response: { error: 'boom' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-retry-nonempty-strip',
+            { type: SendMessageType.Retry },
+          ),
+        );
+
+        // A second scan would let the leading ok part close the pending
+        // failure and latch a spurious retryArc.
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['read_file']),
+        );
+      });
+
+      it('should record an accepted submission exactly once (parallel ok/error parts)', async () => {
+        acceptTurns();
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'ok' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'c2',
+                  name: 'read_file',
+                  response: { error: 'boom' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-single-scan',
+            { type: SendMessageType.ToolResult },
+          ),
+        );
+
+        // A second scan of the same submission would let its leading ok
+        // part close the failure its own error part left, latching a
+        // spurious arc.
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['read_file']),
+        );
+      });
+
       it('should keep the full fast-path window when review is already_running', async () => {
         mockMemoryManager.scheduleSkillReview.mockReturnValue({
           status: 'skipped',
@@ -9333,6 +9507,10 @@ hello
         // /resume and /branch switch sessions on the same GeminiClient via
         // config.startNewSession + initialize(); the old session's window
         // and retained pending window must not leak into the new one.
+        // Dispatch a real review so the settle handler's taskId guard is
+        // exercised across the session reset (a bare object literal would
+        // leave the guard untested).
+        const staleReview = deferReview('task-old');
         client['toolCallCount'] = 5;
         client['skillsModifiedInSession'] = true;
         client['userSteeredSinceReview'] = true;
@@ -9342,16 +9520,7 @@ hello
           hasSubstantiveWork: true,
           failedToolNames: new Set(['run_shell_command']),
         };
-        client['pendingSkillReviewWindow'] = {
-          taskId: 'task-old',
-          toolCallCount: 5,
-          userSteer: true,
-          signals: {
-            retryArc: true,
-            hasSubstantiveWork: true,
-            failedToolNames: new Set(['run_shell_command']),
-          },
-        };
+        await dispatchReview('prompt-id-autoskill-switch-before');
 
         vi.mocked(mockConfig.getSessionId).mockReturnValue(
           'switched-session-id',
@@ -9368,6 +9537,20 @@ hello
           failedToolNames: new Set(),
         });
         expect(client['pendingSkillReviewWindow']).toBeNull();
+
+        // A stale settle from the old session's review must not touch the
+        // fresh state: no streak bump, no re-arm.
+        await settleReview(staleReview.promise, () => {
+          staleReview.resolve({ status: 'skipped', metadata: {} });
+        });
+        expect(client['skillReviewFailureStreak']).toBe(0);
+        expect(client['pendingSkillReviewWindow']).toBeNull();
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
+        });
       });
 
       it('should preserve substantive-work signals when history is compressed', async () => {

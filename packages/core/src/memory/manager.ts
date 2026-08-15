@@ -151,7 +151,6 @@ export interface ScheduleSkillReviewParams {
   now?: Date;
   config?: Config;
   enabled?: boolean;
-  threshold?: number;
   maxTurns?: number;
   timeoutMs?: number;
   /** When true, stage created skills for user confirmation instead of
@@ -850,7 +849,7 @@ export class MemoryManager {
     // a fast path for windows showing trial-and-error signals, and a count
     // backstop that only fires after known write/execute work, so a pile of
     // bare file reads never triggers.
-    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
+    const threshold = AUTO_SKILL_THRESHOLD;
     const fastPath =
       (params.experienceSignals.retryArc ||
         params.experienceSignals.userSteer) &&

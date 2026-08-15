@@ -935,7 +935,13 @@ const createErrorResponse = (
       functionResponse: {
         id: request.callId,
         name: request.name,
-        response: { error: error.message },
+        response: {
+          error: error.message,
+          // Denial producers use a dozen different error wordings; carry the
+          // structured never-executed signal on the wire so history consumers
+          // can classify denials without text matching.
+          ...(executionStatus === 'not_started' ? { executionStatus } : {}),
+        },
       },
     },
   ],

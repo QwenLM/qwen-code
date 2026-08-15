@@ -223,7 +223,6 @@ function fitText(
   persistedOutputFiles: string[] | undefined,
 ): string {
   if (text.length <= maxChars) return text;
-  if (maxChars <= 0) return '';
 
   const header =
     persistedOutputFiles && persistedOutputFiles.length > 0
@@ -233,6 +232,13 @@ function fitText(
             .map((file) => `- ${file}`)
             .join('\n')}`
       : 'Tool output truncated.';
+  // A zero allocation must still surface the persisted-artifact pointer —
+  // returning '' would orphan the file the finalizer just persisted.
+  if (maxChars <= 0) {
+    return persistedOutputFiles && persistedOutputFiles.length > 0
+      ? header
+      : '';
+  }
   if (header.length >= maxChars) {
     return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }
@@ -495,7 +501,7 @@ export async function finalizeToolResponses(
     associateFinalizerEntries(finalized, new Set(finalized.keys()));
   }
   const finalizedTotal = collectTextSlots(finalized).reduce(
-    (sum, slot) => sum + slot.text.length,
+    (sum, slot) => sum + slot.text.length + (slot.protectedPrefix?.length ?? 0),
     0,
   );
   debugLogger.info(

@@ -8,6 +8,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getPlanModeSystemReminder } from '../core/prompts.js';
+import {
+  operationCancelledErrorMessage,
+  PERMISSION_DECLINED_MESSAGE_PREFIX,
+  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+} from '../core/tool-result-markers.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   enforceFunctionResponseBudget,
@@ -311,9 +316,12 @@ describe('tool response finalization', () => {
       'output'
     ] as string;
 
-    expect(output.startsWith(reminder)).toBe(true);
-    expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
-    expect(output.length).toBeLessThan(reminder.length + hookContext.length);
+    // Exact pin: the reminder prefix is budget-exempt and already exceeds
+    // the budget, so the remainder gets a zero allocation and the finalized
+    // output is exactly prefix + persisted-artifact pointer.
+    expect(output).toBe(
+      `${reminder}\n\nTool output truncated. Persisted tool-output artifact: /tmp/enter-plan.txt`,
+    );
     expect(persist).toHaveBeenCalledWith(
       'enter-plan',
       ToolNames.ENTER_PLAN_MODE,
@@ -369,7 +377,11 @@ describe('tool response finalization', () => {
     ] as string;
 
     expect(output.startsWith(`${reminder}\n\n`)).toBe(true);
-    expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+    // Exact pin: the exempt reminder prefix consumes the whole budget, so
+    // the finalized output is exactly prefix + artifact pointer.
+    expect(output).toBe(
+      `${reminder}\n\nTool output truncated. Persisted tool-output artifact: /tmp/enter-plan.txt`,
+    );
     expect(output).not.toContain('second'.repeat(1000));
   });
 
@@ -396,6 +408,102 @@ describe('tool response finalization', () => {
 
     expect(typeof error).toBe('string');
     expect((error as string).length).toBeLessThanOrEqual(100);
+  });
+
+  it('preserves the full cancellation marker prefix on a budget-truncated error', async () => {
+    const marker = operationCancelledErrorMessage(
+      TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+    );
+    const entries = [
+      entry('cancelled', [
+        {
+          functionResponse: {
+            id: 'cancelled',
+            name: 'shell',
+            response: { error: `${marker}\n\n${'hook-context'.repeat(500)}` },
+          },
+        },
+      ]),
+    ];
+
+    const result = await finalizeToolResponses(config(100), entries);
+    const error = result[0].responseParts[0].functionResponse?.response?.[
+      'error'
+    ] as string;
+
+    // The marker prefix is budget-exempt: a truncated cancellation error
+    // must still classify as completed work / neutral downstream
+    // (didToolCallProduceWork, isFailedResponse).
+    expect(error.startsWith(marker)).toBe(true);
+  });
+
+  it('reserves protected error prefixes from the batch budget (wire length pin)', async () => {
+    const prefix = PERMISSION_DECLINED_MESSAGE_PREFIX;
+    const entries = [
+      entry('denied', [
+        {
+          functionResponse: {
+            id: 'denied',
+            name: 'shell',
+            response: { error: `${prefix}${'x'.repeat(10_000)}` },
+          },
+        },
+      ]),
+    ];
+
+    const result = await finalizeToolResponses(config(100), entries);
+    const error = result[0].responseParts[0].functionResponse?.response?.[
+      'error'
+    ] as string;
+
+    // The prefix is exempt from allocation but reserved from the budget:
+    // the finalized wire length must stay within the budget itself
+    // (allocating the full budget would over-shoot by the prefix length:
+    // 36 + 100 = 136).
+    expect(error.length).toBeLessThanOrEqual(100);
+    expect(error.startsWith(prefix)).toBe(true);
+  });
+
+  it('keeps the persisted-artifact pointer when protected prefixes consume the whole budget', async () => {
+    const marker = operationCancelledErrorMessage(
+      TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+    );
+    const cancellation = (callId: string): ToolResponseBudgetEntry =>
+      entry(callId, [
+        {
+          functionResponse: {
+            id: callId,
+            name: 'shell',
+            response: { error: `${marker}\n\n${'hook'.repeat(100)}` },
+          },
+        },
+      ]);
+    const entries = [
+      cancellation('cancel-a'),
+      cancellation('cancel-b'),
+      entry('success', [
+        {
+          functionResponse: {
+            id: 'success',
+            name: 'shell',
+            response: { output: 'y'.repeat(5000) },
+          },
+        },
+      ]),
+    ];
+
+    // The two marker prefixes already exceed the budget, so every slot's
+    // allocation is zero.
+    const result = await finalizeToolResponses(config(100), entries);
+    const output = result[2].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    // A zero allocation must still surface the artifact pointer: returning
+    // '' would orphan the file the finalizer just persisted.
+    expect(output).toBe(
+      'Tool output truncated. Persisted tool-output artifact: /tmp/success.txt',
+    );
   });
 
   it('does not exempt arbitrary enter_plan_mode output', async () => {
@@ -796,7 +904,8 @@ describe('tool response finalization', () => {
       'output'
     ] as string;
 
-    expect(output.startsWith(reminder)).toBe(true);
-    expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+    // Exact pin: without persistence the zero-allocation remainder is
+    // dropped, leaving exactly the exempt prefix.
+    expect(output).toBe(`${reminder}\n\n`);
   });
 });

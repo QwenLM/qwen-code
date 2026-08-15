@@ -67,6 +67,25 @@ const NEUTRAL_ERRORS = [
   ['suppressed structured-output sibling', SUPPRESSED_SIBLING_SKIP_PREFIX],
 ] as const;
 
+// Verbatim wordings from coreToolScheduler's never-executed denial sites
+// (hook deny, background-agent auto-deny, hard deny, plan-mode block). The
+// dynamic producers (auto-mode block, plan-required teammate pre-approval)
+// share the same createErrorResponse builder, so the structural
+// `executionStatus: 'not_started'` field — not the wording — must classify
+// every denial as never-executed.
+const DENIED_ERRORS = [
+  ['hook deny', 'Permission denied by hook for "write_file"'],
+  [
+    'background-agent auto-deny',
+    'Tool "write_file" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.',
+  ],
+  ['hard deny', 'Tool "write_file" is denied.'],
+  [
+    'plan-mode block',
+    'Tool blocked by plan mode: "edit" is not a read-only tool. Only read-only tools (read_file, grep_search, glob, list_directory, web_fetch, etc.) are allowed in plan mode. Do NOT retry this tool. Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool\'s purpose.',
+  ],
+] as const;
+
 describe('accumulateExperienceSignals', () => {
   it('starts empty', () => {
     expect(accumulateExperienceSignals([])).toEqual({
@@ -144,6 +163,26 @@ describe('accumulateExperienceSignals', () => {
       expect(
         accumulateExperienceSignals([toolOk('write_file')], pending).retryArc,
       ).toBe(true);
+    },
+  );
+
+  it.each(DENIED_ERRORS)(
+    'classifies never-executed denials as neutral via executionStatus (%s)',
+    (_label, error) => {
+      const denied = toolResult('edit', {
+        error,
+        executionStatus: 'not_started',
+      });
+      expect(accumulateExperienceSignals([denied]).failedToolNames).toEqual(
+        new Set(),
+      );
+
+      // Control: the same wording without the structured field is a
+      // genuine failure — the field is what neutralizes it, so a producer
+      // that stops carrying it is detectable.
+      expect(
+        accumulateExperienceSignals([toolError('edit', error)]).failedToolNames,
+      ).toEqual(new Set(['edit']));
     },
   );
 
