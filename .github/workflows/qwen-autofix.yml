@@ -4555,22 +4555,26 @@ jobs:
           # created_at filter while carrying pre-update sums (#9114 R2-6).
           MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
-          # Author pushes / base updates re-anchor the measurement too, not
-          # just the bot's own update-branch merge that BASE_UPD_AT tracks: the
-          # net is measured against origin/main, so any commit an EXTERNAL
-          # actor (or a stale-base merge) added to the branch since the bot
-          # last evaluated it inflates this round's sum relative to prior
-          # rounds' sums, measured on the old head — an incomparable
-          # comparison that trips (or suppresses) a false handoff (#9114
-          # R2-8/R6-3). The bot's last judged head rides in its autofix-redcheck
-          # marker (LIVE_RED_HEAD); if the current head is not it, the head
-          # moved outside a bot round — drop every prior sum by cutting the
-          # comparability window at now, so this round re-anchors.
+          # NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an
+          # author push) is deliberately NOT done here. The obvious signal —
+          # comparing the checked-out head against the bot's last judged head
+          # (autofix-redcheck) — is wrong: that marker records the head the
+          # agent was GIVEN, before its own push, so it differs after every
+          # pushing round and would re-anchor on the bot's own fixes, zeroing
+          # the census in exactly the push regime the handoff exists for. A
+          # correct version needs both a bot-authored-move test and a
+          # PERSISTED cut (a one-round cut is re-admitted the next round);
+          # that is its own change, tracked in #9114.
           GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"
-          if [[ -n "${LIVE_RED_HEAD}" && "${LIVE_RED_HEAD}" != "${CHECKED_OUT_HEAD}" ]]; then
-            echo "🔁 branch head moved outside a bot round (last judged ${LIVE_RED_HEAD:0:9}, now ${CHECKED_OUT_HEAD:0:9}) — re-anchoring growth divergence"
-            GROWTH_NOW_CUTOFF="${MEASURED_AT}"
-          fi
+          # KNOWN RESIDUAL (#9114): this sibling read still filters on the
+          # comment's created_at, not a prepare-time measured= like the
+          # growth-now read below. Its values are measured in prepare too, so a
+          # round whose agent run straddles a base update can anchor the window
+          # on pre-update values. Narrow (the update must land inside the
+          # anchor round's own agent run) and first-wins, so it cannot be
+          # re-poisoned later in the window; stamping measured= into the
+          # growth-base marker is tracked with the rest of #9114 rather than
+          # widening this change.
           GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
@@ -4629,7 +4633,7 @@ jobs:
           # climbing anyway. Read this window's prior per-round growth markers
           # (written by the report step): count the rounds that were over
           # budget, and take the MOST RECENT prior over-budget run's growth
-          # SUM (highest run_id — see below; NOT the window-wide max, which a
+          # SUM (latest measured= — see below; NOT the window-wide max, which a
           # one-off spike would raise forever). The round is DIVERGING when it
           # is over budget now, the brake has already fired for
           # >= GROWTH_DIVERGENCE_ROUNDS prior rounds, and the diff has NOT
@@ -4645,19 +4649,24 @@ jobs:
           # the trajectory clause below is accurate even on a round that pulled
           # back under budget. markers:
           # <!-- autofix-growth-now src=N test=N over=BOOL round=N run=ID measured=TS key=W -->
-          # Deduped and ordered by run=GITHUB_RUN_ID, the per-workflow-run id:
-          # the report post's bounded retry re-posts one run's marker (same
-          # run_id → collapses to the LATEST by measured=, so a re-run's fresh
-          # measurement wins over its own stale first post), while every
-          # distinct address run has a fresh, monotonically increasing run_id.
+          # Deduped by run=GITHUB_RUN_ID (the per-workflow-run id) and ORDERED
+          # by measured=: the report post's bounded retry re-posts one run's
+          # marker, and a failed job's re-run keeps the same run_id, so a run
+          # collapses to its LATEST measurement — and that collapse happens
+          # BEFORE the over/window/cutoff filters, or a re-run that came back
+          # under budget would still be represented by its stale over=true
+          # attempt. Every distinct address run has a fresh run_id.
           # round=/eval-watermark are NOT a safe identity — a state-triggered
           # lane (a persistent merge conflict selects the PR every scan with no
           # new evaluable feedback) freezes both NEWEST and ROUND, so distinct
           # over-budget runs would share them and collapse, stalling the count.
-          # Filtered on measured= (the prepare-time measurement instant, NOT the
-          # comment's post-agent created_at) after GROWTH_NOW_CUTOFF, which
-          # re-anchors on a base update OR any external head move — a prior sum
-          # measured against a different tree is not comparable to this round's.
+          # Filtered on measured= (the prepare-time measurement instant, NOT
+          # the comment's post-agent created_at) after GROWTH_NOW_CUTOFF, so a
+          # prior sum measured against a pre-base-update tree is dropped rather
+          # than compared to this round's. measured= is OPTIONAL in the scan:
+          # markers posted before it existed fall back to their comment's
+          # created_at, so deploying this does not blank the census of a window
+          # that is already in flight.
           # The "not shrinking" test compares against the MOST RECENT prior
           # over-budget run's sum (latest measured=), not the window-wide max: a
           # single transient spike would otherwise raise the bar forever and a
@@ -4672,12 +4681,12 @@ jobs:
           if [[ "${NET_MEASURED}" == 'true' ]]; then
             read -r OVER_ROUNDS_PRIOR PREV_SUM < <(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg cutoff "${GROWTH_NOW_CUTOFF}" --arg curr "${GITHUB_RUN_ID}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) measured=([^ ]+) key=([^ ]+) -->") ] | .[]
-                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), measured: .[5], win: .[6]} ]
+                | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) (?:measured=([^ ]+) )?key=([^ ]+) -->") ] | .[]
+                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), measured: (.[5] // ($c.created_at // "")), win: .[6]} ]
+              | group_by(.run) | map(max_by(.measured))
               | map(select(.win == $key and .over == "true"))
               | map(select(.run != ($curr | tonumber)))
               | map(select($cutoff == "" or (.measured > $cutoff)))
-              | group_by(.run) | map(max_by(.measured))
               | sort_by(.measured)
               | "\(length) \((last.sum) // 0)"' "${WORKDIR}/ic.json" 2> /dev/null || echo "0 0")
             [[ "${OVER_ROUNDS_PRIOR}" =~ ^[0-9]+$ ]] || OVER_ROUNDS_PRIOR=0
@@ -5891,8 +5900,9 @@ jobs:
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
               # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the dedup+order identity (a retry
-              # re-posts the same run, distinct runs get fresh run ids).
+              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
+              # job re-run re-posts the same run; measured= orders and picks
+              # that run's latest attempt).
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
@@ -5923,8 +5933,9 @@ jobs:
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
               # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the dedup+order identity (a retry
-              # re-posts the same run, distinct runs get fresh run ids).
+              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
+              # job re-run re-posts the same run; measured= orders and picks
+              # that run's latest attempt).
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
@@ -6591,7 +6602,7 @@ jobs:
               # Per-round growth history the divergence read counts — same
               # marker the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=
-              # (per-workflow-run) is the dedup/order identity.
+              # (per-workflow-run) is the DEDUP identity; measured= orders.
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               # A sentinel ts means the agent evaluated NOTHING (crash, API
               # error, gate crash) and the next scan must retry. Recording a

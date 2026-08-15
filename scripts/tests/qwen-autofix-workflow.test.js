@@ -6260,9 +6260,10 @@ exit 1
       } = {},
     ) => ({
       user: { login },
-      // created_at is no longer read (the filter uses measured=), kept only
-      // as a realistic comment field.
-      created_at: measured,
+      // Deliberately DIFFERENT from measured=: the report posts the comment
+      // long after prepare measured, and the read must key on measured=. A
+      // fixture that tied them together could not tell the two apart.
+      created_at: '2026-06-01T00:00:00Z',
       body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} measured=${measured} key=${key} -->`,
     });
     const diverge = ({
@@ -6363,7 +6364,7 @@ exit 1
       }),
     ).toBe('false 1');
     // When a run was re-run and posted two markers with DIFFERENT sums, the
-    // LATEST attempt (by created_at) wins, not jq's stale first: run 1002's
+    // LATEST attempt (by measured=) wins, not jq's stale first: run 1002's
     // fresh attempt (sum 300 @ T2) is PREV_SUM, so current 400 >= 300 →
     // diverged. Keeping the stale first (sum 900) would read 400 >= 900 → not.
     expect(
@@ -6462,6 +6463,56 @@ exit 1
         ],
       }),
     ).toBe('false 1');
+    // A re-run whose FRESH attempt came back under budget must not be
+    // represented by its own stale over=true attempt: the per-run collapse
+    // happens BEFORE the over-filter, so the run drops out entirely.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(300, 150, 'true', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:01:00Z',
+          }),
+          marker(80, 40, 'false', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 0');
+    // Backward compatibility: a marker posted BEFORE measured= existed still
+    // counts, falling back to its comment's created_at — deploying the
+    // measured= switch must not blank the census of an in-flight window.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:01:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
+    // …and a legacy marker is still subject to the cutoff, via that fallback.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:01:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 0');
     // A malformed GROWTH_DIVERGENCE_ROUNDS falls back to 2 (the sanitize guard
     // at the top of the block) instead of crashing the `-ge` arithmetic: two
     // prior over-budget rounds still climbing → diverged.
@@ -6583,35 +6634,24 @@ exit 1
       ) ?? [],
     ).toHaveLength(2);
     expect(workflow).toContain('echo "measured_at=${MEASURED_AT}"');
-    // The comparability cutoff re-anchors on an external head move (author
-    // push / base update), not only the bot's own base-update marker: extract
-    // the GROWTH_NOW_CUTOFF block and exercise both branches.
-    const cutoffBlock = prepareBranchAndFeedbackStep.match(
-      /GROWTH_NOW_CUTOFF="\$\{BASE_UPD_AT\}"\n[\s\S]*?GROWTH_NOW_CUTOFF="\$\{MEASURED_AT\}"\n\s+fi/,
-    )?.[0];
-    expect(cutoffBlock).toBeTruthy();
-    const cutoffOf = (liveRed, head) =>
-      execFileSync(
-        'bash',
-        [
-          '-c',
-          `BASE_UPD_AT=base-ts\nMEASURED_AT=now-ts\n` +
-            `LIVE_RED_HEAD='${liveRed}'\nCHECKED_OUT_HEAD='${head}'\n` +
-            `${cutoffBlock}\nprintf '%s' "$GROWTH_NOW_CUTOFF"`,
-        ],
-        { encoding: 'utf8' },
-      )
-        .trim()
-        .split('\n')
-        .pop();
-    // Head unchanged since the bot's last judged head → keep the base-update
-    // cutoff (prior sums stay comparable across bot rounds).
-    expect(cutoffOf('abc123', 'abc123')).toBe('base-ts');
-    // Head moved to something the bot did not record (author push / base
-    // update) → re-anchor at now, dropping every prior sum.
-    expect(cutoffOf('abc123', 'def456')).toBe('now-ts');
-    // First round (no prior bot head) → nothing to re-anchor against.
-    expect(cutoffOf('', 'def456')).toBe('base-ts');
+    // The measurement instant is taken in PREPARE, next to the net it stamps —
+    // not at report time, which is what the whole switch is about.
+    const prepMeasured = prepareBranchAndFeedbackStep.indexOf(
+      'MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+    );
+    expect(prepMeasured).toBeGreaterThan(-1);
+    expect(prepMeasured).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf('echo "measured_at=${MEASURED_AT}"'),
+    );
+    // The head-move re-anchor is deliberately NOT in this change (see #9114):
+    // the redcheck head is the pre-push judged head, so comparing against it
+    // would re-anchor on the bot's own pushes and zero the census.
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'GROWTH_NOW_CUTOFF="${MEASURED_AT}"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"',
+    );
     // growth_diverged is NOT emitted as a step output — the handoff is
     // enforced by the feedback.md text, so a dangling dead output would only
     // mislead a future consumer.
