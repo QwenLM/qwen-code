@@ -2551,13 +2551,16 @@ describe('qwen pr review concurrency routing', () => {
   it('gates on the same bot login the workflow publishes', () => {
     // The group expression cannot read review-config's bot_login output, so
     // it carries the literal; pin it against the constant it mirrors so a
-    // rename of the bot cannot desync the two.
+    // rename of the bot cannot desync all three sites.
     const botLogin = parse(workflow)
       .jobs['review-config'].steps.find(
         (s) => s.name === 'Set review constants',
       )
       .run.match(/bot_login=([a-zA-Z0-9-]+)/)[1];
     expect(group).toContain(
+      `github.event.requested_reviewer.login == '${botLogin}'`,
+    );
+    expect(parse(workflow).jobs['precheck-pr'].if).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );
   });
