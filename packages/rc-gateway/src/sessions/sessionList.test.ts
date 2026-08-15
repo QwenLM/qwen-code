@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -140,11 +140,13 @@ describe('listSessions', () => {
     await write(ID(3)); // another root
     const { sessions, truncated } = await listSessions(dir);
     expect(truncated).toBe(false);
-    expect(sessions).toEqual([
+    expect(sessions).toMatchObject([
       { sessionId: ID(1), forks: [ID(2)] },
       { sessionId: ID(2), parentSessionId: ID(1), forks: [] },
       { sessionId: ID(3), forks: [] },
     ]);
+    // Verify all have updatedAt
+    expect(sessions.every((s) => s.updatedAt)).toBe(true);
   });
 
   it('skips non-.jsonl and syntactically invalid filenames', async () => {
@@ -172,6 +174,30 @@ describe('listSessions', () => {
 
   it('exposes a positive default cap', () => {
     expect(MAX_LIST_SESSIONS).toBeGreaterThan(0);
+  });
+
+  it('returns updatedAt (mtime, ISO) and sorts most-recent first', async () => {
+    // Write two files with distinct mtimes using utimes for determinism.
+    const earlier = new Date('2025-01-01T10:00:00Z');
+    const later = new Date('2025-01-02T10:00:00Z');
+
+    await write(ID(1));
+    const file1 = join(dir, `${ID(1)}.jsonl`);
+    await utimes(file1, earlier, earlier);
+
+    await write(ID(2));
+    const file2 = join(dir, `${ID(2)}.jsonl`);
+    await utimes(file2, later, later);
+
+    const { sessions } = await listSessions(dir);
+
+    // Check updatedAt is present and ISO-8601 format
+    expect(sessions[0].updatedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(sessions[1].updatedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+
+    // Sessions should be sorted by updatedAt descending (most recent first)
+    const times = sessions.map((s) => s.updatedAt);
+    expect(times).toEqual([...times].sort().reverse()); // desc
   });
 });
 
@@ -286,7 +312,7 @@ describe('listSessions titles (cycle 85)', () => {
       JSON.stringify({ sessionId: ID(2), type: 'user' }) + '\n',
     );
     const { sessions } = await listSessions(dir);
-    expect(sessions).toEqual([
+    expect(sessions).toMatchObject([
       // titleSource defaults to 'manual' when the record omits it (cycle 95).
       {
         sessionId: ID(1),
@@ -296,6 +322,8 @@ describe('listSessions titles (cycle 85)', () => {
       },
       { sessionId: ID(2), forks: [] },
     ]);
+    // Verify all have updatedAt
+    expect(sessions.every((s) => s.updatedAt)).toBe(true);
   });
 
   it('threads titleSource:"auto" through to the listing item', async () => {
@@ -312,9 +340,11 @@ describe('listSessions titles (cycle 85)', () => {
         '\n',
     );
     const { sessions } = await listSessions(dir);
-    expect(sessions).toEqual([
+    expect(sessions).toMatchObject([
       { sessionId: ID(1), title: 'Auto named', titleSource: 'auto', forks: [] },
     ]);
+    // Verify updatedAt exists
+    expect(sessions[0].updatedAt).toBeDefined();
   });
 });
 

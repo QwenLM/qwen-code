@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { open, readdir } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ForkRecord } from './forkTranscript.js';
 import { isValidSessionId } from './chatsPath.js';
@@ -21,6 +21,8 @@ export interface SessionListItem {
   titleSource?: 'manual' | 'auto';
   /** Child session ids PRESENT in this listing that forked from this one. */
   forks: string[];
+  /** Last modified time (mtime) of the transcript file, ISO-8601. */
+  updatedAt: string;
 }
 
 /** A whole `/rc/sessions` listing plus a partial-scan flag. */
@@ -217,6 +219,8 @@ export interface SessionEntry {
   title?: string;
   /** How the title was set: 'manual' | 'auto'. */
   titleSource?: 'manual' | 'auto';
+  /** Last modified time (mtime) of the transcript file, ISO-8601. */
+  updatedAt: string;
 }
 
 /**
@@ -242,6 +246,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
       ...(e.title ? { title: e.title } : {}),
       ...(e.title && e.titleSource ? { titleSource: e.titleSource } : {}),
       forks: [],
+      updatedAt: e.updatedAt,
     });
   }
   for (const e of entries) {
@@ -304,12 +309,30 @@ export async function listSessions(
     }
     // Title is best-effort enrichment (never throws) — a bounded tail read.
     const info = await readSessionTitleInfo(chatsDir, id);
+    // Read file mtime for updatedAt timestamp
+    let updatedAt: string;
+    try {
+      const stats = await stat(join(chatsDir, `${id}.jsonl`));
+      updatedAt = stats.mtime.toISOString();
+    } catch {
+      // Fallback to current time if stat fails
+      updatedAt = new Date().toISOString();
+    }
     entries.push({
       sessionId: id,
       parentSessionId: parent,
       ...(info ? { title: info.title, titleSource: info.titleSource } : {}),
+      updatedAt,
     });
   }
 
-  return { sessions: assembleListing(entries), truncated };
+  const sessions = assembleListing(entries);
+  // Sort by updatedAt descending (most recent first)
+  sessions.sort((a, b) => {
+    const aTime = new Date(a.updatedAt).getTime();
+    const bTime = new Date(b.updatedAt).getTime();
+    return bTime - aTime; // descending
+  });
+
+  return { sessions, truncated };
 }
