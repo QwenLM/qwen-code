@@ -369,6 +369,17 @@ describe('parseReviewArgs', () => {
     });
   });
 
+  it('a codereview URL on a NON-Aone host is refused, not a live target', () => {
+    // Unlike …/pull/<n> (any GHE host legitimately serves it), /codereview/
+    // is Aone-only — on any other host it must hit the fail-closed
+    // invalid-url refusal, not become a live PR target.
+    const got = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/codereview/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',

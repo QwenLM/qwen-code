@@ -112,6 +112,15 @@ describe('aoneReader.fetchDiff', () => {
       'base-sha..__qwen-review-diff-7',
     );
     expect(diff).toBe('diff --git a/x b/x\n');
+    // The MR head is FORCE-fetched (a stale throwaway ref from an interrupted
+    // run must not fail the fetch when the head was rewritten), and the target
+    // branch is fetched so the merge-base is current.
+    expect(gitMock).toHaveBeenCalledWith(
+      'fetch',
+      'origin',
+      '+refs/merge-requests/7/head:__qwen-review-diff-7',
+    );
+    expect(gitMock).toHaveBeenCalledWith('fetch', 'origin', 'master');
     // The throwaway ref is cleaned up.
     expect(gitMock).toHaveBeenCalledWith(
       'branch',

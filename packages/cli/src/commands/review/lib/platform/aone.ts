@@ -220,12 +220,25 @@ export const aoneReader: ReviewPlatformReader = {
     const target = view.targetBranch ?? 'master';
     const ref = `__qwen-review-diff-${prNumber}`;
     try {
-      git('fetch', 'origin', `refs/merge-requests/${prNumber}/head:${ref}`);
+      // Force-fetch (`+`): a stale throwaway ref left by an interrupted
+      // earlier run would otherwise make this fetch fail whenever the MR head
+      // was rewritten — the normal AGit-Flow iteration shape.
+      git('fetch', 'origin', `+refs/merge-requests/${prNumber}/head:${ref}`);
+      // Fetch the target branch so the merge-base is current — merge-basing
+      // against a stale origin/<target> produces a structurally complete but
+      // wrong-base diff (the failure lib/merge-base.ts was extracted to
+      // prevent). If the fetch fails, fall back to whatever origin/<target>
+      // is locally (best available).
+      try {
+        git('fetch', 'origin', target);
+      } catch {
+        // keep the local origin/<target> as-is
+      }
       let base: string;
       try {
         base = git('merge-base', `origin/${target}`, ref);
       } catch {
-        // Target branch not fetchable locally — fall back to diffing the head
+        // Target branch not present locally — fall back to diffing the head
         // against its first parent (single-commit AGit-Flow CRs).
         base = `${ref}~1`;
       }

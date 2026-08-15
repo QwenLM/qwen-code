@@ -125,6 +125,16 @@ describe('parseRemoteUrl', () => {
     });
   });
 
+  it('scheme case is irrelevant (RFC 3986), matching hostOfRemoteUrl', () => {
+    expect(
+      parseRemoteUrl('HTTPS://GitLab.Alibaba-Inc.com/maxcompute/odps_src.git'),
+    ).toEqual({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+    });
+  });
+
   it('lowercases the host and keeps the last two path segments (nested groups)', () => {
     expect(
       parseRemoteUrl('https://GitLab.Alibaba-Inc.com/sub/maxcompute/odps_src'),

@@ -658,4 +658,31 @@ describe('computeDiffStats', () => {
       changedFiles: 0,
     });
   });
+
+  it('counts changedFiles on `diff --git`, not on `---`/`+++` header lines', () => {
+    // A binary file contributes a `diff --git` but NO `---`/`+++` headers, so
+    // #diff--git (3) differs from #--- (2) — a mutation that counted `---`
+    // lines would report 2 and stay green without this fixture.
+    const d = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      'diff --git a/img.png b/img.png',
+      'Binary files a/img.png and b/img.png differ',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(computeDiffStats(d)).toEqual({
+      additions: 2,
+      deletions: 2,
+      changedFiles: 3,
+    });
+  });
 });

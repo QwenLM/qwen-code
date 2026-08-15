@@ -39,6 +39,14 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
   };
 });
 
+// The Aone refusal guard probes the platform (cwd origin via
+// node:child_process) when no host is passed; pin it to GitHub so these
+// GitHub tests neither spawn a real `git` in the vitest cwd nor couple to the
+// machine's actual clone origin.
+vi.mock('./lib/platform/registry.js', () => ({
+  getPlatformReader: () => ({ kind: 'github' }),
+}));
+
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 const writeStderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({

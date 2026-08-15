@@ -559,40 +559,34 @@ export function isCollapsedFromUpstream(i: {
   );
 }
 
-/** Changed (+/-) lines in a unified diff — headers excluded. */
+/**
+ * Changed (+/-) lines in a unified diff — headers excluded. Delegates to the
+ * single hunk-state walker in computeDiffStats so the two can never disagree
+ * (isCollapsedFromUpstream compares this against the advertised stats, and
+ * for Aone the advertised stats COME from computeDiffStats — one walker, or
+ * the ratio is load-bearing on two copies agreeing).
+ *
+ * POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
+ * every line starting `--`, and a DELETED line whose own content starts `--`
+ * arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
+ * comments, a `--flag` in a script. Each one silently dropped a real changed
+ * line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
+ * (the disclosure fires when the recomputed count comes in LOW).
+ */
 export function countDiffChangedLines(diffText: string): number {
-  // POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
-  // every line starting `--`, and a DELETED line whose own content starts `--`
-  // arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
-  // comments, a `--flag` in a script. Each one silently dropped a real changed
-  // line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
-  // (the disclosure fires when the recomputed count comes in LOW).
-  //
-  // Inside a hunk the position is unambiguous — `---`/`+++` cannot be file
-  // headers there — so track hunk state and count every `+`/`-` line in it.
-  let n = 0;
-  let inHunk = false;
-  for (const line of diffText.split('\n')) {
-    if (line.startsWith('@@')) {
-      inHunk = true;
-      continue;
-    }
-    // `diff --git` opens the next file's header block; `\ No newline at end of
-    // file` is a marker, not content, and git emits it inside the hunk.
-    if (line.startsWith('diff --git')) {
-      inHunk = false;
-      continue;
-    }
-    if (!inHunk || line.startsWith('\\')) continue;
-    if (line.startsWith('+') || line.startsWith('-')) n++;
-  }
-  return n;
+  const { additions, deletions } = computeDiffStats(diffText);
+  return additions + deletions;
 }
 
 /**
- * Additions / deletions / changed-files counted straight off a unified diff.
- * Used when the platform does not advertise diff stats (Aone) — GitHub's
- * `gh pr view` reports them, so GitHub keeps the advertised numbers.
+ * Additions / deletions / changed-files counted straight off a unified diff —
+ * the single hunk-state walker (see countDiffChangedLines). Used when the
+ * platform does not advertise diff stats (Aone); GitHub's `gh pr view`
+ * reports them, so GitHub keeps the advertised numbers. Inside a hunk the
+ * position is unambiguous — `---`/`+++` cannot be file headers there — so
+ * track hunk state and count every `+`/`-` line in it; `diff --git` opens
+ * the next file's header block and `\ No newline at end of file` is a marker,
+ * not content.
  */
 export function computeDiffStats(diffText: string): {
   additions: number;

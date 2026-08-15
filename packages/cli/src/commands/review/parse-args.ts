@@ -106,9 +106,13 @@ const PR_URL_RE =
 // view` key on), carried as the target's `number` exactly like a GitHub PR
 // number; the platform itself is detected from the clone's remote, not the URL.
 // The group path may be nested (`group/subgroup/project`) — the repo identity
-// keeps the last two segments, mirroring aone.parseRemoteUrl.
+// keeps the last two segments, mirroring aone.parseRemoteUrl. Unlike
+// `…/pull/<n>` (which any GHE host legitimately serves), the host is
+// constrained to Aone: a `/codereview/` URL on any other host is not a valid
+// target and must hit the fail-closed `invalid-url` refusal, not become a
+// live PR target.
 const AONE_CR_URL_RE =
-  /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
+  /^(https?):\/\/([A-Za-z0-9.-]*alibaba-inc\.com(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
 
 /**
  * Case-insensitive: `--effort High` has exactly one plausible meaning, and
