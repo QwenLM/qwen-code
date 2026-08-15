@@ -20,6 +20,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
 }
 
 const sdkMock = vi.hoisted(() => ({
@@ -53,11 +54,15 @@ let latestState: SessionArtifactsState | undefined;
 
 function deferred<T>(): Deferred<T> {
   let resolve: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((done) => {
+  let reject: ((reason?: unknown) => void) | undefined;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  if (!resolve) throw new Error('deferred promise did not initialize');
-  return { promise, resolve };
+  if (!resolve || !reject) {
+    throw new Error('deferred promise did not initialize');
+  }
+  return { promise, resolve, reject };
 }
 
 function artifact(id: string): DaemonSessionArtifact {
@@ -228,6 +233,7 @@ describe('useSessionArtifacts', () => {
       .mockResolvedValueOnce({ artifacts: [artifact('recovered-artifact')] });
 
     await renderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
 
     // Automatic refresh #1: initial mount fails before any last-good data exists.
     await act(async () => {
@@ -240,6 +246,7 @@ describe('useSessionArtifacts', () => {
     // Automatic refresh #2: artifactsVersion recovers and establishes last-good.
     sdkMock.artifactsVersion = 1;
     await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     await act(async () => {
       await Promise.resolve();
     });
@@ -249,10 +256,12 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.loading).toBe(false);
 
     // Automatic refresh #3: prompt settling back to idle fails transiently.
-    sdkMock.promptStatus = 'running';
+    sdkMock.promptStatus = 'streaming';
     await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     sdkMock.promptStatus = 'idle';
     await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
     await act(async () => {
       await Promise.resolve();
     });
@@ -265,6 +274,7 @@ describe('useSessionArtifacts', () => {
     // Automatic refresh #4: artifactsVersion fails and still keeps last-good.
     sdkMock.artifactsVersion = 2;
     await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
     await act(async () => {
       await Promise.resolve();
     });
@@ -274,14 +284,55 @@ describe('useSessionArtifacts', () => {
       'current-artifact',
     ]);
 
+    // Re-rendering the same version is not a new automatic refresh.
+    await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
+
     // The panel is not wedged: the next automatic refresh recovers.
     sdkMock.artifactsVersion = 3;
     await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(5);
     await act(async () => {
       await Promise.resolve();
     });
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'recovered-artifact',
+    ]);
+  });
+
+  it('ignores loading cleanup from superseded artifact refresh failures', async () => {
+    const staleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [artifact('current-artifact')] })
+      .mockReturnValueOnce(staleLoad.promise)
+      .mockResolvedValueOnce({ artifacts: [artifact('replacement')] });
+
+    await renderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+    expect(latestState?.loading).toBe(true);
+
+    sdkMock.artifactsVersion = 2;
+    await rerenderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'replacement',
+    ]);
+
+    await act(async () => {
+      staleLoad.reject(new Error('Failed to fetch'));
+      await staleLoad.promise.catch(() => undefined);
+    });
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'replacement',
     ]);
   });
 });
