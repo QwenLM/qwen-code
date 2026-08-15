@@ -329,6 +329,8 @@ describe('runCliEntry', () => {
 
     const helpText = stdout.join('');
     expect(helpText).toContain('Usage: qwen [options] [command]');
+    expect(helpText).toContain('\nCommands:');
+    expect(helpText).toContain('\nOptions:');
     expect(helpText).toContain('Manage Qwen Code hooks');
     expect(helpText).toContain('Manage MCP servers');
     expect(helpText).toContain('Run Qwen Code as a local HTTP daemon');
