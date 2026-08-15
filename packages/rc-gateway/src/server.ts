@@ -688,11 +688,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   );
   // POST /session/:id/resume — reactivate a past (ended) conversation on its
   // workspace's daemon so a phone can pick it back up (add-resume-conversations).
-  // Write-scoped; bare namespace. No enforceSessionLock — unlike /end or
-  // /prompt, resuming an ENDED session has no live lock to enforce.
+  // Write-scoped; bare namespace. enforceSessionLock binds a session-locked
+  // caller's token to its one session id (parity with every other
+  // /session/:id/* route); a no-op for the unlocked tokens that normally reach
+  // this route.
   app.post(
     '/session/:id/resume',
     requireScope(WRITE, audit),
+    enforceSessionLock(audit),
     subActorBan, // banned chat user → 403 (before touching the daemon)
     createSessionResumeRoute(deps.daemon, audit),
   );
