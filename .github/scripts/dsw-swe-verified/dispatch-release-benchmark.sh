@@ -6,6 +6,7 @@ set -euo pipefail
 : "${QWEN_REF:?QWEN_REF is required}"
 : "${QWEN_COMMIT:?QWEN_COMMIT is required}"
 : "${INSTANCE_LIMIT:?INSTANCE_LIMIT is required}"
+: "${TERMINAL_BENCH_LIMIT:=89}"
 : "${BENCHMARK_IDEMPOTENCY_KEY:?BENCHMARK_IDEMPOTENCY_KEY is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 
@@ -42,6 +43,14 @@ output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
 
 if [[ ! "${INSTANCE_LIMIT}" =~ ^[0-9]+$ ]] || (( INSTANCE_LIMIT < 1 || INSTANCE_LIMIT > 500 )); then
   echo "INSTANCE_LIMIT must be between 1 and 500" >&2
+  exit 2
+fi
+if [[ ! "${TERMINAL_BENCH_LIMIT}" =~ ^[0-9]+$ ]] || (( TERMINAL_BENCH_LIMIT != 1 && TERMINAL_BENCH_LIMIT != 89 )); then
+  echo "TERMINAL_BENCH_LIMIT must be 1 or 89" >&2
+  exit 2
+fi
+if [[ -n "${TERMINAL_BENCH_INSTANCE_ID:-}" && "${TERMINAL_BENCH_LIMIT}" != "1" ]]; then
+  echo "TERMINAL_BENCH_INSTANCE_ID requires TERMINAL_BENCH_LIMIT=1" >&2
   exit 2
 fi
 if [[ ! "${max_attempts}" =~ ^[0-9]+$ ]] || (( max_attempts < 1 || max_attempts > 8 )); then
@@ -191,8 +200,15 @@ print(run_id)
 # SWE scoreability is independent: a published QUARANTINED result still starts
 # the TB follow-up.
 tb_manifest_path="${output_root}/terminal-bench-2.0-manifest.json"
-"${python_bin}" "${script_root}/make-terminal-bench-manifest.py" \
-  --archive "${tb_task_cache}" --output "${tb_manifest_path}"
+tb_manifest_args=(
+  --archive "${tb_task_cache}"
+  --limit "${TERMINAL_BENCH_LIMIT}"
+  --output "${tb_manifest_path}"
+)
+if [[ -n "${TERMINAL_BENCH_INSTANCE_ID:-}" ]]; then
+  tb_manifest_args+=(--instance-id "${TERMINAL_BENCH_INSTANCE_ID}")
+fi
+"${python_bin}" "${script_root}/make-terminal-bench-manifest.py" "${tb_manifest_args[@]}"
 "${pool_bin}" create-release-chain \
   --swe-run-id "${run_id}" \
   --tb-idempotency-key "${BENCHMARK_IDEMPOTENCY_KEY}-terminal-bench-2.0" \
@@ -209,6 +225,7 @@ jq -n \
   --arg qwen_commit "${QWEN_COMMIT}" \
   --arg execution_backend "${execution_backend}" \
   --arg terminal_bench_status "PENDING_SWE_PUBLICATION" \
+  --argjson terminal_bench_expected_instances "${TERMINAL_BENCH_LIMIT}" \
   --argjson expected_instances "${INSTANCE_LIMIT}" \
   '{
     status: $status,
@@ -218,6 +235,7 @@ jq -n \
     qwen_commit: $qwen_commit,
     execution_backend: $execution_backend,
     terminal_bench_status: $terminal_bench_status,
+    terminal_bench_expected_instances: $terminal_bench_expected_instances,
     expected_instances: $expected_instances
   }' > "${output_root}/dispatch-receipt.json"
 
