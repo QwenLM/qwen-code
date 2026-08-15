@@ -87,8 +87,11 @@ describe('bundled review skill', () => {
     // another model's marker (absence counts as mismatch). The unit suites
     // pin the gate's INPUTS — identity carriage, rendered instruction —
     // but not these clauses themselves; measured on this PR, reverting both
-    // hunks left every suite green. A revert or paraphrase must fail here.
+    // hunks left every suite green. A revert or paraphrase must fail here —
+    // branch 1's `**and** model matches` clause is pinned on its own, since
+    // a partial revert dropping only it leaves every other pin intact.
     const body = skillBody();
+    expect(body).toContain('If SHAs differ **and** model matches');
     expect(body).toContain('If SHAs differ **but** model differs');
     expect(body).toContain("require the side file's `model` to equal");
     expect(body).toContain('recovers the findings work list but NO anchor');

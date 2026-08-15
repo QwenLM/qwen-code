@@ -1765,11 +1765,12 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
   });
 
   it('injects the session model into the marker — QWEN_CODE_MODEL reaches the anchor (wiring)', async () => {
-    // The certifying identity must be the model the session ACTUALLY runs —
-    // Config publishes it per session, the shell tool injects it into this
-    // subprocess — not the id the state JSON typed. Dropping the runtime
-    // argument from the handler's composeReview call leaves the pure-function
-    // tests green while the posted anchor is certified by the typed id again.
+    // The certifying identity must be the model the runtime published for
+    // the session — Config publishes it per session, the shell tool injects
+    // it into this subprocess — superseding the id the state JSON typed.
+    // Dropping the runtime argument from the handler's composeReview call
+    // leaves the pure-function tests green while the posted anchor is
+    // certified by the typed id again.
     const dir = mkdtempSync(join(tmpdir(), 'compose-runtime-model-'));
     const inputPath = join(dir, 'compose.json');
     const commentsPath = join(dir, 'comments.json');
@@ -4511,14 +4512,14 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.body).not.toContain('the-session-model');
   });
 
-  it('the anchor carries the RUNTIME identity — injected at the CLI boundary, never typed by the model', () => {
+  it('the anchor carries the RUNTIME identity — injected at the CLI boundary, superseding the typed id', () => {
     // The certifying model used to be `input.modelId` — a field of the
     // model-written state JSON. A review running under one model could type
     // another's id, and the posted anchor would certify the range to a model
     // that never reviewed it: a later run of that model accepts `sha..HEAD`
-    // and skips the earlier code. The boundaries now inject the identity the
-    // session ACTUALLY runs (Config publishes QWEN_CODE_MODEL); the typed
-    // field is only the fallback for runs no session published.
+    // and skips the earlier code. The boundaries now inject the runtime-
+    // published identity (Config publishes QWEN_CODE_MODEL), superseding the
+    // typed field, which is only the fallback for runs no session published.
     const r = composeReview(
       {
         planPath: coveredPlan(['verify', 'reverse-audit'], {

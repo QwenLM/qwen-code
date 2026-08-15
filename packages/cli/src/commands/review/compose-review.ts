@@ -839,7 +839,7 @@ function ledgerMarkerFor(
     // The anchor's same-model qualifier: "clean up to `sha`" is THIS model's
     // verdict, and Step 1's recovered-anchor gate refuses to scope another
     // model's round to it. The identity is the one the RUNTIME published —
-    // the boundaries inject it, a model cannot type it — with the
+    // the boundaries inject it, and it supersedes the typed id — with the
     // model-written field only as the fallback for runs no session published
     // (and boundary-validated then whenever attribution is on): a review
     // running under one model could otherwise type another's id and certify
@@ -2841,9 +2841,12 @@ export const composeReviewCommand: CommandModule = {
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
       operatorReviewSettings().attribution,
-      // The anchor's certifying identity is the model the session ACTUALLY
-      // runs — Config publishes it per session, the shell tool injects it
-      // into this subprocess — not the id the state JSON typed.
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
       process.env['QWEN_CODE_MODEL'],
     );
     // The exact terminal verdict, persisted beside the fields it is computed

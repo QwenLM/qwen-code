@@ -1412,12 +1412,13 @@ describe('the ledger marker on the body that reaches GitHub', () => {
   }
 
   it('injects the session model into the posted marker — QWEN_CODE_MODEL reaches the wire (wiring)', () => {
-    // The certifying identity must be the model the session ACTUALLY runs —
-    // Config publishes it per session, the shell tool injects it into this
-    // subprocess — not the id the state JSON typed. Dropping the runtime
-    // argument from runSubmit's compose call keeps every other suite green
-    // while the POSTED marker's `model` silently falls back to the typed id:
-    // the exact cross-model forgery this PR exists to prevent. Mirrors the
+    // The certifying identity must be the model the runtime published for
+    // the session — Config publishes it per session, the shell tool injects
+    // it into this subprocess — superseding the id the state JSON typed.
+    // Dropping the runtime argument from runSubmit's compose call keeps
+    // every other suite green while the POSTED marker's `model` silently
+    // falls back to the typed id: the exact silent substitution this wiring
+    // exists to catch. Mirrors the
     // compose-review handler's wiring test at the one boundary whose body
     // reaches GitHub.
     const planPath = coveredPlanAt(6771, 'deadbeef00112233');
