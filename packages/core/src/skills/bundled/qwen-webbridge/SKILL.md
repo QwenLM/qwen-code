@@ -2,9 +2,7 @@
 name: qwen-webbridge
 description: Control the user's real Chrome browser with its existing tabs and login sessions. Use for navigating websites, reading pages, clicking, typing, screenshots, PDFs, uploads, network inspection, or any browser task when the Qwen Chrome extension is connected.
 allowedTools:
-  - run_shell_command
   - read_file
-  - write_file
 ---
 
 # Qwen WebBridge
@@ -32,6 +30,8 @@ Send JSON to `POST /command`:
   "session": "research-550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+Shell commands and file writes below are ordinary tool calls and follow the session's approval rules; expect approval prompts unless the user has granted narrower allow rules. Do not ask the user to add broad allow rules for this skill.
 
 Use one stable session name with a fresh UUID suffix for the entire user task. The first `navigate` should normally use `newTab:true` and a human-readable `group_title`. At the end, call `close_session` with `close_tabs:false` to release browser state while preserving tabs. Omit `close_tabs:false` only when the user asks to close the task's tabs.
 

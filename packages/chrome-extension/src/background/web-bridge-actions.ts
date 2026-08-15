@@ -56,7 +56,18 @@ const INTERACTIVE_ROLES = new Set([
   'tab',
   'treeitem',
 ]);
-const refsByTab = new Map<number, Map<string, Map<string, ElementRef>>>();
+interface SessionRefs {
+  /**
+   * Top-frame loaderId captured when the snapshot was taken. Resolving a ref
+   * against a different loader fails closed: backendNodeIds restart from
+   * small integers in every new document, so a stale ref would otherwise
+   * silently resolve to a different element.
+   */
+  loaderId?: string;
+  refs: Map<string, ElementRef>;
+}
+
+const refsByTab = new Map<number, Map<string, SessionRefs>>();
 const groupBySession = new Map<string, number>();
 const tabsBySession = new Map<string, Set<number>>();
 const networkCaptures = new Map<string, NetworkCapture>();
@@ -106,7 +117,11 @@ export function executeWebBridgeAction(
       return await action(args);
     } finally {
       if (name !== 'close_tab' && name !== 'close_session') {
-        await releaseIdleTabs(args);
+        try {
+          await releaseIdleTabs(args);
+        } catch {
+          // Cleanup must never replace the action's outcome.
+        }
       }
     }
   });
@@ -383,18 +398,32 @@ async function evaluate(args: Args): Promise<unknown> {
 async function snapshot(args: Args): Promise<unknown> {
   const tab = await currentTab(args);
   return withCdpTab(tab.id, async (send) => {
+    const loaderId = await topFrameLoaderId(send);
     const result = record(await send('Accessibility.getFullAXTree'));
     const nodes = Array.isArray(result['nodes']) ? result['nodes'] : [];
-    const refs = new Map<string, ElementRef>();
     const refsBySession = refsByTab.get(tab.id) ?? new Map();
-    refsBySession.set(sessionKey(args), refs);
+    // Continue numbering where the previous snapshot left off so a ref
+    // remembered from an earlier snapshot of the same session can never
+    // collide with a freshly issued one.
+    const startRef = refsBySession.get(sessionKey(args))?.refs.size ?? 0;
+    const refs = new Map<string, ElementRef>();
+    refsBySession.set(sessionKey(args), { loaderId, refs });
     refsByTab.set(tab.id, refsBySession);
     return {
       url: tab.url,
       title: tab.title,
-      tree: formatAccessibilityTree(nodes, refs),
+      tree: formatAccessibilityTree(nodes, refs, startRef),
     };
   });
+}
+
+async function topFrameLoaderId(send: CdpCommand): Promise<string | undefined> {
+  try {
+    const tree = record(await send('Page.getFrameTree'));
+    return string(record(record(tree['frameTree'])['frame'])['loaderId']);
+  } catch {
+    return undefined;
+  }
 }
 
 async function click(args: Args): Promise<unknown> {
@@ -572,7 +601,7 @@ async function keyType(args: Args): Promise<unknown> {
     const focused = record(
       await send('Runtime.evaluate', {
         expression:
-          "(() => { const el = document.activeElement; return !!el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'); })()",
+          "(() => { const editable = (el) => !!el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'); let el = document.activeElement; while (el) { if (editable(el)) return true; if (el.tagName === 'IFRAME') { try { el = el.contentDocument ? el.contentDocument.activeElement : null; } catch { el = null; } continue; } el = el.shadowRoot ? el.shadowRoot.activeElement : null; } return false; })()",
         returnByValue: true,
       }),
     );
@@ -584,6 +613,9 @@ async function keyType(args: Args): Promise<unknown> {
   });
 }
 
+const MAX_SEND_KEYS_CHARS = 1_024;
+const MAX_SEND_KEYS_DISPATCH_GROUPS = 300;
+
 async function sendKeys(args: Args): Promise<unknown> {
   const keys = requiredString(args, 'keys', 'send_keys');
   const repeat = args['repeat'] === undefined ? 1 : Number(args['repeat']);
@@ -591,10 +623,19 @@ async function sendKeys(args: Args): Promise<unknown> {
     throw new Error('send_keys: repeat must be an integer in [1, 100]');
   }
   const platform = (await chrome.runtime.getPlatformInfo()).os;
-  const sequences = keys
-    .trim()
-    .split(/\s+/)
-    .map((key) => parseKey(key, platform));
+  const segments = keys.trim().split(/\s+/);
+  // Bound the serialized CDP work so one oversized request cannot keep
+  // typing into the user's page long after the daemon-side 60s timeout,
+  // wedging every queued WebBridge command behind it.
+  if (
+    keys.length > MAX_SEND_KEYS_CHARS ||
+    segments.length * repeat > MAX_SEND_KEYS_DISPATCH_GROUPS
+  ) {
+    throw new Error(
+      `send_keys: too many keys (max ${MAX_SEND_KEYS_CHARS} chars and ${MAX_SEND_KEYS_DISPATCH_GROUPS} key*repeat dispatch groups)`,
+    );
+  }
+  const sequences = segments.map((key) => parseKey(key, platform));
   return onCurrentTab(args, async (send) => {
     let dispatched = 0;
     for (let run = 0; run < repeat; run++) {
@@ -659,7 +700,15 @@ async function network(args: Args): Promise<unknown> {
     stopNetworkListenerIfIdle();
     return { success: true, message: 'network capture stopped' };
   }
-  const requests = networkCaptures.get(key)?.requests ?? new Map();
+  // The current tab may have changed since `start` (newTab navigation or
+  // stale-tab recovery), so fall back to the session's capture instead of
+  // reporting an empty list for a still-running capture.
+  const capture =
+    networkCaptures.get(key) ??
+    [...networkCaptures.values()].find(
+      (candidate) => candidate.session === session,
+    );
+  const requests = capture?.requests ?? new Map();
   if (command === 'list') {
     const filter = string(args['filter']);
     const values = [...requests.values()].filter(
@@ -678,7 +727,8 @@ async function network(args: Args): Promise<unknown> {
     const request = requests.get(requestId);
     if (!request) throw new Error(`network: request "${requestId}" not found`);
     if (request.failed) return request;
-    const response = await withCdpTab(tab.id, async (send) =>
+    const captureTabId = capture?.tabId ?? tab.id;
+    const response = await withCdpTab(captureTabId, async (send) =>
       record(await send('Network.getResponseBody', { requestId })),
     );
     let body: unknown = response['body'];
@@ -1058,6 +1108,7 @@ async function groupTab(tabId: number, args: Args): Promise<void> {
 function formatAccessibilityTree(
   rawNodes: unknown[],
   refs: Map<string, ElementRef>,
+  startRef = 0,
 ): unknown[] {
   const nodes = rawNodes.map(record);
   const byId = new Map<string, JsonRecord>();
@@ -1083,7 +1134,7 @@ function formatAccessibilityTree(
     }
     const backendNodeId = integer(node['backendDOMNodeId']);
     if (INTERACTIVE_ROLES.has(role) && backendNodeId !== undefined) {
-      const ref = `e${refs.size + 1}`;
+      const ref = `e${startRef + refs.size + 1}`;
       refs.set(ref, { backendNodeId });
       output['ref'] = `@${ref}`;
     }
@@ -1136,9 +1187,18 @@ async function objectIdFromRef(
   send: CdpCommand,
 ): Promise<string> {
   const ref = selector.startsWith('@') ? selector.slice(1) : selector;
-  const element = refsByTab.get(tabId)?.get(session)?.get(ref);
-  if (!element) {
+  const entry = refsByTab.get(tabId)?.get(session);
+  const element = entry?.refs.get(ref);
+  if (!entry || !element) {
     throw new Error(`${action}: unknown ref "${selector}". Run snapshot first`);
+  }
+  if (entry.loaderId !== undefined) {
+    const currentLoaderId = await topFrameLoaderId(send);
+    if (currentLoaderId !== entry.loaderId) {
+      throw new Error(
+        `${action}: unknown ref "${selector}". Page changed, run snapshot first`,
+      );
+    }
   }
   const result = record(
     await send('DOM.resolveNode', { backendNodeId: element.backendNodeId }),
@@ -1213,7 +1273,12 @@ async function releaseIdleTabs(args: Args): Promise<void> {
     const capturing = [...networkCaptures.values()].some(
       (capture) => capture.tabId === tabId,
     );
-    if (!capturing) await releaseCdpTab(tabId);
+    if (capturing) continue;
+    try {
+      await releaseCdpTab(tabId);
+    } catch {
+      // The tab may already be gone; keep releasing the rest.
+    }
   }
 }
 
@@ -1487,9 +1552,27 @@ function matchesRequestedUrl(
   actual: string | undefined,
   requested: string,
 ): boolean {
-  return requested.includes('://') && !requested.includes('*')
-    ? matchesExactUrl(actual, requested)
-    : matchesHost(actual, requested);
+  if (requested.includes('://') && !requested.includes('*')) {
+    return matchesExactUrl(actual, requested);
+  }
+  // about:, data:, javascript: and similar scheme URLs cannot be routed
+  // through host matching (`new URL('https://about:blank')` throws), so
+  // compare them by href instead. An all-digit rest is a `host:port`
+  // request, not a scheme URL, and keeps the host-matching path.
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):(.*)$/i.exec(requested);
+  if (
+    schemeMatch &&
+    schemeMatch[1].toLowerCase() !== 'http' &&
+    schemeMatch[1].toLowerCase() !== 'https' &&
+    !/^\d+$/.test(schemeMatch[2])
+  ) {
+    try {
+      return !!actual && new URL(actual).href === new URL(requested).href;
+    } catch {
+      return false;
+    }
+  }
+  return matchesHost(actual, requested);
 }
 
 function matchesExactUrl(

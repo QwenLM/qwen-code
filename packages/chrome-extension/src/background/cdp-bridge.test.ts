@@ -205,6 +205,69 @@ describe('CDP bridge', () => {
     bridge.shutdownCdpBridge();
   });
 
+  it('delivers debugger events to direct subscribers without a raw client', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const listener = vi.fn();
+    const unsubscribe = bridge.subscribeCdpEvents(listener);
+
+    await bridge.withCdpTab(7, async () => undefined);
+
+    for (const emit of chromeHarness.debuggerEventListeners) {
+      emit({ tabId: 7 }, 'Network.requestWillBeSent', { requestId: 'r1' });
+    }
+    expect(listener).toHaveBeenCalledWith(
+      'Network.requestWillBeSent',
+      { requestId: 'r1' },
+      7,
+    );
+
+    listener.mockClear();
+    for (const emit of chromeHarness.debuggerEventListeners) {
+      emit({ tabId: 99 }, 'Network.requestWillBeSent', { requestId: 'r2' });
+    }
+    expect(listener).not.toHaveBeenCalled();
+
+    unsubscribe();
+    bridge.shutdownCdpBridge();
+  });
+
+  it('detaches only the timed-out action\'s tab, not every attachment', async () => {
+    const chromeHarness = installChromeHarness({ deferSendCommand: true });
+    const bridge = await loadBridge();
+
+    await bridge.withCdpTab(7, async () => undefined);
+    await bridge.withCdpTab(8, async () => undefined);
+
+    const pending = bridge.withCdpTab(7, (send) =>
+      send('Runtime.evaluate', { expression: 'new Promise(() => {})' }),
+    );
+    void pending.catch(() => {});
+    await vi.waitFor(() =>
+      expect(chromeHarness.sendCommand).toHaveBeenCalledOnce(),
+    );
+
+    await vi.advanceTimersByTimeAsync(55_000);
+
+    await expect(pending).rejects.toThrow(
+      'WebBridge action timed out after 55s',
+    );
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
+    expect(chromeHarness.detach).not.toHaveBeenCalledWith(
+      { tabId: 8 },
+      expect.any(Function),
+    );
+
+    // The untouched tab stays attached and usable.
+    await expect(
+      bridge.withCdpTab(8, async () => undefined),
+    ).resolves.toBeUndefined();
+    bridge.shutdownCdpBridge();
+  });
+
   it('keeps direct WebBridge tabs attached while switching targets', async () => {
     const chromeHarness = installChromeHarness();
     const bridge = await loadBridge();

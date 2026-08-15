@@ -5,7 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { WebBridgeRegistry } from './web-bridge-registry.js';
 import { WebBridgeService } from './web-bridge-service.js';
@@ -357,6 +358,70 @@ describe('WebBridgeService', () => {
     expect(call).toHaveBeenCalledOnce();
   });
 
+  it('rejects close_tab while another session borrows the tab', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 99 })
+      .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'owner',
+    });
+    await service.execute({
+      action: 'find_tab',
+      args: { url: 'https://example.test', active: true },
+      session: 'borrower',
+    });
+
+    await expect(
+      service.execute({
+        action: 'close_tab',
+        args: {},
+        session: 'owner',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps another session\'s tab out of the close_session close set', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 99 })
+      .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true })
+      .mockResolvedValueOnce({ success: true, closed: 0 });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'owner',
+    });
+    await service.execute({
+      action: 'find_tab',
+      args: { url: 'https://example.test', active: true },
+      session: 'borrower',
+    });
+
+    await service.execute({
+      action: 'close_session',
+      args: {},
+      session: 'owner',
+    });
+
+    expect(call).toHaveBeenLastCalledWith(
+      'close_session',
+      expect.objectContaining({
+        _session: 'owner',
+        _tabIds: [],
+      }),
+    );
+  });
+
   it('keeps a borrowed tab selected after navigating it', async () => {
     const registry = new WebBridgeRegistry();
     const call = vi
@@ -517,6 +582,51 @@ describe('WebBridgeService', () => {
       _tabId: undefined,
       _tabIds: [],
     });
+  });
+
+  it('prunes the oldest artifact directories beyond the cap', async () => {
+    const root = tmpdir();
+    const created: string[] = [];
+    for (let i = 0; i < 130; i++) {
+      const dir = path.join(
+        root,
+        `qwen-webbridge-prune-test-${String(i).padStart(3, '0')}`,
+      );
+      await mkdir(dir, { recursive: true });
+      const time = 1_700_000_000 + i;
+      await utimes(dir, time, time);
+      created.push(dir);
+    }
+    let artifactDir = '';
+    try {
+      const registry = new WebBridgeRegistry();
+      vi.spyOn(registry, 'call').mockResolvedValue({
+        data: Buffer.from('x').toString('base64'),
+        dataLength: 1,
+        pageTitle: 'Prune',
+      });
+      const service = new WebBridgeService(registry, '1.2.3');
+
+      const result = await service.execute({
+        action: 'screenshot',
+        args: {},
+        session: 'prune',
+      });
+      artifactDir = path.dirname(
+        String((result as Record<string, unknown>)['path']),
+      );
+
+      await expect(stat(created[0])).rejects.toThrow();
+      await expect(stat(created[1])).rejects.toThrow();
+      await expect(stat(created[2])).rejects.toThrow();
+      await expect(stat(created[3])).resolves.toBeDefined();
+    } finally {
+      for (const dir of [...created, artifactDir]) {
+        if (dir.includes('qwen-webbridge')) {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }
+    }
   });
 
   it.each([

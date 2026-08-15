@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { WebBridgeRegistry } from './web-bridge-registry.js';
@@ -56,6 +56,7 @@ export class WebBridgeRequestError extends Error {
 const MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_PDF_BYTES = 24 * 1024 * 1024;
 const MAX_COMMAND_BYTES = 256 * 1024;
+const MAX_ARTIFACT_DIRS = 128;
 const MAX_PENDING_COMMANDS = 32;
 const MAX_SESSIONS = 64;
 const MAX_QUEUE_WAIT_MS = 60_000;
@@ -139,12 +140,30 @@ export class WebBridgeService {
     };
     if (
       command.action === 'close_tab' &&
-      state.currentTabId !== undefined &&
-      state.currentTabId === state.borrowedTabId
+      state.currentTabId !== undefined
     ) {
-      throw new WebBridgeRequestError('Cannot close a borrowed tab', 409);
+      if (state.currentTabId === state.borrowedTabId) {
+        throw new WebBridgeRequestError('Cannot close a borrowed tab', 409);
+      }
+      if (
+        this.tabUsedByOtherSessions(state.currentTabId, command.session)
+      ) {
+        throw new WebBridgeRequestError(
+          'Cannot close a tab used by another session',
+          409,
+        );
+      }
     }
     const injectedArgs = this.injectSessionArgs(command, state);
+    if (command.action === 'close_session') {
+      // The extension-side cross-session guard lives in module state that
+      // does not survive an MV3 service-worker restart, so the long-lived
+      // daemon is the durable enforcement point: never hand another
+      // session's owned or borrowed tab to the close set.
+      injectedArgs['_tabIds'] = [...state.ownedTabIds].filter(
+        (tabId) => !this.tabUsedByOtherSessions(tabId, command.session),
+      );
+    }
     let result: unknown;
     try {
       result = await this.registry.call(command.action, injectedArgs);
@@ -195,6 +214,19 @@ export class WebBridgeService {
       _tabId: state.currentTabId,
       _tabIds: [...state.ownedTabIds],
     };
+  }
+
+  private tabUsedByOtherSessions(
+    tabId: number,
+    excludedSession: string,
+  ): boolean {
+    for (const [session, state] of this.sessions) {
+      if (session === excludedSession) continue;
+      if (state.ownedTabIds.has(tabId) || state.borrowedTabId === tabId) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private captureSessionResult(
@@ -278,6 +310,7 @@ export class WebBridgeService {
         : result['format'] === 'jpeg'
           ? 'jpg'
           : 'png';
+    await pruneArtifactDirectories();
     const directory = await mkdtemp(path.join(tmpdir(), 'qwen-webbridge-'));
     const filePath = path.join(
       directory,
@@ -296,6 +329,36 @@ export class WebBridgeService {
             ? 'image/jpeg'
             : 'image/png',
     };
+  }
+}
+
+/**
+ * Artifacts persist under a fresh tmpdir per screenshot/PDF and callers may
+ * read them for a while, so prune by count (oldest first) instead of age.
+ */
+async function pruneArtifactDirectories(): Promise<void> {
+  try {
+    const root = tmpdir();
+    const entries = await readdir(root);
+    const directories: Array<{ name: string; mtimeMs: number }> = [];
+    for (const name of entries) {
+      if (!name.startsWith('qwen-webbridge-')) continue;
+      try {
+        const info = await stat(path.join(root, name));
+        if (info.isDirectory()) {
+          directories.push({ name, mtimeMs: info.mtimeMs });
+        }
+      } catch {
+        // Already gone.
+      }
+    }
+    if (directories.length < MAX_ARTIFACT_DIRS) return;
+    directories.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const entry of directories.slice(0, directories.length - MAX_ARTIFACT_DIRS + 1)) {
+      await rm(path.join(root, entry.name), { recursive: true, force: true });
+    }
+  } catch {
+    // Pruning is best-effort; never fail the artifact write.
   }
 }
 

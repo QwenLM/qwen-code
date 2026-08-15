@@ -110,6 +110,13 @@ const pendingDirectCommands = new Set<{
   cancel(error: Error): void;
 }>();
 let directOperationActive = false;
+/**
+ * Tabs the in-flight direct operation has touched (via `withCdpTab`). A
+ * per-operation timeout detaches exactly these tabs instead of the whole
+ * bridge, so a hung action in one session can't destroy other sessions'
+ * attachments and network captures.
+ */
+let activeDirectOperationTabIds: Set<number> | null = null;
 let detachInProgress: Promise<void> | undefined;
 const DIRECT_OPERATION_TIMEOUT_MS = 55_000;
 
@@ -145,8 +152,11 @@ export function isCdpBridgeFrame(type: unknown): boolean {
 }
 
 /**
- * Forward a CDP event from the real tab to the daemon. Only events for the
- * currently-attached tab are forwarded.
+ * Fan a CDP event out from the real tab. Every attached tab delivers to the
+ * direct subscribers (`subscribeCdpEvents`) — with no raw `/cdp` client
+ * connected (the dominant WebBridge mode) this is the only delivery path for
+ * network-capture and navigate-lifecycle events. Only the raw client's own
+ * attached tab is additionally forwarded to the daemon socket.
  */
 function onDebuggerEvent(
   source: chrome.debugger.Debuggee,
@@ -307,13 +317,14 @@ async function runDirectBrowserOperation<T>(
     throw new Error('CDP tunnel is currently controlling the browser');
   }
   directOperationActive = true;
+  activeDirectOperationTabIds = new Set<number>();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const timedOut = new Promise<never>((_resolve, reject) => {
       const error = new Error('WebBridge action timed out after 55s');
       error.name = 'WebBridgeTimeoutError';
       timeout = setTimeout(() => {
-        void detachCdpBridge(error);
+        void detachDirectOperationTabs(error);
         reject(error);
       }, DIRECT_OPERATION_TIMEOUT_MS);
     });
@@ -321,6 +332,7 @@ async function runDirectBrowserOperation<T>(
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     directOperationActive = false;
+    activeDirectOperationTabIds = null;
   }
 }
 
@@ -335,6 +347,7 @@ export function withCdpTab<T>(
   operation: (send: CdpCommand) => Promise<T>,
 ): Promise<T> {
   const run = async () => {
+    activeDirectOperationTabIds?.add(tabId);
     await attachTab(tabId);
     directTabIds.add(tabId);
     return operation((method, params) =>
@@ -540,6 +553,41 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
  * Tear down the bridge: detach the debugger and stop forwarding. Called when
  * the daemon socket closes so a stale attachment doesn't linger. Idempotent.
  */
+async function detachDirectOperationTabs(error: Error): Promise<void> {
+  const tabIds = [...(activeDirectOperationTabIds ?? [])].filter((tabId) =>
+    attachedTabIds.has(tabId),
+  );
+  for (const pending of pendingDirectCommands) pending.expire();
+  if (tabIds.length === 0) return;
+  for (const tabId of tabIds) {
+    for (const listener of directDetachListeners) listener(tabId);
+  }
+  const pendingDetaches: Array<Promise<void>> = [];
+  for (const tabId of tabIds) {
+    attachedTabIds.delete(tabId);
+    directTabIds.delete(tabId);
+    if (detachingTabIds.has(tabId)) continue;
+    detachingTabIds.add(tabId);
+    pendingDetaches.push(
+      new Promise<void>((resolve) => {
+        const done = () => {
+          void chrome.runtime.lastError;
+          detachingTabIds.delete(tabId);
+          resolve();
+        };
+        try {
+          chrome.debugger.detach({ tabId }, done);
+        } catch {
+          done();
+        }
+      }),
+    );
+  }
+  await Promise.all(pendingDetaches);
+  if (attachedTabIds.size === 0) teardownAttachments();
+  for (const pending of [...pendingDirectCommands]) pending.cancel(error);
+}
+
 function detachCdpBridge(error: Error): Promise<void> {
   for (const pending of pendingDirectCommands) pending.expire();
   detachInProgress ??= performCdpDetach(error).finally(() => {
