@@ -4857,6 +4857,114 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
   });
 });
 
+describe("composeReview — the composed body fits GitHub's limit", () => {
+  // A POST over 65,536 characters is rejected WHOLE — the review's blockers
+  // included — so the body carries its own budget. What it may drop, and in
+  // what order, is the policy under test: the deferral display yields first,
+  // the not-reviewed disclosures second, the blockers and the caps never.
+  const LIMIT = 65536;
+  const nit = (i: number): DeferredEntry => ({
+    file: `f${i}.ts`,
+    line: 1,
+    source: 'review',
+    severity: 'Suggestion',
+    title: 'x'.repeat(200),
+  });
+
+  it('leaves a body that fits untouched', () => {
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [nit(1)],
+        unreviewedDimensions: ['security'],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).not.toContain('were trimmed from this body');
+    expect(r.body).toContain('Deferred under the convergence posture');
+  });
+
+  it('trims the deferral display first, discloses the count, and keeps the blockers', () => {
+    // The un-trimmable half is huge but legal: unresolved blockers are the
+    // one thing a review exists to deliver.
+    const blocker = 'B'.repeat(64_300);
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        bodyCriticals: [blocker],
+        deferredSuggestions: [nit(1), nit(2), nit(3)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    // The blocker survives whole; the deferral display is gone, counted.
+    expect(r.body).toContain(blocker);
+    expect(r.body).not.toContain('Deferred under the convergence posture');
+    expect(r.body).toContain('1 disclosure section(s) were trimmed');
+    // The operator gets the same fact on stderr, not only the PR page.
+    expect(r.remediation.some((line) => line.startsWith('body budget:'))).toBe(
+      true,
+    );
+  });
+
+  it('trims the not-reviewed disclosures only after the deferral display', () => {
+    const blocker = 'B'.repeat(63_000);
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        bodyCriticals: [blocker],
+        deferredSuggestions: [nit(1), nit(2), nit(3)],
+        unreviewedDimensions: [`security — ${'D'.repeat(3_000)}`],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain(blocker);
+    expect(r.body).not.toContain('Deferred under the convergence posture');
+    expect(r.body).not.toContain('Not reviewed:');
+    expect(r.body).toContain('2 disclosure section(s) were trimmed');
+  });
+
+  it('truncates as a last resort rather than composing a body GitHub rejects', () => {
+    // Blockers alone past the limit: they are un-trimmable by policy, so the
+    // body is cut — English-only, so the bilingual fold cannot be left
+    // unbalanced — and says so. Posting a truncated review beats posting
+    // none, which is what a 422 would leave.
+    const r = composeReview(
+      base({
+        planPath: coveredPlan(['verify', 'reverse-audit'], { han: true }),
+        bodyCriticals: ['C'.repeat(80_000)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain('was TRUNCATED to fit');
+    expect(r.body).toContain(FOOTER);
+    // No half-open fold, and no lone surrogate at the cut.
+    expect(r.body.includes('<details>')).toBe(r.body.includes('</details>'));
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
+  });
+
+  it('holds room for the ledger marker, so the POSTED body still fits', () => {
+    // The marker is appended after the body composes, so the budget reserves
+    // its cap — measured on the value `submit` actually posts.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: Array.from(
+        { length: 40 },
+        (_, i) => `blocker ${i}: ${'B'.repeat(1_500)}`,
+      ),
+    });
+    expect(r.body).toContain('<!-- qwen-review-ledger ');
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+  });
+});
+
 describe('composeReview — the findings file tag check', () => {
   // The pipelined loop's invariant, machine-read. Under the serial loop the
   // last round's verification completing before Step 6 was structural; the
@@ -5423,7 +5531,16 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     const t0 = performance.now();
     const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
     expect(performance.now() - t0).toBeLessThan(2000);
-    // The multi-line entry still collapses to one list item.
+    // 160k of model prose is past GitHub's body limit, and unresolved
+    // blockers are un-trimmable by policy, so this composes the last-resort
+    // truncation rather than a body the API would reject whole.
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('collapses a multi-line cannot-tell entry into one list item', () => {
+    const wrapped = 'comment 102 (b.ts) — body\n   truncated';
+    const r = composeReview(base({ cannotTellCriticals: [wrapped] }));
     expect(r.body).toContain('comment 102 (b.ts) — body truncated');
+    expect(r.body).not.toContain('was TRUNCATED to fit');
   });
 });
