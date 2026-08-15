@@ -189,16 +189,20 @@ export class WebBridgeService {
         error instanceof Error &&
         STALE_TAB_ERROR.test(error.message)
       ) {
-        state.ownedTabIds.delete(state.currentTabId);
-        state.currentTabId = undefined;
-        state.borrowedTabId = undefined;
+        const staleTabId = state.currentTabId;
         result = await this.registry.call(command.action, {
           ...command.args,
           newTab: true,
           _session: command.session,
           _tabId: undefined,
-          _tabIds: [...state.ownedTabIds],
+          _tabIds: [...state.ownedTabIds].filter((id) => id !== staleTabId),
         });
+        // Drop the stale tab only after the recovery succeeded: mutating
+        // first would leave an emptied session entry behind when the retry
+        // itself throws, leaking it against MAX_SESSIONS until restart.
+        if (staleTabId !== undefined) state.ownedTabIds.delete(staleTabId);
+        state.currentTabId = undefined;
+        state.borrowedTabId = undefined;
       } else {
         throw error;
       }

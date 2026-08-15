@@ -1617,24 +1617,38 @@ function matchesRequestedUrl(
   actual: string | undefined,
   requested: string,
 ): boolean {
+  if (!actual) return false;
+  if (requested === '*') return true;
   if (requested.includes('://') && !requested.includes('*')) {
     return matchesExactUrl(actual, requested);
   }
-  // about:, data:, javascript: and similar scheme URLs cannot be routed
-  // through host matching (`new URL('https://about:blank')` throws), so
-  // compare them by href instead. An all-digit rest is a `host:port`
-  // request, not a scheme URL, and keeps the host-matching path.
-  const schemeMatch = /^([a-z][a-z0-9+.-]*):(.*)$/i.exec(requested);
-  if (
-    schemeMatch &&
-    schemeMatch[1].toLowerCase() !== 'http' &&
-    schemeMatch[1].toLowerCase() !== 'https' &&
-    !/^\d+$/.test(schemeMatch[2])
-  ) {
+  if (!requested.includes('*')) {
+    // A schemeless request is host[:port][/path]: parse it as an https://
+    // URL so the port and path participate in the match. Hostname-only
+    // matching used to discard the port (`localhost:9222` matched a :3000
+    // tab), and `host:port/path` was misparsed as an opaque-scheme URL and
+    // never matched. Requests that cannot be a host (about:, data:, …)
+    // fall through to href comparison.
     try {
-      return !!actual && new URL(actual).href === new URL(requested).href;
+      const expected = new URL(`https://${requested}`);
+      const actualUrl = new URL(actual);
+      if (expected.hostname !== actualUrl.hostname) return false;
+      if (expected.port !== '' && expected.port !== actualUrl.port) {
+        return false;
+      }
+      if (
+        expected.pathname !== '/' &&
+        !actualUrl.pathname.startsWith(expected.pathname)
+      ) {
+        return false;
+      }
+      return true;
     } catch {
-      return false;
+      try {
+        return new URL(actual).href === new URL(requested).href;
+      } catch {
+        return false;
+      }
     }
   }
   return matchesHost(actual, requested);

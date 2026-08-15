@@ -338,6 +338,43 @@ describe('WebBridgeService', () => {
     });
   });
 
+  it('keeps session state intact when the stale-tab retry fails', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 99 })
+      .mockRejectedValueOnce(new Error('No tab with id: 99'))
+      .mockRejectedValueOnce(new Error('tab load timed out'))
+      .mockResolvedValueOnce({ success: true, closed: 1 });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test' },
+      session: 'research',
+    });
+    await expect(
+      service.execute({
+        action: 'navigate',
+        args: { url: 'https://example.test' },
+        session: 'research',
+      }),
+    ).rejects.toThrow('tab load timed out');
+
+    // The failed retry must not leave an emptied session entry behind:
+    // the original tab stays in the close set.
+    await service.execute({
+      action: 'close_session',
+      args: {},
+      session: 'research',
+    });
+    expect(call).toHaveBeenLastCalledWith('close_session', {
+      _session: 'research',
+      _tabId: 99,
+      _tabIds: [99],
+    });
+  });
+
   it('hands ownership of a borrowed tab to the borrower when the owner closes', async () => {
     const registry = new WebBridgeRegistry();
     const call = vi

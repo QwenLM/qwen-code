@@ -824,6 +824,48 @@ describe('WebBridge actions', () => {
     ).rejects.toThrow('Page changed, run snapshot first');
   });
 
+  it('matches host:port requests by port, not hostname only', async () => {
+    (
+      chrome.tabs.get as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation(async (tabId: number) => ({
+      id: tabId,
+      url: 'http://localhost:3000/',
+      title: 'Dev server',
+      status: 'complete',
+      groupId: -1,
+    }));
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('find_tab', {
+        url: 'localhost:9222',
+        _session: 'research',
+        _tabIds: [17],
+      }),
+    ).rejects.toThrow('no tab matching localhost:9222');
+  });
+
+  it('matches host:port/path requests against same-origin tabs', async () => {
+    (
+      chrome.tabs.get as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation(async (tabId: number) => ({
+      id: tabId,
+      url: 'https://example.com:8080/path/page',
+      title: 'Example',
+      status: 'complete',
+      groupId: -1,
+    }));
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('find_tab', {
+        url: 'example.com:8080/path',
+        _session: 'research',
+        _tabIds: [17],
+      }),
+    ).resolves.toMatchObject({ tabId: 17 });
+  });
+
   it('matches about:blank tabs in find_tab', async () => {
     (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       id: 17,
