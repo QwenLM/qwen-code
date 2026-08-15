@@ -65,6 +65,8 @@ export interface CdpLinkBinding {
  * Holds the active extension CDP bridge for one daemon process. Inert until an
  * extension `/acp` connection registers and at least one `/cdp` client binds.
  */
+const MAX_MULTI_CLIENT_LINKS = 16;
+
 export class CdpTunnelRegistry {
   private active: CdpBridgeEndpoint | undefined;
   /** Links bound to the active bridge, keyed by minted `linkId`. */
@@ -134,6 +136,12 @@ export class CdpTunnelRegistry {
     const bridge = this.active;
     if (!bridge) return undefined;
     if (!bridge.multiClient && this.links.size >= 1) return undefined;
+    // Cap multi-client links too: each bound link carries daemon-side
+    // timers/state plus an extension-side attachment ref, and a
+    // reconnect-looping client must not grow either without bound.
+    if (bridge.multiClient && this.links.size >= MAX_MULTI_CLIENT_LINKS) {
+      return undefined;
+    }
     const stored: CdpLinkBinding = Object.assign(binding, {
       linkId: `cdp-link-${this.nextLinkSeq++}`,
     });

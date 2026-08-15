@@ -540,7 +540,7 @@ describe('CDP bridge', () => {
     );
   });
 
-  it('rejects joiners when debugger detaches while tab metadata is pending', async () => {
+  it('acks attach failure to every link when Chrome detaches during the metadata fetch', async () => {
     const chromeHarness = installChromeHarness({ deferTabGet: true });
     const bridge = await loadBridge();
     const send = vi.fn();
@@ -556,10 +556,68 @@ describe('CDP bridge', () => {
     await vi.waitFor(() =>
       expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
     );
-    chromeHarness.debuggerDetachListeners[0]?.(
-      { tabId: 7 },
-      'canceled_by_user',
+
+    // The user cancels the debugging banner while tab metadata is pending.
+    for (const listener of chromeHarness.debuggerDetachListeners) {
+      listener({ tabId: 7 }, 'canceled_by_user');
+    }
+    chromeHarness.finishTabGet();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 1,
+        error: { message: 'debugger detached during attach' },
+        linkId: 'cdp-link-1',
+      }),
     );
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 2,
+        error: { message: 'debugger detached during attach' },
+        linkId: 'cdp-link-2',
+      }),
+    );
+  });
+
+  it('acks attach failure when the debugger detaches during fast-path metadata', async () => {
+    const chromeHarness = installChromeHarness({ deferTabGet: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(
+        1,
+      ),
+    );
+    chromeHarness.finishTabGet();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 1,
+        url: 'https://example.test',
+        title: 'Page',
+        linkId: 'cdp-link-1',
+      }),
+    );
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(
+        2,
+      ),
+    );
+    for (const listener of chromeHarness.debuggerDetachListeners) {
+      listener({ tabId: 7 }, 'canceled_by_user');
+    }
     chromeHarness.finishTabGet();
 
     await vi.waitFor(() =>
@@ -748,10 +806,10 @@ describe('CDP bridge', () => {
     const bridge = await loadBridge();
     const send = vi.fn();
 
-    vi.mocked(chrome.tabs.query)
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce([{ id: 7 }])
       .mockResolvedValueOnce([{ id: 8 }]);
-    vi.mocked(chrome.tabs.get).mockResolvedValue({
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       id: 8,
       url: 'https://next.example.test',
       title: 'Next',
@@ -961,6 +1019,80 @@ describe('CDP bridge', () => {
         result: { value: 'ok' },
         linkId: 'cdp-link-1',
       }),
+    );
+  });
+
+  it('does not plant a stale release for a link evicted by a tab switch', async () => {
+    const chromeHarness = installChromeHarness({ deferTabGet: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    // Link 1 lands on tab 7.
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(
+        1,
+      ),
+    );
+    chromeHarness.finishTabGet();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'cdp_attached', id: 1 }),
+      ),
+    );
+
+    // Link 2's attach targets a different active tab; the tab-switch flow
+    // replaces attachedLinks while its metadata fetch is still pending,
+    // evicting the landed link 1.
+    (
+      chrome.tabs.query as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValueOnce([{ id: 8 }]);
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.attach).toHaveBeenCalledTimes(2),
+    );
+
+    // Link 1 releases while the switch flow is in flight: it is no longer in
+    // attachedLinks, but its handleAttach completed long ago — nothing may
+    // be recorded in the deferred-release ledger.
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+    chromeHarness.finishTabGet();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'cdp_attached', id: 2 }),
+      ),
+    );
+
+    // Reusing the evicted link's id must attach cleanly, not hit a stale
+    // 'released during attach' rejection.
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 4, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(
+        3,
+      ),
+    );
+    chromeHarness.finishTabGet();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cdp_attached',
+          id: 4,
+          linkId: 'cdp-link-1',
+          url: expect.any(String),
+        }),
+      ),
     );
   });
 });

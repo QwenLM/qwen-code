@@ -39,6 +39,12 @@ interface RegisterCdpStatusRouteDeps {
  * shared Chrome bridge (extension connected + multi-client) before rerouting
  * their `chrome-devtools` MCP from `--autoConnect` to `--wsEndpoint`. Returns
  * only booleans/counters — no workspace or session data.
+ *
+ * Mounted behind the daemon's bearer auth when a token is configured: an
+ * unauthenticated probe then receives `401` (not the `usable: false` body),
+ * which the reroute treats as "no bridge" and safely keeps `--autoConnect`.
+ * The `usable` field still tells token-bearing clients why their
+ * auth-incapable CDP tools cannot share the bridge.
  */
 export function registerCdpStatusRoute(
   app: Application,
