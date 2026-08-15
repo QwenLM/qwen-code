@@ -258,6 +258,14 @@ describe('extractImages', () => {
     expect(extractImages(body)).toEqual([{ url: ATTACHMENT, alt: '' }]);
   });
 
+  it('drops img src values that would break out of the image syntax', () => {
+    const breakout = `<img src="${ATTACHMENT})![t](https://evil.example/pixel.png)">`;
+    const spaced = `<img src="${ATTACHMENT} with space.png">`;
+
+    expect(extractImages(breakout)).toEqual([]);
+    expect(extractImages(spaced)).toEqual([]);
+  });
+
   it('does not treat ordinary links as images', () => {
     const body =
       '[design doc](https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/design.md)\n' +
@@ -398,7 +406,7 @@ describe('renderReleaseNotesV2', () => {
     // Appendix: collapsed, normalized titles, authors kept, no breaking PR.
     expect(markdown).toContain('<details>');
     expect(markdown).toContain(
-      '<summary>Complete Change List (4 pull requests)</summary>',
+      '<summary>Complete Change List (3 pull requests)</summary>',
     );
     expect(markdown).toContain(
       `web-shell: upload files ([#1](${PR(1)})) by @alice`,
@@ -590,6 +598,23 @@ describe('renderReleaseNotesV2', () => {
     expect(markdown).toContain('  - 移除旧版 v1 API 端点。');
     expect(markdown).not.toContain('## 中文摘要');
   });
+
+  it('counts only listed entries and pluralizes the appendix header', () => {
+    const single = renderReleaseNotesV2({
+      ...base,
+      entries: [entries[0]],
+      themes: [],
+    });
+
+    expect(single).toContain(
+      '<summary>Complete Change List (1 pull request)</summary>',
+    );
+
+    // Entry 4 is breaking and is listed only under Breaking Changes.
+    expect(renderReleaseNotesV2(base)).toContain(
+      '<summary>Complete Change List (3 pull requests)</summary>',
+    );
+  });
 });
 
 describe('generateAiContent themes', () => {
@@ -702,6 +727,87 @@ describe('generateAiContent themes', () => {
     expect(result.warnings).toEqual([
       'Chinese theme fallback for 1 theme field(s); English text is shown instead.',
     ]);
+  });
+
+  it('warns when an invalid English theme intro is dropped', async () => {
+    const entries = [entry(1, 'feat: one')];
+
+    const result = await generateAiContent(
+      entries,
+      themeComplete([
+        {
+          title: 'Sessions',
+          titleZh: '会话',
+          intro: 'See https://example.com for details.',
+          introZh: '',
+          items: [1],
+        },
+      ]),
+    );
+
+    expect(result.themes).toEqual([
+      {
+        title: 'Sessions',
+        titleZh: '会话',
+        intro: '',
+        introZh: '',
+        items: [1],
+      },
+    ]);
+    expect(result.warnings).toEqual([
+      'Theme intro fallback for 1 theme field(s); the intro was dropped.',
+    ]);
+  });
+
+  it('drops intros that would inject Markdown structure', async () => {
+    const entries = [entry(1, 'feat: one'), entry(2, 'feat: two')];
+
+    const result = await generateAiContent(
+      entries,
+      themeComplete([
+        {
+          title: 'A',
+          titleZh: '甲',
+          intro: '# Known issues',
+          introZh: '',
+          items: [1],
+        },
+        {
+          title: 'B',
+          titleZh: '乙',
+          intro: '---',
+          introZh: '',
+          items: [2],
+        },
+      ]),
+    );
+
+    expect(result.themes.map((theme) => theme.intro)).toEqual(['', '']);
+    expect(result.warnings).toEqual([
+      'Theme intro fallback for 2 theme field(s); the intro was dropped.',
+    ]);
+  });
+
+  it('does not count an invisible Chinese intro fallback', async () => {
+    const entries = [entry(1, 'feat: one')];
+
+    const result = await generateAiContent(
+      entries,
+      themeComplete([
+        {
+          title: 'A',
+          titleZh: '甲',
+          intro: '',
+          introZh: 'See https://example.com for details.',
+          items: [1],
+        },
+      ]),
+    );
+
+    expect(result.themes).toEqual([
+      { title: 'A', titleZh: '甲', intro: '', introZh: '', items: [1] },
+    ]);
+    expect(result.warnings).toEqual([]);
   });
 });
 
@@ -1238,6 +1344,79 @@ describe('generateReleaseNotes', () => {
     expect(result.markdown).toContain('<!-- qwen-release-notes:v2 -->');
     expect(result.usedAi).toBe(false);
     expect(result.warnings[0]).toMatch(/Summary batch fallback/);
+  });
+
+  it('reports AI output when only the Chinese summaries are model-written', async () => {
+    const generatedBody = [
+      "## What's Changed",
+      `* feat(cli): add search by @alice in ${PR(1)}`,
+    ].join('\n');
+    const complete = async (request) => {
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: [
+            {
+              pr: 1,
+              summary: 'See https://example.com for details.',
+              summaryZh: '新增搜索。',
+            },
+          ],
+        });
+      }
+      if (request.kind === 'highlights') {
+        return JSON.stringify({ highlights: [] });
+      }
+      return JSON.stringify({ themes: [] });
+    };
+
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete,
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toContain('## 中文摘要');
+    expect(result.markdown).toContain(`新增搜索。 ([#1](${PR(1)}))`);
+    expect(result.usedAi).toBe(true);
+  });
+
+  it('does not count Chinese summaries that the v1 layout never renders', async () => {
+    const generatedBody = [
+      "## What's Changed",
+      `* feat(cli): add search by @alice in ${PR(1)}`,
+    ].join('\n');
+    const complete = async (request) => {
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: [
+            {
+              pr: 1,
+              summary: 'See https://example.com for details.',
+              summaryZh: '新增搜索。',
+            },
+          ],
+        });
+      }
+      if (request.kind === 'highlights') {
+        return JSON.stringify({ highlights: [] });
+      }
+      return '{not-json';
+    };
+
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete,
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toContain('<!-- qwen-release-notes:v1 -->');
+    expect(result.usedAi).toBe(false);
   });
 
   it('normalizes fallback titles in the v2 digest like the appendix', async () => {
