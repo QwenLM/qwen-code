@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
@@ -122,6 +122,7 @@ export interface QueuedPrompt {
   sessionId?: string;
   text: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
   onAdmitted?: () => void;
@@ -192,6 +193,7 @@ export function QueuedPromptDisplay({
           getQueuedPromptParts(prompt, parseUserMessageContent),
         );
         const imageCount = prompt.images?.length ?? 0;
+        const fileCount = prompt.files?.length ?? 0;
         const isSubmitting = prompt.serverState === 'submitting';
         const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
@@ -256,6 +258,9 @@ export function QueuedPromptDisplay({
               {preview.truncated ? '...' : null}
               {imageCount > 0
                 ? ` ${t('queue.imageCount', { count: imageCount })}`
+                : ''}
+              {fileCount > 0
+                ? ` ${t('queue.fileCount', { count: fileCount })}`
                 : ''}
               {isAdmissionUnknown && !hasUnknownPayload
                 ? ` ${t('queue.localCopyDiscarded')}`

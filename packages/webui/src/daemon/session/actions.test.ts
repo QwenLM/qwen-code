@@ -168,6 +168,72 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('rejects a concurrent source-bound branch request', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const first = createDeferred<{
+      sessionId: string;
+      displayName: string;
+      clientId: string;
+    }>();
+    source.client.branchSession.mockReturnValueOnce(first.promise);
+    const { actions } = createActionsHarness({
+      session: source,
+    });
+
+    const firstBranch = actions.branchSession('First');
+    const secondBranch = actions.branchSession('Second');
+    await expect(secondBranch).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    expect(source.client.branchSession).toHaveBeenCalledOnce();
+
+    first.resolve({
+      sessionId: 'session-b',
+      displayName: 'First',
+      clientId: 'client-b',
+    });
+    await expect(firstBranch).resolves.toEqual({
+      sessionId: 'session-b',
+      displayName: 'First',
+      switchStarted: true,
+    });
+  });
+
+  it('does not open a branch that resolves after its source is cleared', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const branched = createDeferred<{
+      sessionId: string;
+      displayName: string;
+      clientId: string;
+    }>();
+    source.client.branchSession.mockReturnValueOnce(branched.promise);
+    const { actions, pendingSessionLoadRef, sessionRef } = createActionsHarness(
+      {
+        session: source,
+      },
+    );
+
+    const pending = actions.branchSession('Late branch');
+    await actions.clearSession();
+    branched.resolve({
+      sessionId: 'session-b',
+      displayName: 'Late branch',
+      clientId: 'client-b',
+    });
+
+    await expect(pending).resolves.toEqual({
+      sessionId: 'session-b',
+      displayName: 'Late branch',
+      switchStarted: false,
+    });
+    await Promise.resolve();
+    expect(sessionRef.current).toBeUndefined();
+    expect(pendingSessionLoadRef.current).toBeUndefined();
+    expect(source.client.detachSession).toHaveBeenCalledWith(
+      'session-b',
+      'client-b',
+    );
+  });
   it('creates from the active session client when the connection matches', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');
@@ -989,6 +1055,99 @@ describe('createDaemonSessionActions', () => {
     expect(restartEventStream).not.toHaveBeenCalled();
   });
 
+  it('rethrows a stale branch point error without a generic notice', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.client.branchSession.mockRejectedValueOnce(
+      new DaemonHttpError(409, { code: 'branch_point_invalid' }, 'Conflict'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
+      _alreadyDispatched: true,
+    });
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const branchResult = createDeferred<{
+        sessionId: string;
+        displayName: string;
+      }>();
+      session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+      const addNotice = vi.fn((notice) => notice);
+      const { actions, pendingSessionLoadRef } = createActionsHarness({
+        addNotice,
+        session,
+      });
+
+      let settled = false;
+      const branch = actions
+        .branchSession(undefined, 'checkpoint-1')
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(settled).toBe(false);
+      expect(addNotice).not.toHaveBeenCalled();
+
+      branchResult.resolve({
+        sessionId: 'session-b',
+        displayName: 'Historical branch',
+      });
+      await expect(branch).resolves.toEqual({
+        sessionId: 'session-b',
+        displayName: 'Historical branch',
+        switchStarted: true,
+      });
+      if (pendingSessionLoadRef.current) {
+        clearTimeout(pendingSessionLoadRef.current.timeout);
+        pendingSessionLoadRef.current.resolve();
+        pendingSessionLoadRef.current = undefined;
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a late branch result supersede newer navigation', async () => {
+    const session = createMockSession('session-a');
+    const branchResult = createDeferred<{
+      sessionId: string;
+      displayName: string;
+    }>();
+    session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      session,
+    });
+
+    const branch = actions.branchSession(undefined, 'checkpoint-1');
+    const newerLoad = actions.loadSession('session-b');
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+
+    branchResult.resolve({
+      sessionId: 'session-c',
+      displayName: 'Historical branch',
+    });
+    await expect(branch).resolves.toEqual({
+      sessionId: 'session-c',
+      displayName: 'Historical branch',
+      switchStarted: false,
+    });
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+
+    if (pendingSessionLoadRef.current) {
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.resolve();
+      pendingSessionLoadRef.current = undefined;
+    }
+    await expect(newerLoad).resolves.toBeUndefined();
+  });
+
   it('preserves ambiguous stable-id admission failures for reconciliation', async () => {
     const session = {
       ...createMockSession('session-a'),
@@ -1182,6 +1341,42 @@ describe('createDaemonSessionActions', () => {
       currentModel: 'target-model',
       currentMode: 'target-mode',
     });
+  });
+
+  it('forwards text file attachments as resource blocks and chip metadata', async () => {
+    const session = createMockSession('session-a');
+    const { actions, store } = createActionsHarness({ session });
+
+    const prompt = actions.sendPrompt('check this', {
+      files: [{ name: 'app.log', text: 'line1', media_type: 'text/plain' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            { type: 'text', text: 'check this\n\n@attachment:///app.log' },
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///app.log',
+                mimeType: 'text/plain',
+                text: 'line1',
+              },
+            },
+          ],
+        }),
+        expect.any(AbortSignal),
+      );
+    });
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      'check this',
+      [],
+      undefined,
+      [{ name: 'app.log', text: 'line1', mimeType: 'text/plain' }],
+    );
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
   });
 });
 
