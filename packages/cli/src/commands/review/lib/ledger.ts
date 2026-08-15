@@ -74,8 +74,11 @@ export interface Ledger {
    * `sha..HEAD` past code the CURRENT model never reviewed — permanently,
    * since each clean round re-anchors past the last. Rides and falls WITH
    * the anchor: the serializer withholds it whenever it withholds `sha`
-   * (fail-closed or truncated rounds), and the parser drops it when the sha
-   * beside it did not survive — a model naming no range qualifies nothing.
+   * (fail-closed or truncated rounds) — and withholds the PAIR when the
+   * model itself does not fit the cap, since a truncated id is a prefix and
+   * a prefix can equal another model's full id — and the parser drops it
+   * when the sha beside it did not survive (or it exceeds the cap) — a
+   * model naming no range qualifies nothing.
    */
   model?: string;
 }
@@ -104,7 +107,14 @@ const SHA_RE = /^[0-9a-f]{7,64}$/;
 export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
-/** Real model ids run short (`qwen3.7-max`); 64 holds any of them whole. */
+/**
+ * The longest model id the marker can carry — and it carries one WHOLE or
+ * not at all: a truncated id is a prefix, and a prefix can equal a DIFFERENT
+ * model's full id, which the same-model gate would then accept past code it
+ * never reviewed. An id over this cap takes the whole anchor pair with it,
+ * degrading recovery to the full diff — the fail-safe direction. Real model
+ * ids run short (`qwen3.7-max`); the cap bounds the marker, not them.
+ */
 export const LEDGER_MAX_MODEL = 64;
 
 /**
@@ -154,10 +164,16 @@ export function serializeLedger(ledger: Ledger): string {
     // keeps its findings and loses its anchor, exactly as a fail-closed round
     // does.
     else if (ledger.sha && SHA_RE.test(ledger.sha)) {
-      payload.sha = ledger.sha;
-      // The same-model qualifier travels only beside the anchor it qualifies.
+      // The same-model qualifier travels only beside the anchor it qualifies
+      // — and only WHOLE: a truncated id is a prefix, and a prefix can equal
+      // a DIFFERENT model's full id, which the gate would then accept past
+      // code it never reviewed. A model that does not fit takes the anchor
+      // pair with it; recovery degrades to the full diff.
       const model = ledger.model?.trim();
-      if (model) payload.model = model.slice(0, LEDGER_MAX_MODEL);
+      if (model === undefined || model.length <= LEDGER_MAX_MODEL) {
+        payload.sha = ledger.sha;
+        if (model) payload.model = model;
+      }
     }
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
@@ -234,12 +250,15 @@ export function parseLedger(body: string | undefined): Ledger | null {
       typeof raw.sha === 'string' && SHA_RE.test(raw.sha) && !dropped
         ? raw.sha
         : undefined;
+    const rawModel = typeof raw.model === 'string' ? raw.model.trim() : '';
     const model =
       // Anchored-only on READ as on WRITE: a model beside no surviving sha
       // qualifies no range, and a hand-edited marker must not make it look
-      // as if it did.
-      sha && typeof raw.model === 'string' && raw.model.trim() !== ''
-        ? raw.model.trim().slice(0, LEDGER_MAX_MODEL)
+      // as if it did. Whole or not at all here too: an over-cap model is one
+      // the serializer would never have written — drop it, and the gate
+      // reads the absence as a mismatch.
+      sha && rawModel !== '' && rawModel.length <= LEDGER_MAX_MODEL
+        ? rawModel
         : undefined;
     return {
       v: 1,
