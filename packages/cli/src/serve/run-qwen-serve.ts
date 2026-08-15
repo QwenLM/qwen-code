@@ -3028,8 +3028,13 @@ async function runQwenServeImpl(
     daemonLog.raw(line, level);
 
   let actualPort = opts.port;
+  // Same trailing-newline gotcha as the daemon token above:
+  // `export QWEN_WEBBRIDGE_TOKEN=$(cat token.txt)` keeps the file's final
+  // `\n` in the value, and a newline-bearing token can never match an HTTP
+  // Authorization header — every WebBridge request would 401 with no
+  // breadcrumb. Trim once at boot; fall back to a fresh token when empty.
   const webBridgeToken =
-    daemonRuntimeBaseEnv['QWEN_WEBBRIDGE_TOKEN'] || randomUUID();
+    daemonRuntimeBaseEnv['QWEN_WEBBRIDGE_TOKEN']?.trim() || randomUUID();
   let webBridgeUrl: string | undefined;
   const webBridgeChildEnvs = new Set<NodeJS.ProcessEnv>();
   const applyWebBridgeEnv = (env: NodeJS.ProcessEnv): void => {

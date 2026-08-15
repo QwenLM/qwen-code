@@ -6053,7 +6053,10 @@ describe('runQwenServe runtime startup failures', () => {
     });
 
     const previousWebBridgeToken = process.env['QWEN_WEBBRIDGE_TOKEN'];
-    process.env['QWEN_WEBBRIDGE_TOKEN'] = 'webbridge-secret';
+    // Trailing newline on purpose: `export TOKEN=$(cat token.txt)` keeps the
+    // file's final newline, and boot must trim it — the Authorization header
+    // below carries the trimmed value and must be accepted.
+    process.env['QWEN_WEBBRIDGE_TOKEN'] = 'webbridge-secret\n';
     const handle = await runQwenServe(
       {
         port: 0,
