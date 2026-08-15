@@ -2048,6 +2048,8 @@ export function App({
   const customization = useMemo(
     () => ({
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -2072,6 +2074,8 @@ export function App({
     }),
     [
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -12637,10 +12641,12 @@ export function App({
                   }}
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
-                  <ArtifactPanel
-                    {...artifactPanelSharedProps}
-                    variant="drawer"
-                  />
+                  <WebShellCustomizationProvider value={customization}>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      variant="drawer"
+                    />
+                  </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
             )}
@@ -12703,12 +12709,14 @@ export function App({
                       onPointerDown={handleArtifactPanelResizeStart}
                     />
                   )}
-                  <div className={styles.artifactPanelClip}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      panelWidth={artifactPanelWidth}
-                    />
-                  </div>
+                  <WebShellCustomizationProvider value={customization}>
+                    <div className={styles.artifactPanelClip}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        panelWidth={artifactPanelWidth}
+                      />
+                    </div>
+                  </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
               )}
