@@ -1900,6 +1900,81 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('bridges images on the primary route after a slash prompt route resolution rejects', async () => {
+    setupMetricsMock();
+    const mixedParts: Part[] = [
+      { text: 'inspect this image and audio' },
+      { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+      { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+    ];
+    const mockCommand = {
+      name: 'flaky-model',
+      description: 'submit mixed media through a flaky route',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: mixedParts,
+        modelOverride: 'flaky-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'flaky-model', authType: AuthType.QWEN_OAUTH }]);
+    const visionRuntime = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent', modalities: {} },
+    };
+    const resolveForModel = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('route unavailable'))
+      .mockResolvedValue(visionRuntime);
+    mockConfig = {
+      ...mockConfig,
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example/v1',
+        agentCapable: true,
+      }),
+      getBaseLlmClient: vi.fn().mockReturnValue({ resolveForModel }),
+    } as unknown as Config;
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [mixedParts[0], { text: '[transcribed image]' }],
+      transcript: '[transcribed image]',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-agent',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/flaky-model',
+      'prompt-mixed-route-rejected',
+    );
+
+    expect(runVisionBridgeSpy).toHaveBeenCalledOnce();
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(JSON.stringify(sentParts)).not.toContain('audio/wav');
+    expect(JSON.stringify(sentParts)).not.toContain('image/png');
+    expect(JSON.stringify(sentParts)).toContain('[transcribed image]');
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
+  });
+
   it('notices a failed audio bridge that never sent audio anywhere', async () => {
     setupMetricsMock();
     Object.assign(mockConfig, {

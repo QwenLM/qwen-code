@@ -11379,8 +11379,15 @@ export class Session implements SessionContext {
             }`,
           );
         }
+        return fullTurnParts;
       }
-      return fullTurnParts;
+      // A rejected selection can mean either that another live override owns
+      // the turn or that a prior fail-closed resolution cleared the override.
+      // Only the former may keep raw images; otherwise bridge them for the
+      // primary route below.
+      if (getModelOverride?.() !== undefined) {
+        return fullTurnParts;
+      }
     }
 
     let bridgeResult: VisionBridgeResult;

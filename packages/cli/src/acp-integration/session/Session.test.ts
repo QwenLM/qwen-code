@@ -11512,6 +11512,20 @@ describe('Session', () => {
               },
             ],
           })
+          .mockResolvedValueOnce({
+            items: [
+              {
+                content: [
+                  {
+                    type: 'image',
+                    mimeType: 'image/png',
+                    data: 'bGF0ZXItaW1hZ2U=',
+                  },
+                ],
+                displayText: 'please inspect this later image',
+              },
+            ],
+          })
           .mockResolvedValue({ items: [] });
         mockChat.sendMessageStream = vi
           .fn()
@@ -11564,9 +11578,21 @@ describe('Session', () => {
         expect(fullTurnSelections).toEqual([true, false]);
         const thirdCall = vi.mocked(mockChat.sendMessageStream).mock.calls[2];
         expect(thirdCall?.[0]).toBe('qwen3-code-plus');
+        expect(JSON.stringify(thirdCall?.[1].message)).toContain(
+          '[recovered drained image]',
+        );
         expect(JSON.stringify(thirdCall?.[1].message)).not.toContain(
           'image/png',
         );
+        const recordedLaterImage = vi
+          .mocked(mockChatRecordingService.recordMidTurnUserMessage)
+          .mock.calls.find(
+            ([, display]) => display === 'please inspect this later image',
+          )?.[0];
+        expect(JSON.stringify(recordedLaterImage)).toContain(
+          '[recovered drained image]',
+        );
+        expect(JSON.stringify(recordedLaterImage)).not.toContain('image/png');
         expect(agentMessageChunks()).toContain(
           'Audio was not sent: the active model override could not be resolved.',
         );

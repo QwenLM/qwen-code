@@ -1347,6 +1347,7 @@ export async function runNonInteractive(
           adapter.emitSystemMessage(subtype, { notice });
         }
       };
+      let inlineModelOverrideResolutionFailed = false;
       if (inlineModelOverride !== undefined && hasAudioParts(initialParts)) {
         let supportsAudio = false;
         let routeResolutionFailed = false;
@@ -1371,6 +1372,7 @@ export async function runNonInteractive(
           initialParts = replaceAudioPartsWithUnavailable(initialParts, reason);
           emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
           if (routeResolutionFailed) {
+            inlineModelOverrideResolutionFailed = true;
             inlineModelOverride = undefined;
           }
         } else {
@@ -1408,7 +1410,11 @@ export async function runNonInteractive(
         hasImageParts(initialParts)
       ) {
         const fullTurnModel = config.getDefaultVisionBridgeModel();
-        if (fullTurnModel?.agentCapable && !hasAudioParts(initialParts)) {
+        if (
+          !inlineModelOverrideResolutionFailed &&
+          fullTurnModel?.agentCapable &&
+          !hasAudioParts(initialParts)
+        ) {
           const fullTurnParts = initialParts.map((part) =>
             clampInlineMediaPart(part),
           );
