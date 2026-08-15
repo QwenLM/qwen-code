@@ -363,12 +363,21 @@ describe('ghRaw()', () => {
 
   afterEach(() => setGhHost(undefined));
 
-  it('returns bytes untouched — no trim, no CRLF rewrite', () => {
-    // A diff of a CRLF file: the `\r` before git's line-terminating `\n` is
-    // blob content, and a trailing whitespace-only context line is part of
-    // the last hunk. Both must survive (fetch-pr's raw-bytes policy).
-    mockExecFileSync.mockReturnValueOnce(' line one\r\n   \r\n');
-    expect(ghRaw('pr', 'diff', '1')).toBe(' line one\r\n   \r\n');
+  it('returns bytes untouched — no trim, no CRLF rewrite, no utf8 loss', () => {
+    // A real Buffer carrying an invalid-UTF-8 byte (0xE9, Latin-1 é): the
+    // latin1 decode must actually execute and preserve it. Mocking a JS
+    // string here would make String.prototype.toString an identity call and
+    // the decode would never run — a utf8 refactor would ship green while
+    // corrupting the byte to U+FFFD.
+    mockExecFileSync.mockReturnValueOnce(
+      Buffer.from(' line one\r\n é\r\n', 'latin1'),
+    );
+    expect(ghRaw('pr', 'diff', '1')).toBe(' line one\r\n é\r\n');
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      expect.any(Array),
+      expect.objectContaining({ encoding: 'buffer' }),
+    );
   });
 
   it('gh() still trims and normalises (the contrast pin)', () => {

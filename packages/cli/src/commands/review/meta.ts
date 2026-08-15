@@ -57,9 +57,22 @@ export function runMeta(args: MetaArgs): MetaResult {
   let ownerRepo: string;
   if (args.repo !== undefined) {
     // Explicit repo: the host comes from the flag/env, defaulting to
-    // github.com — there is no URL to derive it from.
+    // github.com — there is no URL to derive it from. Gate it the same way
+    // the discovery branch does: `resolveGhHost` also reads the GH_HOST env
+    // and never validates, so an unroutable env value (underscore intranet
+    // alias) must not be emitted as the host label while every sibling
+    // rejects it when welded back as --host. An env-sourced failure is
+    // environmental (exit 1), a --host typo was already classified exit 2 by
+    // the handler's own setGhHost.
     ownerRepo = args.repo;
     host = resolveGhHost(args.host) ?? 'github.com';
+    if (!HOSTNAME_RE.test(host)) {
+      throw new Error(
+        `cannot route at the ${
+          args.host !== undefined ? '--host flag' : 'GH_HOST environment'
+        } ${JSON.stringify(host)} — not a hostname the review subcommands accept`,
+      );
+    }
   } else {
     const id = platform.resolveRepo();
     ownerRepo = `${id.owner}/${id.repo}`;

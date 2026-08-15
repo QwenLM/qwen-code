@@ -1212,12 +1212,26 @@ export function buildRoleBrief(
         `agent-prompt: plan ownerRepo is not owner/repo: ${JSON.stringify(repo)}`,
       );
     }
+    if (report.host !== undefined && typeof report.host !== 'string') {
+      throw new Error(
+        `agent-prompt: plan host is not a string: ${JSON.stringify(report.host)}`,
+      );
+    }
     const trimmedHost =
       typeof report.host === 'string' ? report.host.trim() : '';
     // Fail closed on a PRESENT-but-invalid host (a tampered/corrupted plan):
-    // a missing host is optional (no --host), but an invalid one must not be
-    // silently dropped from the welded command — that would reroute the
-    // evidence fetch to github.com's same-named repo.
+    // a missing host is optional (no --host), but a whitespace-only or
+    // non-hostname one must not be silently dropped from the welded command —
+    // that would reroute the evidence fetch to github.com's same-named repo.
+    if (
+      typeof report.host === 'string' &&
+      report.host !== '' &&
+      trimmedHost === ''
+    ) {
+      throw new Error(
+        `agent-prompt: plan host is whitespace-only: ${JSON.stringify(report.host)}`,
+      );
+    }
     if (trimmedHost !== '' && !HOSTNAME_RE.test(trimmedHost)) {
       throw new Error(
         `agent-prompt: plan host is not a hostname: ${JSON.stringify(report.host)}`,

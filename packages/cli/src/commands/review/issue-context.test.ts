@@ -540,6 +540,33 @@ describe('issueContextCommand handler', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('parses the documented repo-qualified grammar (--issue owner/repo#n)', () => {
+    // The handler regex is the only parser of this grammar; pin it end to
+    // end so a capture-group/# mutation can't hand runIssueContext a wrong
+    // (number, ownerRepo) pair with the suite green.
+    mockClosing([]);
+    mockIssue('referenced elsewhere');
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+      issue: ['acme/widgets#7'],
+    });
+    expect(ghMock).toHaveBeenNthCalledWith(
+      2,
+      'issue',
+      'view',
+      '7',
+      '--repo',
+      'acme/widgets',
+      '--json',
+      'title,body,comments',
+    );
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it('exits 2 on a non-positive pr_number or --issue, without calling gh or auth', () => {
     (issueContextCommand.handler as (a: unknown) => void)({
       _: [],
