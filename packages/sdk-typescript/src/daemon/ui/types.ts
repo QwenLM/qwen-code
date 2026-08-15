@@ -294,6 +294,35 @@ export const DAEMON_UI_DEBUG_REASONS = [
 
 export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
 
+/**
+ * Debug reasons that classify forward-compatibility noise — frames this
+ * normalizer has no case for. These diagnostics are routed to the bounded
+ * `unrecognizedDiagnostics` sidechannel instead of `blocks[]`; `malformed_*`
+ * diagnostics stay in the transcript because they signal an actual defect.
+ */
+export type DaemonUnrecognizedDiagnosticReason = Extract<
+  DaemonUiDebugReason,
+  'unrecognized_event' | 'unrecognized_session_update'
+>;
+
+/**
+ * One forward-compatibility diagnostic mirrored onto the transcript
+ * sidechannel. Carries the normalizer classification plus the original
+ * event envelope fields a developer console needs, without ever entering
+ * `blocks[]` (so it cannot finalize a streaming assistant/thought block or
+ * consume the `maxBlocks` budget).
+ */
+export interface DaemonUnrecognizedDiagnostic {
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+  text: string;
+  source?: string;
+  data?: unknown;
+  eventId?: number;
+  serverTimestamp?: number;
+  /** Reducer receive time (`state.now` at dispatch). */
+  receivedAt: number;
+}
+
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
@@ -1006,6 +1035,16 @@ export interface DaemonTranscriptSidechannelState {
     suggestion: string;
     promptId: string;
   };
+  /**
+   * Bounded sidechannel for forward-compatibility diagnostics
+   * (`unrecognized_event` / `unrecognized_session_update`). These never
+   * enter `blocks[]`, so they cannot finalize a streaming assistant/thought
+   * block (orphaning a subsequent `assistant.usage` frame) and cannot
+   * consume the `maxBlocks` budget that real conversation content relies
+   * on. Newest entries are kept; the array is capped at
+   * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`.
+   */
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
   pendingUserShellCommand?: {
     command: string;
     cwd?: string;

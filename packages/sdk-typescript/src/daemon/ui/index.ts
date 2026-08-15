@@ -25,6 +25,8 @@ export {
   selectToolProgress,
   selectTranscriptBlocks,
   selectTranscriptBlocksOrderedByEventId,
+  selectUnrecognizedDiagnostics,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from './transcript.js';
 export { createDaemonTranscriptStore } from './store.js';
 export { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from './sentinels.js';
@@ -81,6 +83,8 @@ export type {
   DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events
   DaemonUiAssistantDoneEvent,
   DaemonUiDebugReason,

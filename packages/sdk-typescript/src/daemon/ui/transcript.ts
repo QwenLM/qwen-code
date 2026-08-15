@@ -15,7 +15,10 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   DaemonUserShellTranscriptBlock,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
@@ -23,6 +26,11 @@ import { createDaemonToolPreview } from './toolPreview.js';
 import { isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
+/**
+ * Cap for the `unrecognizedDiagnostics` sidechannel. Forward-compat noise
+ * must stay inspectable without growing unboundedly in long sessions.
+ */
+export const UNRECOGNIZED_DIAGNOSTICS_LIMIT = 50;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
@@ -53,6 +61,7 @@ export function createDaemonTranscriptState(
     activeThoughtBlockByParent: createIndex(),
     // PR-E sidechannel: track current tool / approval mode / progress
     toolProgress: createIndex(),
+    unrecognizedDiagnostics: [],
     awaitingResync: false,
     resyncRequiredCount: 0,
     nextOrdinal: 1,
@@ -341,6 +350,10 @@ function applyDaemonTranscriptEvent(
       break;
     case 'status':
     case 'debug':
+      if (isUnrecognizedDiagnostic(event)) {
+        appendUnrecognizedDiagnostic(next, event);
+        break;
+      }
       appendStatusBlock(next, event.type, event.text, event, {
         clearActiveText: event.clearActiveText,
       });
@@ -1211,6 +1224,54 @@ function resolvePermissionBlock(
   clearActiveText(state);
 }
 
+type UnrecognizedDiagnosticEvent = DaemonUiStatusEvent & {
+  type: 'debug';
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+};
+
+function isUnrecognizedDiagnostic(
+  event: DaemonUiStatusEvent,
+): event is UnrecognizedDiagnosticEvent {
+  return (
+    event.type === 'debug' &&
+    (event.debugReason === 'unrecognized_event' ||
+      event.debugReason === 'unrecognized_session_update')
+  );
+}
+
+/**
+ * Route forward-compatibility noise to the bounded `unrecognizedDiagnostics`
+ * sidechannel instead of `blocks[]`. Appending it as a status block would
+ * run the default `clearActiveText`, finalizing the streaming assistant/
+ * thought block so a following `assistant.usage` frame is dropped, and each
+ * block would consume the `maxBlocks` budget — repeated noise then evicts
+ * real conversation content in `trimTranscriptState`. Renderer-side
+ * filtering runs strictly after these mutations, so hiding the block later
+ * cannot prevent either symptom. `malformed_payload` diagnostics and
+ * client-dispatched debug events keep their block semantics.
+ */
+function appendUnrecognizedDiagnostic(
+  state: DaemonTranscriptState,
+  event: UnrecognizedDiagnosticEvent,
+): void {
+  const diagnostic: DaemonUnrecognizedDiagnostic = {
+    debugReason: event.debugReason,
+    text: event.text,
+    receivedAt: state.now,
+    ...(event.source !== undefined ? { source: event.source } : {}),
+    ...(event.data !== undefined ? { data: event.data } : {}),
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+  };
+  const diagnostics = [...state.unrecognizedDiagnostics, diagnostic];
+  state.unrecognizedDiagnostics =
+    diagnostics.length > UNRECOGNIZED_DIAGNOSTICS_LIMIT
+      ? diagnostics.slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT)
+      : diagnostics;
+}
+
 function appendStatusBlock(
   state: DaemonTranscriptState,
   kind: 'status' | 'error' | 'debug',
@@ -1366,6 +1427,9 @@ function cloneTranscriptState(
     // (e.g. `useDaemonFollowupSuggestion`) skip re-renders for events
     // that don't touch the suggestion.
     lastFollowupSuggestion: state.lastFollowupSuggestion,
+    // Same reference-stability contract: the reducer replaces the whole
+    // array when appending, never mutates it in-place.
+    unrecognizedDiagnostics: state.unrecognizedDiagnostics,
   };
   const onTruncation = opts.onTruncation ?? truncationCallbacks.get(state);
   if (onTruncation) truncationCallbacks.set(next, onTruncation);
@@ -1821,6 +1885,19 @@ export function selectLastFollowupSuggestion(
   state: DaemonTranscriptState,
 ): { suggestion: string; promptId: string } | undefined {
   return state.lastFollowupSuggestion;
+}
+
+/**
+ * Forward-compatibility diagnostics mirrored from normalizer-classified
+ * `unrecognized_event` / `unrecognized_session_update` debug events. These
+ * live outside `blocks[]` (see `appendUnrecognizedDiagnostic`), so developer
+ * tooling can still inspect them after renderers hide them. Bounded by
+ * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`, newest last.
+ */
+export function selectUnrecognizedDiagnostics(
+  state: DaemonTranscriptState,
+): readonly DaemonUnrecognizedDiagnostic[] {
+  return state.unrecognizedDiagnostics;
 }
 
 /**

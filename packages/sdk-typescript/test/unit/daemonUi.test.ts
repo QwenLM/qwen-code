@@ -2633,12 +2633,14 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
-  it('carries debugReason through the reducer onto the transcript block', () => {
+  it('routes unrecognized diagnostics to the sidechannel with classification intact', () => {
     // The normalizer tests above inspect events directly and the Web Shell
     // adapter tests construct blocks by hand, so neither would notice if the
-    // reducer dropped the field on the way across. Production blocks would
-    // then lose their classification and Web Shell would render raw JSON
-    // again with both suites still green.
+    // reducer dropped the field on the way across. Unrecognized diagnostics
+    // are routed to `unrecognizedDiagnostics` instead of `blocks[]` (they
+    // must not finalize a streaming assistant block or consume the
+    // `maxBlocks` budget), so the classification must survive onto the
+    // sidechannel entry.
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       normalizeDaemonEvent(
@@ -2646,9 +2648,9 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       ),
     );
 
-    expect(state.blocks).toEqual([
+    expect(state.blocks).toEqual([]);
+    expect(state.unrecognizedDiagnostics).toEqual([
       expect.objectContaining({
-        kind: 'debug',
         debugReason: 'unrecognized_event',
       }),
     ]);

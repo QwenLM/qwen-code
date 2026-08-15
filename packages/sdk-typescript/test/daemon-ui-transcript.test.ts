@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createDaemonTranscriptState,
   reduceDaemonTranscriptEvents,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../src/daemon/ui/transcript.js';
 import type { DaemonUiEvent } from '../src/daemon/ui/types.js';
 
@@ -148,5 +149,156 @@ describe('status event while a thought block is streaming', () => {
     const thought = state.blocks[1];
     if (thought.kind !== 'thought') throw new Error('expected thought');
     expect(thought.text).toBe('thinking more');
+  });
+});
+
+describe('unrecognized diagnostics stay out of the chat transcript', () => {
+  it('preserves the active assistant block and usage across an unrecognized diagnostic', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'hello' },
+        {
+          type: 'debug',
+          text: 'language_changed (unrecognized daemon event): {"language":"en"}',
+          debugReason: 'unrecognized_event',
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        { type: 'assistant.done' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    const assistant = state.blocks[1];
+    if (assistant.kind !== 'assistant') throw new Error('expected assistant');
+    expect(assistant.text).toBe('hello');
+    expect(assistant.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      cachedTokens: 0,
+    });
+
+    expect(state.unrecognizedDiagnostics).toHaveLength(1);
+    expect(state.unrecognizedDiagnostics[0]?.debugReason).toBe(
+      'unrecognized_event',
+    );
+    expect(state.unrecognizedDiagnostics[0]?.text).toBe(
+      'language_changed (unrecognized daemon event): {"language":"en"}',
+    );
+  });
+
+  it('does not let hidden diagnostics evict conversation blocks through maxBlocks', () => {
+    let state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'answer' },
+        { type: 'assistant.done' },
+      ],
+      { now: 1, maxBlocks: 2 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'debug',
+          text: 'some_future_event (unrecognized daemon event): {"a":1}',
+          debugReason: 'unrecognized_event',
+        },
+        {
+          type: 'debug',
+          text: 'some_future_update (unrecognized session update): {"b":2}',
+          debugReason: 'unrecognized_session_update',
+        },
+      ],
+      { now: 1, maxBlocks: 2 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['question', 'answer']);
+    expect(
+      state.unrecognizedDiagnostics.map((entry) => entry.debugReason),
+    ).toEqual(['unrecognized_event', 'unrecognized_session_update']);
+  });
+
+  it('keeps malformed-payload diagnostics in the transcript', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answering' },
+        {
+          type: 'debug',
+          text: 'session_rewound (malformed payload): {"oops":true}',
+          debugReason: 'malformed_payload',
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'assistant',
+      'debug',
+    ]);
+    expect(state.unrecognizedDiagnostics).toHaveLength(0);
+    expect(state.activeAssistantBlockId).toBeUndefined();
+  });
+
+  it('keeps client-dispatched debug events in the transcript', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answering' },
+        { type: 'debug', text: 'Model switched: qwen3-max' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'assistant',
+      'debug',
+    ]);
+    expect(state.unrecognizedDiagnostics).toHaveLength(0);
+    expect(state.activeAssistantBlockId).toBeUndefined();
+  });
+
+  it('bounds the unrecognized diagnostics sidechannel', () => {
+    const events: DaemonUiEvent[] = [];
+    for (let index = 0; index < UNRECOGNIZED_DIAGNOSTICS_LIMIT + 5; index++) {
+      events.push({
+        type: 'debug',
+        text: `event_${index} (unrecognized daemon event): {}`,
+        debugReason: 'unrecognized_event',
+      });
+    }
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 1 },
+    );
+
+    expect(state.unrecognizedDiagnostics).toHaveLength(
+      UNRECOGNIZED_DIAGNOSTICS_LIMIT,
+    );
+    expect(state.unrecognizedDiagnostics.at(-1)?.text).toBe(
+      `event_${UNRECOGNIZED_DIAGNOSTICS_LIMIT + 4} (unrecognized daemon event): {}`,
+    );
+    expect(state.unrecognizedDiagnostics[0]?.text).toBe(
+      'event_5 (unrecognized daemon event): {}',
+    );
   });
 });
