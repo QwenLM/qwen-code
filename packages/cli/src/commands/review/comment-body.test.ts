@@ -43,6 +43,13 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    // assertWritableOutPath must not consult AMBIENT filesystem state through
+    // the partial mock: a stray directory at the shared /tmp path would fail
+    // the suite for a reason invisible in the repo.
+    existsSync: () => false,
+    statSync: () => {
+      throw new Error('statSync: path does not exist (mocked)');
+    },
   };
   return { ...mock, default: mock };
 });
@@ -148,17 +155,27 @@ describe('commentBodyCommand handler', () => {
     process.exitCode = undefined;
   });
 
-  it('prints the body verbatim on stdout', () => {
+  it('prints the body byte-exact on stdout (no invented trailing newline)', () => {
+    // The stdout path uses process.stdout.write, not writeStdoutLine — a body
+    // without a trailing newline must not gain one (an empty body would
+    // otherwise print exactly '\n').
     ghApiMock.mockReturnValue({ body: 'the body' });
-    (commentBodyCommand.handler as (a: unknown) => void)({
-      _: [],
-      $0: 'qwen',
-      id: 5,
-      kind: 'inline',
-      repo: 'QwenLM/qwen-code',
-    });
-    expect(writeStdoutLineMock).toHaveBeenCalledWith('the body');
-    expect(process.exitCode).toBeUndefined();
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    try {
+      (commentBodyCommand.handler as (a: unknown) => void)({
+        _: [],
+        $0: 'qwen',
+        id: 5,
+        kind: 'inline',
+        repo: 'QwenLM/qwen-code',
+      });
+      expect(stdoutSpy).toHaveBeenCalledWith('the body');
+      // And never the newline-appending line writer for the body.
+      expect(writeStdoutLineMock).not.toHaveBeenCalledWith('the body');
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
   });
 
   it('threads --host to setGhHost before the first gh call', () => {

@@ -25,6 +25,7 @@ import {
   ghWithInput,
   ghWithInputRetried,
   ensureAuthenticated,
+  isOwnerRepo,
 } from './gh.js';
 
 // Host targeting is code, not prose: the subcommands thread `--host` here,
@@ -383,5 +384,52 @@ describe('ghRaw()', () => {
   it('gh() still trims and normalises (the contrast pin)', () => {
     mockExecFileSync.mockReturnValueOnce(' a\r\nb\n');
     expect(gh('pr', 'diff', '1')).toBe('a\nb');
+  });
+});
+
+describe('isOwnerRepo', () => {
+  it('allows a dash-prefixed REPO name but rejects a dash-prefixed OWNER', () => {
+    // GitHub repo names can start with a hyphen (yezhaodan/-Git exists since
+    // 2018); owners cannot. Only the owner half carries the flag-shape ban —
+    // pinning BOTH directions so a "simplify to one segment rule" mutation
+    // goes red (real dash-prefixed repos must stay reviewable).
+    expect(isOwnerRepo('yezhaodan/-Git')).toBe(true);
+    expect(isOwnerRepo('-evil/repo')).toBe(false);
+    expect(isOwnerRepo('QwenLM/qwen-code')).toBe(true);
+    expect(isOwnerRepo('../escape')).toBe(false);
+    expect(isOwnerRepo('owner/..')).toBe(false);
+  });
+});
+
+describe('ghRaw() transient retry (buffer stderr)', () => {
+  let atomsWaitSpy: MockInstance<typeof Atomics.wait>;
+
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+    atomsWaitSpy = vi.spyOn(Atomics, 'wait').mockReturnValue('ok');
+  });
+
+  afterEach(() => {
+    atomsWaitSpy.mockRestore();
+    setGhHost(undefined);
+  });
+
+  it('still retries on HTTP 503 when stderr arrives as a Buffer', () => {
+    // In bytes mode `err.stderr` is a Buffer, so the typed-stderr check in
+    // isTransientGhError cannot fire — retry depends on the marker being in
+    // err.message (Node embeds it there). Pin that the retry still fires.
+    const err = new Error(
+      'gh: No server is currently available (HTTP 503)',
+    ) as Error & { stderr: Buffer };
+    err.stderr = Buffer.from('No server is currently available (HTTP 503)');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw err;
+      })
+      .mockReturnValueOnce(Buffer.from('ok'));
+    expect(ghRaw('pr', 'diff', '1')).toBe('ok');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    stderrSpy.mockRestore();
   });
 });

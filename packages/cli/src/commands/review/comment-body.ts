@@ -132,11 +132,29 @@ export const commentBodyCommand: CommandModule = {
       return;
     }
     const host = (argv as { host?: string }).host;
+    // `--kind` is the one argv value yargs' element-wise `choices` does NOT
+    // fully guard: a duplicated flag arrives as an ARRAY that passes choices
+    // per element, and String() would coerce it to 'review,inline' — slipping
+    // past the per-PR guard into the wrong API collection. Validate it is a
+    // single admitted token before any platform call.
+    const kindRaw: unknown = argv['kind'];
+    const kind =
+      typeof kindRaw === 'string' &&
+      (COMMENT_KINDS as readonly string[]).includes(kindRaw)
+        ? (kindRaw as CommentKind)
+        : undefined;
+    if (kind === undefined) {
+      writeStderrLineSafe(
+        `comment-body: --kind must be a single value of ${COMMENT_KINDS.join('/')}, got ${JSON.stringify(argv['kind'])}`,
+      );
+      process.exitCode = 2;
+      return;
+    }
     try {
       setGhHost(host);
       const result = runCommentBody({
         id,
-        kind: String(argv['kind']) as CommentKind,
+        kind,
         repo: String(argv['repo']),
         prNumber: pr,
         out: (argv as { out?: string }).out,
@@ -149,7 +167,10 @@ export const commentBodyCommand: CommandModule = {
           }),
         );
       } else {
-        writeStdoutLine(result.body);
+        // Byte-exact: writeStdoutLine would append a '\n' the body does not
+        // have (an empty body would print exactly '\n') — the same artifact
+        // the JSON-parse fix in getCommentBody was written to avoid.
+        process.stdout.write(result.body);
       }
     } catch (err) {
       const usage = err instanceof TypeError;

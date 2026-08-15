@@ -137,6 +137,20 @@ describe('runMeta', () => {
     expect(result.host).toBe('other.example.com');
   });
 
+  it('explicit-branch: an unroutable GH_HOST env value throws naming the env (exit-1 class)', () => {
+    // resolveGhHost reads the env too and never validates; the explicit-repo
+    // branch must gate the emitted host with HOSTNAME_RE, else a
+    // gh-tolerated underscore alias is emitted and dies downstream when
+    // welded back as --host. A plain Error (not TypeError) keeps the
+    // environmental exit-1 class.
+    process.env['GH_HOST'] = 'my_ghe';
+    ghMock.mockReturnValue('{"headRefOid":"abc","url":"u"}');
+    expect(() => runMeta({ prNumber: 1, repo: 'o/r' })).toThrow(
+      /GH_HOST environment.*my_ghe/,
+    );
+    expect(() => runMeta({ prNumber: 1, repo: 'o/r' })).not.toThrow(TypeError);
+  });
+
   it('adds headSha and webUrl when a PR number is given', () => {
     ghMock.mockReturnValue(
       '{"headRefOid":"2d71a0f851c8c18462cc85b60d90973e132274d8","url":"https://github.com/QwenLM/qwen-code/pull/8981"}',

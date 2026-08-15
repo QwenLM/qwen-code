@@ -23,6 +23,13 @@ export function assertWritableOutPath(out: string): void {
   if (out.trim() === '') {
     throw new TypeError('--out must name a file path');
   }
+  // A trailing separator is the POSIX spelling of "this is a directory" —
+  // `resolve` normalizes it away, so check the RAW value: otherwise a
+  // not-yet-existing `--out /tmp/diffs/` slips past and gets written as a
+  // FILE after the fetches (every POSIX peer refuses that argument).
+  if (/[/\\]$/.test(out.trim())) {
+    throw new TypeError(`--out names a directory, not a file: ${out}`);
+  }
   const resolved = resolve(out);
   if (existsSync(resolved) && statSync(resolved).isDirectory()) {
     throw new TypeError(`--out names a directory, not a file: ${out}`);

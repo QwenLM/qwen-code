@@ -39,6 +39,13 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    // assertWritableOutPath must not consult AMBIENT filesystem state through
+    // the partial mock: a stray directory at the shared /tmp path would fail
+    // the suite for a reason invisible in the repo.
+    existsSync: () => false,
+    statSync: () => {
+      throw new Error('statSync: path does not exist (mocked)');
+    },
   };
   return { ...mock, default: mock };
 });
@@ -428,11 +435,14 @@ describe('runIssueContext', () => {
       },
     ]);
     mockIssue('closing one');
-    // Hand-typed lowercase --repo vs the API's canonical casing.
+    // Hand-typed lowercase --repo, and the extra carries the user-typed
+    // lowercase coordinate (the real handler path: `ownerRepo: or ?? repo`)
+    // against the closing ref's canonical casing — this is what exercises
+    // the toLowerCase() fold in the dedup key.
     runIssueContext({
       ...ARGS,
       repo: 'qwenlm/qwen-code',
-      extraIssues: ex(9078),
+      extraIssues: [{ number: 9078, ownerRepo: 'qwenlm/qwen-code' }],
     });
     // one discovery call + one issue fetch — no duplicate section
     expect(ghMock).toHaveBeenCalledTimes(2);
@@ -565,6 +575,24 @@ describe('issueContextCommand handler', () => {
       'title,body,comments',
     );
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('rejects a traversal-shaped qualified coordinate before any fetch', () => {
+    // The regex syntactically admits `..` and dash-leading owners; the
+    // isOwnerRepo clause is the only rejection. `--issue` is model-sourced
+    // (Agent 0 builds the qualified form), so pin the refusal: a usage error
+    // must stay exit 2, never degrade into an 'unfetchable' section.
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+      issue: ['../evil#7'],
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
   it('exits 2 on a non-positive pr_number or --issue, without calling gh or auth', () => {

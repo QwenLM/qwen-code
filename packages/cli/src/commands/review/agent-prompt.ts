@@ -1202,9 +1202,12 @@ export function buildRoleBrief(
     // the same on its read path). Trim the host first: fetch-pr records the
     // raw flag, and a padded-but-valid host must not fall to null here while
     // routing fine everywhere else.
-    if (!/^\d+$/.test(String(pr))) {
+    if (
+      !/^[1-9]\d*$/.test(String(pr)) ||
+      Number(pr) > Number.MAX_SAFE_INTEGER
+    ) {
       throw new Error(
-        `agent-prompt: plan prNumber is not a number: ${JSON.stringify(pr)}`,
+        `agent-prompt: plan prNumber is not a safe positive integer: ${JSON.stringify(pr)}`,
       );
     }
     if (!isOwnerRepo(repo)) {
@@ -1212,7 +1215,15 @@ export function buildRoleBrief(
         `agent-prompt: plan ownerRepo is not owner/repo: ${JSON.stringify(repo)}`,
       );
     }
-    if (report.host !== undefined && typeof report.host !== 'string') {
+    // fetch-pr writes `host: args.host?.trim() || null` UNCONDITIONALLY — a
+    // same-repo github.com plan carries `host: null`, which must NOT throw
+    // (only a present non-null non-string is a tampered plan). Sibling
+    // readers tolerate null the same way.
+    if (
+      report.host !== undefined &&
+      report.host !== null &&
+      typeof report.host !== 'string'
+    ) {
       throw new Error(
         `agent-prompt: plan host is not a string: ${JSON.stringify(report.host)}`,
       );

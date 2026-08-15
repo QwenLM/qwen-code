@@ -39,6 +39,13 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    // assertWritableOutPath must not consult AMBIENT filesystem state through
+    // the partial mock: a stray directory at the shared /tmp path would fail
+    // the suite for a reason invisible in the repo.
+    existsSync: () => false,
+    statSync: () => {
+      throw new Error('statSync: path does not exist (mocked)');
+    },
   };
   return { ...mock, default: mock };
 });

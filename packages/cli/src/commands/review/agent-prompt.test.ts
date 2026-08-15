@@ -2339,7 +2339,17 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       buildRoleBrief({ ...PR_PLAN, prNumber: '6766; touch /tmp/pwned' }, '0', {
         planPath,
       }),
-    ).toThrow(/not a number/);
+    ).toThrow(/not a safe positive integer/);
+    // The weld guard also rejects 0 and unsafe integers (which the welded
+    // issue-context handler would reject / mis-round).
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, prNumber: '0' }, '0', { planPath }),
+    ).toThrow(/not a safe positive integer/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, prNumber: '123456789012345678901' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/not a safe positive integer/);
     expect(() =>
       buildRoleBrief({ ...PR_PLAN, ownerRepo: '../escape' }, '0', {
         planPath,
@@ -2361,6 +2371,20 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(() =>
       buildRoleBrief({ ...PR_PLAN, host: '--help' }, '0', { planPath }),
     ).toThrow(/not a hostname/);
+    // A present-but-whitespace-only host fails closed too (every sibling
+    // classifies it as a validation error).
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: ' ' }, '0', { planPath }),
+    ).toThrow(/whitespace-only/);
+    // Regression guard (R8-1): fetch-pr writes `host: null` unconditionally
+    // for a same-repo github.com plan — null must be tolerated, not throw.
+    const planPath2 = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: null }, '0', { planPath: planPath2 }),
+    ).not.toThrow();
+    expect(
+      buildRoleBrief({ ...PR_PLAN, host: null }, '0', { planPath: planPath2 }),
+    ).not.toContain('--host');
   });
 
   it('refuses Agent 0 on a plan with no pull request in it', () => {
