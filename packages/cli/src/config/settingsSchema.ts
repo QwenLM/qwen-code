@@ -767,6 +767,7 @@ const SETTINGS_SCHEMA = {
           { value: 'critical', label: 'Critical-only (every round)' },
           { value: 'suggestion', label: 'Suggestions and Criticals' },
         ],
+      },
       reverseAuditRounds: {
         type: 'number',
         label: 'Reverse-audit round ceiling: review',
