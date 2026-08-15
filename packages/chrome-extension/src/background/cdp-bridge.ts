@@ -250,6 +250,16 @@ async function tabInfoOf(
   }
 }
 
+async function liveTabInfoOf(
+  tabId: number,
+): Promise<{ url?: string; title?: string }> {
+  const info = await tabInfoOf(tabId);
+  if (attachedTabId !== tabId) {
+    throw new Error('debugger detached during attach');
+  }
+  return info;
+}
+
 /** Promisified `chrome.debugger.sendCommand` (callback API → Promise). */
 function sendDebuggerCommand(
   tabId: number,
@@ -309,7 +319,7 @@ async function runAttachFlow(
     if (attachedTabId === tabId) {
       attachedLinks.add(linkId);
       ensureAttachObservers();
-      return await tabInfoOf(tabId);
+      return await liveTabInfoOf(tabId);
     }
 
     const prevTabId = attachedTabId;
@@ -349,7 +359,7 @@ async function runAttachFlow(
     }
     ensureAttachObservers();
 
-    return await tabInfoOf(tabId);
+    return await liveTabInfoOf(tabId);
   } finally {
     attachOwnerLinkId = null;
     attachInFlight = null;

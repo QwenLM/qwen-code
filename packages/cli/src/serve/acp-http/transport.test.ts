@@ -93,6 +93,7 @@ const setupGithubMocks = vi.hoisted(() => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: stdioMocks.writeStderrLine,
+  writeStderrLineSafe: stdioMocks.writeStderrLine,
 }));
 
 vi.mock('../../services/setup-github.js', async () => {

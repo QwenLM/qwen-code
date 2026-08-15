@@ -203,11 +203,11 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     }
   });
 
-  // QWEN_CDP_MCP_COMMAND is spawned by the daemon as the browser-automation
-  // MCP adapter and QWEN_SERVE_CDP_TUNNEL_OVER_WS switches that tunnel
-  // surface on — the same daemon-hijack class as QWEN_CLI_ENTRY.
-  it('excludes the serve CDP adapter command and tunnel switch', () => {
+  // These steer the browser-automation adapter command, daemon endpoint, and
+  // tunnel surface — the same daemon-hijack class as QWEN_CLI_ENTRY.
+  it('excludes the serve CDP adapter environment', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CDP_MCP_COMMAND');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_DAEMON_URL');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
     );

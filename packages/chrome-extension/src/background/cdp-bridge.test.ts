@@ -540,6 +540,38 @@ describe('CDP bridge', () => {
     );
   });
 
+  it('rejects joiners when debugger detaches while tab metadata is pending', async () => {
+    const chromeHarness = installChromeHarness({ deferTabGet: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+    );
+    chromeHarness.debuggerDetachListeners[0]?.(
+      { tabId: 7 },
+      'canceled_by_user',
+    );
+    chromeHarness.finishTabGet();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 2,
+        error: { message: 'debugger detached during attach' },
+        linkId: 'cdp-link-2',
+      }),
+    );
+  });
+
   it('clears an in-flight release after a failed attach', async () => {
     const chromeHarness = installChromeHarness({ deferAttach: true });
     const bridge = await loadBridge();
