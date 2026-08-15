@@ -186,8 +186,10 @@ print(run_id)
 )"
 
 # The release worker must not remain alive for either benchmark.  Persist the
-# exact TB 2.0 task set now; the DSW Publisher dispatches it only after it has
-# processed the SWE terminal result, regardless of SWE scoreability.
+# exact TB 2.0 task set now; the DSW Publisher dispatches it only after the SWE
+# result and trajectory bundle have been written successfully to the Release.
+# SWE scoreability is independent: a published QUARANTINED result still starts
+# the TB follow-up.
 tb_manifest_path="${output_root}/terminal-bench-2.0-manifest.json"
 "${python_bin}" "${script_root}/make-terminal-bench-manifest.py" \
   --archive "${tb_task_cache}" --output "${tb_manifest_path}"

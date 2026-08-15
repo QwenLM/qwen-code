@@ -118,7 +118,7 @@ jobs:
       EAS_TEMPLATE_MANIFEST: '/mnt/workspace/qwen-benchmark-acr-prewarm/deploy/eas/templates.json'
       ACR_IMAGE_MANIFEST: '/mnt/workspace/qwen-benchmark-eas-poc/state/acr-manifest-c104f840.json'
       ACR_IMAGE_STATE_DIR: '/mnt/data/qwen-benchmark/acr-prewarm/c104f840/state'
-      BENCHMARK_POOL_DATABASE_URL: 'postgresql://postgres@/qwen_benchmark_eas_long_pool?host=/mnt/dynamic/qwen-benchmark-pg/run&port=55432'
+      BENCHMARK_POOL_DATABASE_URL: 'postgresql://postgres@/qwen_benchmark_eas_long_pool_utf8?host=/mnt/dynamic/qwen-benchmark-pg/run&port=55432'
 
     steps:
       - name: 'Checkout pipeline'
@@ -179,6 +179,7 @@ jobs:
             echo "- Pool run: \`${POOL_RUN_ID}\`"
             echo "- State: queued"
             echo "- SWE-bench cases: ${INSTANCE_LIMIT}"
-            echo "- Terminal-Bench 2.0: 89 frozen tasks, queued durably after the SWE Publisher processes its terminal result."
+            echo "- Terminal-Bench 2.0: 89 frozen tasks recorded as a durable follow-up."
+            echo "- TB is dispatched only after the SWE Publisher successfully updates this Release."
             echo "- The persistent DSW publisher writes separate, verifier-backed SWE and TB result sections and assets to this Release."
           } >> "${GITHUB_STEP_SUMMARY}"
