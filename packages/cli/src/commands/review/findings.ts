@@ -35,6 +35,7 @@ import type { CommandModule } from 'yargs';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { AnchorRequest } from './lib/anchors.js';
 
 // These four lists have a second consumer: the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
@@ -194,6 +195,20 @@ function oneOf<T extends string>(
     : undefined;
 }
 
+/**
+ * The finding format the agents write mandates the bracketed tag —
+ * `Source: [review]`, `Source: [probe]` — and a finding copied forward with
+ * the tag it was born with used to die at this gate, because the artifact
+ * schema names the bare enum. Strip the brackets and validate what is inside;
+ * anything else (including an unknown word, bracketed or not) still fails.
+ */
+function normalizeSource(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const bracketed = /^\[(.*)\]$/.exec(trimmed);
+  return (bracketed ? bracketed[1] : trimmed).trim();
+}
+
 function parseLocations(
   o: Record<string, unknown>,
   index: number,
@@ -303,7 +318,7 @@ export function validateFindings(raw: unknown): Finding[] {
     const source =
       o['source'] === undefined
         ? ('review' as Source)
-        : oneOf(o['source'], SOURCES);
+        : oneOf(normalizeSource(o['source']), SOURCES);
     if (!source) {
       fail(
         i,
@@ -814,6 +829,56 @@ export function buildReport(findings: readonly Finding[]): FindingsReport {
   };
 }
 
+/**
+ * The Step 7 resolver input, projected from the canonical findings.
+ *
+ * `resolve-anchors` wants flat `{id, path, anchor, line?}` entries — one per
+ * location — while the artifact stores `locations[]` arrays under a different
+ * key name (`file`, not `path`). Hand-writing that projection once produced
+ * all-null anchors and a redo; this is the mechanical version. Only the
+ * findings headed for the `comments` array are projected — high-confidence
+ * Criticals and Suggestions; a standalone finding keeps its own id, and an
+ * aggregate's locations carry `<id>-1`, `<id>-2`, …, the suffix scheme Step 7
+ * joins each resolution back to its finding on. Locations without an anchor
+ * are skipped: there is nothing to resolve, and their disposition is the
+ * ordinary unanchorable one (body Critical, discarded Suggestion).
+ */
+export function anchorRequestsFor(
+  findings: readonly Finding[],
+): AnchorRequest[] {
+  const requests: AnchorRequest[] = [];
+  const seen = new Map<string, string>();
+  for (const f of findings) {
+    if (f.confidence !== 'high') continue;
+    if (f.severity !== 'Critical' && f.severity !== 'Suggestion') continue;
+    const postable = f.locations.filter((l) => l.anchor !== undefined);
+    const multi = postable.length > 1;
+    for (const [i, l] of postable.entries()) {
+      const id = multi ? `${f.id}-${i + 1}` : f.id;
+      // Finding ids are unique, but an EXPANDED id can equal another finding's
+      // own id (`p1`'s first location mints `p1-1`; a standalone finding may
+      // be named `p1-1`). Resolutions join back on this id, so the collision
+      // must fail here, at projection — not at Step 7, where `resolve-anchors`
+      // would refuse the whole batch and take every other resolution down.
+      const other = seen.get(id);
+      if (other !== undefined) {
+        throw new Error(
+          `findings: anchor request id "${id}" is produced twice — findings ` +
+            `"${other}" and "${f.id}" both claim it; rename one of the findings`,
+        );
+      }
+      seen.set(id, f.id);
+      requests.push({
+        id,
+        path: l.file,
+        anchor: l.anchor as string,
+        ...(l.line !== undefined ? { line: l.line } : {}),
+      });
+    }
+  }
+  return requests;
+}
+
 /** One line per finding, for a terminal that will not render the JSON. */
 export function renderFindings(report: FindingsReport): string[] {
   return report.findings.map((f) => {
@@ -835,6 +900,7 @@ interface FindingsArgs {
   outcomes: string | undefined;
   print: boolean | undefined;
   testDelta: string | undefined;
+  toAnchors: string | undefined;
 }
 
 function readJson(path: string, what: string): unknown {
@@ -885,12 +951,19 @@ export const findingsCommand: CommandModule = {
         describe:
           'The test-delta artifact. A Critical naming a test file that also failed on the merge base is held back to Suggestion, carrying the measurement that demoted it.',
       })
+      .option('to-anchors', {
+        type: 'string',
+        describe:
+          'Also write the Step 7 resolver input: one {id, path, anchor, line?} ' +
+          'per anchored location of every high-confidence Critical and ' +
+          'Suggestion, ready for resolve-anchors.',
+      })
       .option('print', {
         type: 'boolean',
         describe: 'Also print one line per finding to stdout',
       }),
   handler: (argv) => {
-    const { input, out, outcomes, print, testDelta } =
+    const { input, out, outcomes, print, testDelta, toAnchors } =
       argv as unknown as FindingsArgs;
 
     let findings = validateFindings(readJson(input, 'findings'));
@@ -947,6 +1020,23 @@ export const findingsCommand: CommandModule = {
     const target = resolve(out);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+
+    // Project the resolver input from the SAME findings the artifact carries —
+    // after the holds above, so a Critical lowered to Suggestion (or a
+    // confidence lowered to terminal-only) projects as the holds intend.
+    if (toAnchors !== undefined) {
+      const requests = anchorRequestsFor(report.findings);
+      const anchorTarget = resolve(toAnchors);
+      mkdirSync(dirname(anchorTarget), { recursive: true });
+      writeFileSync(
+        anchorTarget,
+        `${JSON.stringify(requests, null, 2)}\n`,
+        'utf8',
+      );
+      writeStderrLine(
+        `findings: wrote ${requests.length} anchor request(s) for Step 7 to ${anchorTarget}`,
+      );
+    }
 
     const { bySeverity, byConfidence } = report.counts;
     writeStderrLine(

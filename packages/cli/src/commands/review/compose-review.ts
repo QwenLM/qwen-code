@@ -123,8 +123,12 @@ export interface ComposeReviewInput {
    * toward `C` exactly like anchored Criticals.
    */
   bodyCriticals?: string[];
-  /** Suggestions discarded as unanchorable (offline validation or 422). */
-  suggestionsDiscarded?: number;
+  /**
+   * Suggestions discarded as unanchorable (offline validation or 422). A
+   * count; the list form the Step 7 prose invites — `[]`, or one entry per
+   * discarded item — is accepted and counted by its length.
+   */
+  suggestionsDiscarded?: number | readonly unknown[];
   /**
    * Existing Criticals already on the PR whose Step 6 re-check landed on
    * `cannot tell` — one line each (location + what could not be decided).
@@ -435,6 +439,11 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
 // body-Critical-only input into an APPROVE that dropped the only blocker.
 function toCount(value: unknown, field: string): number {
   if (value === undefined || value === null) return 0;
+  // The Step 7 prose reads these fields — `suggestionsDiscarded` above all —
+  // as the LIST of discarded items, and a run that wrote the list itself used
+  // to die at this gate after hours of analysis. Its length IS the count, so
+  // count it rather than refuse: `[]` is zero, `["a", "b"]` is two.
+  if (Array.isArray(value)) return value.length;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new TypeError(
       `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,

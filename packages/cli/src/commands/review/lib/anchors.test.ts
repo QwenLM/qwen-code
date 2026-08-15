@@ -511,6 +511,156 @@ describe('resolveAnchor', () => {
   });
 });
 
+describe('resolveAnchor — the substring fallback (KB-long lines)', () => {
+  // A file whose paragraphs are single multi-KB lines — SKILL.md is one —
+  // defeats every whole-line tier: the quote IS in the diff, inside a line.
+  // The natural anchor there is a mid-line fragment, and containment is what
+  // places it, at the containing line.
+  const PARAGRAPH =
+    'The resolver turns each quoted snippet into a line number, because a ' +
+    'line number the model counted out by hand is not something the pipeline ' +
+    'can trust, and a derived number is strictly better evidence than an ' +
+    'asserted one. A mid-line fragment is the natural anchor shape here.';
+
+  const diff = [
+    'diff --git a/SKILL.md b/SKILL.md',
+    '--- a/SKILL.md',
+    '+++ b/SKILL.md',
+    '@@ -1,0 +1,2 @@',
+    '+# Heading',
+    `+${PARAGRAPH}`,
+    '',
+  ].join('\n');
+  const hay = () => lines(diff, 'SKILL.md');
+
+  it('resolves a mid-line fragment to the containing added line', () => {
+    const r = resolveAnchor(
+      hay(),
+      'a derived number is strictly better evidence than an asserted one',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      startLine: 2,
+      tier: 'substring-added',
+      matchCount: 1,
+      ambiguous: false,
+    });
+  });
+
+  it('reports the containing line when it is a context line', () => {
+    const contextDiff = [
+      'diff --git a/SKILL.md b/SKILL.md',
+      '--- a/SKILL.md',
+      '+++ b/SKILL.md',
+      '@@ -1,2 +1,2 @@',
+      ' # Heading',
+      ` ${PARAGRAPH}`,
+      '',
+    ].join('\n');
+    const r = resolveAnchor(
+      lines(contextDiff, 'SKILL.md'),
+      'the natural anchor shape here',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'substring-context',
+    });
+  });
+
+  it('keeps a whole-line quote exact — the fallback is the LAST tier', () => {
+    const r = resolveAnchor(hay(), PARAGRAPH);
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'exact-added',
+    });
+  });
+
+  it('leaves a short fragment unmatched — too little text to place a line', () => {
+    // Below MIN_SUBSTRING_LENGTH a fragment sits inside half the lines a diff
+    // renders; matching it would be noise with a confident face.
+    const r = resolveAnchor(hay(), 'strictly');
+    expect(r.status).toBe('unmatched');
+  });
+
+  it('does not fall back for a multi-line snippet', () => {
+    // A fragment of the paragraph plus the heading cannot sit inside one
+    // line, and the marker readings get no containment guess stacked on them.
+    const r = resolveAnchor(hay(), '# Heading\nThe resolver turns each');
+    expect(r.status).toBe('unmatched');
+  });
+
+  it('refuses a fragment contained in several lines, unless a claim decides', () => {
+    const phrase = 'the same repeated phrase appears in this review twice';
+    const repeatDiff = [
+      'diff --git a/d.md b/d.md',
+      '--- a/d.md',
+      '+++ b/d.md',
+      '@@ -1,0 +1,3 @@',
+      `+first line that carries ${phrase} in it`,
+      '+an unrelated line',
+      `+second line that carries ${phrase} in it`,
+      '',
+    ].join('\n');
+    const hayR = lines(repeatDiff, 'd.md');
+
+    const blind = resolveAnchor(hayR, phrase);
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('more than one hunk line');
+
+    const claimed = resolveAnchor(hayR, phrase, 3);
+    expect(claimed).toMatchObject({
+      status: 'resolved',
+      line: 3,
+      matchCount: 2,
+      ambiguous: true,
+    });
+  });
+
+  it('counts one line once even when the fragment repeats inside it', () => {
+    // The fragment appears twice in the SAME line; that is one place the
+    // comment can hang, not an ambiguity.
+    const repeatDiff = [
+      'diff --git a/r.md b/r.md',
+      '--- a/r.md',
+      '+++ b/r.md',
+      '@@ -1,0 +1,1 @@',
+      '+review the charge(amt) call; then review the charge(amt) call again',
+      '',
+    ].join('\n');
+    const r = resolveAnchor(
+      lines(repeatDiff, 'r.md'),
+      'review the charge(amt) call',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 1,
+      matchCount: 1,
+      ambiguous: false,
+    });
+  });
+
+  it('matches after whitespace collapse, but only when that is the only place', () => {
+    const r = resolveAnchor(hay(), 'a  derived   number is strictly better');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'substring-added',
+    });
+  });
+
+  it('carries the drift measurement like any other tier', () => {
+    const r = resolveAnchor(
+      hay(),
+      'the natural anchor shape here',
+      9, // the agent miscounted; the fragment is on line 2
+    );
+    expect(r).toMatchObject({ status: 'resolved', line: 2, drift: 7 });
+  });
+});
+
 it('does not throw on a candidate set past the argument-spread limit', () => {
   // `Math.min(...cands.map(dist))` turns every candidate into a function
   // argument; a diff with enough repeated lines crosses the engine limit and

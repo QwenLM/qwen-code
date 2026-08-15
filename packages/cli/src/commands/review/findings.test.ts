@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  anchorRequestsFor,
   applyOutcomes,
   buildReport,
   compressSummary,
@@ -68,6 +69,27 @@ describe('validateFindings', () => {
     // nothing publicly while believing it reported everything.
     const [f] = validateFindings([{ ...base, confidence: undefined }]);
     expect(f.confidence).toBe('high');
+  });
+
+  it('normalizes the bracketed source tags the finding format mandates', () => {
+    // Finders write `Source: [probe]` / `Source: [review]` — the bracketed
+    // form the finding format in every agent brief mandates. A finding copied
+    // forward with the tag it was born with must not die at this gate.
+    for (const source of SOURCES) {
+      const [f] = validateFindings([{ ...base, source: `[${source}]` }]);
+      expect(f.source).toBe(source);
+    }
+    const [spaced] = validateFindings([{ ...base, source: ' [probe] ' }]);
+    expect(spaced.source).toBe('probe');
+  });
+
+  it('still rejects an unknown source, bracketed or not', () => {
+    expect(() => validateFindings([{ ...base, source: '[bogus]' }])).toThrow(
+      /has source "\[bogus\]"; expected one of/,
+    );
+    expect(() => validateFindings([{ ...base, source: '[]' }])).toThrow(
+      /has source "\[\]"; expected one of/,
+    );
   });
 
   it('accepts snake_case for the fields the prose format spells with a space', () => {
@@ -465,6 +487,98 @@ describe('renderFindings', () => {
   });
 });
 
+describe('anchorRequestsFor', () => {
+  // The Step 7 resolver input, so the projection nobody hand-writes anymore
+  // (a hand projection from `locations[]` once produced all-null anchors).
+  const finding = (over: Partial<Finding> = {}): Finding => ({
+    id: 'f1',
+    severity: 'Critical',
+    confidence: 'high',
+    source: 'review',
+    summary: 'The guard is missing.',
+    shortSummary: 'The guard is missing.',
+    failureScenario: 'A negative amount reaches charge().',
+    locations: [{ file: 'src/pay.ts', line: 11, anchor: 'charge(amt);' }],
+    ...over,
+  });
+
+  it('projects a standalone finding under its own id, path from file', () => {
+    expect(anchorRequestsFor([finding()])).toEqual([
+      { id: 'f1', path: 'src/pay.ts', anchor: 'charge(amt);', line: 11 },
+    ]);
+  });
+
+  it('omits line when the location has none', () => {
+    const [req] = anchorRequestsFor([
+      finding({ locations: [{ file: 'a.ts', anchor: 'x' }] }),
+    ]);
+    expect(req).toEqual({ id: 'f1', path: 'a.ts', anchor: 'x' });
+  });
+
+  it('expands an aggregate into suffixed ids, one per anchored location', () => {
+    const requests = anchorRequestsFor([
+      finding({
+        id: 'p1',
+        locations: [
+          { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+          { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          { file: 'c.ts', line: 3, anchor: 'const c = 3;' },
+        ],
+      }),
+    ]);
+    expect(requests.map((r) => r.id)).toEqual(['p1-1', 'p1-2', 'p1-3']);
+    expect(requests.map((r) => r.path)).toEqual(['a.ts', 'b.ts', 'c.ts']);
+  });
+
+  it('skips locations without an anchor — there is nothing to resolve', () => {
+    // The one postable location is the only request, so it keeps the bare id:
+    // the suffix exists to tell several requests for one finding apart.
+    const requests = anchorRequestsFor([
+      finding({
+        id: 'p1',
+        locations: [
+          { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+          { file: 'b.ts', line: 2 },
+        ],
+      }),
+    ]);
+    expect(requests).toEqual([
+      { id: 'p1', path: 'a.ts', anchor: 'const a = 1;', line: 1 },
+    ]);
+  });
+
+  it('refuses an expanded id that collides with another finding’s id', () => {
+    // The aggregate `p1` mints `p1-1` for its first location; a standalone
+    // finding is allowed to be named `p1-1`. Resolutions join back on this
+    // id, so the collision must fail here — not at Step 7, where
+    // resolve-anchors refuses the whole batch.
+    expect(() =>
+      anchorRequestsFor([
+        finding({
+          id: 'p1',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          ],
+        }),
+        finding({ id: 'p1-1' }),
+      ]),
+    ).toThrow(/anchor request id "p1-1" is produced twice/);
+  });
+
+  it('projects only high-confidence Criticals and Suggestions', () => {
+    // The resolver input is the comments[] set: Nice to have and
+    // low-confidence findings are terminal-only and never anchored.
+    const requests = anchorRequestsFor([
+      finding({ id: 'keep-c' }),
+      finding({ id: 'keep-s', severity: 'Suggestion' }),
+      finding({ id: 'drop-nth', severity: 'Nice to have' }),
+      finding({ id: 'drop-low', confidence: 'low' }),
+    ]);
+    expect(requests.map((r) => r.id)).toEqual(['keep-c', 'keep-s']);
+  });
+});
+
 // The exported functions are unit-tested above, and none of them reaches the
 // review unless this command's file boundary holds: reading two JSON inputs,
 // writing the artifact, and — the part that matters — turning an incomplete
@@ -636,6 +750,60 @@ describe('findings (command boundary)', () => {
     expect(report.findings[0].severity).toBe('Suggestion');
     expect(report.counts.bySeverity['Critical']).toBe(0);
     expect(report.findings[0].failureScenario).toContain('failed there too');
+  });
+
+  it('--to-anchors writes the resolver input beside the artifact, and names it on stderr', () => {
+    // The projection Step 7 used to hand-write: it must come out of the SAME
+    // findings the artifact carries, holds included.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'nested/anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'f1',
+          source: '[probe]',
+          anchor: 'charge(amt);',
+        },
+      ]),
+    );
+    const stderr = runCapturingStderr({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const requests = JSON.parse(readFileSync(anchors, 'utf8'));
+    expect(requests).toEqual([
+      { id: 'f1', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
+    expect(stderr).toContain('1 anchor request(s)');
+  });
+
+  it('--to-anchors projects the held severity, not the filed one', () => {
+    // A Critical the witness rule lowered to low confidence is terminal-only
+    // and must not reach the resolver input: the projection runs after the
+    // holds, on the same findings the artifact carries.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'kept', anchor: 'charge(amt);', source: 'probe' },
+        { ...base, id: 'demoted', anchor: 'other(amt);', source: 'review' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const requests = JSON.parse(readFileSync(anchors, 'utf8'));
+    expect(requests.map((r: { id: string }) => r.id)).toEqual(['kept']);
   });
 
   it.each([

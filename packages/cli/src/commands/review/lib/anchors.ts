@@ -50,7 +50,13 @@ export type MatchTier =
   | 'exact-context'
   /** Matched only after normalising indentation. */
   | 'loose-added'
-  | 'loose-context';
+  | 'loose-context'
+  /**
+   * Matched as a fragment INSIDE a longer hunk line, not as the whole line —
+   * the shape a file whose paragraphs are single multi-KB lines produces.
+   */
+  | 'substring-added'
+  | 'substring-context';
 
 export interface AnchorResolution {
   status: 'resolved' | 'unmatched';
@@ -324,6 +330,93 @@ function pick(cands: Candidate[], claimedLine?: number): Candidate | null {
 }
 
 /**
+ * Short fragments sit inside half the lines a diff renders — `}`, `return;` —
+ * so the containment tiers take only snippets long enough that a hit says
+ * something: past the one-token class, where a match starts to name a place.
+ */
+const MIN_SUBSTRING_LENGTH = 12;
+
+/** Whitespace runs collapsed to one space — the loose reading of containment. */
+function normalizeCollapsed(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The last tier: a single-line snippet matched as a fragment INSIDE a hunk
+ * line, reported at the containing line. A file whose paragraphs are single
+ * multi-KB lines — SKILL.md is one — defeats every whole-line tier above,
+ * because the quote is in the diff, just not the WHOLE of any line; there the
+ * natural anchor is a mid-line fragment, and containment is what places it.
+ *
+ * Only the faithful reading of a single-line snippet qualifies: a multi-line
+ * snippet cannot sit inside one line, and the marker-stripped readings are
+ * already guesses about what was typed. Same safety shape as the whole-line
+ * tiers — a hit on several lines is decided by the claimed line or refused,
+ * and the whitespace-collapsed reading earns its place only when it is the
+ * ONLY place the fragment could go. A resolved fragment sits inside a hunk by
+ * construction, exactly like a whole-line resolution, so it is a valid GitHub
+ * anchor; it is weaker evidence about WHICH line, and the tier says so.
+ */
+function substringResolution(
+  hay: NewSideLine[],
+  needleLines: string[],
+  claimedLine?: number,
+): AnchorResolution | null {
+  if (needleLines.length !== 1) return null;
+  const needle = normalizeExact(needleLines[0]);
+  if (needle.trim().length < MIN_SUBSTRING_LENGTH) return null;
+
+  const norms: Array<[boolean, (s: string) => string]> = [
+    [true, (s) => s],
+    [false, normalizeCollapsed],
+  ];
+  for (const [exact, norm] of norms) {
+    const normNeedle = norm(needle);
+    // One candidate per LINE: a fragment repeated inside one line places the
+    // comment on that line either way, and counting the repetitions would
+    // report an ambiguity the resolver does not actually have.
+    const cands: Candidate[] = hay
+      .filter((l) => norm(l.text).includes(normNeedle))
+      .map((l) => ({ startLine: l.newLine, line: l.newLine, added: l.added }));
+    if (cands.length === 0) continue;
+
+    if (!exact && cands.length > 1) {
+      return {
+        status: 'unmatched',
+        reason:
+          'the snippet sits inside more than one hunk line only after its ' +
+          'whitespace is normalised — quote a longer fragment so the line is ' +
+          'unambiguous',
+      };
+    }
+
+    const best = pick(cands, claimedLine);
+    if (!best) {
+      return {
+        status: 'unmatched',
+        reason:
+          'the snippet sits inside more than one hunk line and nothing ' +
+          'distinguishes them — quote a longer fragment so it is unique, or ' +
+          'give the line number you mean so the nearest match can be chosen',
+      };
+    }
+
+    return {
+      status: 'resolved',
+      line: best.line,
+      startLine: best.startLine,
+      matchCount: cands.length,
+      tier: best.added ? 'substring-added' : 'substring-context',
+      ambiguous: cands.length > 1,
+      ...(claimedLine !== undefined
+        ? { drift: Math.abs(best.startLine - claimedLine) }
+        : {}),
+    };
+  }
+  return null;
+}
+
+/**
  * Resolve one anchor snippet to a line range in the post-change file.
  *
  * `claimedLine` is the number the agent reported. It is never trusted as the
@@ -414,12 +507,21 @@ export function resolveAnchor(
     }
   }
 
+  // Nothing matched as whole lines. Before giving up, try the snippet as a
+  // fragment inside a hunk line — the tier KB-long Markdown lines need. A
+  // whole-line reading that found candidates but could not choose is already
+  // returned above as THE answer; this fires only when no whole-line reading
+  // found anything at all.
+  const fragment = substringResolution(newSideLines, variants[0], claimedLine);
+  if (fragment) return fragment;
+
   return {
     status: 'unmatched',
     reason:
-      'snippet does not appear in any hunk of this file — it may be quoted ' +
-      'from unchanged code outside the diff, paraphrased rather than copied, ' +
-      'or attributed to the wrong file',
+      'snippet does not appear in any hunk of this file — neither as whole ' +
+      'lines nor as a fragment inside one. It may be quoted from unchanged ' +
+      'code outside the diff, paraphrased rather than copied, or attributed ' +
+      'to the wrong file',
   };
 }
 
