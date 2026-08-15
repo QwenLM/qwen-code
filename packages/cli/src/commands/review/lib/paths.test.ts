@@ -9,6 +9,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import {
   tmpFile,
   probeWorktreePath,
+  scratchLabel,
   scratchWorktreePath,
   scratchWorktreePrefix,
   worktreePath,
@@ -118,13 +119,30 @@ describe('scratchWorktreePath', () => {
     );
   });
 
-  it('shares its prefix with the sweep that has to find trees it cannot name', () => {
-    // cleanup lists the parent directory and matches this prefix: the label half
-    // is the shard's record key, which the sweeper never sees.
+  it('refuses a label that keeps no path-safe character', () => {
+    // `???` and `!!!` are two different labels that flatten to nothing. A
+    // fallback would name both trees after the prefix itself — one tree for
+    // every shard whose label was unusable, and a path cleanup's prefix sweep
+    // matches as a whole family.
+    expect(() => scratchWorktreePath(worktree, '???')).toThrow(TypeError);
+    expect(scratchLabel('???')).toBe('');
+  });
+});
+
+describe('scratchWorktreePrefix', () => {
+  it('is the exact infix cleanup sweeps on, not merely a prefix of the path', () => {
+    // Asserting only `path.startsWith(prefix)` is a tautology — the path is
+    // BUILT from the prefix — and it holds just as well for a broader prefix,
+    // which is the dangerous direction: `cleanup` feeds this to a
+    // `startsWith` filter over the temp dir and deletes every match, so a
+    // prefix of `…/review-pr-7` alone would delete PR 70's live worktrees.
+    expect(scratchWorktreePrefix(worktreePath(7))).toBe(
+      `${resolve(worktreePath(7))}-scratch-`,
+    );
     expect(
-      scratchWorktreePath(worktreePath(7), 'verify--round-1--x').startsWith(
+      scratchWorktreePath(worktreePath(70), 'x').startsWith(
         scratchWorktreePrefix(worktreePath(7)),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 });

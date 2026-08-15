@@ -129,7 +129,19 @@ const SCRATCH_INFIX = '-scratch-';
  * must never be, since that is the tree it exists to keep clean.
  */
 export function scratchWorktreePath(worktree: string, label: string): string {
-  return `${resolve(worktree)}${SCRATCH_INFIX}${scratchLabel(label)}`;
+  const safe = scratchLabel(label);
+  // A label that flattens to nothing would name the tree after the PREFIX
+  // itself — one tree for every agent whose label happened to be unusable, and
+  // a path `cleanup`'s prefix sweep matches as a whole family. Refusing is the
+  // fail-closed direction: the caller (`scratch-tree`) turns this into an
+  // `available: false` the verifier can act on.
+  if (!safe) {
+    throw new TypeError(
+      `scratch label ${JSON.stringify(label)} keeps no path-safe character ` +
+        '(A-Za-z0-9._-); a tree cannot be named for it',
+    );
+  }
+  return `${resolve(worktree)}${SCRATCH_INFIX}${safe}`;
 }
 
 /**
@@ -156,13 +168,18 @@ export function scratchWorktreePrefix(worktree: string): string {
  * Sanitising there with this same function keeps the label shell-inert (no
  * quoting to get right, no metacharacter to reach a shell) AND keeps the brief
  * honest — the flag it shows is exactly the label the tree will be named for.
+ *
+ * Returns the empty string when nothing survives, and deliberately does NOT
+ * substitute a default: `???` and `!!!` are two different labels that flatten
+ * to nothing, and a shared default would put two shards in one tree — the race
+ * the label exists to prevent, reached through the sanitiser.
  */
 export function scratchLabel(label: string): string {
-  const flat = label
+  return label
     .replace(/[^A-Za-z0-9._-]/g, '_')
     .replace(/\.\.+/g, '_')
-    .replace(/^[._]+/, '');
-  return (flat || 'agent').slice(0, 64);
+    .replace(/^[._]+/, '')
+    .slice(0, 64);
 }
 
 /** Local branch ref name for a fetched PR head. */

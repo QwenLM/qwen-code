@@ -62,6 +62,19 @@ export function discardWorktree(cwd: string, tree: string): SweepResult {
   return sweep;
 }
 
+/** The residue probe's answer: what to name, and how much it left unnamed. */
+export interface WorktreeResidue {
+  /** The dirty paths, capped — every one of them safe to interpolate. */
+  paths: string[];
+  /**
+   * How many the tree actually holds. `total > paths.length` means the cap bit,
+   * and both renderers say so: a capped list presented as the complete one is a
+   * verifier restoring twelve paths and leaving the thirteenth in the tree the
+   * next round reads.
+   */
+  total: number;
+}
+
 /**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
@@ -75,33 +88,60 @@ export function discardWorktree(cwd: string, tree: string): SweepResult {
  * "these three paths are not in the commit" tells it exactly which of its
  * evidence to distrust.
  *
- * Ignored files are excluded (`node_modules`, `dist`: every review builds), and
- * the list is capped — a caller renders it into a prompt, and an unbounded list
- * from a tree someone ran a full build in would push out the brief around it.
+ * Three flags decide whether the names are usable, and every one of them was
+ * wrong in the first cut:
+ *
+ * - `-z` because the names become COMMANDS. Porcelain's rendered form quotes a
+ *   path with spaces or non-ASCII bytes (`"caf\303\251.ts"`) and writes a
+ *   rename as `orig -> new`, so a file literally named `a -> b.ts` parsed to
+ *   `b.ts"` — a name matching nothing on disk, handed to an agent as the path
+ *   to run `git show HEAD:` against. The NUL format is unquoted and puts a
+ *   rename's original path in its own record.
+ * - `--untracked-files=all` because `normal` collapses a new directory to one
+ *   `probe_dir/` entry, and every recovery this pipeline prints — `git show
+ *   HEAD:`, `git checkout HEAD --` — fails on a directory. The contamination
+ *   shape this exists to catch (an agent dropping probe files into a new
+ *   folder) is exactly the shape `normal` renders unactionable.
+ * - `maxBuffer` because the default is 1 MB and `spawnSync` answers ENOBUFS by
+ *   returning no stdout — which this function would have read as "clean". The
+ *   overload case is the one where the tree is dirtiest.
+ *
+ * Ignored files are excluded (`node_modules`, `dist`: every review builds).
  * Empty on any git failure: this is a diagnostic, and a diagnostic that throws
  * would fail the build it is only commenting on.
  */
-export function worktreeResidue(cwd: string, cap = 12): string[] {
+export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   const r = spawnSync(
     'git',
-    ['status', '--porcelain', '--untracked-files=normal'],
-    { cwd, encoding: 'utf8' },
+    ['status', '--porcelain', '--untracked-files=all', '-z'],
+    { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
-  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return [];
-  return (
-    r.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      // `XY path` — and `XY orig -> path` for a rename. The path half is what a
-      // reader needs; the status letters are noise to it.
-      .map((line) => {
-        const rest = line.slice(line.indexOf(' ') + 1).trim();
-        const arrow = rest.lastIndexOf(' -> ');
-        return arrow === -1 ? rest : rest.slice(arrow + 4);
-      })
-      .slice(0, cap)
-  );
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+    return { paths: [], total: 0 };
+  }
+  const records = r.stdout.split('\0').filter((rec) => rec.length > 0);
+  const paths: string[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i];
+    // `XY <path>` — the status letters are noise to a reader; the path is what
+    // it has to act on. A rename or copy spends a SECOND record on the original
+    // path, which is not residue in its own right (the destination is what sits
+    // in the tree), so it is consumed here rather than reported.
+    const status = rec.slice(0, 2);
+    paths.push(rec.slice(3));
+    if (status.includes('R') || status.includes('C')) i++;
+  }
+  return { paths: paths.slice(0, cap), total: paths.length };
+}
+
+/** What a dependency farm run did, and whether it found one already standing. */
+export interface DependencyFarm {
+  /** Packages symlinked in by THIS call. */
+  linked: number;
+  /** Packages this call could not link — disclosed, never silently dropped. */
+  failed: number;
+  /** True when a farm was already in place, so this call had nothing to link. */
+  alreadyPresent: boolean;
 }
 
 /**
@@ -135,8 +175,8 @@ export function worktreeResidue(cwd: string, cap = 12): string[] {
 export function exposeDependencies(
   probeTree: string,
   dependencyRoot: string,
-): { linked: number; failed: number } {
-  const done = { linked: 0, failed: 0 };
+): DependencyFarm {
+  const done: DependencyFarm = { linked: 0, failed: 0, alreadyPresent: false };
   if (probeTree === dependencyRoot) return done;
   farmNodeModules(dependencyRoot, probeTree, done);
   try {
@@ -165,16 +205,25 @@ export function exposeDependencies(
  *
  * A directory that already has one is left alone — the reuse path of a scratch
  * tree calls this again, and re-linking a farm that is already there would be
- * pure cost.
+ * pure cost. That case is RECORDED rather than merely skipped: `{linked: 0,
+ * failed: 0}` otherwise reads the same whether the farm was already standing or
+ * the source had nothing to link (a killed `npm install` leaves a
+ * `node_modules` holding one lockfile), and the two want opposite things said
+ * to the verifier — "your harness is ready" versus "no harness will start
+ * here".
  */
 function farmNodeModules(
   sourceDir: string,
   targetDir: string,
-  done: { linked: number; failed: number },
+  done: DependencyFarm,
 ): void {
   const source = join(sourceDir, 'node_modules');
   const target = join(targetDir, 'node_modules');
-  if (!existsSync(source) || existsSync(target)) return;
+  if (!existsSync(source)) return;
+  if (existsSync(target)) {
+    done.alreadyPresent = true;
+    return;
+  }
   mkdirSync(target);
   const linkType = process.platform === 'win32' ? 'junction' : 'dir';
   for (const entry of readdirSync(source, { withFileTypes: true })) {

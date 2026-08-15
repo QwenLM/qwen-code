@@ -31,18 +31,12 @@ import {
   runControlMutant,
 } from './test-efficacy.js';
 import {
-  exposeDependencies,
-  worktreeCreateFailureDetail,
-} from './lib/worktree.js';
-import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
   symlinkSync,
   existsSync,
   readFileSync,
-  readdirSync,
-  lstatSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -227,119 +221,6 @@ describe('findVitestBin', () => {
     writeFileSync(join(vitestDir, 'index.js'), '');
 
     expect(() => findVitestBin(worktree)).toThrow(/not defined by "exports"/);
-  });
-});
-
-describe('exposeDependencies', () => {
-  it('links top-level and scoped packages, counting what it linked', () => {
-    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
-    const nm = join(root, 'node_modules');
-    mkdirSync(join(nm, 'plain-pkg'), { recursive: true });
-    mkdirSync(join(nm, '@scope', 'inner-pkg'), { recursive: true });
-    // A non-directory entry is skipped — neither linked nor counted as a failure.
-    writeFileSync(join(nm, 'stray-file'), 'x');
-
-    const got = exposeDependencies(probe, root);
-
-    expect(got).toEqual({ linked: 2, failed: 0 });
-    expect(readdirSync(join(probe, 'node_modules')).sort()).toEqual([
-      '@scope',
-      'plain-pkg',
-    ]);
-    expect(
-      lstatSync(join(probe, 'node_modules', 'plain-pkg')).isSymbolicLink(),
-    ).toBe(true);
-    expect(
-      lstatSync(
-        join(probe, 'node_modules', '@scope', 'inner-pkg'),
-      ).isSymbolicLink(),
-    ).toBe(true);
-  });
-
-  it('farms a workspace member’s own node_modules, which npm could not hoist', () => {
-    // A version conflict leaves a package installed under the MEMBER, and Node
-    // resolves it by walking up from the importing file — so a tree with only
-    // the root farm fails to resolve exactly the package that could not be
-    // hoisted. Measured on this repo: a scratch tree with 1 560 root packages
-    // linked still could not resolve `@testing-library/react` for a UI probe.
-    const root = mkdtempSync(join(tmpdir(), 'expose-ws-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-ws-probe-'));
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({ workspaces: ['packages/*'] }),
-    );
-    mkdirSync(join(root, 'node_modules', 'hoisted'), { recursive: true });
-    for (const member of ['cli', 'absent']) {
-      mkdirSync(join(root, 'packages', member), { recursive: true });
-      writeFileSync(
-        join(root, 'packages', member, 'package.json'),
-        JSON.stringify({ name: `@x/${member}` }),
-      );
-      mkdirSync(join(root, 'packages', member, 'node_modules', 'nested'), {
-        recursive: true,
-      });
-    }
-    // The probe tree holds one of the two members.
-    mkdirSync(join(probe, 'packages', 'cli'), { recursive: true });
-
-    const got = exposeDependencies(probe, root);
-
-    expect(got).toEqual({ linked: 2, failed: 0 });
-    expect(existsSync(join(probe, 'node_modules', 'hoisted'))).toBe(true);
-    expect(
-      existsSync(join(probe, 'packages', 'cli', 'node_modules', 'nested')),
-    ).toBe(true);
-    // A member the tree does not contain gets nothing — creating its directory
-    // would put a path in the tree that its commit does not have.
-    expect(existsSync(join(probe, 'packages', 'absent'))).toBe(false);
-  });
-
-  it('leaves an already-built probe farm untouched', () => {
-    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
-    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
-    mkdirSync(join(probe, 'node_modules'), { recursive: true });
-
-    expect(exposeDependencies(probe, root)).toEqual({ linked: 0, failed: 0 });
-    expect(readdirSync(join(probe, 'node_modules'))).toEqual([]);
-  });
-});
-
-describe('worktreeCreateFailureDetail', () => {
-  // The branch this string is built on fires only when `git worktree add` fails,
-  // which no real-git test can force portably (the one lever — an unwritable
-  // `.git/worktrees` — is bypassed by root and differs under CI's unprivileged
-  // user). The composition is the part with logic in it, so it is pinned here.
-  it('names the add failure, and folds in the sweep stderr that explains it', () => {
-    const got = worktreeCreateFailureDetail(
-      'probe',
-      new Error("fatal: '/w/wt-probe' already exists"),
-      "fatal: '/w/wt-probe' is not a working tree\n",
-    );
-    expect(got).toContain('probe worktree could not be created');
-    expect(got).toContain("fatal: '/w/wt-probe' already exists");
-    // The sweep is usually the explanation for the add failure — keep it.
-    expect(got).toContain(
-      "(stale-tree sweep also reported: fatal: '/w/wt-probe' is not a working tree)",
-    );
-  });
-
-  it('omits the sweep clause when the sweep said nothing', () => {
-    // The normal case: no stale tree, so the sweep is silent. A dangling empty
-    // "(stale-tree sweep also reported: )" would be noise in the report.
-    const got = worktreeCreateFailureDetail(
-      'probe',
-      new Error('disk full'),
-      '   \n',
-    );
-    expect(got).toBe('probe worktree could not be created: disk full');
-  });
-
-  it('survives a non-Error throw', () => {
-    expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
-      'probe worktree could not be created: boom',
-    );
   });
 });
 

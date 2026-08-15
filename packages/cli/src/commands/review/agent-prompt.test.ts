@@ -1204,6 +1204,44 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it("welds THIS shard's record key into the scratch-tree command it is handed", () => {
+    // The plumbing is pinned at both ends — `buildRoleBrief` with an explicit
+    // key, and the record key's shape — but the middle carried nothing: drop
+    // the `key` the launch builder passes down and every shard of a round runs
+    // `scratch-tree --label verify`, sharing one tree, with the whole suite
+    // green. The concurrent-shard race this PR removes, back through a
+    // one-line regression.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verify-label-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          worktreePath: dir,
+          prNumber: '9207',
+          ownerRepo: 'QwenLM/qwen-code',
+        }),
+      );
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings,
+        round: 2,
+      });
+      const key = [...readRecordedPrompts(plan).keys()][0];
+      expect(key).toMatch(/^verify--round-2--[0-9a-f]{12}$/);
+      // The scratch block lives in the BRIEF the launch points at.
+      expect(readFileSync(briefPath(plan, key), 'utf8')).toContain(
+        `--label ${key}`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('verify takes --round too — a re-verification round is its own receipt', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-round-verify-'));
     try {
@@ -2432,7 +2470,10 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       key: 'verify--round-2--deadbeef1234',
     });
     expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review scratch-tree');
-    expect(p).toContain(`--worktree ${resolve(PR_PLAN.worktreePath)}`);
+    // QUOTED: an ordinary macOS workspace (`~/Documents/John's Projects/…`)
+    // word-splits a bare interpolation, and the failure is silent — every
+    // shard's scratch tree unavailable, every probe demoted to a reading.
+    expect(p).toContain(`--worktree '${resolve(PR_PLAN.worktreePath)}'`);
     expect(p).toContain('--label verify--round-2--deadbeef1234');
     // A relative --worktree would resolve against the agent's cwd, which IS the
     // worktree — the trap Agent 7's block already documents.
@@ -2468,10 +2509,26 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(clean).not.toContain('And right now it is not clean');
 
     const dirty = buildRoleBrief(PR_PLAN, '1a', {
-      residue: ['compose-review.ts', '__probe__.test.ts'],
+      residue: {
+        paths: ['compose-review.ts', '__probe__.test.ts'],
+        total: 2,
+      },
     });
     expect(dirty).toContain('And right now it is not clean');
     expect(dirty).toContain('`compose-review.ts`, `__probe__.test.ts`');
+    expect(dirty).not.toContain('more not listed');
+
+    // A capped list presented as the complete one is a reader who distrusts
+    // twelve paths and trusts the thirteenth.
+    const capped = buildRoleBrief(PR_PLAN, '1a', {
+      residue: { paths: ['a.ts'], total: 9 },
+    });
+    expect(capped).toContain('8 more not listed here');
+
+    // `git show HEAD:` cannot produce an UNTRACKED path — the prototypical
+    // residue. The rule has to say what that answer means, or it hands the
+    // reader a mandated command that exits 128 and no way to finish.
+    expect(clean).toContain("exists on disk, but not in 'HEAD'");
 
     // The verifier reads code too, and a chunk agent reads source files straight
     // out of the shared tree — the issue names both.
@@ -2479,8 +2536,27 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       'Your working directory is a SHARED review worktree',
     );
     expect(
-      buildChunkAgentPrompt({ ...PLAN, ...PR_PLAN }, 13, undefined, ['x.ts']),
+      buildChunkAgentPrompt({ ...PLAN, ...PR_PLAN }, 13, undefined, {
+        paths: ['x.ts'],
+        total: 1,
+      }),
     ).toContain('And right now it is not clean');
+
+    // Agent 8's whole-diff block is built outside `buildLaunch` — the one
+    // launch class that reads the shared tree and used to get neither the rule
+    // nor the paths.
+    expect(
+      buildWholeDiffBlock({ ...PLAN, ...PR_PLAN }, undefined, {
+        paths: ['x.ts'],
+        total: 1,
+      }),
+    ).toContain('And right now it is not clean');
+    expect(buildWholeDiffBlock({ ...PLAN, ...PR_PLAN })).toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+    expect(buildWholeDiffBlock(PLAN)).not.toContain(
+      'Your working directory is a SHARED review worktree',
+    );
 
     // Not for a review with no worktree: there the working tree is the user's
     // own, and its uncommitted changes may be the very thing under review.

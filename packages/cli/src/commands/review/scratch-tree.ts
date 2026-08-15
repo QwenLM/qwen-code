@@ -37,14 +37,19 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { scratchWorktreePath } from './lib/paths.js';
+import {
+  assertWritableOutPath,
+  scratchLabel,
+  scratchWorktreePath,
+} from './lib/paths.js';
 import {
   discardWorktree,
   exposeDependencies,
   worktreeCreateFailureDetail,
   worktreeResidue,
+  type DependencyFarm,
   type SweepResult,
 } from './lib/worktree.js';
 
@@ -62,13 +67,13 @@ export interface ScratchTreeReport {
    */
   reused: boolean;
   /**
-   * The `node_modules` farm: how many top-level packages were symlinked in from
-   * the review worktree, and how many could not be. `null` when the review
-   * worktree has no `node_modules` at all — then a JS unit harness will not
-   * start here, and the note says so rather than letting the verifier discover
-   * it as a mysterious `vitest: not found`.
+   * The `node_modules` farm: how many packages were symlinked in from the
+   * review worktree, how many could not be, and whether a farm was already
+   * standing. `null` when no farm could be built at all — the review worktree
+   * has no `node_modules`, or the linking failed — and the note says WHICH,
+   * because the two want opposite things done about them.
    */
-  dependencies: { linked: number; failed: number } | null;
+  dependencies: DependencyFarm | null;
   /**
    * Paths the SHARED review worktree carries that its HEAD does not, at the
    * moment of this call. Normally empty. Non-empty means residue is in the tree
@@ -79,6 +84,13 @@ export interface ScratchTreeReport {
    * shared tree anyway.
    */
   sharedTreeResidue: string[];
+  /**
+   * How many dirty paths the tree actually holds. Greater than
+   * `sharedTreeResidue.length` means the list above was capped — a capped list
+   * read as the complete one is a verifier restoring what it was shown and
+   * leaving the rest in the tree the next round reads.
+   */
+  sharedTreeResidueTotal: number;
   /** What happened, in one line. Rendered to the verifier verbatim. */
   note: string;
 }
@@ -114,9 +126,26 @@ function git(cwd: string, ...args: string[]): void {
  * is the whole cost this reuse path exists to avoid.
  */
 function resetScratchTree(tree: string, headSha: string): boolean {
+  // The gate that makes the rest of this function safe to run. A LINKED
+  // worktree has a `.git` file pointing at the common dir; a bare directory
+  // left by a crashed `worktree add` (or by a cleanup whose `rmSync` failed)
+  // has nothing — and git, finding nothing, walks UP. The scratch path sits
+  // inside the user's own checkout, so `checkout --force --detach <sha>` would
+  // then run against THAT: the user's uncommitted tracked work discarded, their
+  // HEAD detached onto the PR's commit, and `rev-parse HEAD` returning the very
+  // sha that makes this function report success (measured on a real repo). The
+  // caller's discard-and-rebuild path handles the bare directory correctly;
+  // this one must never touch it.
+  if (!existsSync(join(tree, '.git'))) return false;
   try {
     git(tree, 'checkout', '--force', '--detach', headSha);
-    git(tree, 'clean', '-fd');
+    // `-ff`, not `-f`: a single `-f` refuses to delete a nested git repository,
+    // so a probe that cloned or `git init`-ed a fixture inside the scratch tree
+    // survives the reset while the report says the tree is pristine. `-x` is
+    // deliberately NOT passed — ignored paths are where the dependency farm
+    // lives, and rebuilding it every call is the cost this reuse path exists to
+    // avoid.
+    git(tree, 'clean', '-ffd');
     return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
@@ -131,6 +160,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     reused: false,
     dependencies: null,
     sharedTreeResidue: [],
+    sharedTreeResidueTotal: 0,
     note,
   });
 
@@ -139,14 +169,19 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     return unavailable(`the review worktree ${worktree} does not exist`);
   }
   // The label is what keeps concurrent verifier shards out of each other's
-  // trees, so an empty one is refused rather than defaulted: a default is a
+  // trees, so a missing one is refused rather than defaulted: a default is a
   // shared tree by another name, and it would reintroduce the very race this
   // command exists to remove — one shard editing the file another is measuring.
-  if (!args.label || args.label.trim().length === 0) {
+  // The check is on the SANITIZED form, because that is what names the tree: a
+  // label of `???` and a label of `!!!` are two different non-empty strings
+  // that flatten to nothing, and a fallback would put both shards in one tree.
+  const label = scratchLabel(args.label ?? '');
+  if (!label) {
     return unavailable(
-      '--label is required: it is what gives each verifier shard its own tree, ' +
-        'and shards of one round run concurrently. Pass the record key from ' +
-        'your launch block.',
+      '--label is required, and must keep at least one of `A-Za-z0-9._-` once ' +
+        'flattened for a path: it is what gives each verifier shard its own ' +
+        'tree, and shards of one round run concurrently. Pass the record key ' +
+        'from your launch block.',
     );
   }
 
@@ -161,17 +196,24 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 
   // Read BEFORE the tree is created, so it describes the shared tree as this
   // call found it and can never be confused with anything this call did.
-  const sharedTreeResidue = worktreeResidue(worktree);
+  const residue = worktreeResidue(worktree);
+  const sharedTreeResidue = residue.paths;
   const residueNote =
     sharedTreeResidue.length > 0
       ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue.join(', ')} ` +
-        `${sharedTreeResidue.length === 1 ? 'is' : 'are'} not in ${headSha.slice(0, 9)}. ` +
-        'Other agents are reading that tree right now and will take those lines for the ' +
-        "PR's own code. Restore it (`git checkout -- <path>` / delete the file) before you " +
-        'do anything else.'
+        `${sharedTreeResidue.length === 1 ? 'is' : 'are'} not in ${headSha.slice(0, 9)}` +
+        (residue.total > sharedTreeResidue.length
+          ? `, and ${residue.total - sharedTreeResidue.length} more paths not listed here ` +
+            '(run `git status --porcelain` in that worktree for the full set)'
+          : '') +
+        '. Other agents are reading that tree right now and will take those lines for the ' +
+        "PR's own code. Restore it before you do anything else — " +
+        '`git checkout HEAD -- <path>` for anything tracked (plain `git checkout --` ' +
+        'restores from the INDEX, so it leaves STAGED residue in place), ' +
+        'delete anything untracked.'
       : '';
 
-  const tree = scratchWorktreePath(worktree, args.label);
+  const tree = scratchWorktreePath(worktree, label);
   if (existsSync(tree) && resetScratchTree(tree, headSha)) {
     const dependencies = farmDependencies(tree, worktree);
     return {
@@ -179,8 +221,9 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       path: tree,
       headSha,
       reused: true,
-      dependencies,
+      dependencies: dependencies.farm,
       sharedTreeResidue,
+      sharedTreeResidueTotal: residue.total,
       note:
         `your scratch tree is at ${tree}, restored to ${headSha.slice(0, 9)} ` +
         `(reusing the one an earlier call created — anything you left in it is gone).` +
@@ -204,6 +247,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       reused: false,
       dependencies: null,
       sharedTreeResidue,
+      sharedTreeResidueTotal: residue.total,
       note:
         `${worktreeCreateFailureDetail('scratch', e, String(sweep?.stderr ?? ''))}. ` +
         'Do NOT fall back to probing in the review worktree — other agents are ' +
@@ -219,8 +263,9 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     path: tree,
     headSha,
     reused: false,
-    dependencies,
+    dependencies: dependencies.farm,
     sharedTreeResidue,
+    sharedTreeResidueTotal: residue.total,
     note:
       `your scratch tree is at ${tree}, checked out at ${headSha.slice(0, 9)}. ` +
       'Write your probe there, mutate there, apply the candidate fix there; the ' +
@@ -247,34 +292,57 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 function farmDependencies(
   tree: string,
   worktree: string,
-): { linked: number; failed: number } | null {
-  if (!existsSync(resolve(worktree, 'node_modules'))) return null;
+): { farm: DependencyFarm | null; failure: string | null } {
+  if (!existsSync(resolve(worktree, 'node_modules'))) {
+    return { farm: null, failure: null };
+  }
   try {
-    return exposeDependencies(tree, worktree);
-  } catch {
+    return { farm: exposeDependencies(tree, worktree), failure: null };
+  } catch (err) {
     // Best effort, exactly as it is for the probe: a farm that could not be
-    // built costs the verifier a runnable harness, never a wrong verdict.
-    return null;
+    // built costs the verifier a runnable harness, never a wrong verdict. But
+    // the REASON is carried out — folding a link failure into the same `null`
+    // the absent case uses made the note say "the review worktree has no
+    // node_modules" about a worktree that has one, sending the verifier to
+    // install a tree that only needed a retry.
+    return { farm: null, failure: (err as Error).message };
   }
 }
 
-function dependencyNote(
-  dependencies: { linked: number; failed: number } | null,
-): string {
-  if (dependencies === null) {
+function dependencyNote(dependencies: {
+  farm: DependencyFarm | null;
+  failure: string | null;
+}): string {
+  const { farm, failure } = dependencies;
+  if (failure !== null) {
+    return (
+      ` Linking the review worktree's dependencies in failed (${failure}), so a ` +
+      'JS unit harness may not start here. That is an environment gap, never a ' +
+      'finding — and never a reason to probe in the review worktree instead.'
+    );
+  }
+  if (farm === null) {
     return (
       ' The review worktree has no `node_modules`, so nothing was linked in and ' +
       'a JS unit harness will not start here — install in the SCRATCH tree if you ' +
       'need one, never in the review worktree.'
     );
   }
-  if (dependencies.linked === 0 && dependencies.failed === 0) {
-    return ' Its `node_modules` was already in place.';
+  if (farm.linked === 0 && farm.failed === 0) {
+    // Two different states reach `{0, 0}`, and the honest sentence differs:
+    // the farm was already standing (a second call for the same shard), or the
+    // source had nothing linkable at all (the shape a killed `npm install`
+    // leaves: a `node_modules` holding only a lockfile).
+    return farm.alreadyPresent
+      ? ' Its `node_modules` was already in place.'
+      : " The review worktree's `node_modules` held nothing linkable, so a JS " +
+          'unit harness will not start here — install in the SCRATCH tree if ' +
+          'you need one, never in the review worktree.';
   }
   return (
-    ` ${dependencies.linked} dependencies linked in` +
-    (dependencies.failed > 0
-      ? `, ${dependencies.failed} could not be — a harness that cannot resolve a package is an environment gap, not a finding.`
+    ` ${farm.linked} dependencies linked in` +
+    (farm.failed > 0
+      ? `, ${farm.failed} could not be — a harness that cannot resolve a package is an environment gap, not a finding.`
       : '.')
   );
 }
@@ -308,16 +376,25 @@ export const scratchTreeCommand: CommandModule = {
   handler: (argv) => {
     const args = argv as unknown as ScratchTreeArgs;
     try {
+      // BEFORE the worktree is created, like every sibling command: an empty or
+      // directory `--out` otherwise survives to `writeFileSync`, dies EISDIR
+      // after a tree and a 1 700-link farm already exist, and exit-codes as a
+      // runtime failure instead of the repairable-invocation class.
+      if (args.out !== undefined) assertWritableOutPath(args.out);
       const report = runScratchTree(args);
+      // stdout FIRST: the report is the answer, and a caller scripting on it
+      // should not lose a usable tree's path to a failed side-file write.
+      writeStdoutLine(JSON.stringify(report, null, 2));
       if (args.out) {
         mkdirSync(dirname(resolve(args.out)), { recursive: true });
         writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
       }
-      writeStdoutLine(JSON.stringify(report, null, 2));
       writeStderrLine(`scratch-tree: ${report.note}`);
     } catch (err) {
-      writeStderrLine((err as Error).message);
-      process.exitCode = 1;
+      writeStderrLine(`scratch-tree: ${(err as Error).message}`);
+      // 2 is the caller's "repair the invocation" signal; 1 is a runtime
+      // failure it can only retry.
+      process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
 };

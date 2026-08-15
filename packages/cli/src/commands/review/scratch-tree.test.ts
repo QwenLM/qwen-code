@@ -14,9 +14,16 @@
 // commit says it is. A scratch tree that works but lets one write through is a
 // scratch tree that has failed.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -26,7 +33,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runScratchTree } from './scratch-tree.js';
+import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 
 describe('runScratchTree', () => {
@@ -46,6 +53,10 @@ describe('runScratchTree', () => {
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    // Every JS repo a review runs in ignores its dependency directory, and the
+    // reuse path's `git clean` spares ignored paths on purpose — that is what
+    // lets a reused tree keep its farm instead of re-linking it every call.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
     git(repo, 'add', '-A');
     git(repo, 'commit', '-qm', 'head');
     headSha = git(repo, 'rev-parse', 'HEAD');
@@ -120,15 +131,110 @@ describe('runScratchTree', () => {
     expect(existsSync(join(second.path!, '__probe__.test.ts'))).toBe(false);
   });
 
-  it('clears a leftover directory a crashed run left at the path', () => {
+  it('rebuilds over a leftover directory instead of resetting the PARENT checkout', () => {
+    // The reuse path runs `git checkout --force` with the scratch path as cwd.
+    // A bare directory there — what a crashed `worktree add` or a cleanup whose
+    // `rmSync` failed leaves behind — has no `.git`, so git walks UP and finds
+    // the user's own checkout, which the scratch path sits inside: their
+    // uncommitted work discarded, their HEAD detached onto the PR's commit, and
+    // `rev-parse HEAD` then returning the sha that makes the reset report
+    // success. Measured on a real repo before the `.git` gate.
     const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
     mkdirSync(tree, { recursive: true });
     writeFileSync(join(tree, 'junk.txt'), 'from a run that died\n');
+    // The parent checkout, as a user would leave it: on a branch, with work.
+    writeFileSync(join(repo, 'a.ts'), 'LOCAL UNCOMMITTED WORK\n');
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
 
     const r = run();
+
     expect(r.available).toBe(true);
+    // Rebuilt, not "reused" — the leftover was never treated as a worktree.
+    expect(r.reused).toBe(false);
     expect(existsSync(join(tree, 'junk.txt'))).toBe(false);
+    expect(existsSync(join(tree, '.git'))).toBe(true);
     expect(git(tree, 'rev-parse', 'HEAD')).toBe(headSha);
+    // And the user's checkout is exactly as they left it.
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
+    expect(readFileSync(join(repo, 'a.ts'), 'utf8')).toBe(
+      'LOCAL UNCOMMITTED WORK\n',
+    );
+  });
+
+  it('removes a nested repo a probe left behind — `-fd` alone would not', () => {
+    // `git clean -fd` refuses to delete a nested git repository, so a probe that
+    // cloned or `git init`-ed a fixture inside its scratch tree would survive
+    // the reset while the report says "anything you left in it is gone".
+    const first = run();
+    const nested = join(first.path!, 'fixture-repo');
+    mkdirSync(nested, { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: nested });
+    writeFileSync(join(nested, 'fixture.txt'), 'from the last probe\n');
+
+    const second = run();
+    expect(second.reused).toBe(true);
+    expect(existsSync(nested)).toBe(false);
+  });
+
+  it('refuses a label that flattens to nothing rather than sharing one tree', () => {
+    // `???` and `!!!` are two different non-empty labels with no path-safe
+    // character between them: a fallback would put both shards in one tree —
+    // the race the label exists to prevent, reached through the sanitiser.
+    for (const label of ['???', '!!!']) {
+      const r = runScratchTree({ worktree, label });
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('--label is required');
+    }
+  });
+
+  it('keeps the farm on reuse, and says the farm was already there', () => {
+    mkdirSync(join(worktree, 'node_modules', 'vitest'), { recursive: true });
+    const first = run();
+    expect(first.dependencies).toEqual({
+      linked: 1,
+      failed: 0,
+      alreadyPresent: false,
+    });
+
+    const second = run();
+    expect(second.reused).toBe(true);
+    expect(second.dependencies).toEqual({
+      linked: 0,
+      failed: 0,
+      alreadyPresent: true,
+    });
+    expect(second.note).toContain('`node_modules` was already in place');
+    // The farm the reset spared is the whole point of reusing the tree.
+    expect(existsSync(join(second.path!, 'node_modules', 'vitest'))).toBe(true);
+  });
+
+  it('says which harness gap it hit when node_modules holds nothing linkable', () => {
+    // The shape a killed `npm install` leaves. `{linked: 0, failed: 0}` reads
+    // identically to "the farm was already there", and the two want opposite
+    // things said to the verifier.
+    mkdirSync(join(worktree, 'node_modules'), { recursive: true });
+    writeFileSync(join(worktree, 'node_modules', '.package-lock.json'), '{}');
+
+    const r = run();
+    expect(r.dependencies).toEqual({
+      linked: 0,
+      failed: 0,
+      alreadyPresent: false,
+    });
+    expect(r.note).toContain('held nothing linkable');
+    expect(r.note).not.toContain('already in place');
+  });
+
+  it('is unavailable — with its reason — when the worktree is not a checkout', () => {
+    // Outside any repository, so git cannot discover one by walking up.
+    const plain = mkdtempSync(join(tmpdir(), 'qwen-not-a-checkout-'));
+    try {
+      const r = runScratchTree({ worktree: plain, label: 'verify' });
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('cannot read HEAD');
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
   });
 
   it('leaves the shared review worktree untouched by everything it does', () => {
@@ -153,6 +259,7 @@ describe('runScratchTree', () => {
     const r = run();
     expect(r.available).toBe(true);
     expect(r.sharedTreeResidue.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
+    expect(r.sharedTreeResidueTotal).toBe(2);
     expect(r.note).toContain('the shared review worktree is NOT clean');
     expect(r.note).toContain('__probe__.test.ts');
   });
@@ -170,7 +277,11 @@ describe('runScratchTree', () => {
     });
 
     const r = run();
-    expect(r.dependencies).toEqual({ linked: 2, failed: 0 });
+    expect(r.dependencies).toEqual({
+      linked: 2,
+      failed: 0,
+      alreadyPresent: false,
+    });
     expect(existsSync(join(r.path!, 'node_modules', 'vitest'))).toBe(true);
     expect(r.note).toContain('2 dependencies linked in');
   });
@@ -192,5 +303,69 @@ describe('runScratchTree', () => {
     expect(r.available).toBe(false);
     expect(r.path).toBeUndefined();
     expect(r.note).toContain('does not exist');
+  });
+
+  it('keeps the measured residue when the tree could not be created', () => {
+    // The failure path must not collapse to the empty-residue default: a note
+    // that names contaminated paths beside a `sharedTreeResidue: []` field
+    // tells a reader and a script two different things.
+    if (process.getuid?.() === 0) return; // root ignores the mode bits below
+    writeFileSync(join(worktree, '__probe__.test.ts'), 'it("x", () => {});');
+    const parent = join(repo, '.qwen', 'tmp');
+    chmodSync(parent, 0o555); // `git worktree add` cannot create the directory
+    try {
+      const r = runScratchTree({ worktree, label: 'verify--round-1--zzz' });
+      expect(r.available).toBe(false);
+      expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
+      expect(r.note).toContain('NOT clean');
+      expect(r.note).toContain(
+        'Do NOT fall back to probing in the review worktree',
+      );
+    } finally {
+      chmodSync(parent, 0o755);
+    }
+  });
+
+  describe('the command handler', () => {
+    beforeEach(() => {
+      process.exitCode = undefined;
+      (writeStdoutLine as unknown as ReturnType<typeof vi.fn>).mockClear();
+    });
+    afterEach(() => {
+      process.exitCode = undefined;
+    });
+
+    it('refuses a directory --out BEFORE standing anything up', () => {
+      // The class `assertWritableOutPath` exists for: without it the tree and
+      // its farm are built, `writeFileSync` dies EISDIR, and a usage typo
+      // exit-codes as a runtime failure with the usable tree's path lost.
+      const outDir = join(repo, 'reports');
+      mkdirSync(outDir, { recursive: true });
+      (scratchTreeCommand.handler as (a: unknown) => void)({
+        worktree,
+        label: 'verify--round-1--out',
+        out: outDir,
+      });
+      expect(process.exitCode).toBe(2);
+      expect(
+        existsSync(scratchWorktreePath(worktree, 'verify--round-1--out')),
+      ).toBe(false);
+    });
+
+    it('prints the report before writing the side file', () => {
+      const out = join(repo, 'reports', 'scratch.json');
+      (scratchTreeCommand.handler as (a: unknown) => void)({
+        worktree,
+        label: 'verify--round-1--out',
+        out,
+      });
+      expect(process.exitCode).toBeUndefined();
+      const printed = (writeStdoutLine as unknown as ReturnType<typeof vi.fn>)
+        .mock.calls[0][0] as string;
+      expect(JSON.parse(printed).available).toBe(true);
+      expect(JSON.parse(readFileSync(out, 'utf8')).path).toBe(
+        scratchWorktreePath(worktree, 'verify--round-1--out'),
+      );
+    });
   });
 });

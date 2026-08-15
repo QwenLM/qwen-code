@@ -92,7 +92,7 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { scratchLabel } from './lib/paths.js';
-import { worktreeResidue } from './lib/worktree.js';
+import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -485,7 +485,7 @@ export function buildChunkAgentPrompt(
   report: PlanReport,
   id: number,
   rules?: string,
-  residue?: string[],
+  residue?: WorktreeResidue,
 ): string {
   const { chunk, total } = chunkFrom(report, id);
 
@@ -765,9 +765,16 @@ export function buildChunkLaunchPrompt(
 export function buildWholeDiffBlock(
   report: PlanReport,
   rules?: string,
+  residue?: WorktreeResidue,
 ): string {
   const diffPath = requireDiffPath(report);
   const parts = [...diffReadingBlock(report, diffPath)];
+  // An Agent 8 specialist reads source out of the same shared worktree every
+  // other agent is pinned to, so it owes the same rule (#9207). It is the one
+  // launch class built outside `buildLaunch`, which is exactly how it was
+  // missed: the stderr tripwire fired on its build while the block it produced
+  // said nothing — and only the orchestrator sees stderr, never the agent.
+  parts.push(...worktreeEvidenceBlock(report, residue));
   const repositoryContext = repositoryContextOf(report);
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
@@ -1057,9 +1064,9 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
  * `worktreePath` here: the report stores it repo-relative and review commands
  * run from the project root.
  */
-function worktreeResidueOf(report: PlanReport): string[] {
+function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
-  if (typeof wt !== 'string' || !wt) return [];
+  if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
   return worktreeResidue(resolve(wt));
 }
 
@@ -1084,7 +1091,7 @@ function worktreeResidueOf(report: PlanReport): string[] {
  */
 function worktreeEvidenceBlock(
   report: PlanReport,
-  residue: string[] | undefined,
+  residue: WorktreeResidue | undefined,
 ): string[] {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return [];
@@ -1097,18 +1104,26 @@ function worktreeEvidenceBlock(
       'the diff and not in the commit is not a finding.** Before reporting anything ' +
       'that surprises you — a test file the diff never added, a line the diff never ' +
       'touched — check it against the commit under review with ' +
-      '`git show HEAD:<path>` and judge THAT. (An auditor of a real run took a ' +
-      "verifier's live probe for the PR's own code and came within a step of filing " +
-      'a Critical against it.)',
+      '`git show HEAD:<path>` and judge THAT. **A path that command cannot produce ' +
+      "(`exists on disk, but not in 'HEAD'`) is not in the commit at all** — it is " +
+      "not the PR's code, so it is neither evidence nor a finding. (An auditor of a " +
+      "real run took a verifier's live probe for the PR's own code and came within a " +
+      'step of filing a Critical against it.)',
   ];
-  if (residue && residue.length > 0) {
+  if (residue && residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
     parts.push(
       '',
       `**And right now it is not clean.** These paths differ from the commit under ` +
-        `review: ${residue.map((p) => `\`${inertPath(p)}\``).join(', ')}. Take your ` +
-        'evidence for them from `git show HEAD:<path>`, not from the file on disk, ' +
-        'and say in your return that you saw them, so the orchestrator can have ' +
-        'the tree cleared.',
+        `review: ${residue.paths.map((p) => `\`${inertPath(p)}\``).join(', ')}` +
+        (unlisted > 0
+          ? `, and ${unlisted} more not listed here (\`git status --porcelain\` has the full set — this list is capped)`
+          : '') +
+        '. Take your evidence for them from `git show HEAD:<path>`, not from the ' +
+        'file on disk — and where that command reports the path is not in HEAD, it ' +
+        'is something written into the tree after the commit, which settles it: not ' +
+        "the PR's code. Say in your return that you saw them, so the orchestrator " +
+        'can have the tree cleared.',
     );
   }
   return parts;
@@ -1150,7 +1165,7 @@ export function buildRoleBrief(
      */
     key?: string;
     /** Paths the review worktree carries that its commit does not, if any. */
-    residue?: string[];
+    residue?: WorktreeResidue;
   } = {},
 ): string {
   const brief = BRIEFS[role];
@@ -1335,7 +1350,11 @@ export function buildRoleBrief(
           'without an install.',
         '',
         '```bash',
-        `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${resolve(wt)} \\`,
+        // Quoted, like every other path this file prints into a command: an
+        // ordinary macOS workspace (`~/Documents/John's Projects/…`) word-splits
+        // a bare interpolation, and the failure would be silent — every shard's
+        // scratch tree unavailable, every probe demoted to a reading.
+        `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
         `  --label ${label}`,
         '```',
         '',
@@ -1347,8 +1366,19 @@ export function buildRoleBrief(
           'reports `sharedTreeResidue` — paths the REVIEW worktree carries that its ' +
           'commit does not. That list must be empty; if it is not, something has ' +
           'written into the tree the other agents are reading, so restore those ' +
-          'paths (`git checkout -- <path>`, delete stray files) before you go on, ' +
-          'and say so in your report.',
+          'paths (`git checkout HEAD -- <path>` for anything tracked — plain ' +
+          '`git checkout --` restores from the index and leaves STAGED residue in ' +
+          'place — and delete anything untracked) before you go on, and say so in ' +
+          'your report.',
+        '',
+        '**One limit of the scratch tree, so you do not spend a run rediscovering ' +
+          'it:** its `node_modules` is linked from the review worktree, and in a ' +
+          'monorepo that means a workspace package (`@scope/pkg`) resolves to the ' +
+          "review worktree's built copy, not to your scratch tree's source. A probe " +
+          'and a fix INSIDE one package flip normally; a fix you apply in package A ' +
+          'while the probe runs in package B will NOT be seen, however correct it is. ' +
+          'That is the harness, not the finding: say so and treat the flip as ' +
+          'inconclusive rather than reporting the fix as ineffective.',
       );
     }
   }
@@ -1846,7 +1876,7 @@ function buildLaunch(
     round?: number;
   },
   rules?: string,
-  residue?: string[],
+  residue?: WorktreeResidue,
 ): { key: string; prompt: string } {
   if (spec.role) {
     const key =
@@ -2005,7 +2035,7 @@ function runRoster(
   report: PlanReport,
   planPath: string,
   rules?: string,
-  residue?: string[],
+  residue?: WorktreeResidue,
 ): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
@@ -2286,7 +2316,7 @@ function runAllChunks(
   findingsContent: string,
   rules?: string,
   round?: number,
-  residue?: string[],
+  residue?: WorktreeResidue,
 ): void {
   const chunks = requireAuditableChunks(report);
 
@@ -2714,12 +2744,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // think it is. Cheap enough to do unconditionally (one `git status` per call,
   // not per agent) and silent on a clean tree, which is every healthy run.
   const residue = worktreeResidueOf(report);
-  if (residue.length > 0) {
+  if (residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
     writeStderrLine(
-      `warning: the review worktree carries changes its commit does not: ${residue.join(', ')}. ` +
-        'Every agent built by this call is told to take its evidence for those paths from ' +
-        '`git show HEAD:<path>`. Restore them before the next round — a probe left in the ' +
-        "shared tree reads to an auditor as the PR's own code.",
+      `warning: the review worktree carries changes its commit does not: ${residue.paths.join(', ')}` +
+        (unlisted > 0 ? ` (and ${unlisted} more — this list is capped)` : '') +
+        '. Every CODE-READING agent built by this call is told to take its evidence for those ' +
+        'paths from `git show HEAD:<path>` — Agent 7, which builds and tests this tree, is ' +
+        'not, and neither is anything else that does not review code. Restore them before the ' +
+        "next round: a probe left in the shared tree reads to an auditor as the PR's own code.",
     );
   }
 
@@ -2943,7 +2976,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   let key: string;
   let findingsFile: string | null = null;
   if (args.wholeDiff) {
-    prompt = buildWholeDiffBlock(report, rules);
+    prompt = buildWholeDiffBlock(report, rules, residue);
     key = 'whole-diff';
   } else {
     // The record key must be unique per launch. An invariant agent is keyed by its
