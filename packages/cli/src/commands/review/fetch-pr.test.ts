@@ -224,6 +224,7 @@ const producerMocks = vi.hoisted(() => ({
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
+  refExists: vi.fn(() => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   writeStderrLine: vi.fn(),
 }));
@@ -277,7 +278,7 @@ vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
   gitOpt: vi.fn(() => null),
   gitRaw: vi.fn(() => Buffer.from('')),
-  refExists: vi.fn(() => false),
+  refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
 }));
 
@@ -296,6 +297,7 @@ describe('fetch-pr report assembly', () => {
     producerMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
+    producerMocks.refExists.mockReturnValue(false);
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
@@ -399,6 +401,22 @@ describe('fetch-pr report assembly', () => {
       );
     });
 
+    it('refuses a malformed pr_number before the gate, matching the lock to the destroyer', async () => {
+      // The lease gate only engages `pr-\d+` targets, but `cleanStale`
+      // destroys `worktreePath(prNumber)` for ANY input — `path.join`
+      // normalizes `'5/.'` onto `review-pr-5`. Unvalidated, a malformed
+      // number sails past the gate lease-less and deletes a live holder's
+      // worktree (#9205 with the lock never engaged).
+      await expect(reportFor({ pr_number: '5/.' })).rejects.toThrow(
+        'fetch-pr: pr_number must be a positive integer, got "5/."',
+      );
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(producerMocks.gh).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
+    });
+
     it('lets the holding session re-fetch its own lease', async () => {
       // Ownership is per session, not per prompt: a later round re-fetches
       // while its own earlier prompt's lease is still on disk.
@@ -409,14 +427,36 @@ describe('fetch-pr report assembly', () => {
       });
       vi.mocked(reviewLeaseHeldByAnotherSession).mockReturnValueOnce(false);
 
-      await reportFor({});
+      // The service also no-ops when sessionId/promptId are missing, and this
+      // suite never sets the env vars — set both, and pin them below, or the
+      // assertion stays green on the very inputs that void the lock.
+      const prevSessionId = process.env['QWEN_CODE_SESSION_ID'];
+      const prevPromptId = process.env['QWEN_CODE_PROMPT_ID'];
+      process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
+      process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
+      try {
+        await reportFor({});
+      } finally {
+        if (prevSessionId === undefined) {
+          delete process.env['QWEN_CODE_SESSION_ID'];
+        } else {
+          process.env['QWEN_CODE_SESSION_ID'] = prevSessionId;
+        }
+        if (prevPromptId === undefined) {
+          delete process.env['QWEN_CODE_PROMPT_ID'];
+        } else {
+          process.env['QWEN_CODE_PROMPT_ID'] = prevPromptId;
+        }
+      }
 
       expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledTimes(1);
       // Pin the lease's ARGUMENTS — the service silently no-ops on a malformed
-      // target, so an unwired `target` writes nothing and voids the lock with
-      // every other test still green.
+      // target or missing ids, so an unwired field writes nothing and voids
+      // the lock with every other test still green.
       expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledWith(
         expect.objectContaining({
+          sessionId: 'session-self',
+          promptId: 'prompt-now',
           target: 'pr-42',
           repositoryRoot: process.cwd(),
           worktreePath: '.qwen/tmp/review-pr-42',
@@ -434,6 +474,10 @@ describe('fetch-pr report assembly', () => {
       // sits inside the network-bound fetch must still see A's lease. Moving
       // the write after any destructive or network step (#9205's interleave)
       // keeps every other test green while widening that window.
+      // refExists true so BOTH destructive legs of cleanStale run — the
+      // branch deletion must also come after the lease is visible.
+      producerMocks.refExists.mockReturnValue(true);
+
       await reportFor({});
 
       const leaseOrder = vi.mocked(createReviewWorktreeLease).mock
@@ -443,6 +487,9 @@ describe('fetch-pr report assembly', () => {
       );
       expect(leaseOrder).toBeLessThan(
         producerMocks.git.mock.invocationCallOrder[0]!,
+      );
+      expect(leaseOrder).toBeLessThan(
+        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
       );
     });
   });
@@ -482,6 +529,16 @@ describe('fetch-pr report assembly', () => {
       expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
+      );
+      // Teardown mirrors the acquisition window: the destructive branch
+      // rollback first, the lease released LAST — a clear that lands before
+      // `branch -D` lets another session through the emptied gate while the
+      // deletion is still pending. Compare the FIRST clear: the outer catch's
+      // second clear fires after the branch leg anyway.
+      expect(
+        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        vi.mocked(clearReviewWorktreeLease).mock.invocationCallOrder[0]!,
       );
     });
 

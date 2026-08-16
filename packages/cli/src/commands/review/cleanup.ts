@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLease,
+  isReviewLeaseFile,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
@@ -31,7 +32,6 @@ import {
   probeWorktreePath,
   baseWorktreePath,
   reviewBranch,
-  LEASE_PREFIX,
   REVIEW_TMP_DIR,
   tmpFile,
   tmpPrefix,
@@ -385,6 +385,12 @@ export function runCleanup(target: string): void {
   // much still there — the two streams contradicting each other, and the stdout
   // half being the one a script reads.
   let failedAny = false;
+  // The lease guards the worktree and branch, so it releases once THOSE steps
+  // are done: a side file that will not delete (EACCES on a read-only entry,
+  // a Windows file handle) must not keep the lock held — a leftover lease
+  // refuses every later fetch-pr of this PR and skips every later cleanup,
+  // and nothing sweeps a finished session's lease automatically.
+  let failedDestruction = false;
 
   // --- Worktree + branch (only for PR targets) -------------------------
   const prMatch = /^pr-(\d+)$/.exec(target);
@@ -439,6 +445,7 @@ export function runCleanup(target: string): void {
       } else if (existed) {
         writeStderrLine(`Failed to remove ${label} ${path}: ${reason}`);
         failedAny = true;
+        failedDestruction = true;
       }
     };
 
@@ -485,6 +492,7 @@ export function runCleanup(target: string): void {
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
         failedAny = true;
+        failedDestruction = true;
       }
     }
   }
@@ -506,10 +514,7 @@ export function runCleanup(target: string): void {
     // bare prefix: a file-review target named "lease" flattens to this same
     // prefix, and its OWN side files still need removal — nothing else removes
     // them. Lease removal itself belongs to clearReviewWorktreeLease below.
-    if (
-      file.startsWith(LEASE_PREFIX) &&
-      /^pr-\d+\.json$/.test(file.slice(LEASE_PREFIX.length))
-    ) {
+    if (isReviewLeaseFile(file)) {
       continue;
     }
     if (!file.startsWith(prefix)) continue;
@@ -528,7 +533,7 @@ export function runCleanup(target: string): void {
     }
   }
 
-  if (!failedAny) {
+  if (!failedDestruction) {
     clearReviewWorktreeLease(process.cwd(), target);
   }
 

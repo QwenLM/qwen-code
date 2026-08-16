@@ -33,6 +33,23 @@ function validTarget(target: string): boolean {
   return /^pr-\d+$/.test(target);
 }
 
+/**
+ * Whether a filename under `REVIEW_TMP_DIR` is a review-worktree lease.
+ * Derived from `validTarget` so the writer, `cleanup`'s sweep guard, and the
+ * `cleanupReviewWorktreeLeases` scan share one definition of the lease shape
+ * (see the `LEASE_PREFIX` comment in `lib/paths.ts`).
+ */
+export function isReviewLeaseFile(fileName: string): boolean {
+  if (!fileName.startsWith(LEASE_PREFIX) || !fileName.endsWith('.json')) {
+    return false;
+  }
+  const target = fileName.slice(
+    LEASE_PREFIX.length,
+    fileName.length - '.json'.length,
+  );
+  return validTarget(target);
+}
+
 export interface ReviewWorktreeLease {
   sessionId: string;
   promptId: string;
@@ -251,7 +268,7 @@ export function cleanupReviewWorktreeLeases(params: {
     if (!existsSync(directory)) return;
 
     for (const entry of readdirSync(directory)) {
-      if (!entry.startsWith(LEASE_PREFIX) || !entry.endsWith('.json')) continue;
+      if (!isReviewLeaseFile(entry)) continue;
       const path = join(directory, basename(entry));
       const lease = readLease(path);
       if (

@@ -69,6 +69,8 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
   reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
   reviewLeasePath: (repositoryRoot: string, target: string) =>
     `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
+  isReviewLeaseFile: (fileName: string) =>
+    /^qwen-review-lease-pr-\d+\.json$/.test(fileName),
 }));
 
 vi.mock('./lib/git.js', () => ({
@@ -113,6 +115,9 @@ describe('runCleanup', () => {
       freed: false,
       reason: undefined,
     });
+    // clearAllMocks keeps implementations a prior test set — drop them so a
+    // throwing rmSync cannot leak into tests that expect deletion to work.
+    mocks.rmSync.mockReset();
   });
 
   it('keeps the lease when branch deletion fails', () => {
@@ -138,6 +143,29 @@ describe('runCleanup', () => {
 
     runCleanup('pr-123');
 
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+  });
+
+  it('clears the lease when only a side file fails to delete', () => {
+    // The lease guards the worktree and branch, not side files: once those
+    // are freed, a residue a later sweep retries must not keep the lock held
+    // — a leftover lease refuses every later fetch-pr of this PR and skips
+    // every later cleanup, and nothing sweeps it automatically.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-diff.txt']);
+    mocks.rmSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to remove'),
+    );
     expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
       process.cwd(),
       'pr-123',
@@ -235,6 +263,33 @@ describe('runCleanup', () => {
     runCleanup('pr-123');
 
     expect(mocks.readReviewWorktreeLease).toHaveBeenCalledTimes(2);
+    // Pin the ARGUMENTS of both reads: mockReturnValueOnce is argument-blind,
+    // so a re-check that reads a malformed target stays green here while
+    // failing open in production (validTarget rejects it -> null -> not held).
+    expect(mocks.readReviewWorktreeLease).toHaveBeenNthCalledWith(
+      1,
+      process.cwd(),
+      'pr-123',
+    );
+    expect(mocks.readReviewWorktreeLease).toHaveBeenNthCalledWith(
+      2,
+      process.cwd(),
+      'pr-123',
+    );
+    // And the second read must come AFTER the audit, not merely exist:
+    // hoisting it above auditPrWrites keeps every other assertion green while
+    // the seconds-long audit again runs after the last lease check (#9205).
+    // Here the audit no-ops on the missing fetch report and names that skip
+    // on stderr — the note's position pins the audit inside the window.
+    const auditNoteIndex = mocks.writeStderrLine.mock.calls.findIndex((c) =>
+      String(c[0]).includes('bypass audit skipped'),
+    );
+    expect(auditNoteIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      mocks.readReviewWorktreeLease.mock.invocationCallOrder[1]!,
+    ).toBeGreaterThan(
+      mocks.writeStderrLine.mock.invocationCallOrder[auditNoteIndex]!,
+    );
     // Nothing of B's may be touched.
     expect(mocks.releaseWorktree).not.toHaveBeenCalled();
     expect(mocks.execFileSync).not.toHaveBeenCalled();

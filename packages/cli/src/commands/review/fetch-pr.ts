@@ -187,6 +187,18 @@ function cleanStale(prNumber: string): void {
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
 
+  // The lease gate below only engages `pr-\d+` targets, but `cleanStale`
+  // destroys `worktreePath(prNumber)` for ANY input (`path.join` even
+  // normalizes `'5/.'` onto PR 5's tree). Refuse every other shape before the
+  // gate, or a malformed number sails past it lease-less and deletes a live
+  // holder's state — #9205 with the lock never engaged. Same check, same
+  // message shape, as the sibling commands.
+  if (!/^\d+$/.test(prNumber) || Number(prNumber) <= 0) {
+    throw new Error(
+      `fetch-pr: pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
+    );
+  }
+
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }

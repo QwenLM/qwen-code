@@ -18,6 +18,7 @@ import {
   cleanupReviewWorktreeLeases,
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
+  isReviewLeaseFile,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
@@ -392,6 +393,64 @@ describe('readReviewWorktreeLease', () => {
     expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
     expect(readReviewWorktreeLease(root, '../../evil')).toBeNull();
     expect(readReviewWorktreeLease(root, 'local')).toBeNull();
+  });
+});
+
+describe('isReviewLeaseFile', () => {
+  it('accepts exactly the filenames the lease writer can produce', () => {
+    expect(isReviewLeaseFile('qwen-review-lease-pr-1.json')).toBe(true);
+    expect(isReviewLeaseFile('qwen-review-lease-pr-99999.json')).toBe(true);
+  });
+
+  it('rejects near-misses the cleanup sweep must not skip', () => {
+    // A file-review target named `lease` flattens to the bare prefix; its
+    // side files must stay sweepable, and nothing else is a lease.
+    expect(isReviewLeaseFile('qwen-review-lease-diff.txt')).toBe(false);
+    expect(isReviewLeaseFile('qwen-review-lease-.json')).toBe(false);
+    expect(isReviewLeaseFile('qwen-review-lease-local.json')).toBe(false);
+    expect(isReviewLeaseFile('qwen-review-lease-pr-1.json.bak')).toBe(false);
+    expect(isReviewLeaseFile('xqwen-review-lease-pr-1.json')).toBe(false);
+  });
+});
+
+describe('cleanupReviewWorktreeLeases scan', () => {
+  it('skips files outside the writer target grammar even with lease content', () => {
+    // The scan shares its lease shape with the writer (isReviewLeaseFile):
+    // a hand-shaped file the writer could never produce is not swept, so the
+    // finalizer's destructive path cannot ride a non-lease name.
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    execFileSync('git', ['-C', root, 'branch', 'qwen-review/pr-1']);
+    execFileSync('git', [
+      '-C',
+      root,
+      'worktree',
+      'add',
+      '-q',
+      worktree,
+      'qwen-review/pr-1',
+    ]);
+    const stray = join(root, '.qwen', 'tmp', 'qwen-review-lease-local.json');
+    writeFileSync(
+      stray,
+      JSON.stringify({
+        sessionId: 'session-a',
+        promptId: 'prompt-parent',
+        target: 'pr-1',
+        repositoryRoot: root,
+        worktreePath: worktree,
+        branch: 'qwen-review/pr-1',
+      }),
+    );
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      repositoryRoot: root,
+    });
+
+    expect(existsSync(worktree)).toBe(true);
+    expect(existsSync(stray)).toBe(true);
   });
 });
 
