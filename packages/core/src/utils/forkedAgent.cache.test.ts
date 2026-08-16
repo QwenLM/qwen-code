@@ -68,6 +68,12 @@ describe('CacheSafeParams', () => {
       expect(params!.version).toBeGreaterThan(0);
     });
 
+    it('stores session id', () => {
+      saveCacheSafeParams({}, [], 'model', 'session-a');
+
+      expect(getCacheSafeParams()?.sessionId).toBe('session-a');
+    });
+
     it('deep clones generationConfig', () => {
       const config: GenerateContentConfig = {
         systemInstruction: 'test',
