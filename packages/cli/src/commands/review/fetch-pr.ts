@@ -54,6 +54,8 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -378,7 +380,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     fetchedSha,
     fetchedAt,
     auditSince,
-    host: args.host ?? null,
+    // Record the TRIMMED host: setGhHost routes the padded-but-valid flag
+    // fine, but downstream readers that re-validate (compose-review's plan
+    // identity, the agent-prompt weld) must see the same canonical form, or
+    // a padded host silently drops to github.com anchor links.
+    host: args.host?.trim() || null,
     worktreePath: wt,
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
@@ -426,7 +432,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    }),
     ...planEffortField(args.effort),
   };
 

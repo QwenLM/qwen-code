@@ -14,6 +14,7 @@ interface Item {
   id: number;
   text: string;
   images?: unknown[];
+  files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
 }
@@ -99,6 +100,20 @@ describe('removeInjectedFromQueue', () => {
     expect(next).not.toBeNull();
     expect(next).toHaveLength(1);
     expect(next?.[0].images).toEqual([{ data: 'x' }]);
+  });
+
+  it('never matches a file-bearing entry (files are not pushed mid-turn)', () => {
+    const withFile = { ...q('with file'), files: [{ name: 'app.log' }] };
+    const prompts = [withFile, q('with file')];
+    const next = removeInjectedFromQueue(
+      prompts,
+      [batch('s', 'with file')],
+      's',
+    );
+    // The text-only one is removed; the file-bearing one stays.
+    expect(next).not.toBeNull();
+    expect(next).toHaveLength(1);
+    expect(next?.[0]).toBe(withFile);
   });
 
   it('does not remove an ordinary queued prompt with the same text', () => {

@@ -430,12 +430,22 @@ export interface BridgeBranchSessionRequest {
   sourceType?: string;
   sourceId?: string;
   replayInheritedHistory?: boolean;
+  atRecordId?: string;
 }
 
-export interface BridgeBranchedSession extends BridgeRestoredSession {
+export interface BridgePersistedBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }
+
+export interface BridgeBranchedSession
+  extends BridgeRestoredSession,
+    BridgePersistedBranchedSession {}
+
+export type BridgeBranchSessionResult =
+  | BridgeBranchedSession
+  | BridgePersistedBranchedSession;
 
 export interface BridgeSideTaskSessionRequest {
   name?: string;
@@ -1148,15 +1158,12 @@ export interface AcpSessionBridge {
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession>;
 
-  /**
-   * Fork a live session's JSONL transcript and load the fork via resume
-   * semantics (no history replay). Source must be idle (no active prompt).
-   */
+  /** Restore latest-state forks; leave historical checkpoint forks persisted. */
   branchSession(
     sessionId: string,
     req: BridgeBranchSessionRequest,
     context?: BridgeClientRequestContext,
-  ): Promise<BridgeBranchedSession>;
+  ): Promise<BridgeBranchSessionResult>;
 
   /** Create a persisted side task with a snapshot of the parent's context. */
   createSideTaskSession(

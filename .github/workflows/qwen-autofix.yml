@@ -234,6 +234,12 @@ env:
   # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
   # stop' removes it). Matched EXACTLY against the trimmed comment body.
   TAKEOVER_COMMAND: '@qwen-code /takeover'
+  # Escalation label: applied when the loop STOPS on a PR (round cap,
+  # consecutive-failure or time-budget breaker) and a human must act —
+  # re-arm, split, merge, or close. It makes paused PRs filterable and lets
+  # the fleet shepherd age out unanswered stops. Removed wherever management
+  # resumes (engage/re-arm) or a human releases the PR.
+  NEEDS_HUMAN_LABEL: 'autofix/needs-human'
   # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
   # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
   # and it erases the audit trail). This command instead posts an
@@ -1947,6 +1953,11 @@ jobs:
               # already addressed is never replayed.
               gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。\n\n</details>\n\n<!-- takeover-ack engaged -->')"
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
+              # Management resumed — the escalation label is stale. 404 is
+              # the common case (the PR was never paused).
+              if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+                [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+              fi
             else
               # REST for consistency and runner-version independence: `gh pr
               # edit`'s GraphQL lookup requests
@@ -1984,6 +1995,11 @@ jobs:
               fi
               gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${FORK_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")" \
                 || echo "::warning::engage ack comment failed on #${PR}; the scan's first-pickup ack heals it"
+              # Engaged (possibly re-engaging an auto-released PR) — the
+              # escalation label is stale. 404 is the common case.
+              if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+                [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+              fi
             fi
           else
             if [[ "${HAS}" != 'true' ]]; then
@@ -1998,10 +2014,52 @@ jobs:
               # `/takeover stop` retries the removal — but must not disappear
               # silently either: masked, the ack reads "released" while the
               # loop keeps managing the PR.
+              # The 404-tolerance block is pinned byte-identical to the other
+              # workflows' label DELETE (a contract test), so REMOVED_OK —
+              # whether the takeover release actually LANDED — is derived
+              # AFTER the idiom from the captured stream: gh api prints the
+              # remaining-labels JSON body on success (even '[]'), while a
+              # failure carries "HTTP <status>" in the error text. 404 =
+              # already off (landed); any other HTTP error = the release did
+              # NOT land and the needs-human removal below must NOT run
+              # (R4-32) — or the PR keeps the takeover label (still capped,
+              # nothing manages it now) while losing the only filterable
+              # escalation state. The flag is keyed on the EXIT STATUS, with
+              # one text-derived exception: a failed DELETE whose error
+              # carries the exact "HTTP 404" token is the already-off case.
+              # The match must stay that precise token, not a bare "404"
+              # substring: transport failures embed the request URL — a PR
+              # number containing 404 would flip the classification — while
+              # no transport error carries an "HTTP" token (R6-1/R6-19).
+              LBL_DEL_FAILED=false
               if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
+                [[ "${REMOVE_ERR}" == *"HTTP 404"* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"; }
               fi
-              echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+              REMOVED_OK=true
+              if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
+                REMOVED_OK=false
+              fi
+              if [[ "${REMOVED_OK}" == "true" ]]; then
+                echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+              else
+                # R7-7: the success claim must not fire when the DELETE did
+                # not land — the motivating fix for pr-self-report-label.yml
+                # in this very PR is precisely this lying-log shape.
+                echo "⚠️ #${PR}: ${TAKEOVER_LABEL} removal did not land — the next /takeover stop retries"
+              fi
+              # Released means a human is driving — the escalation label is
+              # stale. Remove it only when the release landed (REMOVED_OK)
+              # AND the PR is not frozen by skip (a frozen PR must keep its
+              # only filterable escalation state — R4-3). 404 is the common
+              # case (never paused).
+              SKIP_STATE="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
+              if [[ "${REMOVED_OK}" != "true" ]]; then
+                echo "::warning::#${PR}: release did not land — keeping ${NEEDS_HUMAN_LABEL}; the next /takeover stop retries both"
+              elif [[ "${SKIP_STATE}" == "true" ]]; then
+                echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
+              elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+                [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+              fi
               # Release ack, direct from the command — the exact mirror of
               # the engage side above, for the same reason: the unlabeled
               # round-trip is the thing we no longer trust, fork unlabeled
@@ -2014,7 +2072,14 @@ jobs:
               # the unlabeled-path ack when the label sender is the bot.
               REL_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_INFO}")"
               REL_HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
-              if [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" && "${REL_HAS_SKIP}" == "true" ]]; then
+              if [[ "${REMOVED_OK}" != "true" ]]; then
+                # The DELETE did not land — the label is still on and the
+                # loop still manages this PR. A "released" ack (and its
+                # marker) would record a release that never happened: no
+                # unlabeled event fires, nothing retries, and no human
+                # re-issues the command. Own the failure and name the retry.
+                REL_BODY="$(printf '⚠️ Takeover release did not land: removing the `%s` label failed transiently, so it is still present and the autofix loop keeps managing this PR under the round cap. Comment `%s stop` to retry the release.\n\n<details>\n<summary>中文说明</summary>\n\n⚠️ 释放未生效：移除 `%s` 标签时瞬时失败，标签仍在，autofix 循环仍按轮次上限继续托管此 PR。评论 `%s stop` 可重试释放。\n\n</details>\n\n<!-- takeover-ack release-failed -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+              elif [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" && "${REL_HAS_SKIP}" == "true" ]]; then
                 REL_BODY="$(printf '👋 Takeover mode ended. This bot-authored PR also carries `%s`, which opts it out of standard bot management entirely — nothing will engage it until that label is removed.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束。本 bot 创建的 PR 同时带有 `%s`，已完全退出常规 bot 管理 —— 移除该标签前不会有任何介入。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${SKIP_LABEL}")"
               elif [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
                 REL_BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
@@ -2079,11 +2144,38 @@ jobs:
           fi
           gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '\U0001F504 AutoFix re-armed. The next scan re-reads this PR'"'"'s feedback from the start and the round counter resets. Nothing was deleted — this marker supersedes the evaluation markers above it.\n\n<details>\n<summary>中文说明</summary>\n\n\U0001F504 已重新武装 AutoFix。下一次扫描会从头重新读取本 PR 的反馈，轮次计数也已重置。未删除任何内容 —— 本标记使其上方的评估标记失效。\n\n</details>\n\n<!-- autofix-rearm -->')"
           echo "🔄 re-armed PR #${PR}"
+          # Management resumed — the escalation label is stale. 404 is the
+          # common case (the PR was never paused). Remove it only when the
+          # PR will actually be MANAGED after this re-arm (R5-2): the scan
+          # candidate population is bot-authored or takeover-labeled PRs
+          # only, so on an auto-released human PR (no takeover label, not
+          # bot-authored) /retry posts a marker nothing will act on — the
+          # label must stay as the only filterable escalation state. Skip
+          # also wins over re-arm everywhere (a frozen PR keeps its label),
+          # and the read FAILS CLOSED (mirrors takeover-ack's exit-1).
+          if ! RETRY_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
+            echo "::warning::#${PR}: label state unreadable — keeping ${NEEDS_HUMAN_LABEL} (fail closed)"
+          elif [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${RETRY_INFO}")" == "true" ]]; then
+            echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
+          elif [[ "$(jq -r --arg ab "${AUTOFIX_BOT}" --arg tk "${TAKEOVER_LABEL}" '
+                ((.author.login // "") == $ab) or (([.labels[]?.name] | index($tk)) != null)
+              ' <<< "${RETRY_INFO}")" != "true" ]]; then
+            echo "🧭 keeping ${NEEDS_HUMAN_LABEL} on #${PR}: nothing manages it until re-engaged (no takeover label, not bot-authored)"
+          elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+            [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+          fi
 
   takeover-ack:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.takeover_ack != '' }}
+    # A delayed or overlapping ack must not race a newer cycle's ack:
+    # queued (never cancelled) per-PR execution serializes the runs so
+    # the staleness reads below see each predecessor's writes (mirrors
+    # takeover-command).
+    concurrency:
+      group: 'qwen-autofix-takeover-ack-${{ needs.route.outputs.ack_pr }}'
+      cancel-in-progress: false
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -2139,6 +2231,52 @@ jobs:
             HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
             PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
           fi
+          # R2-4: a delayed release ack can run AFTER takeover was
+          # re-applied and the new cycle paused again — a live takeover
+          # label means this ack's premise is stale. Post nothing and
+          # touch nothing: the new cycle's own events produce their own
+          # acks, while a stale run here would delete the new cycle's
+          # needs-human and claim a release while takeover is live.
+          if [[ "${ACK}" == 'released' && "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")" == "true" ]]; then
+            echo "⚠️ released ack skipped on #${PR}: ${TAKEOVER_LABEL} re-applied since the release (stale ack)"
+            exit 0
+          fi
+          # R2-4 mirror for the engaged direction: a delayed engaged ack — a
+          # red run re-run later, or overlapping runs from quick label
+          # toggles — must not DELETE a fresh cycle's needs-human and must
+          # not post a marker that resets the round window (REARM_KEY is
+          # the newest engage marker). Label absent → the engagement ended
+          # after this event. A bot engage ack at/after the newest labeled
+          # event → the current cycle is already acked. Both skip without
+          # posting or touching labels; an unreadable history skips too
+          # (fail closed — the scan's NEED_ENGAGE_ACK dedup heals a
+          # genuinely missed ack, while nothing heals a stale marker).
+          if [[ "${ACK}" == 'engaged' ]]; then
+            if [[ "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")" != "true" ]]; then
+              echo "⚠️ engaged ack skipped on #${PR}: ${TAKEOVER_LABEL} removed since the label event (stale ack)"
+              exit 0
+            fi
+            if ! ack_ic="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null)"; then
+              echo "::warning::engaged ack skipped on #${PR}: comment history unreadable (fail closed)"
+              exit 0
+            fi
+            if ! ack_ev="$(gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null)"; then
+              echo "::warning::engaged ack skipped on #${PR}: event history unreadable (fail closed)"
+              exit 0
+            fi
+            ack_aced_ts="$(jq -rs --arg ab "${AUTOFIX_BOT}" '
+              add // [] | [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                | .created_at ] | max // ""' <<< "${ack_ic}")"
+            ack_labeled_ts="$(jq -rs --arg tl "${TAKEOVER_LABEL}" '
+              add // [] | [ .[] | select((.event // "") == "labeled")
+                | select((.label.name // "") == $tl)
+                | .created_at ] | max // ""' <<< "${ack_ev}")"
+            if [[ -n "${ack_aced_ts}" && ! "${ack_labeled_ts}" > "${ack_aced_ts}" ]]; then
+              echo "⚠️ engaged ack skipped on #${PR}: a bot engage ack already landed after the newest ${TAKEOVER_LABEL} label event (stale ack)"
+              exit 0
+            fi
+          fi
           if [[ "${ACK}" == 'base-refused' ]]; then
             BODY="$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Two ways forward: retarget this PR to `main` once the base PR merges — the `%s` label is left in place and the scan lists by label, so the next scan engages it with no re-labelling — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。两条路：待 base 的 PR 合入后把本 PR 改为面向 `main` —— `%s` 标签予以保留，扫描按标签枚举，下一次扫描即会自动接管，无需重新打标签；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${ACK_BASE}" "${TAKEOVER_LABEL}" "${ACK_BASE}" "${TAKEOVER_LABEL}")"
           elif [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
@@ -2151,6 +2289,21 @@ jobs:
             BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
           else
             BODY="$(printf '👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply `%s` (or comment `%s`) to re-engage.\n\n<details>\n<summary>中文说明</summary>\n\n👋 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 `%s` 标签（或评论 `%s`）即可再次接管。\n\n</details>\n\n<!-- takeover-ack released -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+          fi
+          # The escalation label goes stale on a real engage or any release
+          # (a human is driving again). NOT on base-refused (nothing changed)
+          # and NOT on skip-blocked (management never resumed) — and a
+          # RELEASE onto a skip-frozen PR also keeps the label: nothing
+          # manages or restores that PR, so it must stay in the needs-human
+          # filter (R4-3). 404 is the common case (the PR was never paused).
+          # Runs BEFORE the ack comment: the state change already happened
+          # (the human toggled the label — the comment is purely
+          # informational), so a transient comment failure aborting this step
+          # under set -e must not strand the stale label.
+          if [[ ( "${ACK}" == 'released' || "${ACK}" == 'engaged' ) && "${HAS_SKIP}" != 'true' ]]; then
+            if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+              [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+            fi
           fi
           gh pr comment "${PR}" --repo "${REPO}" --body "${BODY}"
 
@@ -2695,10 +2848,11 @@ jobs:
               break
             fi
             # One PR fetch for the branch name, check rollup, creation time
-            # (the watermark floor below), and labels (the effective round
-            # cap) — avoids extra round-trips per candidate PR.
+            # (the watermark floor below), labels (the effective round
+            # cap), and author (the cap branch's bot-author exemption) —
+            # avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository,author 2> /dev/null || echo '{}')"
             HEAD_REPO_FULL="${REPO}"
             if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
               HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
@@ -2936,9 +3090,13 @@ jobs:
                 add | [.[] | select((.user.login // "") == $ab)
                      | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
                      | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
-              gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null \
-                | jq -s 'add // []' > "${WORKDIR}/pr-events.json" \
-                || echo '[]' > "${WORKDIR}/pr-events.json"
+              PR_EVENTS_OK=''
+              if gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/pr-events.json"; then
+                PR_EVENTS_OK=true
+              else
+                echo '[]' > "${WORKDIR}/pr-events.json"
+              fi
               LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
                 add | [.[] | select(.event == "labeled")
                      | select((.label.name // "") == $lb)
@@ -2988,6 +3146,11 @@ jobs:
               fi
               if [[ "${SCAN_BOT_ACTOR}" == "${AUTOFIX_BOT}" ]]; then
                 if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"; then
+                  # Engaged — the escalation label is stale. 404 is the
+                  # common case (the PR was never paused).
+                  if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+                    [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+                  fi
                   # Atomic re-fetch: ic.json already holds a successful full
                   # fetch from above; a truncated stream must not leave it 0
                   # bytes (jq -s fails only AFTER the redirect truncates) —
@@ -3162,14 +3325,61 @@ jobs:
                 [ .[] | select((.user.login // "") == $ab)
                   | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                   | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              # Release evidence = a takeover unlabeled EVENT at-or-newer
+              # than the window key. GitHub records it whenever the label
+              # comes off — `/takeover stop`, the ack job, or a manual UI
+              # removal — unlike the release-ack COMMENT, which both release
+              # paths tolerate losing (R4-1): the stop branch swallows a
+              # failed ack post, and the ack job's set -e aborts before it.
+              # A re-arm advances REARM_KEY past the event, re-enabling the
+              # label. Same-second ties resolve toward "released" — never
+              # re-escalate a completed release (R5-9). Fail closed: an
+              # unreadable event history suppresses the re-label rather than
+              # risk the ping-pong.
+              # A capped takeover candidate already paid for this paginated
+              # endpoint earlier in the same iteration (pr-events.json,
+              # gated by PR_EVENTS_OK) — reuse that fetch instead of paying
+              # it twice per capped takeover PR per scan. Non-takeover
+              # candidates keep the standalone fetch, and the fail-closed
+              # semantics ride the flag: the engage-side '[]' fallback must
+              # never read here as "no releases".
+              RELEASE_ACKED=''
+              if [[ "${HAS_TAKEOVER}" == "true" && "${PR_EVENTS_OK}" == "true" ]]; then
+                if ! cp "${WORKDIR}/pr-events.json" "${WORKDIR}/ev.json"; then
+                  RELEASE_ACKED='unreadable'
+                fi
+              elif ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > "${WORKDIR}/ev.json"; then
+                RELEASE_ACKED='unreadable'
+              fi
+              if [[ "${RELEASE_ACKED}" != 'unreadable' ]]; then
+                RELEASE_ACKED="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg rt "${NOTICE_RT}" '
+                  [ .[] | select((.event // "") == "unlabeled")
+                    | select((.label.name // "") == $tl)
+                    | select((.created_at // "") >= $rt) ] | length' "${WORKDIR}/ev.json")"
+              fi
+              # A release only suppresses re-labeling for HUMAN-authored PRs.
+              # A bot-authored PR released from takeover returns to STANDARD
+              # management (its ack says so) — it is still managed, so at the
+              # strict cap it deserves the same notice + escalation label as
+              # any managed PR (R4-5).
+              IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
               if [[ "${DRY_RUN}" == "true" ]]; then
-                echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
-              elif [[ "${CAP_NOTICED}" == "0" ]]; then
+                echo "🧪 DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL} on #${PR}"
+              else
                 # Consent may have moved since PR_META: skip wins everywhere,
                 # and a takeover notice additionally requires the label to
                 # still be present — a label removed (or skip added) moments
-                # ago must not receive a stale 'paused' notice.
-                LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                # ago must not receive a stale 'paused' notice. The read
+                # FAILS CLOSED (mirrors takeover-ack): an unreadable label
+                # state must not get a notice or the escalation label —
+                # collapsing the failure to '' would ignore a concurrently
+                # added skip for standard bot PRs.
+                LIVE_LABELS_JSON="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null || echo '')"
+                LIVE_LABELS="$(jq -r '[.labels[]?.name] | join(" ")' <<< "${LIVE_LABELS_JSON}" 2> /dev/null || echo '')"
+                if [[ -z "${LIVE_LABELS_JSON}" ]]; then
+                  echo "🧭 cap notice skipped: label state unreadable (fail closed) on #${PR}"
+                  continue
+                fi
                 if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]] \
                   || [[ "${HAS_TAKEOVER}" == "true" && " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* ]]; then
                   echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
@@ -3184,14 +3394,38 @@ jobs:
                 fi
                 if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                   echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                else
-                  if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                    CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                elif [[ "${RELEASE_ACKED}" != "0" && "${IS_BOT_AUTHOR}" != "true" ]]; then
+                  # R6-4: an events-API outage is NOT a release — report it
+                  # as what it is, or the log lies during an incident.
+                  if [[ "${RELEASE_ACKED}" == "unreadable" ]]; then
+                    echo "🧭 cap label/notice skipped: release history unreadable (fail closed) on #${PR}"
                   else
-                    CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                    echo "🧭 cap label/notice skipped: PR was released after its last re-arm (#${PR})"
                   fi
-                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
-                    echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
+                else
+                  # The escalation label rides EVERY cap detection, noticed
+                  # or not: the once-per-window dedup suppresses repeat
+                  # comments, but the label is what makes a paused PR
+                  # filterable (the shepherd's auto-release ages from the
+                  # cap notice itself, not from the label) — and applying
+                  # it unconditionally backfills the already-paused fleet
+                  # via the scan rotation after this ships (idle backoff:
+                  # expect hours, not the first scan).
+                  gh label create "${NEEDS_HUMAN_LABEL}" --repo "${REPO}" --color 'D93F0B' \
+                    --description 'The autofix loop stopped on this PR — a human must re-arm, split, merge, or close it' \
+                    2> /dev/null || true
+                  if ! gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${NEEDS_HUMAN_LABEL}" > /dev/null; then
+                    echo "::warning::${NEEDS_HUMAN_LABEL} add failed for #${PR}; will retry next scan"
+                  fi
+                  if [[ "${CAP_NOTICED}" == "0" ]]; then
+                    if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                      CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                    else
+                      CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                    fi
+                    if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
+                      echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
+                    fi
                   fi
                 fi
               fi
@@ -3984,6 +4218,21 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          # The upsert script travels as CONTENT, not as a staged copy: it
+          # runs in a clean child that reads it from this expression-context
+          # output, so there is no agent-writable copy to protect and no
+          # digest to verify. The delimiter is random per run, so script text
+          # cannot close the heredoc.
+          _upsert_delim="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "upsert_src<<${_upsert_delim}"
+            # Absent from the trusted base until this PR merges, and this
+            # step runs under -e: a hard failure here would kill every
+            # pre-merge round. An empty value reaches the consumers' own
+            # `-z` guard, which skips with "stage step never ran".
+            cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true
+            echo "${_upsert_delim}"
+          } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -4529,14 +4778,13 @@ jobs:
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           [[ "${NET_MEASURED}" != 'true' ]] &&
             echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
-          # The marker's window field is spelled `key=`, NOT `win=`, on
-          # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
-          # the breaker PRIOR_HEADS) attribute comments to windows by the
-          # WHOLE-BODY substring `win=<key> -->`, and this marker can
-          # legitimately carry a different window key than its comment's
-          # autofix-eval marker (a supersede-exempt conflict round reporting
-          # after a re-arm). Any token embedding "win=" would double-attribute
-          # that comment to both windows.
+          # The marker's window field is spelled `key=`, NOT `win=`: this
+          # marker can legitimately carry a different window key than its
+          # comment's autofix-eval marker (a supersede-exempt conflict round
+          # reporting after a re-arm). The window censuses attribute
+          # positionally (last-wins) over their own scan-parsed eval
+          # markers, and the distinct token stays as defense in depth for
+          # any future substring consumer.
           # A stale-base auto-update merges current main into the branch,
           # moving the merge base the nets are measured against: overlap
           # resolutions then shift the measurement with no agent push. An
@@ -4548,6 +4796,37 @@ jobs:
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- autofix-base-updated"))
               | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          # The instant THIS round's net was measured. Stamped into the
+          # growth-now marker so the divergence read filters on measurement
+          # time, not the marker comment's created_at — the report posts the
+          # marker only after the agent's ~120-minute run, so a round in
+          # flight when a concurrent base update lands would otherwise pass a
+          # created_at filter while carrying pre-update sums (#9114 R2-6).
+          # Emitted ONLY when a measurement happened: an unmeasured attempt
+          # that still stamped would be explicit in the per-run collapse and
+          # displace the same run's real measurement (#9192 R4-3).
+          MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          [[ "${NET_MEASURED}" == 'true' ]] && echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
+          # NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an
+          # author push) is deliberately NOT done here. The obvious signal —
+          # comparing the checked-out head against the bot's last judged head
+          # (autofix-redcheck) — is wrong: that marker records the head the
+          # agent was GIVEN, before its own push, so it differs after every
+          # pushing round and would re-anchor on the bot's own fixes, zeroing
+          # the census in exactly the push regime the handoff exists for. A
+          # correct version needs both a bot-authored-move test and a
+          # PERSISTED cut (a one-round cut is re-admitted the next round);
+          # that is its own change, tracked in #9114.
+          GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"
+          # KNOWN RESIDUAL (#9114): this sibling read still filters on the
+          # comment's created_at, not a prepare-time measured= like the
+          # growth-now read below. Its values are measured in prepare too, so a
+          # round whose agent run straddles a base update can anchor the window
+          # on pre-update values. Narrow (the update must land inside the
+          # anchor round's own agent run) and first-wins, so it cannot be
+          # re-poisoned later in the window; stamping measured= into the
+          # growth-base marker is tracked with the rest of #9114 rather than
+          # widening this change.
           GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
@@ -4606,7 +4885,7 @@ jobs:
           # climbing anyway. Read this window's prior per-round growth markers
           # (written by the report step): count the rounds that were over
           # budget, and take the MOST RECENT prior over-budget run's growth
-          # SUM (highest run_id — see below; NOT the window-wide max, which a
+          # SUM (latest measured= — see below; NOT the window-wide max, which a
           # one-off spike would raise forever). The round is DIVERGING when it
           # is over budget now, the brake has already fired for
           # >= GROWTH_DIVERGENCE_ROUNDS prior rounds, and the diff has NOT
@@ -4621,39 +4900,66 @@ jobs:
           # Count runs whenever the net is measured (not only over budget), so
           # the trajectory clause below is accurate even on a round that pulled
           # back under budget. markers:
-          # <!-- autofix-growth-now src=N test=N over=BOOL round=N run=ID key=W -->
-          # Deduped and ordered by run=GITHUB_RUN_ID, the per-workflow-run id:
-          # the report post's bounded retry re-posts one run's marker (same
-          # run_id → collapses to the LATEST by created_at, so a re-run's
-          # fresher attempt wins over its own stale first post), while every
-          # distinct address run has a fresh, monotonically increasing run_id. round=/eval-watermark are NOT a
-          # safe identity — a state-triggered lane (a persistent merge conflict
-          # selects the PR every scan with no new evaluable feedback) freezes
-          # both NEWEST and ROUND, so distinct over-budget runs would share them
-          # and collapse, stalling the count. Filtered to markers AFTER any
-          # mid-window base update (BASE_UPD_AT) — the same re-anchoring the
-          # growth-base read guards against. The "not shrinking" test compares
-          # against the MOST RECENT prior over-budget run's sum (highest
-          # run_id), not the window-wide max: a single transient spike would
-          # otherwise raise the bar forever and a genuine plateau-over-budget
-          # runaway (the exact case to escalate) would never clear it. The
-          # CURRENT run's own markers are excluded (run != GITHUB_RUN_ID): a
-          # re-run of a failed job keeps the same run id and its failed
-          # attempt already posted a marker, so counting it would over-report
-          # the round's own attempt as a PRIOR one.
+          # <!-- autofix-growth-now src=N test=N over=BOOL round=N run=ID measured=TS key=W -->
+          # Deduped by run=GITHUB_RUN_ID (the per-workflow-run id) and ORDERED
+          # by measured=: the report post's bounded retry re-posts one run's
+          # marker, and a failed job's re-run keeps the same run_id, so a run
+          # collapses to its LATEST measurement — and that collapse happens
+          # BEFORE the over/window/cutoff filters, or a re-run that came back
+          # under budget would still be represented by its stale over=true
+          # attempt. Within the collapse an explicit measured= beats the
+          # created_at fallback: a re-run attempt that crashed BEFORE prepare
+          # — or whose measurement failed — posts an inert over=false marker
+          # with no measured=, whose fallback (post-run) timestamp would
+          # otherwise outdate and erase the same run's real prepare-time
+          # measurement. Every distinct address run has a fresh run_id.
+          # KNOWN RESIDUAL (#9114): during the one-time deploy transition a
+          # run whose FIRST attempt posted a legacy (no measured=) over=true
+          # marker and whose re-run crashes before prepare still collapses
+          # fallback-vs-fallback on created_at — the later inert marker wins
+          # and erases the count. Self-limiting: once deployed, every real
+          # measurement carries measured= and beats any inert marker.
+          # round=/eval-watermark are NOT a safe identity — a state-triggered
+          # lane (a persistent merge conflict selects the PR every scan with no
+          # new evaluable feedback) freezes both NEWEST and ROUND, so distinct
+          # over-budget runs would share them and collapse, stalling the count.
+          # Filtered on measured= (the prepare-time measurement instant, NOT
+          # the comment's post-agent created_at) after GROWTH_NOW_CUTOFF, so a
+          # prior sum measured against a pre-base-update tree is dropped rather
+          # than compared to this round's. KNOWN RESIDUAL (#9114): the tree is
+          # fixed at the branch fetch/checkout while the cutoff comes from
+          # ic.json fetched afterwards, so a base update landing between the
+          # fetch and the measured_at stamp admits a pre-update marker;
+          # self-heals at the next re-arm/base update. measured= is OPTIONAL in
+          # the scan:
+          # markers posted before it existed fall back to their comment's
+          # created_at, so deploying this does not blank the census of a window
+          # that is already in flight. KNOWN RESIDUAL (#9114): during that
+          # transition the sort mixes two clocks — a legacy marker's fallback
+          # is its POST-RUN created_at while a new marker stamps prepare time —
+          # so PREV_SUM can briefly come from an older measurement; the count
+          # is unaffected and it self-heals at the next re-arm/base update.
+          # The "not shrinking" test compares against the MOST RECENT prior
+          # over-budget run's sum (latest measured=), not the window-wide max: a
+          # single transient spike would otherwise raise the bar forever and a
+          # genuine plateau-over-budget runaway (the exact case to escalate)
+          # would never clear it. The CURRENT run's own markers are excluded
+          # (run != GITHUB_RUN_ID): a re-run of a failed job keeps the same run
+          # id and its failed attempt already posted a marker, so counting it
+          # would over-report the round's own attempt as a PRIOR one.
           GROWTH_DIVERGED='false'
           OVER_ROUNDS_PRIOR=0
           PREV_SUM=0
           if [[ "${NET_MEASURED}" == 'true' ]]; then
-            read -r OVER_ROUNDS_PRIOR PREV_SUM < <(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" --arg curr "${GITHUB_RUN_ID}" '
+            read -r OVER_ROUNDS_PRIOR PREV_SUM < <(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg cutoff "${GROWTH_NOW_CUTOFF}" --arg curr "${GITHUB_RUN_ID}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) key=([^ ]+) -->") ] | .[]
-                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), win: .[5], at: ($c.created_at // "")} ]
+                | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) (?:measured=([^ ]+) )?key=([^ ]+) -->") ] | .[]
+                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), measured: (.[5] // ($c.created_at // "")), explicit: (.[5] != null), win: .[6]} ]
+              | group_by(.run) | map(max_by([.explicit, .measured]))
               | map(select(.win == $key and .over == "true"))
               | map(select(.run != ($curr | tonumber)))
-              | map(select($baseupd == "" or (.at > $baseupd)))
-              | group_by(.run) | map(max_by(.at))
-              | sort_by(.run)
+              | map(select($cutoff == "" or (.measured > $cutoff)))
+              | sort_by(.measured)
               | "\(length) \((last.sum) // 0)"' "${WORKDIR}/ic.json" 2> /dev/null || echo "0 0")
             [[ "${OVER_ROUNDS_PRIOR}" =~ ^[0-9]+$ ]] || OVER_ROUNDS_PRIOR=0
             [[ "${PREV_SUM}" =~ ^-?[0-9]+$ ]] || PREV_SUM=0
@@ -4880,7 +5186,7 @@ jobs:
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or (.state // "") == "CHANGES_REQUESTED"
                   or ((.body // "") | contains("**[Critical]**")))
-              | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [rv:\(.id)] [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
@@ -4924,7 +5230,7 @@ jobs:
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or ((.body // "") | contains("**[Critical]**")))
-              | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [ic:\(.id)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
             if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
               echo
@@ -4993,8 +5299,8 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(((.body // "") | contains("win=" + $key + " -->"))
-                    or ($key == "none" and (((.body // "") | contains("win=")) | not)))
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                    | ($wins | length) > 0 and (($wins | last) == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
@@ -5229,6 +5535,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5326,6 +5636,56 @@ jobs:
             "${WORKDIR}/agent-timeout" \
             "${WORKDIR}/resolved-comments.txt" \
             "${WORKDIR}/comment-replies.json"
+          # NOT deleted with its siblings: run 2 writes its own
+          # deferred-findings.json, and a deferral dropped here is gone for
+          # good (the eval watermark filters this round's feedback out of
+          # every later round). Carry run 1's into a sidecar the upsert
+          # unions in; merge if a previous repair already left one.
+          if [[ -s "${WORKDIR}/deferred-findings.json" ]]; then
+            if [[ -s "${WORKDIR}/deferred-findings.carry.json" ]]; then
+              # This round FIRST: unique_by keeps first-of-group in original
+              # order, so a finding re-emitted with fresher text wins — the
+              # same precedence the upsert script documents for its own union.
+              if jq -s 'add' "${WORKDIR}/deferred-findings.json" \
+                "${WORKDIR}/deferred-findings.carry.json" \
+                > "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then
+                mv "${WORKDIR}/deferred-findings.carry.next" \
+                  "${WORKDIR}/deferred-findings.carry.json"
+                # Merged: this round's copy lives on inside the sidecar.
+                rm -f "${WORKDIR}/deferred-findings.json"
+              else
+                # Which side is corrupt is NOT known here — jq -s fails if
+                # EITHER input is unparseable, and today's topology cannot
+                # even produce a pre-existing carry (WORKDIR is wiped at run
+                # start and there is exactly one repair step), so this branch
+                # is defensive. Say what is certain: the merge failed, the
+                # earlier set is kept, this round's is preserved unmerged.
+                # The only loss path in this feature without a raw dump: the
+                # newer set is discarded here and the eval watermark means
+                # nothing re-derives it, so print it before deleting. `::` is
+                # neutralized because the content is agent-written and a raw
+                # `::` at line start would be parsed as a workflow command.
+                _dfsize="$(wc -c < "${WORKDIR}/deferred-findings.json" 2> /dev/null | tr -d ' ')"
+                if [[ -n "${_dfsize}" ]] && (( _dfsize > 4000 )); then
+                  echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows, TRUNCATED at 4000 of ${_dfsize} bytes — the full file rides this run's artifact dump:"
+                else
+                  echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows:"
+                fi
+                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
+                echo
+                rm -f "${WORKDIR}/deferred-findings.carry.next"
+                # Keep the discarded set ON DISK so the warning's pointer at
+                # the artifact dump is true past the 4000-byte clip. Renamed,
+                # not left in place: the upsert would otherwise union it back
+                # in as if it had merged.
+                mv "${WORKDIR}/deferred-findings.json" \
+                  "${WORKDIR}/deferred-findings.unmerged.json"
+              fi
+            else
+              mv "${WORKDIR}/deferred-findings.json" \
+                "${WORKDIR}/deferred-findings.carry.json"
+            fi
+          fi
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
@@ -5348,6 +5708,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5415,10 +5779,13 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              cat "${WORKDIR}/${f}"
+              # Agent-written content: a line-start `::` would be parsed as a
+              # workflow command (::error::, ::add-mask::), the same reason
+              # every other echo of these files neutralizes it.
+              sed 's/::/;;/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -5451,6 +5818,7 @@ jobs:
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
+          UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Growth-brake baseline: written into this window's FIRST report
           # comment only (growth_base_new), so later rounds' first-wins parse
@@ -5469,6 +5837,7 @@ jobs:
           GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
+          MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
         run: |-
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
           # drop any planted token BEFORE the identity check below, so a
@@ -5660,6 +6029,80 @@ jobs:
               echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
           }
+          # Deferred-findings persistence, shared by both arms below.
+          #
+          # No agent-writable path takes part in this. The script CONTENT
+          # travels in expression context — captured at stage time from the
+          # trusted checkout — so there is no staged copy to verify, and with
+          # it go the digest gate, its check-then-use window, and the
+          # planted-FIFO/huge-file reads that a path-based read invites. The
+          # child's own messages travel on fd 3, which the parent captures,
+          # while fd 1/2 are discarded; every loader side channel (auxv dumps,
+          # ldd traces, whatever is next) writes there and cannot reach the
+          # parsed output, and there is no log file to plant, race or bound.
+          #
+          # /usr/bin/env is invoked by ABSOLUTE PATH: bash never does
+          # function/alias lookup on a slash-bearing word, so a planted
+          # BASH_FUNC_env%% cannot intercept the bootstrap. `-i` then drops
+          # every BASH_FUNC_* import, BASH_ENV, SHELLOPTS, alias and trap.
+          # LD_* is the one family env -i cannot block (ld.so acts while
+          # loading env itself), so the ones that MATTER are cleared by
+          # command-prefix assignment and the rest are caught by verifying the
+          # RESULT: the child prints a liveness sentinel first, and its
+          # absence — trace mode, exec failure, a missing interpreter — is
+          # reported rather than passing silently for a successful round.
+          run_deferred_upsert() {
+            if [[ -z "${UPSERT_SRC:-}" ]]; then
+              # Stage never ran: nothing was deferred either.
+              echo 'deferred-findings upsert skipped: stage step never ran'
+              return 0
+            fi
+            UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
+              /usr/bin/env -i \
+              PATH="${TRUSTED_PATH}" \
+              GITHUB_TOKEN="${GITHUB_TOKEN}" \
+              GH_HOST=github.com \
+              RUNNER_TEMP="${RUNNER_TEMP}" \
+              WORKDIR="${WORKDIR}" \
+              PR="${PR}" \
+              REPO="${REPO}" \
+              AUTOFIX_BOT="${AUTOFIX_BOT}" \
+              UPSERT_SRC="${UPSERT_SRC}" \
+              bash --norc -c '
+                set -uo pipefail
+                exec >&3
+                printf "%s\n" "__upsert_child_live__"
+                if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                  echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                  exit 0
+                fi
+                export GH_CONFIG_DIR
+                bash -c "${UPSERT_SRC}" ||
+                  echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
+              ' > /dev/null 2>&1 ; } 3>&1 )" || true
+            # INSPECTION uses bash builtins only ([[ ]], read, printf — no
+            # exec): under loader trace mode every external binary, grep
+            # included, would itself print-and-exit-0, so a grep-based check
+            # would be neutered by the very condition it must detect.
+            if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
+              echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
+            fi
+            # The child's output is agent-reachable content, so a line-start
+            # `::` is neutralized before it reaches this step's stdout.
+            while IFS= read -r _upsert_line; do
+              # Wrapper-authored lines carry a marker and are emitted
+              # VERBATIM so they still render as GitHub annotations; the
+              # script's own output is agent-reachable and stays neutralized.
+              if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
+                :
+              elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
+                printf '%s\n' "${_upsert_line#__upsert_trusted__}"
+              else
+                printf '%s\n' "${_upsert_line//::/;;}"
+              fi
+            done <<< "${UPSERT_OUT}"
+          }
 
                     # Take this PAT-bearing step off every mutable host git surface —
           # both the shared config FILES and git's ENV channels — keep this
@@ -5814,6 +6257,10 @@ jobs:
               fi
             done
             resolve_and_reply_threads
+            # Best-effort: verified out-of-footprint findings persist into
+            # the per-PR tracking issue (script content from expression
+            # context; append-only comment design — see the script).
+            run_deferred_upsert
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -5857,9 +6304,10 @@ jobs:
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
               # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the dedup+order identity (a retry
-              # re-posts the same run, distinct runs get fresh run ids).
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
+              # job re-run re-posts the same run; measured= orders and picks
+              # that run's latest attempt).
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -5867,6 +6315,10 @@ jobs:
             # origin head; resolution's own live-head guards still apply.
             PUSH_RACE_MERGED='false'
             resolve_and_reply_threads
+            # Best-effort: verified out-of-footprint findings persist into
+            # the per-PR tracking issue (script content from expression
+            # context; append-only comment design — see the script).
+            run_deferred_upsert
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
@@ -5889,9 +6341,10 @@ jobs:
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
               # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the dedup+order identity (a retry
-              # re-posts the same run, distinct runs get fresh run ids).
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
+              # job re-run re-posts the same run; measured= orders and picks
+              # that run's latest attempt).
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -5950,8 +6403,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
               if [[ -z "${WIN_HEADS}" ]]; then
@@ -6043,12 +6496,28 @@ jobs:
           # over-budget round that never reaches 'Push and report' leaves a
           # history gap and the divergence count under-reports. Empty outputs
           # (prepare never ran) fall through the :-0/:-false marker fallbacks
-          # to an inert over=false entry.
+          # to an inert over=false entry — measured= then OMITS itself (an
+          # EMPTY measured= value matches no scan and would silently drop the
+          # marker these fallbacks exist to keep); the reader falls back to
+          # the comment's created_at.
           GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
+          MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
+          UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          # NOTE: the deferred-findings upsert below runs its PAT identity
+          # check and the script itself in a sound /usr/bin/env -i child (see
+          # the block near the end of this step) — the script arrives as
+          # content from expression context, so there is no staged copy and
+          # no digest gate. This step body needs no in-shell hardening
+          # preamble for it.
+          # The handoff `gh pr comment` here is pre-existing surface at the
+          # workflow's baseline posture; hardening every pre-existing PAT gh
+          # call against BASH_FUNC/transport plants (via the same clean-child
+          # pattern) is tracked separately, out of this feature's scope.
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -6423,8 +6892,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
@@ -6556,8 +7025,8 @@ jobs:
               # Per-round growth history the divergence read counts — same
               # marker the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=
-              # (per-workflow-run) is the dedup/order identity.
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              # (per-workflow-run) is the DEDUP identity; measured= orders.
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               # A sentinel ts means the agent evaluated NOTHING (crash, API
               # error, gate crash) and the next scan must retry. Recording a
               # judged head here would make RED_HEAD == LIVE_HEAD, so the
@@ -6568,6 +7037,67 @@ jobs:
               fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
+          fi
+          # A failed round must not lose verified deferred findings: the
+          # agent's analysis is independent of whether this round's commit
+          # survived verification. Guarded like the handoff MINUS its
+          # outcome!=fixed/noop condition — deliberately: when the outcome IS
+          # fixed/noop but "Push and report" died before its own upsert (the
+          # push loop's exit paths), this block is the only persistence
+          # route left.
+          if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
+            if [[ -z "${UPSERT_SRC:-}" ]]; then
+              # Stage never ran (pre-stage failure): nothing was deferred.
+              echo 'deferred-findings upsert skipped: stage step never ran'
+            else
+              # Same shape as run_deferred_upsert in 'Push and report' — no
+              # agent-writable path, content from expression context, child
+              # messages on fd 3 — plus the PAT bot-identity check, because
+              # POST_HANDOFF's own check is skipped on the fixed/noop-outcome
+              # path that also reaches here.
+              UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
+                /usr/bin/env -i \
+                PATH="${TRUSTED_PATH}" \
+                GITHUB_TOKEN="${GITHUB_TOKEN}" \
+                GH_HOST=github.com \
+                RUNNER_TEMP="${RUNNER_TEMP}" \
+                WORKDIR="${WORKDIR}" \
+                PR="${PR}" \
+                REPO="${REPO}" \
+                AUTOFIX_BOT="${AUTOFIX_BOT}" \
+                UPSERT_SRC="${UPSERT_SRC}" \
+                bash --norc -c '
+                  set -uo pipefail
+                  exec >&3
+                  printf "%s\n" "__upsert_child_live__"
+                  if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                    echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                    exit 0
+                  fi
+                  export GH_CONFIG_DIR
+                  UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"
+                  if [[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                    echo "__upsert_trusted__::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got ${UPSERT_ACTOR:-none}); NOT persisted this round"
+                    exit 0
+                  fi
+                  bash -c "${UPSERT_SRC}" ||
+                    echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
+                ' > /dev/null 2>&1 ; } 3>&1 )" || true
+              # Builtin-only inspection, same rationale as the twin.
+              if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
+                echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
+              fi
+              while IFS= read -r _upsert_line; do
+                if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
+                  :
+                elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
+                  printf '%s\n' "${_upsert_line#__upsert_trusted__}"
+                else
+                  printf '%s\n' "${_upsert_line//::/;;}"
+                fi
+              done <<< "${UPSERT_OUT}"
+            fi
           fi
 
       # Flip the status comment out of "working" so a finished round never
