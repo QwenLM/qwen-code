@@ -980,10 +980,10 @@ Use the **HEAD commit SHA** captured in Step 1. If not captured, fall back to `"
 
 **Run pre-submission checks**: the bundled `qwen review presubmit` subcommand performs self-PR detection, CI / build status classification, and existing-Qwen-comment classification in one pass — three deterministic gh-API queries collapsed into a single JSON report. Read the report to drive the rest of Step 7.
 
-Optionally write the `(path, line)` anchors of the comments you're about to post — every Critical and Suggestion finding headed for the `comments` array — so existing-comment Overlap can be detected. An entry for a **carried-forward** finding keeps the finding's ledger `id` (its `R<round>-<n>`); an entry for a **fresh** finding of THIS round omits `id` — a fresh id cannot appear in any comment posted before this round, and carrying one would let the new claim ride the re-post exemption into an unrelated thread, or crowd out a genuine re-post's single-id precondition. The carried `id` is what lets a Step 6 re-post be recognized and exempted from the overlap drop:
+Optionally write the `(path, line)` anchors of the comments you're about to post — every Critical and Suggestion finding headed for the `comments` array — so existing-comment Overlap can be detected. An entry for a **carried-forward** finding keeps the finding's ledger `id` (its `R<round>-<n>`); an entry for a **fresh** finding of THIS round omits `id` — a fresh id cannot appear in any comment posted before this round, and carrying one would let the new claim ride the re-post exemption into an unrelated thread, or crowd out a genuine re-post's single-id precondition. The carried `id` is what lets a Step 6 re-post be recognized and exempted from the overlap drop. This list is presubmit INPUT, not the canonical findings artifact — it gets its own file: writing it over `findings.json` replaces the artifact Step 8 archives with a flat shadow of it:
 
 ```bash
-echo '[{"path":"src/foo.ts","line":42,"id":"R3-2"}, ...]' > .qwen/tmp/qwen-review-{target}-findings.json
+echo '[{"path":"src/foo.ts","line":42,"id":"R3-2"}, ...]' > .qwen/tmp/qwen-review-{target}-new-findings.json
 ```
 
 Then run:
@@ -992,7 +992,7 @@ Then run:
 "${QWEN_CODE_CLI:-qwen}" review presubmit \
   {pr_number} {commit_sha} {owner}/{repo} \
   .qwen/tmp/qwen-review-{target}-presubmit.json \
-  [--new-findings .qwen/tmp/qwen-review-{target}-findings.json]
+  [--new-findings .qwen/tmp/qwen-review-{target}-new-findings.json]
 ```
 
 Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
