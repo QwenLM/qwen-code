@@ -418,6 +418,7 @@ export function shouldShowStep(
     case 'baseUrl':
       return config.baseUrl === undefined || Array.isArray(config.baseUrl);
     case 'apiKey':
+      if (config.protocol === AuthType.USE_COPILOT) return false;
       return true;
     case 'models':
       return !config.models || config.modelsEditable === true;
