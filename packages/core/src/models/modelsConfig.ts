@@ -249,6 +249,18 @@ export class ModelsConfig {
     return this.currentAuthType;
   }
 
+  /** Reset live selection after a cancelled first-time authentication. */
+  resetAuth(modelId?: string): void {
+    this.currentAuthType = undefined;
+    this.currentRegistryBaseUrl = undefined;
+    this._generationConfig = modelId ? { model: modelId } : {};
+    this.generationConfigSources = {};
+    this.strictModelProviderSelection = false;
+    this.requireCachedQwenCredentialsOnce = false;
+    this.hasManualCredentials = false;
+    this.activeRuntimeModelSnapshotId = undefined;
+  }
+
   getCurrentRegistryBaseUrl(): string | null | undefined {
     return this.currentRegistryBaseUrl;
   }

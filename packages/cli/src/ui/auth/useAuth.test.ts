@@ -64,28 +64,69 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-const createSettings = () => ({
-  merged: {
-    modelProviders: {},
-  },
-  setValue: vi.fn(),
-  recomputeMerged: vi.fn(),
-  forScope: vi.fn(() => ({
+function setNestedValue(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  const parts = key.split('.');
+  let current = target;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (typeof next !== 'object' || next === null || Array.isArray(next)) {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]!] = value;
+}
+
+const createSettings = (initialSettings: Record<string, unknown> = {}) => {
+  const settingsFile = {
     path: '/tmp/settings.json',
-    settings: {},
-    originalSettings: {},
-  })),
-});
+    settings: structuredClone(initialSettings),
+    originalSettings: structuredClone(initialSettings),
+  };
+  const settings = {
+    merged: structuredClone(initialSettings),
+    setValue: vi.fn(),
+    recomputeMerged: vi.fn(),
+    forScope: vi.fn(() => settingsFile),
+  };
+  settings.setValue.mockImplementation(
+    (_scope: string, key: string, value: unknown) => {
+      setNestedValue(settingsFile.settings, key, value);
+      setNestedValue(settings.merged, key, value);
+    },
+  );
+  settings.recomputeMerged.mockImplementation(() => {
+    settings.merged = structuredClone(settingsFile.settings);
+  });
+  return settings;
+};
 
 const createConfig = (recordSlashCommand = vi.fn()) => {
   const modelsConfig = {
     syncAfterAuthRefresh: vi.fn(),
   };
   return {
-    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getAuthType: vi.fn<() => AuthType | undefined>(() => AuthType.USE_OPENAI),
+    getModel: vi.fn(() => 'pre-copilot-model'),
+    getCurrentModelRegistryBaseUrl: vi.fn<() => string | null | undefined>(
+      () => 'https://pre.example/v1',
+    ),
+    getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
     getUsageStatisticsEnabled: vi.fn(() => false),
     reloadModelProvidersConfig: vi.fn(),
-    refreshAuth: vi.fn(async () => undefined),
+    refreshAuth: vi.fn<
+      (
+        authType: AuthType,
+        isInitialAuth?: boolean,
+        isCurrentTransaction?: () => boolean,
+      ) => Promise<void>
+    >(async () => undefined),
+    switchModel: vi.fn(async () => undefined),
+    resetAuth: vi.fn<(modelId?: string) => void>(),
     getModelsConfig: vi.fn(() => modelsConfig),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
   };
@@ -440,7 +481,9 @@ describe('useAuthCommand', () => {
 
     expect(copilotMocks.discoverGithubToken).toHaveBeenCalledTimes(1);
     expect(copilotMocks.runCopilotDeviceFlow).toHaveBeenCalledTimes(1);
-    expect(copilotMocks.persistGithubToken).toHaveBeenCalledWith('ghu_mock');
+    expect(copilotMocks.persistGithubToken).toHaveBeenCalledWith('ghu_mock', {
+      signal: expect.any(AbortSignal),
+    });
     // Device flow succeeded → externalAuthState cleared
     expect(result.current.externalAuthState).toBeNull();
     // buildInstallPlan proceeded: auth type set to copilot
@@ -457,6 +500,560 @@ describe('useAuthCommand', () => {
       expect.any(Number),
     );
   });
+
+  it('restores pre-Copilot live auth, model, and content generator when cancellation wins refreshAuth', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const runtime = {
+      authType: AuthType.USE_OPENAI,
+      model: 'pre-copilot-model',
+      baseUrl: 'https://pre.example/v1',
+      contentGenerator: 'openai-generator',
+    };
+    config.getAuthType.mockImplementation(() => runtime.authType);
+    config.getModel.mockImplementation(() => runtime.model);
+    config.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    const modelsConfig = config.getModelsConfig();
+    modelsConfig.syncAfterAuthRefresh.mockImplementation(
+      (authType: AuthType, model: string, baseUrl?: string) => {
+        runtime.authType = authType;
+        runtime.model = model;
+        runtime.baseUrl = baseUrl ?? '';
+      },
+    );
+    config.switchModel.mockImplementation(async () => {
+      runtime.authType = AuthType.USE_OPENAI;
+      runtime.model = 'pre-copilot-model';
+      runtime.baseUrl = 'https://pre.example/v1';
+      runtime.contentGenerator = 'openai-generator';
+    });
+    let resolveRefresh!: () => void;
+    let signalRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    config.refreshAuth = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRefresh = () => {
+            runtime.contentGenerator = 'copilot-generator';
+            resolve();
+          };
+          signalRefreshStarted();
+        }),
+    );
+    copilotMocks.discoverGithubToken.mockResolvedValueOnce({
+      token: 'ghu_existing',
+      source: 'mock',
+    });
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    const submit = result.current.handleProviderSubmit(copilotProvider, {
+      baseUrl: resolveBaseUrl(copilotProvider),
+      apiKey: '',
+      modelIds: getDefaultModelIds(copilotProvider),
+    });
+    await refreshStarted;
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    resolveRefresh();
+    await act(async () => {
+      await submit;
+    });
+
+    expect(settings.recomputeMerged).toHaveBeenCalledTimes(1);
+    expect(config.reloadModelProvidersConfig).toHaveBeenLastCalledWith({});
+    expect(config.switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'pre-copilot-model',
+      { baseUrl: 'https://pre.example/v1' },
+    );
+    expect(runtime).toEqual({
+      authType: AuthType.USE_OPENAI,
+      model: 'pre-copilot-model',
+      baseUrl: 'https://pre.example/v1',
+      contentGenerator: 'openai-generator',
+    });
+    expect(addItem).not.toHaveBeenCalled();
+    expect(result.current.isAuthenticating).toBe(false);
+  });
+
+  it('restores a first-time runtime to unauthenticated when cancellation wins refreshAuth', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const runtime: {
+      authType: AuthType | undefined;
+      model: string;
+      baseUrl: string | undefined;
+      contentGenerator: string | undefined;
+    } = {
+      authType: undefined,
+      model: 'unselected',
+      baseUrl: undefined,
+      contentGenerator: undefined,
+    };
+    let providerRegistry: Record<string, unknown> = {};
+    config.getAuthType.mockImplementation(() => runtime.authType);
+    config.getModel.mockImplementation(() => runtime.model);
+    config.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    config.reloadModelProvidersConfig.mockImplementation(
+      (providers: Record<string, unknown>) => {
+        providerRegistry = providers;
+      },
+    );
+    config
+      .getModelsConfig()
+      .syncAfterAuthRefresh.mockImplementation(
+        (authType: AuthType, model: string, baseUrl?: string) => {
+          runtime.authType = authType;
+          runtime.model = model;
+          runtime.baseUrl = baseUrl;
+        },
+      );
+    config.resetAuth.mockImplementation((modelId?: string) => {
+      runtime.authType = undefined;
+      runtime.model = modelId ?? 'unselected';
+      runtime.baseUrl = undefined;
+      runtime.contentGenerator = undefined;
+    });
+    let resolveRefresh!: () => void;
+    let signalRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    config.refreshAuth = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRefresh = () => {
+            runtime.contentGenerator = 'copilot-generator';
+            resolve();
+          };
+          signalRefreshStarted();
+        }),
+    );
+    copilotMocks.discoverGithubToken.mockResolvedValueOnce({
+      token: 'ghu_existing',
+      source: 'mock',
+    });
+    const originalToken = process.env['GITHUB_COPILOT_TOKEN'];
+    delete process.env['GITHUB_COPILOT_TOKEN'];
+
+    try {
+      const { result } = renderHook(() =>
+        useAuthCommand(settings as never, config as never, addItem),
+      );
+      const submit = result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+      await refreshStarted;
+
+      act(() => {
+        result.current.cancelAuthentication();
+      });
+      resolveRefresh();
+      await act(async () => {
+        await submit;
+      });
+
+      expect(settings.merged).toEqual({});
+      expect(process.env['GITHUB_COPILOT_TOKEN']).toBeUndefined();
+      expect(providerRegistry).toEqual({});
+      expect(config.reloadModelProvidersConfig).toHaveBeenLastCalledWith({});
+      expect(config.resetAuth).toHaveBeenCalledWith('unselected');
+      expect(runtime).toEqual({
+        authType: undefined,
+        model: 'unselected',
+        baseUrl: undefined,
+        contentGenerator: undefined,
+      });
+      expect(addItem).not.toHaveBeenCalled();
+    } finally {
+      if (originalToken === undefined) {
+        delete process.env['GITHUB_COPILOT_TOKEN'];
+      } else {
+        process.env['GITHUB_COPILOT_TOKEN'] = originalToken;
+      }
+    }
+  });
+
+  it('keeps a newer successful Copilot setup when a cancelled refresh resolves late', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    const runtime = {
+      authType: AuthType.USE_OPENAI,
+      model: 'pre-copilot-model',
+      baseUrl: 'https://pre.example/v1',
+      contentGenerator: 'openai-generator',
+    };
+    let providerRegistry: Record<string, unknown> = {};
+    config.getAuthType.mockImplementation(() => runtime.authType);
+    config.getModel.mockImplementation(() => runtime.model);
+    config.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    config.reloadModelProvidersConfig.mockImplementation(
+      (providers: Record<string, unknown>) => {
+        providerRegistry = providers;
+      },
+    );
+    config
+      .getModelsConfig()
+      .syncAfterAuthRefresh.mockImplementation(
+        (authType: AuthType, model: string, baseUrl?: string) => {
+          runtime.authType = authType;
+          runtime.model = model;
+          runtime.baseUrl = baseUrl ?? '';
+        },
+      );
+    let resolveRefreshA!: () => void;
+    let signalRefreshAStarted!: () => void;
+    const refreshAStarted = new Promise<void>((resolve) => {
+      signalRefreshAStarted = resolve;
+    });
+    let refreshCount = 0;
+    config.refreshAuth = vi.fn(
+      (
+        _authType: AuthType,
+        _isInitialAuth?: boolean,
+        isCurrentTransaction?: () => boolean,
+      ) => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          return new Promise<void>((resolve) => {
+            resolveRefreshA = () => {
+              if (isCurrentTransaction?.() !== false) {
+                runtime.contentGenerator = 'copilot-generator-a';
+              }
+              resolve();
+            };
+            signalRefreshAStarted();
+          });
+        }
+        if (isCurrentTransaction?.() !== false) {
+          runtime.contentGenerator = 'copilot-generator-b';
+        }
+        return Promise.resolve();
+      },
+    );
+    copilotMocks.discoverGithubToken.mockResolvedValue({
+      token: 'ghu_existing',
+      source: 'mock',
+    });
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    const submitA = result.current.handleProviderSubmit(copilotProvider, {
+      baseUrl: resolveBaseUrl(copilotProvider),
+      apiKey: '',
+      modelIds: ['claude-sonnet-4.6'],
+    });
+    await refreshAStarted;
+
+    let submitB!: Promise<void>;
+    await act(async () => {
+      submitB = result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: ['gpt-5.4'],
+      });
+      await submitB;
+    });
+    resolveRefreshA();
+    await act(async () => {
+      await submitA;
+    });
+
+    expect(settings.merged).toMatchObject({
+      security: { auth: { selectedType: AuthType.USE_COPILOT } },
+      model: { name: 'gpt-5.4' },
+      modelProviders: {
+        [AuthType.USE_COPILOT]: [expect.objectContaining({ id: 'gpt-5.4' })],
+      },
+    });
+    expect(providerRegistry).toMatchObject({
+      [AuthType.USE_COPILOT]: [expect.objectContaining({ id: 'gpt-5.4' })],
+    });
+    expect(runtime).toEqual({
+      authType: AuthType.USE_COPILOT,
+      model: 'gpt-5.4',
+      baseUrl: '',
+      contentGenerator: 'copilot-generator-b',
+    });
+    expect(config.resetAuth).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a late Copilot device flow without installing credentials', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    let receivedSignal: AbortSignal | undefined;
+    let resolveDeviceFlow!: (result: { token: string }) => void;
+    const deviceFlow = new Promise<{ token: string }>((resolve) => {
+      resolveDeviceFlow = resolve;
+    });
+
+    copilotMocks.discoverGithubToken.mockRejectedValueOnce(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockImplementationOnce(
+      (options: { signal?: AbortSignal }) => {
+        receivedSignal = options.signal;
+        return deviceFlow;
+      },
+    );
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    let submit!: Promise<void>;
+    await act(async () => {
+      submit = result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+      await Promise.resolve();
+    });
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    resolveDeviceFlow({ token: 'ghu_late' });
+    await act(async () => {
+      await submit;
+    });
+
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+    expect(settings.setValue).not.toHaveBeenCalled();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
+  it('does not start fallback device auth when cancellation wins discovery', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    let rejectDiscovery!: (error: Error) => void;
+    const discovery = new Promise<never>((_resolve, reject) => {
+      rejectDiscovery = reject;
+    });
+
+    copilotMocks.discoverGithubToken.mockReturnValueOnce(discovery);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    let submit!: Promise<void>;
+    await act(async () => {
+      submit = result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+      await Promise.resolve();
+    });
+
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    rejectDiscovery(new CopilotTokenNotFoundError('mock: no token'));
+    await act(async () => {
+      await submit;
+    });
+
+    expect(copilotMocks.runCopilotDeviceFlow).not.toHaveBeenCalled();
+    expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+    expect(settings.setValue).not.toHaveBeenCalled();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
+  it('does not install Copilot after cancellation during token persistence', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    let resolvePersistence!: () => void;
+    const persistence = new Promise<void>((resolve) => {
+      resolvePersistence = resolve;
+    });
+
+    copilotMocks.discoverGithubToken.mockRejectedValueOnce(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockResolvedValueOnce({
+      token: 'ghu_mock',
+    });
+    copilotMocks.persistGithubToken.mockReturnValueOnce(persistence);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    let submit!: Promise<void>;
+    await act(async () => {
+      submit = result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(copilotMocks.persistGithubToken).toHaveBeenCalledWith('ghu_mock', {
+      signal: expect.any(AbortSignal),
+    });
+    act(() => {
+      result.current.cancelAuthentication();
+    });
+    resolvePersistence();
+    await act(async () => {
+      await submit;
+    });
+
+    expect(settings.setValue).not.toHaveBeenCalled();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
+  it('aborts active Copilot auth on unmount without later continuation', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+    let receivedSignal: AbortSignal | undefined;
+    let resolveDeviceFlow!: (result: { token: string }) => void;
+    const deviceFlow = new Promise<{ token: string }>((resolve) => {
+      resolveDeviceFlow = resolve;
+    });
+
+    copilotMocks.discoverGithubToken.mockRejectedValueOnce(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockImplementationOnce(
+      (options: { signal?: AbortSignal }) => {
+        receivedSignal = options.signal;
+        return deviceFlow;
+      },
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    let submit!: Promise<void>;
+    await act(async () => {
+      submit = result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+      await Promise.resolve();
+    });
+
+    unmount();
+    resolveDeviceFlow({ token: 'ghu_late' });
+    await act(async () => {
+      await submit;
+    });
+
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+    expect(settings.setValue).not.toHaveBeenCalled();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancellation', 'unmount'] as const)(
+    'aborts both overlapping Copilot device flows on %s without continuation',
+    async (end) => {
+      const copilotProvider = findProviderById('copilot')!;
+      const settings = createSettings();
+      const config = createConfig();
+      const addItem = vi.fn();
+      const flows: Array<{
+        signal: AbortSignal | undefined;
+        resolve: (result: { token: string }) => void;
+      }> = [];
+
+      copilotMocks.discoverGithubToken.mockRejectedValue(
+        new CopilotTokenNotFoundError('mock: no token'),
+      );
+      copilotMocks.runCopilotDeviceFlow.mockImplementation(
+        (options: { signal?: AbortSignal }) =>
+          new Promise<{ token: string }>((resolve) => {
+            flows.push({ signal: options.signal, resolve });
+          }),
+      );
+
+      const { result, unmount } = renderHook(() =>
+        useAuthCommand(settings as never, config as never, addItem),
+      );
+      const inputs = {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      };
+      let firstSubmit!: Promise<void>;
+      let secondSubmit!: Promise<void>;
+      await act(async () => {
+        firstSubmit = result.current.handleProviderSubmit(
+          copilotProvider,
+          inputs,
+        );
+        await Promise.resolve();
+      });
+      expect(flows).toHaveLength(1);
+
+      await act(async () => {
+        secondSubmit = result.current.handleProviderSubmit(
+          copilotProvider,
+          inputs,
+        );
+        await Promise.resolve();
+      });
+      expect(flows).toHaveLength(2);
+      if (end === 'cancellation') {
+        act(() => {
+          result.current.cancelAuthentication();
+        });
+      } else {
+        unmount();
+      }
+      flows.forEach((flow, index) => {
+        flow.resolve({ token: `ghu_late_${index}` });
+      });
+      await act(async () => {
+        await Promise.all([firstSubmit, secondSubmit]);
+      });
+
+      expect(flows.map((flow) => flow.signal?.aborted)).toEqual([true, true]);
+      expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+      expect(settings.setValue).not.toHaveBeenCalled();
+      expect(config.refreshAuth).not.toHaveBeenCalled();
+      expect(addItem).not.toHaveBeenCalled();
+    },
+  );
 
   it('skips device flow when a GitHub token already exists', async () => {
     const copilotProvider = findProviderById('copilot')!;

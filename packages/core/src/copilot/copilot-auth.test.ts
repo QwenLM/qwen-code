@@ -1,4 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const fsMocks = vi.hoisted(() => ({
+  mkdir: vi.fn(),
+  writeFile: vi.fn(),
+  rename: vi.fn(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.mkdir.mockImplementation(actual.mkdir);
+  fsMocks.writeFile.mockImplementation(actual.writeFile);
+  fsMocks.rename.mockImplementation(actual.rename);
+  return {
+    ...actual,
+    mkdir: fsMocks.mkdir,
+    writeFile: fsMocks.writeFile,
+    rename: fsMocks.rename,
+  };
+});
+
 import {
   mkdtempSync,
   writeFileSync,
@@ -111,6 +131,7 @@ describe('discoverGithubToken', () => {
 describe('persistGithubToken', () => {
   let tempDir: string;
   beforeEach(() => {
+    vi.clearAllMocks();
     tempDir = mkdtempSync(join(tmpdir(), 'copi-hosts-'));
   });
   afterEach(() => {
@@ -180,6 +201,58 @@ describe('persistGithubToken', () => {
     await persistGithubToken('ghu_roundtrip', { hostsFilePath: hostsFile });
     const result = await discoverGithubToken({ overridePath: hostsFile });
     expect(result.token).toBe('ghu_roundtrip');
+  });
+
+  it('does not replace hosts.json when cancellation is already observed', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    writeFileSync(
+      hostsFile,
+      JSON.stringify({
+        'github.com:Iv1.b507a08c87ecfe98': { oauth_token: 'ghu_existing' },
+      }),
+    );
+    const ctrl = new AbortController();
+    ctrl.abort();
+
+    await expect(
+      persistGithubToken('ghu_new', {
+        hostsFilePath: hostsFile,
+        signal: ctrl.signal,
+      }),
+    ).rejects.toThrow(/cancel/i);
+
+    expect(JSON.parse(readFileSync(hostsFile, 'utf-8'))).toEqual({
+      'github.com:Iv1.b507a08c87ecfe98': { oauth_token: 'ghu_existing' },
+    });
+    expect(fsMocks.mkdir).not.toHaveBeenCalled();
+    expect(fsMocks.writeFile).not.toHaveBeenCalled();
+    expect(fsMocks.rename).not.toHaveBeenCalled();
+  });
+
+  it('does not start the non-abortable rename after cancellation follows its temp write', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    writeFileSync(
+      hostsFile,
+      JSON.stringify({
+        'github.com:Iv1.b507a08c87ecfe98': { oauth_token: 'ghu_existing' },
+      }),
+    );
+    const ctrl = new AbortController();
+    fsMocks.writeFile.mockImplementationOnce(async () => {
+      ctrl.abort();
+    });
+
+    await expect(
+      persistGithubToken('ghu_new', {
+        hostsFilePath: hostsFile,
+        signal: ctrl.signal,
+      }),
+    ).rejects.toThrow(/cancel/i);
+
+    expect(fsMocks.rename).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(hostsFile, 'utf-8'))).toEqual({
+      'github.com:Iv1.b507a08c87ecfe98': { oauth_token: 'ghu_existing' },
+    });
   });
 });
 
@@ -524,5 +597,55 @@ describe('runCopilotDeviceFlow', () => {
     await expect(
       runCopilotDeviceFlow({ fetchImpl: mockFetch, signal: ctrl.signal }),
     ).rejects.toThrow(/cancel/i);
+  });
+
+  it('rejects when cancelled while a polling response resolves late', async () => {
+    const ctrl = new AbortController();
+    let deviceRequestSignal: AbortSignal | null | undefined;
+    let pollRequestSignal: AbortSignal | null | undefined;
+    let resolvePollResponse!: (response: Response) => void;
+    let notifyPollStarted!: () => void;
+    const pollStarted = new Promise<void>((resolve) => {
+      notifyPollStarted = resolve;
+    });
+    const latePollResponse = new Promise<Response>((resolve) => {
+      resolvePollResponse = resolve;
+    });
+    const mockFetch = (async (url: URL | string, init?: RequestInit) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.endsWith('/login/device/code')) {
+        deviceRequestSignal = init?.signal;
+        return new Response(
+          JSON.stringify({
+            device_code: 'dev-late',
+            user_code: 'LATE-0001',
+            verification_uri: 'https://github.com/login/device',
+            interval: 0,
+            expires_in: 60,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      pollRequestSignal = init?.signal;
+      notifyPollStarted();
+      return latePollResponse;
+    }) as typeof fetch;
+
+    const flow = runCopilotDeviceFlow({
+      fetchImpl: mockFetch,
+      signal: ctrl.signal,
+    });
+    await pollStarted;
+    ctrl.abort();
+    resolvePollResponse(
+      new Response(JSON.stringify({ access_token: 'ghu_LATE_TOKEN' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(flow).rejects.toThrow(/cancel/i);
+    expect(deviceRequestSignal).toBe(ctrl.signal);
+    expect(pollRequestSignal).toBe(ctrl.signal);
   });
 });

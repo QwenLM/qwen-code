@@ -81,6 +81,10 @@ function applyModelProvidersPatch(
 
 export interface ApplyProviderInstallPlanOptions {
   settings: ProviderSettingsAdapter;
+  /** Cancels the install and rolls back completed settings/runtime mutations. */
+  signal?: AbortSignal;
+  /** Whether this install still owns shared state when it needs to roll back. */
+  isCurrentTransaction?: () => boolean;
   /** Callback to reload model providers config in the runtime. */
   reloadModelProviders?: (mp: ModelProvidersConfig) => void;
   /** Callback to sync auth state after install. */
@@ -91,6 +95,8 @@ export interface ApplyProviderInstallPlanOptions {
   ) => void;
   /** Callback to refresh auth after install. */
   refreshAuth?: (authType: AuthType) => Promise<void>;
+  /** Restores caller-owned live runtime state when install rollback runs. */
+  rollbackRuntime?: () => void | Promise<void>;
   /** Whether to call refreshAuth after install. Defaults to true. */
   doRefreshAuth?: boolean;
 }
@@ -133,11 +139,17 @@ export async function applyProviderInstallPlan(
 ): Promise<ApplyProviderInstallPlanResult> {
   const {
     settings,
+    signal,
+    isCurrentTransaction,
     reloadModelProviders,
     syncAuthState,
     refreshAuth,
+    rollbackRuntime,
     doRefreshAuth = true,
   } = options;
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw new Error('Provider install cancelled');
+  };
 
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
@@ -152,12 +164,17 @@ export async function applyProviderInstallPlan(
   // (an EACCES from persist vs a refreshAuth rejection look identical
   // otherwise — eight steps, one anonymous error).
   let currentStep = 'init';
+  let rollbackStarted = false;
+  let runtimeStateMayHaveChanged = false;
 
   try {
+    throwIfAborted();
+    rollbackStarted = true;
     // backup() inside the try so a failure here (e.g. structuredClone on a
     // non-serializable adapter) still triggers the catch + env rollback.
     currentStep = 'backup';
     settings.backup?.();
+    throwIfAborted();
 
     // Set environment variables (snapshot previous values for rollback).
     // Defense in depth: refuse process-altering env names. Today every
@@ -168,6 +185,7 @@ export async function applyProviderInstallPlan(
     currentStep = 'env';
     const shadowedEnvKeys: string[] = [];
     for (const [key, value] of Object.entries(plan.env ?? {})) {
+      throwIfAborted();
       if (DENY_ENV_KEYS.has(key.toUpperCase())) {
         throw new Error(
           `Install plan must not set reserved environment variable: ${key}`,
@@ -183,6 +201,7 @@ export async function applyProviderInstallPlan(
       previousEnvValues.set(key, previous);
       settings.setValue(`env.${key}`, value);
       process.env[key] = value;
+      throwIfAborted();
     }
 
     if (shadowedEnvKeys.length > 0) {
@@ -201,6 +220,7 @@ export async function applyProviderInstallPlan(
     };
 
     for (const patch of plan.modelProviders ?? []) {
+      throwIfAborted();
       updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
         patch,
@@ -209,22 +229,29 @@ export async function applyProviderInstallPlan(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
       );
+      throwIfAborted();
     }
 
     // Set auth type
     currentStep = 'authType';
+    throwIfAborted();
     settings.setValue('security.auth.selectedType', plan.authType);
+    throwIfAborted();
 
     // Legacy credentials
     currentStep = 'legacyCredentials';
     if (plan.legacyCredentials?.apiKey != null) {
+      throwIfAborted();
       settings.setValue('security.auth.apiKey', plan.legacyCredentials.apiKey);
+      throwIfAborted();
     }
     if (plan.legacyCredentials?.baseUrl != null) {
+      throwIfAborted();
       settings.setValue(
         'security.auth.baseUrl',
         plan.legacyCredentials.baseUrl,
       );
+      throwIfAborted();
     }
 
     // Model selection
@@ -233,6 +260,7 @@ export async function applyProviderInstallPlan(
     // off a model they chose. If the plan still offers the current model, keep
     // it; a genuine first-time setup still adopts the provider default. (#5819)
     currentStep = 'modelSelection';
+    throwIfAborted();
     let effectiveModelSelection = plan.modelSelection;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
@@ -257,9 +285,12 @@ export async function applyProviderInstallPlan(
       }
     }
     if (effectiveModelSelection?.modelId) {
+      throwIfAborted();
       settings.setValue('model.name', effectiveModelSelection.modelId);
+      throwIfAborted();
       if (effectiveModelSelection.baseUrl) {
         settings.setValue('model.baseUrl', effectiveModelSelection.baseUrl);
+        throwIfAborted();
       } else {
         // The plan selects by model id only, so clear any baseUrl disambiguator
         // left by a previous model-picker selection — otherwise the next launch
@@ -267,6 +298,7 @@ export async function applyProviderInstallPlan(
         // tombstone so the clear overrides a lower-scope value on merge (an
         // undefined write is dropped from JSON and would not override).
         settings.setValue('model.baseUrl', '');
+        throwIfAborted();
       }
     }
 
@@ -274,71 +306,101 @@ export async function applyProviderInstallPlan(
     currentStep = 'providerState';
     for (const [key, entries] of Object.entries(plan.providerState ?? {})) {
       for (const [field, value] of Object.entries(entries)) {
+        throwIfAborted();
         settings.setValue(`${key}.${field}`, value);
+        throwIfAborted();
       }
     }
 
     // Persist to disk
     currentStep = 'persist';
+    throwIfAborted();
     settings.persist();
+    throwIfAborted();
 
     // Reload runtime config
     currentStep = 'reloadModelProviders';
+    throwIfAborted();
     reloadModelProviders?.(updatedModelProviders);
+    throwIfAborted();
     if (effectiveModelSelection?.modelId) {
       currentStep = 'syncAuthState';
+      throwIfAborted();
+      runtimeStateMayHaveChanged = true;
       syncAuthState?.(
         plan.authType,
         effectiveModelSelection.modelId,
         effectiveModelSelection.baseUrl,
       );
+      throwIfAborted();
     }
     if (doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';
+      throwIfAborted();
+      runtimeStateMayHaveChanged = true;
       await refreshAuth(plan.authType);
+      throwIfAborted();
     }
 
+    throwIfAborted();
     currentStep = 'cleanupBackup';
     settings.cleanupBackup?.();
 
     return { updatedModelProviders };
   } catch (error) {
     // Best-effort rollback. Each step is wrapped so a failure in one
-    // doesn't mask the original error or skip the later steps.
-    try {
-      settings.restore?.();
-    } catch (restoreErr) {
-      // eslint-disable-next-line no-console -- best-effort rollback path
-      console.error(
-        '[applyProviderInstallPlan] settings.restore failed during rollback:',
-        restoreErr,
-      );
-    }
-    try {
-      for (const [key, prev] of previousEnvValues) {
-        if (prev === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = prev;
+    // doesn't mask the original error or skip the later steps. A superseded
+    // transaction must not restore its stale snapshots over a newer install.
+    if (rollbackStarted && (isCurrentTransaction?.() ?? true)) {
+      try {
+        settings.restore?.();
+      } catch (restoreErr) {
+        // eslint-disable-next-line no-console -- best-effort rollback path
+        console.error(
+          '[applyProviderInstallPlan] settings.restore failed during rollback:',
+          restoreErr,
+        );
+      }
+      try {
+        for (const [key, prev] of previousEnvValues) {
+          if (prev === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = prev;
+          }
+        }
+      } catch (envErr) {
+        // process.env writes can throw if a custom property descriptor on
+        // process.env has been installed (rare, but observed in some test
+        // harnesses). Don't let it skip the runtime-providers rollback below.
+        // eslint-disable-next-line no-console -- best-effort rollback path
+        console.error(
+          '[applyProviderInstallPlan] env rollback failed:',
+          envErr,
+        );
+      }
+      // Restore in-memory runtime providers — reloadModelProviders may have run
+      // before the failure (e.g. before a refreshAuth rejection).
+      try {
+        reloadModelProviders?.(previousRuntimeProviders);
+      } catch (reloadErr) {
+        // eslint-disable-next-line no-console -- best-effort rollback path
+        console.error(
+          '[applyProviderInstallPlan] reloadModelProviders failed during rollback:',
+          reloadErr,
+        );
+      }
+      if (runtimeStateMayHaveChanged) {
+        try {
+          await rollbackRuntime?.();
+        } catch (runtimeErr) {
+          // eslint-disable-next-line no-console -- best-effort rollback path
+          console.error(
+            '[applyProviderInstallPlan] rollbackRuntime failed during rollback:',
+            runtimeErr,
+          );
         }
       }
-    } catch (envErr) {
-      // process.env writes can throw if a custom property descriptor on
-      // process.env has been installed (rare, but observed in some test
-      // harnesses). Don't let it skip the runtime-providers rollback below.
-      // eslint-disable-next-line no-console -- best-effort rollback path
-      console.error('[applyProviderInstallPlan] env rollback failed:', envErr);
-    }
-    // Restore in-memory runtime providers — reloadModelProviders may have run
-    // before the failure (e.g. before a refreshAuth rejection).
-    try {
-      reloadModelProviders?.(previousRuntimeProviders);
-    } catch (reloadErr) {
-      // eslint-disable-next-line no-console -- best-effort rollback path
-      console.error(
-        '[applyProviderInstallPlan] reloadModelProviders failed during rollback:',
-        reloadErr,
-      );
     }
     // Attach the failing step + authType as *structured properties* rather
     // than baking them into the message. Keeps the user-facing message clean

@@ -165,11 +165,13 @@ const COPILOT_HOSTS_KEY = `github.com:${COPILOT_CLIENT_ID}`;
 
 export async function persistGithubToken(
   token: string,
-  opts?: { hostsFilePath?: string },
+  opts?: { hostsFilePath?: string; signal?: AbortSignal },
 ): Promise<void> {
   const filePath =
     opts?.hostsFilePath ??
     join(homedir(), '.config', 'github-copilot', 'hosts.json');
+  const signal = opts?.signal;
+  throwIfAborted(signal);
 
   let existing: Record<string, unknown> = {};
   try {
@@ -181,6 +183,7 @@ export async function persistGithubToken(
   } catch {
     // file missing or invalid — start fresh
   }
+  throwIfAborted(signal);
 
   const updated = {
     ...existing,
@@ -188,9 +191,19 @@ export async function persistGithubToken(
   };
 
   await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+  throwIfAborted(signal);
   const tmp = `${filePath}.tmp.${process.pid}`;
-  await writeFile(tmp, JSON.stringify(updated, null, 2), { mode: 0o600 });
-  await rename(tmp, filePath);
+  try {
+    await writeFile(tmp, JSON.stringify(updated, null, 2), {
+      mode: 0o600,
+      signal,
+    });
+    throwIfAborted(signal);
+    await rename(tmp, filePath);
+  } catch (error) {
+    await unlink(tmp).catch(() => undefined);
+    throw error;
+  }
 }
 
 export class CopilotExchangeError extends Error {
@@ -437,6 +450,10 @@ export function createCopilotTokenManager(opts?: {
   return { getSnapshot, forceRefresh, getAvailableModelIds };
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('Login cancelled');
+}
+
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('Login cancelled'));
@@ -471,7 +488,9 @@ export async function runCopilotDeviceFlow(opts?: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: `client_id=${COPILOT_CLIENT_ID}&scope=${COPILOT_SCOPE}`,
+    signal,
   });
+  throwIfAborted(signal);
   if (!codeRes.ok)
     throw new Error(`Device code request failed: HTTP ${codeRes.status}`);
   const codeBody = (await codeRes.json()) as {
@@ -481,6 +500,7 @@ export async function runCopilotDeviceFlow(opts?: {
     interval: number;
     expires_in: number;
   };
+  throwIfAborted(signal);
 
   // Validate verification_uri is http(s)
   const parsed = new URL(codeBody.verification_uri);
@@ -511,12 +531,15 @@ export async function runCopilotDeviceFlow(opts?: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: `client_id=${COPILOT_CLIENT_ID}&device_code=${codeBody.device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
+      signal,
     });
+    throwIfAborted(signal);
     const tokenBody = (await tokenRes.json()) as {
       access_token?: string;
       error?: string;
       interval?: number;
     };
+    throwIfAborted(signal);
 
     if (tokenBody.access_token) {
       return { token: tokenBody.access_token };
