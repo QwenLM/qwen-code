@@ -29,7 +29,7 @@ function runMinimizableStateFilter(payload) {
     .map((match) => match[1])
     .find((candidate) => candidate.includes('.data.node'));
   assert.ok(filter, 'minimizable state jq filter must exist');
-  return execFileSync('jq', ['-c', filter], {
+  return execFileSync('jq', ['-r', filter], {
     input: JSON.stringify(payload),
     encoding: 'utf8',
   }).trim();
@@ -123,6 +123,7 @@ describe('auto-minimize-spam: event fast path', () => {
       minimizeStep.env?.EVENT_COMMENT_NODE_ID,
       '${{ github.event.comment.node_id }}',
     );
+    assert.doesNotMatch(minimizeStep.run, /\$\{\{\s*github\.event\./);
     assert.equal(
       minimizeStep.run.match(/\[ -n "\$EVENT_COMMENT_NODE_ID" \]/g)?.length,
       2,
@@ -143,9 +144,15 @@ describe('auto-minimize-spam: event fast path', () => {
       }),
       'true',
     );
-    assert.match(
+    assert.equal(
       minimizeStep.env?.LOOKBACK_HOURS,
-      /github\.event_name == 'push' && '72'/,
+      "${{ inputs.hours || (github.event_name == 'push' && '72') || '2' }}",
+    );
+    assert.equal(
+      runMinimizableStateFilter({
+        data: { node: null },
+      }),
+      'missing',
     );
     assert.match(minimizeStep.run, /if ! is_minimized="\$\(/);
     assert.match(minimizeStep.run, /then\n\s+is_minimized="missing"\n\s+fi/);
