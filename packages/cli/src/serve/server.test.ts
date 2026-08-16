@@ -11617,6 +11617,63 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toEqual([]);
     });
 
+    it('redacts skill bodies from virtual subagent load replay (#9234)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sessionId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+      const commandsEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'parent-1',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Help' }],
+            _meta: {
+              availableSkills: ['bugfix'],
+              availableSkillDetails: [
+                { name: 'bugfix', body: 'x'.repeat(600_000) },
+              ],
+            },
+          },
+        },
+      };
+      const loadSpy = vi
+        .spyOn(VirtualSubagentSessions.prototype, 'load')
+        .mockResolvedValue({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          attached: true,
+          clientId: 'client-v',
+          state: {},
+          compactedReplay: [commandsEvent],
+          liveJournal: [],
+        });
+
+      try {
+        const res = await request(app)
+          .post(`/session/${sessionId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(res.status).toBe(200);
+        const replay = res.body.compactedReplay as Array<{
+          data: { update: Record<string, unknown> };
+        }>;
+        const meta = replay[0]!.data.update['_meta'] as Record<string, unknown>;
+        expect(meta['availableSkills']).toEqual(['bugfix']);
+        expect(meta).not.toHaveProperty('availableSkillDetails');
+        expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+      } finally {
+        loadSpy.mockRestore();
+      }
+    });
+
     it('passes the requested initial history page size to load', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -21290,6 +21347,50 @@ describe('createServeApp', () => {
       ]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('redacts skill bodies from flat transcript events (#9234)', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [{ name: 'help', description: 'Help' }],
+                _meta: {
+                  availableSkills: ['bugfix'],
+                  availableSkillDetails: [
+                    { name: 'bugfix', body: 'x'.repeat(600_000) },
+                  ],
+                },
+              },
+            },
+          ],
+          hasMore: false,
+        }),
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      const event = res.body.events[0] as { data: Record<string, unknown> };
+      expect(event.data['sessionUpdate']).toBe('available_commands_update');
+      const meta = event.data['_meta'] as Record<string, unknown>;
+      expect(meta['availableSkills']).toEqual(['bugfix']);
+      expect(meta).not.toHaveProperty('availableSkillDetails');
+      expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
     });
 
     it('forwards an exclusive persisted-record boundary', async () => {
