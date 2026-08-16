@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isUtf8 } from 'node:buffer';
 import { execFile } from 'node:child_process';
 // Namespace import (vs `import { constants }`) so vitest tests that
 // `vi.mock('node:fs', ...)` without supplying every named export don't
@@ -13,10 +14,21 @@ import { execFile } from 'node:child_process';
 // `O_RDONLY` (= 0 on POSIX) — harmless in mock environments where no
 // real `open()` ever runs.
 import * as nodeFs from 'node:fs';
-import { access, lstat, open, readFile, stat } from 'node:fs/promises';
+import {
+  access,
+  lstat,
+  open,
+  readFile,
+  readlink,
+  stat,
+} from 'node:fs/promises';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
-import type { Hunk } from 'diff';
+import {
+  structuredPatch,
+  type Hunk,
+  type ParsedDiff,
+  type PatchOptions,
+} from 'diff';
 import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
@@ -32,8 +44,6 @@ export interface GitDiffFileHunks {
   truncated: boolean;
 }
 
-const execFileAsync = promisify(execFile);
-
 export interface GitDiffStats {
   filesCount: number;
   linesAdded: number;
@@ -45,14 +55,15 @@ export interface PerFileStats {
   removed: number;
   isBinary: boolean;
   isUntracked?: boolean;
-  /** `true` when the file is removed in the worktree relative to HEAD.
+  /** `true` when the file is removed relative to the comparison base.
    *  Mutually exclusive with `isUntracked`. Detected via
-   *  `git diff HEAD --name-status -z` (status letter `D`); a row like
+   *  `git diff --name-status -z` (status letter `D`); a row like
    *  `0\t10\tfoo.ts` from numstat alone is not enough to distinguish
    *  "deleted" from "heavy edit that drops 10 lines". */
   isDeleted?: boolean;
-  /** Only meaningful for untracked files: `true` when the file exceeded the
-   *  line-counting read cap and `added` is therefore a lower bound. */
+  /** `true` when the line counts are lower bounds: the file exceeded the
+   *  `MAX_DIFF_SIZE_BYTES` read/comparison cap (untracked line counting and
+   *  branch-mode collision diffs both cap at that budget). */
   truncated?: boolean;
   /** For a rename detected by `git diff --numstat -z`, the pre-rename path.
    *  The map key (and wire `path`) is the current post-rename path so the
@@ -63,6 +74,29 @@ export interface PerFileStats {
 export interface GitDiffResult {
   stats: GitDiffStats;
   perFileStats: Map<string, PerFileStats>;
+}
+
+export type GitDiffMode =
+  | 'uncommitted'
+  | 'unstaged'
+  | 'staged'
+  | 'commit'
+  | 'branch';
+
+export interface GitDiffOptions {
+  mode: GitDiffMode;
+  ref?: string;
+}
+
+interface GitDiffComparison {
+  args: string[];
+  includeUntracked: boolean;
+  untrackedBaseRef?: string;
+  /** True when the comparison reads the worktree or index, which transient
+   *  states (merge, rebase, cherry-pick, revert) fill with changes the user
+   *  didn't intentionally make. Commit-vs-commit comparisons read immutable
+   *  objects only and stay available through those states. */
+  transientSensitive: boolean;
 }
 
 const GIT_TIMEOUT_MS = 5000;
@@ -90,6 +124,12 @@ const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
 const UNTRACKED_READ_CHUNK_BYTES = 64 * 1024;
 /** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
 const BINARY_SNIFF_BYTES = 8 * 1024;
+/** Wall-clock budget for one in-process collision diff. jsdiff's Myers walk
+ *  is quadratic in the edit distance: two fully dissimilar near-cap inputs
+ *  otherwise block the daemon's event loop for minutes. On timeout
+ *  `structuredPatch` returns `undefined`, which the caller treats like the
+ *  throwing path (one opaque row). */
+const COLLISION_PATCH_TIMEOUT_MS = 500;
 /** Memoized open flags for line counting. `O_NOFOLLOW` closes the TOCTOU
  *  window between the `lstat` symlink check and `open` — if the path is
  *  replaced with a symlink in that gap, `open` rejects with `ELOOP` instead
@@ -112,15 +152,20 @@ function getUntrackedOpenFlags(): number {
 
 /**
  * Fetch numstat-based git diff stats (files changed, lines added/removed) and
- * per-file summaries comparing the working tree to HEAD. Structured hunks are
- * available separately via `fetchGitDiffHunks`.
+ * per-file summaries for the selected comparison. Omitting options compares
+ * the working tree to HEAD. Structured hunks are available separately via
+ * `fetchGitDiffHunks`.
  *
  * Returns `null` when not inside a git repo, when git itself fails, or when
- * the working tree is in a transient state (merge, rebase, cherry-pick,
- * revert) — those states carry incoming changes that weren't intentionally
- * made by the user.
+ * a worktree/index-targeting comparison runs while the working tree is in a
+ * transient state (merge, rebase, cherry-pick, revert) — those states carry
+ * incoming changes that weren't intentionally made by the user. Commit mode
+ * compares two immutable commits and stays available through those states.
  */
-export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
+export async function fetchGitDiff(
+  cwd: string,
+  options?: GitDiffOptions,
+): Promise<GitDiffResult | null> {
   // Walk ancestors once to find the worktree root; reuse the result for the
   // transient-state probe and every git invocation below. `findGitRoot`
   // doubles as the "is this a git repo" check — a non-null return implies a
@@ -131,7 +176,10 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // invoked from a subdirectory of the worktree.
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
-  if (await isInTransientGitState(gitRoot)) return null;
+  const comparison = await resolveGitDiffComparison(gitRoot, options);
+  if (!comparison) return null;
+  if (comparison.transientSensitive && (await isInTransientGitState(gitRoot)))
+    return null;
 
   // Shortstat probe + untracked scan run in parallel — both are needed
   // regardless of which path we take, and shortstat is O(1) memory so it can
@@ -150,30 +198,172 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // mechanism, but pinning both flags everywhere is defense-in-depth —
   // git's behavior around these drivers has shifted between versions
   // before.
-  const [shortstatOut, untrackedOut] = await Promise.all([
-    runGit(
-      [
-        '--no-optional-locks',
-        'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        'HEAD',
-        '--shortstat',
-      ],
+  const [shortstatOut, untrackedOut, ignoredUntrackedOut, nameStatusOut] =
+    await Promise.all([
+      runGit(
+        [
+          '--no-optional-locks',
+          'diff',
+          '--no-ext-diff',
+          '--no-textconv',
+          ...comparison.args,
+          '--shortstat',
+        ],
+        gitRoot,
+      ),
+      comparison.includeUntracked
+        ? runGit(
+            [
+              '--no-optional-locks',
+              'ls-files',
+              '-z',
+              '--others',
+              '--exclude-standard',
+            ],
+            gitRoot,
+          )
+        : Promise.resolve(null),
+      // Branch-mode collision classification needs the ignore-INCLUSIVE
+      // listing: a baseline-tracked path that was untracked-and-ignored (the
+      // common `git rm --cached` + .gitignore recipe) is absent from the
+      // exclude-standard list and would survive as the exact phantom deletion
+      // the classification exists to remove. All-added rows below stay
+      // exclude-standard-driven — an ignored file is not an addition.
+      comparison.untrackedBaseRef
+        ? runGit(['--no-optional-locks', 'ls-files', '-z', '--others'], gitRoot)
+        : Promise.resolve(null),
+      // Branch-mode collision classification also needs name-status up front:
+      // its deletion/renamed-old paths bound which untracked paths can appear
+      // as phantom deletions at all (see the candidate filter below).
+      comparison.untrackedBaseRef
+        ? runGit(
+            [
+              '--no-optional-locks',
+              'diff',
+              '--no-ext-diff',
+              '--no-textconv',
+              ...comparison.args,
+              '--name-status',
+              '-z',
+            ],
+            gitRoot,
+          )
+        : Promise.resolve(null),
+    ]);
+  // A failed listing must not fold into an empty path list: collision
+  // classification would skip its re-accounting and leave phantom deletions,
+  // the opposite of the fail-closed trackedAtBase probe below.
+  if (
+    comparison.untrackedBaseRef &&
+    (untrackedOut === null ||
+      ignoredUntrackedOut === null ||
+      nameStatusOut === null)
+  ) {
+    return null;
+  }
+  const rawUntrackedPaths = comparison.includeUntracked
+    ? splitNulDelimited(untrackedOut)
+    : [];
+  const classifiablePaths = comparison.untrackedBaseRef
+    ? splitNulDelimited(ignoredUntrackedOut)
+    : [];
+  // A path can surface as a phantom deletion only when the comparison reports
+  // it deleted or as the old side of a rename; this set bounds the collision
+  // classification below. (Non-null in branch mode: the guard above fails
+  // closed on a name-status fetch failure.)
+  const phantomCandidatePaths =
+    nameStatusOut != null
+      ? parsePhantomCandidatePaths(nameStatusOut)
+      : new Set<string>();
+
+  // Branch mode compares the worktree against the baseline tree, but
+  // `git diff <baseline>` proxies the worktree through the index: a path the
+  // baseline tracks that the worktree holds untracked surfaces there as a
+  // phantom deletion. Classify the untracked paths against the baseline
+  // per-path (bounded by the untracked list, unlike a whole-tree `ls-tree -r`
+  // listing, which on a large baseline can overflow runGit's maxBuffer or the
+  // git timeout before the diff even starts) so colliding paths can be diffed
+  // as base-blob-vs-worktree below while everything else stays all-added.
+  // Past the fast-path threshold the classification is skipped — the
+  // aggregate totals are shortstat-driven there anyway. The gate keys on the
+  // SAME exclude-standard count the fast-path gate below uses: the
+  // ignore-inclusive list can exceed the threshold (one ignored build
+  // directory suffices) while the detail path still runs, and skipping
+  // classification there would defeat the collision re-accounting.
+  const quickStats =
+    (shortstatOut != null && parseShortstat(shortstatOut)) || EMPTY_STATS;
+  let filteredUntrackedPaths: string[] | null = null;
+  let collisionPaths: string[] = [];
+  let trackedAtBase: Map<string, string> | null = null;
+  if (
+    comparison.untrackedBaseRef &&
+    classifiablePaths.length > 0 &&
+    quickStats.filesCount + rawUntrackedPaths.length <= MAX_FILES_FOR_DETAILS
+  ) {
+    // Classify only the phantom candidates, not the whole ignore-inclusive
+    // listing: the latter can hold thousands of ignored paths the detail gate
+    // never limits, and every extra ls-tree chunk is one more serial
+    // round-trip that can fail the whole branch diff closed.
+    const strippedClassifiable = classifiablePaths.map(stripTrailingDirSlash);
+    const directCandidates = strippedClassifiable.filter((filePath) =>
+      phantomCandidatePaths.has(filePath),
+    );
+    const directSet = new Set(directCandidates);
+    // A baseline-tracked gitlink whose leftover directory is no longer an
+    // embedded repository (its `.git` deleted) never appears in the untracked
+    // listing itself: `ls-files --others` lists its files individually
+    // (`sub/file.txt`) while the phantom candidate is the ancestor path
+    // (`sub`), which the exact-string match above never relates. Add those
+    // ancestor phantom candidates so the baseline probe can resolve their
+    // mode; only a commit-mode (gitlink) hit becomes a collision — a plain
+    // blob deleted in favor of a same-named directory is a real deletion.
+    const ancestorCandidates: string[] = [];
+    for (const phantomPath of phantomCandidatePaths) {
+      if (directSet.has(phantomPath)) continue;
+      const prefix = `${phantomPath}/`;
+      if (
+        strippedClassifiable.some((filePath) => filePath.startsWith(prefix))
+      ) {
+        ancestorCandidates.push(phantomPath);
+      }
+    }
+    const candidates = [...directCandidates, ...ancestorCandidates];
+    trackedAtBase = await classifyPathsTrackedAtBase(
       gitRoot,
-    ),
-    runGit(
-      [
-        '--no-optional-locks',
-        'ls-files',
-        '-z',
-        '--others',
-        '--exclude-standard',
-      ],
-      gitRoot,
-    ),
-  ]);
-  const untrackedCount = countNulDelimited(untrackedOut);
+      comparison.untrackedBaseRef,
+      candidates,
+    );
+    if (trackedAtBase === null) return null;
+    const tracked = trackedAtBase;
+    const ancestorSet = new Set(ancestorCandidates);
+    collisionPaths = candidates.filter(
+      (filePath) =>
+        tracked.has(filePath) &&
+        (!ancestorSet.has(filePath) || tracked.get(filePath) === '160000'),
+    );
+    // Descendants of a gitlink collision are covered by its single opaque
+    // row: exclude them from the all-added untracked accounting, or the
+    // deletion is double-counted (phantom row plus per-file additions).
+    const gitlinkCollisionPrefixes = collisionPaths
+      .filter((filePath) => tracked.get(filePath) === '160000')
+      .map((filePath) => `${filePath}/`);
+    filteredUntrackedPaths = rawUntrackedPaths.filter((filePath) => {
+      const stripped = stripTrailingDirSlash(filePath);
+      return (
+        !tracked.has(stripped) &&
+        !gitlinkCollisionPrefixes.some((prefix) => stripped.startsWith(prefix))
+      );
+    });
+  }
+  // Without classification (non-branch modes, or branch mode past the
+  // fast-path threshold) every untracked path counts as an addition. A
+  // branch-mode collision then appears in the aggregate totals twice (once
+  // via shortstat's phantom deletion); accepted on that rare knife-edge to
+  // keep the >500-file guardrail O(1).
+  const untrackedCount =
+    filteredUntrackedPaths !== null
+      ? filteredUntrackedPaths.length
+      : rawUntrackedPaths.length;
 
   // Apply the >500-file fast path on tracked + untracked, treating "no
   // shortstat output" (no tracked changes) and "shortstat unparseable"
@@ -183,8 +373,6 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // slow path would only line-count the first MAX_FILES untracked
   // entries — leaving `filesCount: 501` paired with a `linesAdded` that
   // missed the other 451 files.
-  const quickStats =
-    (shortstatOut != null && parseShortstat(shortstatOut)) || EMPTY_STATS;
   if (quickStats.filesCount + untrackedCount > MAX_FILES_FOR_DETAILS) {
     return {
       stats: {
@@ -198,42 +386,59 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   // Numstat gives us +/- counts; name-status tells us *why* a row exists
   // (D = deleted, M = modified, R<score> = rename, etc.). We need both
   // because numstat alone can't distinguish a delete (`0\tN\tpath`) from
-  // a heavy edit that drops N lines.
-  const [numstatOut, nameStatusOut] = await Promise.all([
+  // a heavy edit that drops N lines. Branch mode already fetched name-status
+  // with the listings above (the classification candidates need it); the
+  // other modes fetch it here beside numstat.
+  const [numstatOut, lateNameStatusOut] = await Promise.all([
     runGit(
       [
         '--no-optional-locks',
         'diff',
         '--no-ext-diff',
         '--no-textconv',
-        'HEAD',
+        ...comparison.args,
         '--numstat',
         '-z',
       ],
       gitRoot,
     ),
-    runGit(
-      [
-        '--no-optional-locks',
-        'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        'HEAD',
-        '--name-status',
-        '-z',
-      ],
-      gitRoot,
-    ),
+    comparison.untrackedBaseRef
+      ? Promise.resolve(null)
+      : runGit(
+          [
+            '--no-optional-locks',
+            'diff',
+            '--no-ext-diff',
+            '--no-textconv',
+            ...comparison.args,
+            '--name-status',
+            '-z',
+          ],
+          gitRoot,
+        ),
   ]);
   if (numstatOut == null) return null;
 
   const { stats, perFileStats } = parseGitNumstat(numstatOut);
+  const nameStatus = nameStatusOut ?? lateNameStatusOut;
   const deletedPaths =
-    nameStatusOut != null ? parseDeletedFromNameStatus(nameStatusOut) : null;
+    nameStatus != null ? parseDeletedFromNameStatus(nameStatus) : null;
   if (deletedPaths && deletedPaths.size > 0) {
     for (const [filename, s] of perFileStats) {
       if (deletedPaths.has(filename)) s.isDeleted = true;
     }
+  }
+
+  if (collisionPaths.length > 0 && comparison.untrackedBaseRef) {
+    await applyBaselineCollisions(
+      gitRoot,
+      comparison.untrackedBaseRef,
+      collisionPaths,
+      trackedAtBase ?? new Map(),
+      numstatOut,
+      stats,
+      perFileStats,
+    );
   }
 
   if (untrackedCount > 0) {
@@ -241,7 +446,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
     // already full. Otherwise `filesCount` under-reports whenever tracked
     // changes already fill the `MAX_FILES` slot.
     stats.filesCount += untrackedCount;
-    const untrackedPaths = splitNulDelimited(untrackedOut);
+    const untrackedPaths = filteredUntrackedPaths ?? rawUntrackedPaths;
     // Read line counts for *every* untracked path that survived the
     // `>MAX_FILES_FOR_DETAILS` fast-path filter (so up to ~500 files at the
     // outer cap, not just the first MAX_FILES). Otherwise a workspace with
@@ -321,9 +526,9 @@ export async function fetchGitDiffHunks(
 }
 
 /**
- * Fetch structured hunks for a single file (working tree vs HEAD). Cheaper than
- * `fetchGitDiffHunks`, which diffs the whole tree — this is for on-demand
- * rendering of one file in the diff viewer.
+ * Fetch structured hunks for one file in the selected comparison. Omitting
+ * options compares the working tree to HEAD. Cheaper than `fetchGitDiffHunks`,
+ * which diffs the whole tree — this is for on-demand rendering in the viewer.
  *
  * `filePath` may be a repo-root-relative path or an absolute path inside the
  * repo (the daemon passes the workspace-sandboxed absolute path). Relative
@@ -332,24 +537,28 @@ export async function fetchGitDiffHunks(
  * normalized to a git-root-relative path before any git call, so the path can
  * never escape the repository.
  *
- * Untracked files (which `git diff HEAD` omits) are synthesized as a single
- * all-added hunk by reading the file, so the viewer can show new files like any
- * other addition. `truncated` is set whenever the per-file caps cut content on
- * either path (parser cap for tracked diffs, byte/line caps for synthesized
- * untracked ones). Returns `null` for non-repos, transient states, paths
- * outside the repo, binary or unreadable untracked files, and tracked files
- * with no changes.
+ * Comparisons that target the working tree synthesize untracked files as a
+ * single all-added hunk, so the viewer can show new files like any other
+ * addition. `truncated` is set whenever the per-file caps cut content on either
+ * path (parser cap for tracked diffs, byte/line caps for synthesized untracked
+ * ones). Returns `null` for non-repos, worktree/index comparisons during
+ * transient states, paths outside the repo, binary or unreadable untracked
+ * files, and tracked files with no changes.
  */
 export async function fetchGitDiffHunksForFile(
   cwd: string,
   filePath: string,
   oldPath?: string,
+  options?: GitDiffOptions,
 ): Promise<GitDiffFileHunks | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
   const relPath = toRepoRelativePath(gitRoot, filePath);
   if (relPath === null) return null;
-  if (await isInTransientGitState(gitRoot)) return null;
+  const comparison = await resolveGitDiffComparison(gitRoot, options);
+  if (!comparison) return null;
+  if (comparison.transientSensitive && (await isInTransientGitState(gitRoot)))
+    return null;
 
   // For a rename, include the pre-rename path with rename detection so git
   // diffs old→new content instead of reporting the new path as fully added
@@ -363,9 +572,11 @@ export async function fetchGitDiffHunksForFile(
     '--no-textconv',
   ];
   if (oldRelPath != null) diffArgs.push('-M');
-  diffArgs.push('HEAD', '--');
-  if (oldRelPath != null) diffArgs.push(oldRelPath);
-  diffArgs.push(relPath);
+  diffArgs.push(...comparison.args, '--');
+  // `:(literal)` keeps pathspec magic in user-selected filenames (e.g. a real
+  // file named `foo:(glob)bar.txt`) from being reinterpreted by git.
+  if (oldRelPath != null) diffArgs.push(`:(literal)${oldRelPath}`);
+  diffArgs.push(`:(literal)${relPath}`);
   const diffOut = await runGit(diffArgs, gitRoot);
   if (diffOut == null) return null;
   const truncatedPaths = new Set<string>();
@@ -373,6 +584,24 @@ export async function fetchGitDiffHunksForFile(
   // A single-file diff yields at most one entry; return its hunks regardless of
   // the exact header key (which may carry rename / C-style-quote formatting).
   if (parsed.size > 0) {
+    // Branch mode proxies the worktree through the index, so a path the
+    // baseline tracks that the worktree holds untracked arrives here as a
+    // phantom deletion. The real worktree-vs-baseline comparison is the base
+    // blob against the on-disk content.
+    if (comparison.untrackedBaseRef) {
+      // A git failure (`null`) must not fold into "not untracked": falling
+      // through would return the phantom full-deletion hunks for a file that
+      // exists on disk. Fail closed instead.
+      const isUntracked = await isUntrackedWorktreePath(gitRoot, relPath, true);
+      if (isUntracked === null) return null;
+      if (isUntracked) {
+        return await branchModeUntrackedHunks(
+          gitRoot,
+          comparison.untrackedBaseRef,
+          relPath,
+        );
+      }
+    }
     const [key, hunks] = parsed.entries().next().value as [string, Hunk[]];
     return { hunks: hunks ?? [], truncated: truncatedPaths.has(key) };
   }
@@ -381,21 +610,112 @@ export async function fetchGitDiffHunksForFile(
   // untracked (and not ignored) file, matching the `--exclude-standard` listing
   // that drives the diff file list. A tracked-but-unchanged or ignored file
   // yields nothing here and returns null.
-  const untrackedOut = await runGit(
-    [
-      '--no-optional-locks',
-      'ls-files',
-      '--others',
-      '--exclude-standard',
-      '--',
-      relPath,
-    ],
-    gitRoot,
-  );
-  if (untrackedOut && untrackedOut.trim().length > 0) {
+  if (!comparison.includeUntracked) return null;
+  if (comparison.untrackedBaseRef) {
+    // A collision path (tracked at the baseline, untracked in the worktree)
+    // reaches here when its phantom-deletion diff carries no hunks: an empty
+    // baseline blob, or a tracked diff the parser skipped over the size cap.
+    // The list still advertises the row, so compare the base blob against the
+    // worktree content instead of returning nothing. `branchModeUntrackedHunks`
+    // falls back to the plain all-added synthesis when the baseline does not
+    // track the path.
+    if (await isUntrackedWorktreePath(gitRoot, relPath, true)) {
+      return branchModeUntrackedHunks(
+        gitRoot,
+        comparison.untrackedBaseRef,
+        relPath,
+      );
+    }
+    return null;
+  }
+  if (await isUntrackedWorktreePath(gitRoot, relPath)) {
     return synthesizeUntrackedHunk(gitRoot, relPath);
   }
   return null;
+}
+
+async function resolveGitDiffComparison(
+  gitRoot: string,
+  options?: GitDiffOptions,
+): Promise<GitDiffComparison | null> {
+  const mode = options?.mode ?? 'uncommitted';
+  if (mode === 'unstaged')
+    return { args: [], includeUntracked: true, transientSensitive: true };
+  if (mode === 'staged') {
+    return {
+      args: ['--cached'],
+      includeUntracked: false,
+      transientSensitive: true,
+    };
+  }
+  if (mode === 'uncommitted') {
+    return { args: ['HEAD'], includeUntracked: true, transientSensitive: true };
+  }
+  if (!options?.ref) return null;
+
+  if (mode === 'branch') {
+    const target = await resolveCommitRef(gitRoot, options.ref, true);
+    if (!target) return null;
+    return {
+      args: [target],
+      includeUntracked: true,
+      untrackedBaseRef: target,
+      transientSensitive: true,
+    };
+  }
+  // Runtime guard for callers that parse untyped input (daemon query
+  // strings): without a default rejection an unknown mode with a resolvable
+  // ref would fall through into the commit comparison below.
+  if (mode !== 'commit') return null;
+
+  const target = await resolveCommitRef(gitRoot, options.ref);
+  if (!target) return null;
+  const parent = await resolveCommitRef(gitRoot, `${target}^1`);
+  if (parent)
+    return {
+      args: [parent, target],
+      includeUntracked: false,
+      transientSensitive: false,
+    };
+  const commitObject = await runGit(['cat-file', 'commit', target], gitRoot);
+  if (commitObject == null) return null;
+  const headerEnd = commitObject.indexOf('\n\n');
+  const headers = commitObject.slice(
+    0,
+    headerEnd === -1 ? commitObject.length : headerEnd,
+  );
+  if (/^parent [0-9a-f]{40,64}$/im.test(headers)) return null;
+  const emptyTree = (
+    await runGit(['hash-object', '-t', 'tree', '--stdin'], gitRoot, '')
+  )?.trim();
+  return emptyTree && /^[0-9a-f]{40,64}$/i.test(emptyTree)
+    ? {
+        args: [emptyTree, target],
+        includeUntracked: false,
+        transientSensitive: false,
+      }
+    : null;
+}
+
+async function resolveCommitRef(
+  gitRoot: string,
+  ref: string,
+  preferBranches = false,
+): Promise<string | null> {
+  // Git's bare-name disambiguation prefers refs/tags/ over refs/heads/, but
+  // a branch-mode ref names a branch: resolve an unqualified ref through
+  // refs/heads/ first so a same-named tag cannot steal the comparison.
+  if (preferBranches && !ref.startsWith('refs/')) {
+    const viaHeads = await resolveCommitRef(gitRoot, `refs/heads/${ref}`);
+    if (viaHeads) return viaHeads;
+  }
+  const resolved = (
+    await runGit(
+      ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+      gitRoot,
+    )
+  )?.trim();
+  return resolved && /^[0-9a-f]{40,64}$/i.test(resolved) ? resolved : null;
 }
 
 /**
@@ -426,21 +746,48 @@ function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
   return rel;
 }
 
+/** Drop a trailing incomplete UTF-8 sequence (at most 3 bytes) left when a
+ *  byte-capped read cuts a multi-byte character, returning the last offset
+ *  that ends on a character boundary. Content ending on a complete sequence
+ *  is returned unchanged; an invalid lead byte is left for the validator. */
+function trimPartialUtf8Sequence(buf: Buffer, end: number): number {
+  for (let back = 1; back <= 3 && back <= end; back++) {
+    const byte = buf[end - back] ?? 0;
+    if ((byte & 0xc0) === 0x80) continue;
+    // 0xC0/0xC1 and 0xF5-0xF7 can never start a valid sequence, so they are
+    // not partial leads — leave them for the validator to reject.
+    const leadLength =
+      byte < 0x80
+        ? 1
+        : byte >= 0xc2 && byte < 0xe0
+          ? 2
+          : byte >= 0xe0 && byte < 0xf0
+            ? 3
+            : byte >= 0xf0 && byte < 0xf5
+              ? 4
+              : 0;
+    if (leadLength === 0) return end;
+    return back >= leadLength ? end : end - back;
+  }
+  return end;
+}
+
 /**
- * Build a single all-added hunk from an untracked file's content, capped by
- * `MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE` — `truncated` reports when
- * either cap actually cut content, so the caller can say so instead of
- * presenting a silently incomplete file. Binary or unreadable files return
- * `null` so the caller surfaces them without an inline diff.
+ * Read an untracked worktree file as text under the line-counting safeguards:
+ * regular files only (`ls-files --others` can list FIFOs whose open() blocks
+ * forever waiting on a writer), `O_NOFOLLOW`, the `MAX_DIFF_SIZE_BYTES` read
+ * cap, and the NUL sniff that rejects binary content (the same 8 KB window git
+ * uses). `truncated` reports when the byte cap cut content. With `strict`,
+ * invalid UTF-8 is rejected instead of lossily decoded to U+FFFD — the
+ * collision comparison needs byte-faithful text so two byte-distinct files
+ * cannot decode to identical strings and drop the row.
  */
-async function synthesizeUntrackedHunk(
+async function readWorktreeTextFile(
   gitRoot: string,
   filePath: string,
-): Promise<GitDiffFileHunks | null> {
+  strict = false,
+): Promise<{ text: string; truncated: boolean } | null> {
   const absPath = path.join(gitRoot, filePath);
-  // lstat before open: `ls-files --others` can list FIFOs whose open() blocks
-  // forever waiting on a writer. Gate on regular files (as countUntrackedLines
-  // does) so expanding an untracked FIFO can't hang the daemon's event loop.
   try {
     const lst = await lstat(absPath);
     if (!lst.isFile()) return null;
@@ -464,34 +811,508 @@ async function synthesizeUntrackedHunk(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    // Binary sniff on the same window git uses (a NUL in the first 8 KB).
     const sniffEnd = Math.min(offset, BINARY_SNIFF_BYTES);
     for (let i = 0; i < sniffEnd; i++) {
       if (buf[i] === 0) return null;
     }
-    const lines = buf.toString('utf8', 0, offset).split('\n');
-    // Drop the trailing empty element produced by a final newline.
-    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-    const capped = lines.slice(0, MAX_LINES_PER_FILE);
-    const truncated =
-      st.size > MAX_DIFF_SIZE_BYTES || lines.length > capped.length;
-    if (capped.length === 0) return { hunks: [], truncated };
+    // A byte-capped read can cut a multi-byte UTF-8 sequence in half; the
+    // trailing partial bytes would fail strict validation (and decode to a
+    // stray U+FFFD otherwise), so drop them before validating and decoding.
+    const end =
+      st.size > MAX_DIFF_SIZE_BYTES
+        ? trimPartialUtf8Sequence(buf, offset)
+        : offset;
+    if (strict && !isUtf8(buf.subarray(0, end))) return null;
     return {
-      hunks: [
-        {
-          oldStart: 0,
-          oldLines: 0,
-          newStart: 1,
-          newLines: capped.length,
-          lines: capped.map((line) => '+' + line),
-        },
-      ],
-      truncated,
+      text: buf.toString('utf8', 0, end),
+      truncated: st.size > MAX_DIFF_SIZE_BYTES,
     };
   } catch {
     return null;
   } finally {
     await fh.close().catch(() => {});
+  }
+}
+
+/**
+ * Worktree side of a collision comparison. A symlink stands in for its blob
+ * directly — a symlink's blob content is exactly its target string, so
+ * comparing targets is the true base-vs-worktree comparison (`readWorktreeTextFile`
+ * rejects non-regular files); regular files go through the strict text read.
+ */
+async function readWorktreeCollisionSide(
+  gitRoot: string,
+  relPath: string,
+): Promise<{ text: string; truncated: boolean } | null> {
+  const absPath = path.join(gitRoot, relPath);
+  let lst;
+  try {
+    lst = await lstat(absPath);
+  } catch {
+    return null;
+  }
+  if (lst.isSymbolicLink()) {
+    let target: Buffer;
+    try {
+      target = await readlink(absPath, { encoding: 'buffer' });
+    } catch {
+      return null;
+    }
+    if (!isUtf8(target)) return null;
+    return { text: target.toString('utf8'), truncated: false };
+  }
+  return readWorktreeTextFile(gitRoot, relPath, true);
+}
+
+/**
+ * Build a single all-added hunk from an untracked file's content, capped by
+ * `MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE` — `truncated` reports when
+ * either cap actually cut content, so the caller can say so instead of
+ * presenting a silently incomplete file. Binary or unreadable files return
+ * `null` so the caller surfaces them without an inline diff.
+ */
+async function synthesizeUntrackedHunk(
+  gitRoot: string,
+  filePath: string,
+): Promise<GitDiffFileHunks | null> {
+  const read = await readWorktreeTextFile(gitRoot, filePath);
+  if (read === null) return null;
+  const lines = read.text.split('\n');
+  // Drop the trailing empty element produced by a final newline.
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const capped = lines.slice(0, MAX_LINES_PER_FILE);
+  const truncated = read.truncated || lines.length > capped.length;
+  if (capped.length === 0) return { hunks: [], truncated };
+  return {
+    hunks: [
+      {
+        oldStart: 0,
+        oldLines: 0,
+        newStart: 1,
+        newLines: capped.length,
+        lines: capped.map((line) => '+' + line),
+      },
+    ],
+    truncated,
+  };
+}
+
+/** `ls-tree -z` token format: `<mode> <type> <sha>\t<path>`. Records blob
+ *  AND gitlink (commit) entries — both are baseline-tracked paths a phantom
+ *  deletion can hide behind — but not tree entries: a directory at the same
+ *  path must NOT classify a worktree file as baseline-tracked. Records the
+ *  entry mode per path so collision re-accounting can detect pure mode
+ *  changes. */
+function collectBlobEntries(
+  lsTreeOut: string,
+  into: Map<string, string>,
+): void {
+  for (const token of lsTreeOut.split('\0')) {
+    if (!token) continue;
+    const tab = token.indexOf('\t');
+    if (tab < 0) continue;
+    const header = token.slice(0, tab);
+    const space = header.indexOf(' ');
+    if (space < 0) continue;
+    const type = header.slice(space + 1).split(' ')[0];
+    if (type !== 'blob' && type !== 'commit') continue;
+    into.set(token.slice(tab + 1), header.slice(0, space));
+  }
+}
+
+/** `ls-files --others` collapses an untracked embedded repository into a
+ *  trailing-slash directory entry (`sub/`) while diff/ls-tree name the same
+ *  logical path without the slash (`sub`); normalize before matching so a
+ *  baseline-tracked gitlink classifies as a collision instead of surfacing
+ *  as both a phantom deletion and an untracked directory row. */
+function stripTrailingDirSlash(filePath: string): string {
+  return filePath.endsWith('/') ? filePath.slice(0, -1) : filePath;
+}
+
+/**
+ * Which of `paths` exist as blob or gitlink entries in `baseRef`'s tree —
+ * via batched per-path `ls-tree` queries instead of a whole-tree `ls-tree -r`
+ * listing, which on a large baseline can overflow `runGit`'s maxBuffer or the
+ * git timeout before the diff even starts. Pathspecs carry the `:(literal)`
+ * magic so glob characters in filenames match exactly. Returns `null` when
+ * git fails.
+ */
+async function classifyPathsTrackedAtBase(
+  gitRoot: string,
+  baseRef: string,
+  paths: string[],
+): Promise<Map<string, string> | null> {
+  const tracked = new Map<string, string>();
+  // Chunk by argv byte volume, not path count alone: with long paths
+  // enabled, Windows' CreateProcessW caps the command line at 32,767
+  // characters, and one over-size chunk would fail the whole branch-mode
+  // classification (and with it the diff) closed.
+  const CHUNK_ARGV_BYTES = 30_000;
+  for (let i = 0; i < paths.length; ) {
+    const chunk: string[] = [];
+    let argvBytes = 0;
+    while (i < paths.length) {
+      // The `:(literal)` magic prefix plus the path bytes.
+      const argBytes = Buffer.byteLength(paths[i] ?? '', 'utf8') + 10;
+      if (chunk.length > 0 && argvBytes + argBytes > CHUNK_ARGV_BYTES) break;
+      chunk.push(paths[i] ?? '');
+      argvBytes += argBytes;
+      i++;
+    }
+    const out = await runGit(
+      [
+        '--no-optional-locks',
+        'ls-tree',
+        '-z',
+        baseRef,
+        '--',
+        ...chunk.map((filePath) => `:(literal)${filePath}`),
+      ],
+      gitRoot,
+    );
+    if (out == null) return null;
+    collectBlobEntries(out, tracked);
+  }
+  return tracked;
+}
+
+/** Single-path variant of {@link classifyPathsTrackedAtBase}. */
+async function isBlobTrackedAtBase(
+  gitRoot: string,
+  baseRef: string,
+  relPath: string,
+): Promise<boolean | null> {
+  const out = await runGit(
+    [
+      '--no-optional-locks',
+      'ls-tree',
+      '-z',
+      baseRef,
+      '--',
+      `:(literal)${relPath}`,
+    ],
+    gitRoot,
+  );
+  if (out == null) return null;
+  const tracked = new Map<string, string>();
+  collectBlobEntries(out, tracked);
+  return tracked.has(relPath);
+}
+
+/** Whether git lists the path as an untracked worktree file. Ignored paths
+ *  are excluded unless `includeIgnored` is set: branch-mode reroutes pass it
+ *  because a baseline-tracked path can be untracked AND ignored (the
+ *  `git rm --cached` + .gitignore recipe) and still collide. Returns `null`
+ *  when git itself fails — callers must not fold that into `false`. */
+async function isUntrackedWorktreePath(
+  gitRoot: string,
+  relPath: string,
+  includeIgnored = false,
+): Promise<boolean | null> {
+  const out = await runGit(
+    [
+      '--no-optional-locks',
+      'ls-files',
+      '-z',
+      '--others',
+      ...(includeIgnored ? [] : ['--exclude-standard']),
+      '--',
+      `:(literal)${relPath}`,
+    ],
+    gitRoot,
+  );
+  if (out == null) return null;
+  // An exact-entry match, not "any match under the pathspec": a pathspec also
+  // matches every descendant path (an untracked `a/x` would otherwise make
+  // `a` test true and reroute a real deletion of the file `a`), and the
+  // `:(literal)` magic keeps glob metacharacters in the name from matching
+  // sibling files. Both sides normalize the trailing slash `ls-files
+  // --others` uses to collapse an untracked embedded repository (`sub/`) —
+  // it still denotes the directory itself, not a descendant.
+  const normalized = stripTrailingDirSlash(relPath);
+  return splitNulDelimited(out).some(
+    (entry) => stripTrailingDirSlash(entry) === normalized,
+  );
+}
+
+/** Cut patch hunks at `MAX_LINES_PER_FILE` content lines, mirroring
+ *  `parseGitDiff`'s truncation for tracked diffs. */
+function capPatchHunks(hunks: Hunk[]): {
+  hunks: Hunk[];
+  truncated: boolean;
+} {
+  let budget = MAX_LINES_PER_FILE;
+  let truncated = false;
+  const capped: Hunk[] = [];
+  for (const hunk of hunks) {
+    if (budget <= 0) {
+      truncated = true;
+      break;
+    }
+    if (hunk.lines.length <= budget) {
+      capped.push(hunk);
+      budget -= hunk.lines.length;
+      continue;
+    }
+    truncated = true;
+    capped.push({ ...hunk, lines: hunk.lines.slice(0, budget) });
+    budget = 0;
+  }
+  return { hunks: capped, truncated };
+}
+
+interface BaseWorktreeDiff {
+  added: number;
+  removed: number;
+  hunks: Hunk[];
+  truncated: boolean;
+}
+
+/**
+ * Diff the baseline blob against the worktree copy of an untracked path — the
+ * true comparison behind branch mode's phantom deletions. Returns `null` when
+ * either side is binary or unreadable, or the blob read fails.
+ */
+async function diffBaseBlobAgainstWorktree(
+  gitRoot: string,
+  baseRef: string,
+  relPath: string,
+): Promise<BaseWorktreeDiff | null> {
+  // The object spec starts with the resolved hex sha, so it can never be
+  // parsed as an option regardless of the path's characters. Read raw bytes:
+  // decoding through `toString('utf8')` replaces invalid byte sequences with
+  // U+FFFD, which could make two distinct blobs compare as identical text.
+  const baseRaw = await runGitBuffer(
+    ['--no-optional-locks', 'cat-file', 'blob', `${baseRef}:${relPath}`],
+    gitRoot,
+  );
+  if (baseRaw === null) return null;
+  // Byte-accurate NUL sniff (git's own 8 KB heuristic). Measuring the window
+  // in UTF-16 code units would scan strictly more than 8 KB of bytes for
+  // multi-byte content and mislabel real text blobs as binary.
+  if (baseRaw.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return null;
+  // Cap the baseline side in BYTES, mirroring `readWorktreeTextFile` on the
+  // worktree side, BEFORE validating: bytes past the cap are never decoded,
+  // and validating them would classify a valid capped prefix with an invalid
+  // trailer as binary while the worktree side only validates its capped
+  // prefix. Slicing a decoded string would count UTF-16 code units (up to
+  // ~3x the byte budget for CJK content) and truncate the two sides of the
+  // same diff asymmetrically — identical large files could then compare as
+  // changed because their prefixes differ. The cap can split a multi-byte
+  // sequence, so drop the trailing partial bytes first (the worktree side
+  // trims the same way).
+  const baseTruncated = baseRaw.length > MAX_DIFF_SIZE_BYTES;
+  const baseBytes = baseTruncated
+    ? baseRaw.subarray(0, trimPartialUtf8Sequence(baseRaw, MAX_DIFF_SIZE_BYTES))
+    : baseRaw;
+  // Strict UTF-8 validation — invalid text is treated as binary instead of
+  // being lossily decoded (see the baseRaw read above).
+  if (!isUtf8(baseBytes)) return null;
+  const worktree = await readWorktreeCollisionSide(gitRoot, relPath);
+  if (worktree === null) return null;
+  const baseText = baseBytes.toString('utf8');
+  // @types/diff does not declare the runtime-supported `timeout` option yet.
+  const patchOptions: PatchOptions & { timeout: number } = {
+    context: 3,
+    timeout: COLLISION_PATCH_TIMEOUT_MS,
+    // Tracked rows in the same view follow git's clean/smudge EOL semantics,
+    // so the collision comparison must too: with line-ending conversion active
+    // (`core.autocrlf`, `.gitattributes` eol), a git-unchanged file differs
+    // only by trailing CRs and would otherwise show as a whole-file rewrite.
+    stripTrailingCr: true,
+  };
+  let patch: ParsedDiff | undefined;
+  try {
+    patch = structuredPatch(
+      relPath,
+      relPath,
+      baseText,
+      worktree.text,
+      '',
+      '',
+      patchOptions,
+    );
+  } catch {
+    return null;
+  }
+  // With `timeout`, an aborted diff yields `undefined` instead of throwing.
+  if (!patch) return null;
+  let added = 0;
+  let removed = 0;
+  for (const hunk of patch.hunks) {
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) added++;
+      else if (line.startsWith('-')) removed++;
+    }
+  }
+  const { hunks, truncated } = capPatchHunks(patch.hunks);
+  return {
+    added,
+    removed,
+    hunks,
+    truncated: truncated || worktree.truncated || baseTruncated,
+  };
+}
+
+/**
+ * Hunks for a path that is untracked in the worktree under branch mode: the
+ * baseline blob vs the worktree content when the baseline tracks the path (a
+ * modified row), or the usual all-added synthesis otherwise.
+ */
+async function branchModeUntrackedHunks(
+  gitRoot: string,
+  baseRef: string,
+  relPath: string,
+): Promise<GitDiffFileHunks | null> {
+  const trackedAtBase = await isBlobTrackedAtBase(gitRoot, baseRef, relPath);
+  if (trackedAtBase === null) return null;
+  if (!trackedAtBase) {
+    // All-added synthesis is for visible new files: an ignored path the
+    // baseline does not track appears in no comparison row, so it must not
+    // grow hunks here even though the ignore-inclusive reroute can reach it.
+    if (!(await isUntrackedWorktreePath(gitRoot, relPath))) return null;
+    return synthesizeUntrackedHunk(gitRoot, relPath);
+  }
+  const row = await diffBaseBlobAgainstWorktree(gitRoot, baseRef, relPath);
+  if (row === null) return null;
+  return { hunks: row.hunks, truncated: row.truncated };
+}
+
+/**
+ * Re-account paths the baseline branch tracks but the worktree holds
+ * untracked. `git diff <baseline>` proxies the worktree through the index and
+ * reports such paths as phantom deletions (numstat `0\tN` rows, status `D`);
+ * the real worktree-vs-baseline state is the baseline blob diffed against the
+ * on-disk file. Subtract each phantom row and re-add the path once with the
+ * true added/removed counts (or a binary marker when either side is
+ * unreadable), keeping the single-row-per-path accounting.
+ */
+async function applyBaselineCollisions(
+  gitRoot: string,
+  baseRef: string,
+  collisionPaths: string[],
+  baseModes: ReadonlyMap<string, string>,
+  numstatOut: string,
+  stats: GitDiffStats,
+  perFileStats: Map<string, PerFileStats>,
+): Promise<void> {
+  const collisionSet = new Set(collisionPaths);
+  // Rename rows are keyed by the NEW path — an index entry, never an
+  // untracked collision — so they cannot BE one; but rename detection can
+  // ABSORB a collision path's phantom deletion when the recreated old content
+  // pairs with an added path. Record both shapes: plain deletion rows go into
+  // `phantom`, absorbed renames into `renameAbsorbed` so the loop can convert
+  // the surviving rename row into a plain addition of the new path.
+  const phantom = new Map<string, { added: number; removed: number }>();
+  const renameAbsorbed = new Map<
+    string,
+    { newPath: string; added: number; removed: number }
+  >();
+  forEachNumstatEntry(numstatOut, (entry) => {
+    if (entry.oldPath) {
+      if (collisionSet.has(entry.oldPath)) {
+        renameAbsorbed.set(entry.oldPath, {
+          newPath: entry.path,
+          added: entry.added,
+          removed: entry.removed,
+        });
+      }
+      return;
+    }
+    if (collisionSet.has(entry.path)) {
+      phantom.set(entry.path, { added: entry.added, removed: entry.removed });
+    }
+  });
+
+  for (const relPath of collisionPaths) {
+    const stale = phantom.get(relPath);
+    if (stale) {
+      stats.filesCount -= 1;
+      stats.linesAdded -= stale.added;
+      stats.linesRemoved -= stale.removed;
+    }
+    perFileStats.delete(relPath);
+    const absorbed = renameAbsorbed.get(relPath);
+    if (absorbed) {
+      // The rename row stays one file but loses its rename framing: the
+      // baseline does not track the new path, so against the baseline the
+      // true comparison is a plain addition of its worktree content — and
+      // "renamed from <relPath>" would contradict the collision row the loop
+      // re-adds under the old path.
+      stats.linesAdded -= absorbed.added;
+      stats.linesRemoved -= absorbed.removed;
+      const lines = await countUntrackedLines(
+        path.join(gitRoot, absorbed.newPath),
+      );
+      stats.linesAdded += lines.added;
+      if (perFileStats.has(absorbed.newPath) || perFileStats.size < MAX_FILES) {
+        perFileStats.set(absorbed.newPath, {
+          added: lines.added,
+          removed: 0,
+          isBinary: lines.isBinary,
+          truncated: lines.truncated,
+        });
+      }
+    }
+    const row = await diffBaseBlobAgainstWorktree(gitRoot, baseRef, relPath);
+    if (row === null) {
+      // Binary or unreadable on either side: keep one opaque row.
+      stats.filesCount += 1;
+      if (perFileStats.size < MAX_FILES) {
+        perFileStats.set(relPath, { added: 0, removed: 0, isBinary: true });
+      }
+      continue;
+    }
+    // Identical content: the file is unchanged against the baseline, so the
+    // phantom row is dropped without a replacement — but only when the
+    // comparison covered the whole file (`row.truncated` means "no diff
+    // within the compared prefix", not "identical") and the file type/mode
+    // also matches. Git reports a pure mode flip (executable bit, symlink →
+    // regular file) as a 0/0 row; dropping it would hide the metadata change.
+    if (
+      row.added === 0 &&
+      row.removed === 0 &&
+      !row.truncated &&
+      (await worktreeModeMatchesBase(gitRoot, relPath, baseModes.get(relPath)))
+    ) {
+      continue;
+    }
+    stats.filesCount += 1;
+    stats.linesAdded += row.added;
+    stats.linesRemoved += row.removed;
+    if (perFileStats.size < MAX_FILES) {
+      perFileStats.set(relPath, {
+        added: row.added,
+        removed: row.removed,
+        isBinary: false,
+        truncated: row.truncated,
+      });
+    }
+  }
+}
+
+/**
+ * Whether the worktree file's type/mode matches the baseline blob's mode.
+ * Git tracks only the executable bit for regular files; a baseline symlink
+ * (mode 120000) matches only a symlink worktree path. Returns `false` —
+ * keeping the row — when either side cannot be determined.
+ */
+async function worktreeModeMatchesBase(
+  gitRoot: string,
+  relPath: string,
+  baseMode: string | undefined,
+): Promise<boolean> {
+  if (baseMode !== '100644' && baseMode !== '100755' && baseMode !== '120000')
+    return false;
+  try {
+    const st = await lstat(path.join(gitRoot, relPath));
+    if (baseMode === '120000') return st.isSymbolicLink();
+    if (!st.isFile()) return false;
+    // Git canonicalizes modes from the owner-exec bit only (0o100); group or
+    // other exec bits never reach a tracked mode.
+    return (st.mode & 0o100 ? '100755' : '100644') === baseMode;
+  } catch {
+    return false;
   }
 }
 
@@ -883,8 +1704,8 @@ export function parseShortstat(stdout: string): GitDiffStats | null {
 }
 
 /**
- * Parse `git diff HEAD --name-status -z` output and return the paths whose
- * status is `D` (deleted in the worktree).
+ * Parse `git diff --name-status -z` output and return the paths whose status is
+ * `D` (deleted relative to the comparison base).
  *
  * Wire format with `-z`: `<status>\0<path>\0` per entry, except renames and
  * copies which span three tokens: `R<score>\0<oldpath>\0<newpath>\0` (and
@@ -915,13 +1736,37 @@ export function parseDeletedFromNameStatus(stdout: string): Set<string> {
   return deleted;
 }
 
-function countNulDelimited(stdout: string | null): number {
-  if (!stdout) return 0;
-  let count = 0;
-  for (let i = 0; i < stdout.length; i++) {
-    if (stdout.charCodeAt(i) === 0) count++;
+/**
+ * Parse `git diff --name-status -z` output and return every path that can
+ * surface as a branch-mode phantom deletion: the `D` rows plus the OLD side
+ * of rename/copy rows (rename detection can absorb a collision path's
+ * deletion into the paired addition). Bounds the collision classification —
+ * no other path can produce a phantom row.
+ */
+export function parsePhantomCandidatePaths(stdout: string): Set<string> {
+  const tokens = stdout.split('\0');
+  if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+
+  const candidates = new Set<string>();
+  let i = 0;
+  while (i < tokens.length) {
+    const status = tokens[i] ?? '';
+    i++;
+    if (status === '') continue;
+    const head = status[0];
+    // Rename / copy entries carry TWO path tokens; the old one is the
+    // deletion candidate.
+    if (head === 'R' || head === 'C') {
+      const oldPath = tokens[i] ?? '';
+      if (oldPath !== '') candidates.add(oldPath);
+      i += 2;
+      continue;
+    }
+    const path = tokens[i] ?? '';
+    i++;
+    if (head === 'D' && path !== '') candidates.add(path);
   }
-  return count;
+  return candidates;
 }
 
 function splitNulDelimited(stdout: string | null): string[] {
@@ -1127,23 +1972,85 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function runGit(args: string[], cwd: string): Promise<string | null> {
+async function runGit(
+  args: string[],
+  cwd: string,
+  input?: string,
+): Promise<string | null> {
   // `core.quotepath=false` keeps non-ASCII filenames as UTF-8 in git's output
   // instead of octal-escaping them (`\346\226\207.txt`), which would otherwise
-  // end up as literal keys in `perFileStats`.
-  const fullArgs = ['-c', 'core.quotepath=false', ...args];
-  try {
-    const { stdout } = await execFileAsync('git', fullArgs, {
-      cwd,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 64 * 1024 * 1024,
-      windowsHide: true,
-      encoding: 'utf8',
-    });
-    return stdout;
-  } catch {
-    return null;
-  }
+  // end up as literal keys in `perFileStats`. `diff.renames=true` pins rename
+  // detection against ambient config (`diff.renames=false` in the user's
+  // global gitconfig would otherwise split rename rows into delete+add and
+  // change both the stats and the collision re-accounting that keys on
+  // `oldPath`); inert for the non-diff commands run through here.
+  const fullArgs = [
+    '-c',
+    'core.quotepath=false',
+    '-c',
+    'diff.renames=true',
+    ...args,
+  ];
+  return await new Promise((resolve) => {
+    let child: ReturnType<typeof execFile>;
+    try {
+      child = execFile(
+        'git',
+        fullArgs,
+        {
+          cwd,
+          timeout: GIT_TIMEOUT_MS,
+          maxBuffer: 64 * 1024 * 1024,
+          windowsHide: true,
+          encoding: 'utf8',
+        },
+        (error, stdout) => resolve(error ? null : stdout),
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
+    if (input !== undefined) {
+      // A child that rejects (or exits) without draining stdin turns the
+      // write into an unhandled stdin 'error' event (EPIPE) and crashes the
+      // process; the failure itself is still reported through the exit code.
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(input);
+    }
+  });
+}
+
+/** Raw-byte variant for content that must not be lossily UTF-8 decoded. */
+async function runGitBuffer(
+  args: string[],
+  cwd: string,
+): Promise<Buffer | null> {
+  const fullArgs = [
+    '-c',
+    'core.quotepath=false',
+    '-c',
+    'diff.renames=true',
+    ...args,
+  ];
+  return await new Promise((resolve) => {
+    try {
+      execFile(
+        'git',
+        fullArgs,
+        {
+          cwd,
+          timeout: GIT_TIMEOUT_MS,
+          maxBuffer: 64 * 1024 * 1024,
+          windowsHide: true,
+          encoding: 'buffer',
+        },
+        (error, stdout) => resolve(error ? null : stdout),
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
+  });
 }
 
 /** An in-progress git operation that the status indicator should surface. */

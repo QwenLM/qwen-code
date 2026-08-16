@@ -5,8 +5,10 @@
  */
 
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
+import { findGitRoot } from './gitUtils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -143,7 +145,7 @@ export async function fetchGitBranches(
       ],
       env,
     ).catch(() => ''),
-    runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env).catch(() => ''),
+    readHeadBranchName(cwd, env),
     runGit(
       cwd,
       ['reflog', 'show', '--format=%gs', `-${MAX_REFLOG_ENTRIES}`],
@@ -267,6 +269,62 @@ async function getDetachedHead(
 }
 
 /**
+ * The branch HEAD points at, or '' when detached. Reads the full symbolic
+ * ref and strips the prefix: unlike `symbolic-ref --short`, which shortens
+ * to the shortest unambiguous name and reports `heads/<branch>` when a tag
+ * of the same name exists, the full form always yields the real branch
+ * name. Every checkout-internal decision (landing checks, rollback
+ * targets, reported results) must use this form, or a colliding-ref repo
+ * resolves the wrong ref.
+ */
+async function readHeadBranchName(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  const raw = (
+    await runGit(cwd, ['symbolic-ref', '--quiet', 'HEAD'], env).catch(() => '')
+  ).trim();
+  return raw.startsWith('refs/heads/') ? raw.slice('refs/heads/'.length) : raw;
+}
+
+/**
+ * The attached branch HEAD points at, tri-state for landing verification:
+ * '' means detached, a read failure THROWS. `readHeadBranchName` swallows
+ * failures into the same '' as a detached HEAD, which `checkoutLanded`
+ * cannot distinguish — a swallowed transient failure there could flip a
+ * landed switch into a rollback. `branch --show-current` exits zero with
+ * empty output on a detached HEAD and reports the full branch name without
+ * the colliding-ref lengthening `--abbrev-ref` applies.
+ */
+async function readCurrentBranchName(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return (await runGit(cwd, ['branch', '--show-current'], env)).trim();
+}
+
+/**
+ * The number of entries in HEAD's reflog, or 0 when it cannot be read
+ * (unborn HEAD, reflogging disabled). Snapshotted before a checkout step:
+ * entries added afterwards belong to the step and any hooks it ran — the
+ * per-repository checkout serialization holds across snapshot, step, and
+ * hooks, so no other daemon checkout can interleave — and they are the
+ * evidence of the step's moves even when a hook moves HEAD away again.
+ */
+async function headReflogCount(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<number> {
+  const out = (
+    await runGit(cwd, ['rev-list', '--count', '-g', 'HEAD'], env).catch(
+      () => '',
+    )
+  ).trim();
+  const count = parseInt(out, 10);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+/**
  * Whether `value` is safe to pass to git as a checkout target or branch start
  * point: a plausible ref name (branch, tag, or short/full SHA) that cannot be
  * mistaken for a git option (`-f`, `--patch`, `--output=…`) or a pathspec (`.`)
@@ -286,11 +344,272 @@ export interface GitCheckoutResult {
   detached: boolean;
 }
 
+interface CheckoutLanding {
+  /** Branch HEAD should be on after the switch (branch/DWIM targets). */
+  branch?: string;
+  /** Ref whose commit HEAD should point at (branch, tag, or SHA targets). */
+  commitRef?: string;
+}
+
+interface CheckoutOriginal {
+  /** Branch HEAD was on before the step ('' when detached). */
+  ref: string;
+  /** Commit HEAD pointed at before the step ('' when attached). */
+  commit: string;
+  /** HEAD was unborn before the step (no commit resolved). */
+  unborn: boolean;
+  /** HEAD's reflog length before the step (see headReflogCount). */
+  reflogCount: number;
+}
+
+// Checkouts are serialized per REPOSITORY, not per request cwd: git
+// operations from any workspace-contained subdirectory act on the same HEAD
+// and reflog, so keying the queue on the raw cwd would run two spellings of
+// one repository (root vs subdirectory, or a symlinked path) in parallel.
+// The reflog attribution below cannot tell this step's entries apart from a
+// CONCURRENT same-target checkout's, so without one queue per repository a
+// failed step could pass its movement proof on the other step's entry and
+// its rollback would undo a concurrent successful switch.
+const checkoutSerializers = new Map<string, Promise<void>>();
+
+/**
+ * The queue key for a checkout from `cwd`: the repository root, so every cwd
+ * spelling that acts on the same repository shares one queue. Resolves
+ * symlinks first so aliased spellings of the same path converge too. A path
+ * that is not inside a repository (the checkout will fail with a clearer
+ * error) or cannot be resolved keys on its raw spelling.
+ */
+function checkoutSerializerKey(cwd: string): string {
+  let start = cwd;
+  try {
+    start = realpathSync(cwd);
+  } catch {
+    // Leave `start` on the raw spelling; the fallback below keys on it.
+  }
+  return findGitRoot(start) ?? start;
+}
+
+function serializeCheckout<T>(cwd: string, work: () => Promise<T>): Promise<T> {
+  const key = checkoutSerializerKey(cwd);
+  const previous = checkoutSerializers.get(key) ?? Promise.resolve();
+  const result = previous.then(work);
+  const settled: Promise<void> = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  checkoutSerializers.set(key, settled);
+  void settled.then(() => {
+    if (checkoutSerializers.get(key) === settled) {
+      checkoutSerializers.delete(key);
+    }
+  });
+  return result;
+}
+
+/**
+ * Run one `git checkout` step, absorbing a failing post-checkout hook: git
+ * runs that hook AFTER HEAD has moved and exits non-zero when it fails, even
+ * though the switch itself completed. Verify where HEAD landed instead of
+ * trusting the exit code: on the expected target the step is treated as
+ * successful so callers report (and refresh) the real state; anywhere else
+ * roll back to the captured original HEAD and rethrow, so a failed checkout
+ * never leaves the workspace half-moved. When the landing verification
+ * itself cannot run (a transient read failure), neither outcome is provable:
+ * absorb nothing and roll nothing back, so a read failure can never convert
+ * a landed switch into a rollback.
+ */
+async function runCheckoutStep(
+  cwd: string,
+  args: string[],
+  landing: CheckoutLanding,
+  original: CheckoutOriginal,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  try {
+    await runGit(cwd, args, env);
+    return;
+  } catch (err) {
+    let landed: boolean;
+    try {
+      landed = await checkoutLanded(cwd, landing, original, env);
+    } catch {
+      throw err;
+    }
+    if (landed) return;
+    // Roll back only when HEAD's reflog records this step's checkout among
+    // the entries added since the pre-step snapshot — the evidence that the
+    // step moved HEAD before failing. Without that proof a merely refused
+    // checkout would restore its stale snapshot over a concurrent checkout
+    // that legitimately landed HEAD elsewhere in the meantime, undoing a
+    // successful switch.
+    if (await checkoutMovedHead(cwd, landing, original, env)) {
+      if (original.ref) {
+        await runGit(cwd, ['checkout', original.ref, '--'], env).catch(
+          (rollbackErr) => {
+            // A refused restore leaves the workspace half-moved against the
+            // captured original; surface it instead of failing silently.
+            // eslint-disable-next-line no-console
+            console.error('git checkout rollback failed:', rollbackErr);
+          },
+        );
+      } else if (original.commit) {
+        await runGit(
+          cwd,
+          ['checkout', '--detach', original.commit, '--'],
+          env,
+        ).catch((rollbackErr) => {
+          // eslint-disable-next-line no-console
+          console.error('git checkout rollback failed:', rollbackErr);
+        });
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Whether HEAD's reflog records this step's checkout as a move to
+ * `landing`. Matches among the entries added after the pre-step snapshot
+ * count, not just the newest one: a failing post-checkout hook can run its
+ * own `git checkout`, moving HEAD again and leaving ITS entry newest — a
+ * newest-only scan would miss the step's entry, which is still present, and
+ * away. The per-repository checkout serialization covers the snapshot, the
+ * step, and its hooks, so every post-snapshot entry belongs to them. Hook
+ * entries of another shape (empty-message `symbolic-ref`, `update-ref -m`)
+ * do not match the checkout form. With reflogging disabled there is no
+ * evidence the step moved HEAD, so this stays `false`.
+ */
+async function checkoutMovedHead(
+  cwd: string,
+  landing: CheckoutLanding,
+  original: CheckoutOriginal,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  if (!landing.branch) return false;
+  const fresh = (await headReflogCount(cwd, env)) - original.reflogCount;
+  if (fresh <= 0) return false;
+  const out = await runGit(
+    cwd,
+    ['reflog', '--format=%gs', `-${fresh}`, 'HEAD'],
+    env,
+  ).catch(() => '');
+  const suffix = ` to ${landing.branch}`;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('checkout: moving from ') && line.endsWith(suffix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The commit `landing` points at, or '' when the landing expects a local
+ * branch that does not exist yet the bare ref still resolves (tag/SHA
+ * targets fall through to the bare `commitRef`). The final resolution THROWS
+ * on a git failure: `checkoutLanded` must not mistake a transient read
+ * failure for "the target does not resolve", which would report a landed
+ * detached switch as not landed and roll it back.
+ */
+async function resolveLandingCommit(
+  cwd: string,
+  landing: CheckoutLanding,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  // `git checkout <name>` resolves a colliding name to the LOCAL BRANCH, but
+  // a bare `rev-parse` prefers refs/tags/: resolve through refs/heads/ first
+  // when the landing expects a branch, so the landing check compares against
+  // the same target the switch used. A miss here is expected (tag/SHA
+  // landings carry no refs/heads/ entry), so it falls through instead of
+  // failing the verification.
+  if (landing.branch) {
+    const viaHeads = (
+      await runGit(
+        cwd,
+        [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          `refs/heads/${landing.branch}^{commit}`,
+        ],
+        env,
+      ).catch(() => '')
+    ).trim();
+    if (viaHeads) return viaHeads;
+  }
+  if (!landing.commitRef) return '';
+  return (
+    await runGit(
+      cwd,
+      [
+        'rev-parse',
+        '--verify',
+        '--end-of-options',
+        `${landing.commitRef}^{commit}`,
+      ],
+      env,
+    )
+  ).trim();
+}
+
+async function checkoutLanded(
+  cwd: string,
+  landing: CheckoutLanding,
+  original: CheckoutOriginal,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  // Every read here is tri-state: a transient git failure THROWS, and
+  // `runCheckoutStep` treats the throw as "landing unproven" — no absorb and
+  // no rollback. '' is a real state in this comparison (detached/unborn), so
+  // a read failure swallowed into '' is indistinguishable from it, and
+  // concluding "not landed" from a failed read would roll back a switch that
+  // actually landed.
+  const [nowBranchRaw, nowCommitRaw, targetCommitRaw] = await Promise.all([
+    readCurrentBranchName(cwd, env),
+    runGit(cwd, ['rev-parse', 'HEAD'], env),
+    resolveLandingCommit(cwd, landing, env),
+  ]);
+  const nowCommit = nowCommitRaw.trim();
+  // Equality with the pre-step branch proves nothing for a born HEAD — it
+  // already held before the step ran, so absorbing the equality would report
+  // a refused switch as a success. An unborn HEAD is the exception: the
+  // equality gains meaning only when the step borned HEAD (a commit now
+  // resolves) — a fatally refused checkout leaves it unborn, so the
+  // unborn→born move is the proof the switch happened.
+  if (landing.branch && nowBranchRaw.trim() === landing.branch) {
+    return (
+      original.ref !== landing.branch || (original.unborn && nowCommit !== '')
+    );
+  }
+  // Commit equality only proves HEAD sits on the target commit, not that the
+  // requested switch happened. That is sufficient for detached landings
+  // (tag/SHA targets expect no branch); while HEAD is still attached to a
+  // branch the same equality held before the step ran, so absorbing it would
+  // report a refused switch as a success. The same holds when HEAD was
+  // ALREADY detached at the target commit before the step: a refused
+  // checkout leaves that exact state behind, so the pre-step snapshot must
+  // not match the target either.
+  if (nowBranchRaw.trim() !== '') return false;
+  const targetCommit = targetCommitRaw.trim();
+  if (targetCommit === '' || nowCommit !== targetCommit) return false;
+  return original.commit === '' || original.commit !== targetCommit;
+}
+
 /**
  * Checkout a branch, tag, or revision. Returns the resulting HEAD state.
- * Throws on dirty tree or invalid ref.
+ * Throws on dirty tree or invalid ref. Serialized per repository so
+ * concurrent checkouts acting on the same HEAD — from any cwd spelling
+ * inside it — cannot cross-contaminate each other's snapshot/landing/
+ * rollback window.
  */
-export async function gitCheckout(
+export function gitCheckout(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitCheckoutResult> {
+  return serializeCheckout(cwd, () => performCheckout(cwd, ref, env));
+}
+
+async function performCheckout(
   cwd: string,
   ref: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -298,19 +617,56 @@ export async function gitCheckout(
   if (!isValidCheckoutRef(ref)) {
     throw new Error(`invalid checkout ref: ${ref}`);
   }
+  // Fully qualified refs (what the Web Shell pickers submit) name the exact
+  // namespace of the row the user selected; a bare `git checkout <name>`
+  // re-resolves the short name and can land on a colliding ref instead.
+  // Normalize each namespace to the form the disambiguation below handles
+  // explicitly. `refs/tags/` stays qualified: git resolves it unambiguously
+  // and detaches, which is the tag semantic.
+  let headsQualified = false;
+  if (ref.startsWith('refs/heads/')) {
+    ref = ref.slice('refs/heads/'.length);
+    headsQualified = true;
+  } else if (ref.startsWith('refs/remotes/')) {
+    ref = ref.slice('refs/remotes/'.length);
+  }
+  if (!isValidCheckoutRef(ref)) {
+    throw new Error(`invalid checkout ref: ${ref}`);
+  }
+  // Snapshot HEAD before switching: `runCheckoutStep` needs it both to
+  // verify a hook-failed landing and to roll back a genuinely failed one.
+  const originalRef = await readHeadBranchName(cwd, env);
+  // Probed unconditionally: the unborn flag needs it even when attached (see
+  // checkoutLanded) — on an unborn HEAD branch equality alone cannot tell a
+  // refused checkout from a landed one.
+  const originalCommit = (
+    await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')
+  ).trim();
+  const original: CheckoutOriginal = {
+    ref: originalRef,
+    commit: originalRef ? '' : originalCommit,
+    unborn: originalCommit === '',
+    reflogCount: await headReflogCount(cwd, env),
+  };
   // A remote-tracking ref (remote/branch) needs more than a bare
   // `git checkout <branch>`: with two remotes carrying the same branch name
   // the bare name is ambiguous ("matched multiple remote tracking branches"),
   // and checking out the remote ref directly detaches HEAD. When no local
   // branch of that name exists yet, create one tracking the exact remote ref
   // so a fork layout (origin + upstream) lands on the clicked commit.
-  const isRemoteTracking = await runGit(
-    cwd,
-    ['show-ref', '--verify', '--quiet', `refs/remotes/${ref}`],
-    env,
-  )
-    .then(() => true)
-    .catch(() => false);
+  // Skip the probe when the input named refs/heads/ explicitly: a local
+  // branch whose slashed name mirrors a remote-tracking ref (a legal ref,
+  // listable in the pickers) must resolve as that local branch, not be
+  // rerouted down the tracking-checkout path of the mirror name.
+  const isRemoteTracking =
+    !headsQualified &&
+    (await runGit(
+      cwd,
+      ['show-ref', '--verify', '--quiet', `refs/remotes/${ref}`],
+      env,
+    )
+      .then(() => true)
+      .catch(() => false));
   if (isRemoteTracking) {
     const localName = ref.slice(ref.indexOf('/') + 1);
     if (!isValidCheckoutRef(localName)) {
@@ -326,28 +682,61 @@ export async function gitCheckout(
       .then(() => true)
       .catch(() => false);
     if (hasLocal) {
-      await runGit(cwd, ['checkout', localName, '--'], env);
+      await runCheckoutStep(
+        cwd,
+        ['checkout', localName, '--'],
+        { branch: localName, commitRef: localName },
+        original,
+        env,
+      );
     } else {
       // `--track` forces commit-ish interpretation of the verified
       // remote-tracking ref, so no pathspec terminator is needed.
-      await runGit(cwd, ['checkout', '--track', ref], env);
+      await runCheckoutStep(
+        cwd,
+        ['checkout', '--track', ref],
+        { branch: localName, commitRef: ref },
+        original,
+        env,
+      );
     }
-    const head = (
-      await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
-    ).trim();
-    return { branch: head, detached: false };
+    const head = await readHeadBranchName(cwd, env);
+    if (head) {
+      return { branch: head, detached: false };
+    }
+    // An absorbed hook failure can leave HEAD detached on the target commit
+    // (the bare path's fall-through covers the same state); report the real
+    // landing instead of a malformed `{ branch: '', detached: false }`.
+    const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env);
+    return { branch: sha.trim(), detached: true };
+  }
+  if (headsQualified) {
+    // The picker row named refs/heads/: if the branch vanished since the
+    // list was fetched, reject — the bare checkout below would DWIM onto a
+    // same-named tag and silently detach HEAD.
+    const exists = await runGit(
+      cwd,
+      ['show-ref', '--verify', '--quiet', `refs/heads/${ref}`],
+      env,
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (!exists) {
+      throw new Error(`branch not found: ${ref}`);
+    }
   }
   // `--` terminates options/pathspecs so a validated ref can never be
   // reinterpreted as a path (e.g. `.` wiping the working tree).
-  await runGit(cwd, ['checkout', ref, '--'], env);
-  const headRaw = await runGit(
+  await runCheckoutStep(
     cwd,
-    ['symbolic-ref', '--short', 'HEAD'],
+    ['checkout', ref, '--'],
+    { branch: ref, commitRef: ref },
+    original,
     env,
-  ).catch(() => '');
-  const trimmed = headRaw.trim();
-  if (trimmed) {
-    return { branch: trimmed, detached: false };
+  );
+  const head = await readHeadBranchName(cwd, env);
+  if (head) {
+    return { branch: head, detached: false };
   }
   const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env);
   return { branch: sha.trim(), detached: true };
@@ -355,9 +744,22 @@ export async function gitCheckout(
 
 /**
  * Create a new branch and check it out. Throws if the branch already exists
- * or the working tree is dirty.
+ * or the working tree is dirty. Shares the per-repository checkout
+ * serialization so a concurrent checkout cannot land between the snapshot
+ * and the rollback.
  */
-export async function gitCreateBranch(
+export function gitCreateBranch(
+  cwd: string,
+  name: string,
+  startPoint?: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitCheckoutResult> {
+  return serializeCheckout(cwd, () =>
+    performCreateBranch(cwd, name, startPoint, env),
+  );
+}
+
+async function performCreateBranch(
   cwd: string,
   name: string,
   startPoint?: string,
@@ -378,26 +780,14 @@ export async function gitCreateBranch(
   // post-checkout hook. If that hook fails the call throws even though the
   // workspace is already on the new branch; capture the previous HEAD so we
   // can roll the half-created branch back instead of leaving it in place.
-  const originalRef = (
-    await runGit(
-      cwd,
-      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-      env,
-    ).catch(() => '')
-  ).trim();
+  const originalRef = await readHeadBranchName(cwd, env);
   const originalCommit = originalRef
     ? ''
     : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim();
   try {
     await runGit(cwd, args, env);
   } catch (err) {
-    const nowOn = (
-      await runGit(
-        cwd,
-        ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-        env,
-      ).catch(() => '')
-    ).trim();
+    const nowOn = await readHeadBranchName(cwd, env);
     if (nowOn === name) {
       if (originalRef) {
         await runGit(cwd, ['checkout', originalRef, '--'], env).catch(() => {});
@@ -438,14 +828,13 @@ export async function gitPush(
   if (opts?.setUpstream) {
     let branch: string;
     try {
-      branch = (
-        await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
-      ).trim();
+      branch = (await runGit(cwd, ['symbolic-ref', 'HEAD'], env)).trim();
     } catch {
       throw new Error(
         'cannot push with --set-upstream in detached HEAD state; check out a branch first',
       );
     }
+    branch = branch.replace(/^refs\/heads\//, '');
     // If the branch already tracks an upstream, push without rewriting it.
     const hasUpstream = await runGit(
       cwd,

@@ -48,7 +48,7 @@ function sessionCreateBody(
   return record?.body as Record<string, unknown> | undefined;
 }
 
-test('git mode chip shows popover with three modes and captures screenshots', async ({
+test('git mode chip shows popover with four modes and captures screenshots', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario();
@@ -77,7 +77,7 @@ test('git mode chip shows popover with three modes and captures screenshots', as
   const popover = page.locator('[data-slot="popover-content"]');
   await expect(popover).toBeVisible({ timeout: 5_000 });
 
-  // Screenshot 2: popover open showing three modes
+  // Screenshot 2: popover open showing four modes
   await page.screenshot({
     path: 'client/e2e/test-results/git-mode-2-popover.png',
     animations: 'disabled',
@@ -131,6 +131,149 @@ test('git mode chip shows popover with three modes and captures screenshots', as
     name: 'feat/git-mode-selector',
   });
   expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
+});
+
+test('git mode chip checks out an existing branch', async ({
+  page,
+}, testInfo) => {
+  const scenario = createGitWorkspaceScenario({
+    gitBranches: {
+      v: 1,
+      workspaceCwd: WORKSPACE_CWD,
+      available: true,
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'topic', isHead: false },
+      ],
+      remote: [{ name: 'origin/develop', isHead: false }],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    },
+  });
+  const daemon = await installScenario(
+    page,
+    scenario,
+    String(testInfo.project.use.baseURL),
+  );
+
+  await page.goto('/');
+
+  const chip = page.locator('[data-testid="git-mode-chip"]');
+  await expect(chip).toBeVisible({ timeout: 10_000 });
+  await chip.click();
+
+  const popover = page.locator('[data-slot="popover-content"]');
+  await popover.getByRole('radio', { name: /Existing branch/ }).click();
+
+  const list = popover.getByRole('listbox', { name: 'Existing branch' });
+  await expect(list.getByRole('option')).toHaveCount(2);
+  await expect(list.getByRole('option', { name: 'main' })).toHaveCount(0);
+
+  await popover
+    .getByRole('textbox', { name: 'Search branches…' })
+    .fill('origin');
+  await expect(list.getByRole('option')).toHaveCount(1);
+  // Match the workspace-scoped route exactly: the legacy process-scoped
+  // checkout would mutate the bound workspace instead of the session's
+  // resolved runtime, and the mock daemon answers both identically.
+  const gitStatusRequests = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' &&
+        /^\/workspaces\/[^/]+\/git\/?$/.test(request.path),
+    ).length;
+  // Capture the baseline BEFORE the checkout click: the success path fires
+  // the git-status refetch within milliseconds (the same commit that closes
+  // the popover), while waiting for the popover to close resolves late — a
+  // baseline taken after that wait already includes the follow-up requests
+  // and the increase poll below can never fire.
+  const statusCallsAtCheckout = gitStatusRequests();
+  await list.getByRole('option', { name: 'origin/develop' }).click();
+
+  await expect(popover).not.toBeVisible();
+  await expect
+    .poll(() =>
+      daemon.requests.find(
+        (request) =>
+          request.method === 'POST' &&
+          /^\/workspaces\/[^/]+\/git\/checkout\/?$/.test(request.path),
+      ),
+    )
+    .toMatchObject({ body: { ref: 'refs/remotes/origin/develop' } });
+  // Quiescence: the checkout success path bumps the git-status revision,
+  // which fires follow-up status fetches; wait for them to land before
+  // asserting no session was created, so a late session-create riding the
+  // same effect chain cannot slip past the negative assertion.
+  await expect
+    .poll(() => gitStatusRequests())
+    .toBeGreaterThan(statusCallsAtCheckout);
+  expect(sessionCreateBody(daemon)).toBeUndefined();
+});
+
+test('existing branch groups collapse and stay pinned while scrolling', async ({
+  page,
+}, testInfo) => {
+  const scenario = createGitWorkspaceScenario({
+    gitBranches: {
+      v: 1,
+      workspaceCwd: WORKSPACE_CWD,
+      available: true,
+      local: [
+        { name: 'main', isHead: true },
+        ...Array.from({ length: 12 }, (_, index) => ({
+          name: `topic-${index + 1}`,
+          isHead: false,
+        })),
+      ],
+      remote: [{ name: 'origin/develop', isHead: false }],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    },
+  });
+  await installScenario(page, scenario, String(testInfo.project.use.baseURL));
+
+  await page.goto('/');
+  await page.locator('[data-testid="git-mode-chip"]').click();
+
+  const popover = page.locator('[data-slot="popover-content"]');
+  await popover.getByRole('radio', { name: /Existing branch/ }).click();
+
+  const list = popover.getByRole('listbox', { name: 'Existing branch' });
+  const localGroup = list.getByRole('button', { name: 'Local', exact: true });
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'true');
+
+  await localGroup.click();
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'false');
+  await expect(list.getByRole('option')).toHaveCount(1);
+
+  const search = popover.getByRole('textbox', { name: 'Search branches…' });
+  await search.fill('topic-1');
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'true');
+  await expect(list.getByRole('option')).toHaveCount(4);
+  await search.fill('');
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'false');
+
+  await localGroup.click();
+  await list.evaluate((element) => {
+    element.scrollTop = 60;
+  });
+  // If the list ever stops being scrollable the assignment silently clamps
+  // to 0 and the pinned-header assertion below would pass vacuously.
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(60);
+  const listBounds = await list.boundingBox();
+  const groupBounds = await localGroup.boundingBox();
+  const listPaddingTop = await list.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).paddingTop),
+  );
+  expect(listBounds).not.toBeNull();
+  expect(groupBounds).not.toBeNull();
+  expect(
+    Math.abs((groupBounds?.y ?? 0) - ((listBounds?.y ?? 0) + listPaddingTop)),
+  ).toBeLessThanOrEqual(1);
 });
 
 test('git mode chip worktree mode sends worktree intent', async ({

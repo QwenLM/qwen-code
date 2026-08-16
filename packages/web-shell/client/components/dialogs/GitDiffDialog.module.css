@@ -4,10 +4,180 @@
   min-height: 50vh;
 }
 
+.sourceBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sourceLabel {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.sourceSelect {
+  min-width: 132px;
+  height: 30px;
+  padding: 0 28px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.refTrigger {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.refValue {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refPrefix {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refArrow {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
+.refPopover {
+  width: var(--radix-popover-trigger-width);
+  min-width: 280px;
+  max-height: min(320px, var(--radix-popover-content-available-height));
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.refSearch {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.refSearch:focus-within {
+  border-bottom-color: var(--primary);
+}
+
+.refSearchInput {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.refSearchInput::placeholder {
+  color: var(--muted-foreground);
+}
+
+.refList {
+  min-height: 0;
+  flex: 1 1 auto;
+  max-height: 270px;
+  padding: 4px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.refNote {
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.refItem {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refItem:hover {
+  background: var(--accent);
+}
+
+.refItemActive {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.refEmpty {
+  padding: 16px 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-align: center;
+}
+
 .placeholder {
   padding: 24px 12px;
   text-align: center;
   color: var(--muted-foreground);
+}
+
+.retryButton {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary, #60a5fa);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.retryButton:hover {
+  text-decoration: underline;
+}
+
+.sourceError {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--error-color);
+  font-size: 12px;
 }
 
 .fileList {

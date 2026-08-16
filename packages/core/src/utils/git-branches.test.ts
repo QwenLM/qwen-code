@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchGitBranches,
   gitCheckout,
@@ -156,6 +156,19 @@ describe('fetchGitBranches recent branches', () => {
   });
 });
 
+describe('fetchGitBranches HEAD under colliding refs', () => {
+  it('reports head without the heads/ prefix under a colliding tag', async () => {
+    // `symbolic-ref --short` shortens to the shortest unambiguous name and
+    // would report `heads/release`; the full-form read must win.
+    const dir = makeRepo();
+    git(dir, 'branch', 'release');
+    git(dir, 'tag', 'release');
+    git(dir, 'checkout', '-q', 'release');
+
+    expect((await fetchGitBranches(dir)).head).toBe('release');
+  });
+});
+
 describe('gitCheckout', () => {
   it('switches to an existing branch', async () => {
     const dir = makeRepo();
@@ -225,6 +238,154 @@ describe('gitCheckout', () => {
       'LOCAL EDIT\n',
     );
   });
+
+  // The hook tests install POSIX sh scripts; git's hook execution on
+  // Windows cannot be verified from the Linux CI hosts, so skip them there
+  // (the absorbed-hook logic itself is platform-independent).
+  it.skipIf(process.platform === 'win32')(
+    'reports success when only the post-checkout hook fails',
+    async () => {
+      // Git runs the post-checkout hook AFTER HEAD has moved and exits
+      // non-zero when it fails. The switch itself completed, so the result
+      // must reflect the real state instead of claiming a failure.
+      const dir = makeRepo();
+      git(dir, 'branch', 'target');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const result = await gitCheckout(dir, 'target');
+
+      expect(result).toEqual({ branch: 'target', detached: false });
+      expect(currentBranch(dir)).toBe('target');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports a detached landing when the hook fails on a tag checkout',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'tag', 'v1.0');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const result = await gitCheckout(dir, 'v1.0');
+
+      expect(result.detached).toBe(true);
+    },
+  );
+
+  it('still rejects a refused checkout without moving HEAD', async () => {
+    const dir = makeRepo();
+    // The target branch rewrites a.txt; the dirty local edit makes git
+    // refuse the switch BEFORE moving HEAD.
+    git(dir, 'checkout', '-q', '-b', 'target');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'target version\n');
+    git(dir, 'commit', '-q', '-am', 'target change');
+    git(dir, 'checkout', '-q', 'master');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+    expect(currentBranch(dir)).toBe('master');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'restores the original branch when a failing hook moved HEAD away',
+    async () => {
+      // A post-checkout hook can move HEAD (`symbolic-ref` needs no index
+      // lock, which the parent checkout holds) and then fail the checkout.
+      // The rollback must restore the original branch — it fires because
+      // HEAD's reflog records this step's checkout move. The hook removes
+      // itself so the rollback checkout is not re-sabotaged by a second run.
+      const dir = makeRepo();
+      git(dir, 'branch', 'target');
+      git(dir, 'branch', 'elsewhere');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nrm -f "$0"\ngit symbolic-ref HEAD refs/heads/elsewhere\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+      expect(currentBranch(dir)).toBe('master');
+    },
+  );
+
+  it('rejects a failed checkout whose target commit already matches HEAD', async () => {
+    // origin/feature points at the same commit as master. With the index
+    // locked, the tracking checkout fails BEFORE moving HEAD; the
+    // commit-match fallback must not absorb that as a successful landing
+    // while HEAD is still attached to a branch.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git(dir, 'fetch', '-q', 'origin');
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+    try {
+      await expect(gitCheckout(dir, 'origin/feature')).rejects.toThrow();
+    } finally {
+      fs.rmSync(path.join(dir, '.git', 'index.lock'));
+    }
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('rejects a refused checkout when detached HEAD already sits on the target commit', async () => {
+    // With the index locked the checkout is refused before moving HEAD. The
+    // commit-equality fallback must not absorb that: HEAD was ALREADY
+    // detached at the target commit, so the equality holds without a switch.
+    const dir = makeRepo();
+    git(dir, 'branch', 'target');
+    git(dir, 'checkout', '-q', '--detach', 'HEAD');
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+    try {
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+    } finally {
+      fs.rmSync(path.join(dir, '.git', 'index.lock'));
+    }
+    // HEAD stays detached; the refusal was not absorbed as a landing.
+    expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'logs a refused rollback restore instead of swallowing it',
+    async () => {
+      // The failing hook dirties a file that diverges between the half-moved
+      // HEAD and the original branch, so the restore checkout is refused; the
+      // refusal must surface instead of vanishing silently.
+      const dir = makeRepo();
+      git(dir, 'checkout', '-q', '-b', 'target');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'target version\n');
+      git(dir, 'commit', '-q', '-am', 'target change');
+      git(dir, 'checkout', '-q', '-b', 'elsewhere', 'master');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'elsewhere version\n');
+      git(dir, 'commit', '-q', '-am', 'elsewhere change');
+      git(dir, 'checkout', '-q', 'master');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\necho dirty > a.txt\ngit symbolic-ref HEAD refs/heads/elsewhere\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+        expect(errorSpy).toHaveBeenCalledWith(
+          'git checkout rollback failed:',
+          expect.anything(),
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
 });
 
 describe('gitCreateBranch', () => {
@@ -271,26 +432,29 @@ describe('gitCreateBranch', () => {
 });
 
 describe('gitCreateBranch rollback (R12)', () => {
-  it('rolls back a branch created before a failing post-checkout hook', async () => {
-    const dir = makeRepo();
-    const before = currentBranch(dir);
-    const hookDir = path.join(dir, '.git', 'hooks');
-    fs.mkdirSync(hookDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(hookDir, 'post-checkout'),
-      '#!/bin/sh\nexit 1\n',
-      {
-        mode: 0o755,
-      },
-    );
+  it.skipIf(process.platform === 'win32')(
+    'rolls back a branch created before a failing post-checkout hook',
+    async () => {
+      const dir = makeRepo();
+      const before = currentBranch(dir);
+      const hookDir = path.join(dir, '.git', 'hooks');
+      fs.mkdirSync(hookDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hookDir, 'post-checkout'),
+        '#!/bin/sh\nexit 1\n',
+        {
+          mode: 0o755,
+        },
+      );
 
-    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
+      await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
 
-    // HEAD is restored and the half-created branch is removed.
-    expect(currentBranch(dir)).toBe(before);
-    const branches = git(dir, 'branch', '--format=%(refname:short)');
-    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
-  });
+      // HEAD is restored and the half-created branch is removed.
+      expect(currentBranch(dir)).toBe(before);
+      const branches = git(dir, 'branch', '--format=%(refname:short)');
+      expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+    },
+  );
 });
 
 describe('gitPush', () => {
@@ -301,6 +465,22 @@ describe('gitPush', () => {
 
     await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
       /detached HEAD/,
+    );
+  });
+
+  it('fails loud on a setUpstream push under a colliding tag', async () => {
+    // The branch name is read from the full symbolic ref: a regression to
+    // `symbolic-ref --short HEAD` would resolve `heads/feature` here and
+    // fail with a different error (no matching refspec) instead.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'branch', 'feature');
+    git(dir, 'tag', 'feature');
+    git(dir, 'checkout', '-q', 'feature');
+
+    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
+      /matches more than one/,
     );
   });
 
@@ -544,28 +724,31 @@ describe('gitPull', () => {
 });
 
 describe('gitCommit index rollback (R10 #1)', () => {
-  it('restores the original index when the commit fails after add -A', async () => {
-    const dir = makeRepo();
-    const hookDir = path.join(dir, '.git', 'hooks');
-    fs.mkdirSync(hookDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(hookDir, 'pre-commit'),
-      '#!/bin/sh\necho "lint failed" >&2\nexit 1\n',
-      { mode: 0o755 },
-    );
-    // Stage a deliberate subset and leave another file untracked.
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'staged edit\n');
-    git(dir, 'add', 'a.txt');
-    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'never staged\n');
+  it.skipIf(process.platform === 'win32')(
+    'restores the original index when the commit fails after add -A',
+    async () => {
+      const dir = makeRepo();
+      const hookDir = path.join(dir, '.git', 'hooks');
+      fs.mkdirSync(hookDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hookDir, 'pre-commit'),
+        '#!/bin/sh\necho "lint failed" >&2\nexit 1\n',
+        { mode: 0o755 },
+      );
+      // Stage a deliberate subset and leave another file untracked.
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'staged edit\n');
+      git(dir, 'add', 'a.txt');
+      fs.writeFileSync(path.join(dir, 'scratch.txt'), 'never staged\n');
 
-    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+      expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
 
-    await expect(gitCommit(dir, 'feat: x', { all: true })).rejects.toThrow();
+      await expect(gitCommit(dir, 'feat: x', { all: true })).rejects.toThrow();
 
-    // The failed commit must not leave the whole tree staged: the index
-    // returns to exactly what the user had staged beforehand.
-    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
-  });
+      // The failed commit must not leave the whole tree staged: the index
+      // returns to exactly what the user had staged beforehand.
+      expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+    },
+  );
 
   it('refuses add -A when unmerged entries prevent rollback', async () => {
     const dir = makeRepo();
@@ -702,6 +885,375 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
     expect(result).toEqual({ branch, detached: false });
     expect(headSha(dir)).toBe(localHead);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports a detached landing when a hook detaches HEAD after a tracking checkout',
+    async () => {
+      // The hook detaches HEAD onto the target commit after `--track` created
+      // the branch and exits non-zero: the absorbed failure must report the
+      // real detached state, not `{ branch: '', detached: false }`.
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+      git(dir, 'fetch', '-q', 'origin');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nrm -f "$0"\ngit checkout -q --detach HEAD\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const result = await gitCheckout(dir, 'origin/feature');
+
+      expect(result.detached).toBe(true);
+      expect(result.branch).not.toBe('');
+      expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+    },
+  );
+});
+
+describe('gitCheckout concurrent serialization (R9-2)', () => {
+  it('serializes concurrent same-target checkouts without rollback crossfire', async () => {
+    // Two checkouts of the same target run at once: without per-cwd
+    // serialization the later one can fail (`--track` finds the branch the
+    // first created), and its reflog scan then matches the FIRST step's
+    // entry — passing a movement proof for a HEAD it never moved and
+    // rolling back the successful switch. The queue must keep both results
+    // consistent with the final HEAD.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git(dir, 'fetch', '-q', 'origin');
+
+    const results = await Promise.allSettled([
+      gitCheckout(dir, 'feature'),
+      gitCheckout(dir, 'origin/feature'),
+    ]);
+
+    expect(currentBranch(dir)).toBe('feature');
+    for (const result of results) {
+      expect(result.status).toBe('fulfilled');
+      if (result.status === 'fulfilled') {
+        expect(result.value).toEqual({ branch: 'feature', detached: false });
+      }
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'serializes concurrent checkouts spelled through different cwds of one repository (R11-7)',
+    async () => {
+      // The queue keys on repository identity, not the raw request cwd: git
+      // operations from a workspace-contained subdirectory act on the same
+      // HEAD and reflog as the root, so two cwd spellings of one repository
+      // must share one queue or the crossfire guarded above slips through a
+      // per-cwd key. The serialization is asserted deterministically: a
+      // post-checkout hook records concurrent executions, which the queue
+      // guarantees cannot happen because it holds each checkout — hook
+      // included — until completion.
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+      git(dir, 'fetch', '-q', 'origin');
+      const sub = path.join(dir, 'subdir');
+      fs.mkdirSync(sub);
+      const overlap = path.join(dir, '.git', 'overlap');
+      const marker = path.join(dir, '.git', 'in-hook');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        `#!/bin/sh\nif [ -f "${marker}" ]; then : > "${overlap}"; fi\n: > "${marker}"\nsleep 0.3\nrm -f "${marker}"\nexit 0\n`,
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const results = await Promise.allSettled([
+        gitCheckout(dir, 'feature'),
+        gitCheckout(sub, 'origin/feature'),
+      ]);
+
+      expect(currentBranch(dir)).toBe('feature');
+      for (const result of results) {
+        expect(result.status).toBe('fulfilled');
+        if (result.status === 'fulfilled') {
+          expect(result.value).toEqual({ branch: 'feature', detached: false });
+        }
+      }
+      expect(fs.existsSync(overlap)).toBe(false);
+    },
+  );
+});
+
+describe('gitCheckout landing verification read failures (R11-2)', () => {
+  it.skipIf(process.platform === 'win32')(
+    'does not roll back a landed checkout when a verification read fails',
+    async () => {
+      // The checkout lands, the post-checkout hook fails, and the landing
+      // verification's `rev-parse HEAD` then fails transiently (injected via
+      // a git wrapper that trips only after the hook marks the repo). A
+      // swallowed read used to compare as "HEAD is not on the target" and
+      // roll back the landed switch; the tri-state verification must skip
+      // the rollback and rethrow the hook error instead.
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'second');
+      // Tag the FIRST commit so a rollback to master (now one commit ahead)
+      // is distinguishable from the landed detached HEAD.
+      git(dir, 'tag', 'v1.0', 'HEAD~1');
+      const tagCommit = git(dir, 'rev-parse', 'v1.0').trim();
+      const marker = path.join(dir, '.git', 'verify-marker');
+      const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitwrap-'));
+      tmpRoots.push(binDir);
+      const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      fs.writeFileSync(
+        path.join(binDir, 'git'),
+        `#!/bin/sh\nif [ -f "${marker}" ] && [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then\n  exit 1\nfi\nexec "${realGit}" "$@"\n`,
+      );
+      fs.chmodSync(path.join(binDir, 'git'), 0o755);
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        `#!/bin/sh\n: > "${marker}"\nexit 1\n`,
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      await expect(
+        gitCheckout(dir, 'v1.0', {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        }),
+      ).rejects.toThrow();
+
+      // The landed switch survives: HEAD stays detached on the tag commit
+      // instead of being rolled back to master.
+      expect(headSha(dir)).toBe(tagCommit);
+      expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+    },
+  );
+});
+
+describe('gitCheckout fully qualified refs (R6-19)', () => {
+  it('lands on the branch, not a same-named tag, via refs/heads/', async () => {
+    const dir = makeRepo();
+    // Tag the initial commit, then advance the branch and create a
+    // same-named branch: the qualified value must land on the branch.
+    git(dir, 'tag', 'release');
+    const tagCommit = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+    git(dir, 'branch', 'release');
+
+    const result = await gitCheckout(dir, 'refs/heads/release');
+
+    expect(result).toEqual({ branch: 'release', detached: false });
+    expect(headSha(dir)).not.toBe(tagCommit);
+  });
+
+  it('rejects a refs/heads/ value whose remainder is an option', async () => {
+    const dir = makeRepo();
+    await expect(gitCheckout(dir, 'refs/heads/-f')).rejects.toThrow(
+      'invalid checkout ref',
+    );
+  });
+
+  it('tracks the exact remote ref via refs/remotes/', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git(dir, 'fetch', '-q', 'origin');
+
+    const result = await gitCheckout(dir, 'refs/remotes/origin/feature');
+
+    expect(result).toEqual({ branch: 'feature', detached: false });
+    expect(currentBranch(dir)).toBe('feature');
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      'feature@{u}',
+    ).trim();
+    expect(tracking).toBe('origin/feature');
+  });
+
+  it('lands on a slashed local branch whose name mirrors a remote-tracking ref', async () => {
+    // A local branch literally named origin/develop is a legal ref, and the
+    // pickers submit it as refs/heads/origin/develop. The remote-tracking
+    // mirror must not reroute the checkout to the unrelated local `develop`.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/develop');
+    git(dir, 'fetch', '-q', 'origin');
+    git(dir, 'branch', 'origin/develop');
+    git(dir, 'branch', 'develop');
+
+    const result = await gitCheckout(dir, 'refs/heads/origin/develop');
+
+    expect(result).toEqual({ branch: 'origin/develop', detached: false });
+    expect(currentBranch(dir)).toBe('origin/develop');
+  });
+});
+
+describe('gitCheckout hook-masked failures and colliding landings (R8)', () => {
+  function installFailingHook(dir: string, body: string): void {
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      `#!/bin/sh\nrm -f "$0"\n${body}\nexit 1\n`,
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+  }
+
+  it
+    .skipIf(process.platform === 'win32')
+    .each(['git checkout -q elsewhere', 'git checkout -q --detach HEAD~1'])(
+    'rolls back when a failing hook moved HEAD away via `%s`',
+    async (hookCheckout) => {
+      // The hook's own checkout leaves ITS reflog entry newest, masking
+      // the step's entry from a newest-only scan; the rollback must still
+      // fire on the step's entry among the post-snapshot entries.
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'second');
+      git(dir, 'branch', 'target');
+      git(dir, 'branch', 'elsewhere');
+      installFailingHook(dir, hookCheckout);
+
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+      expect(currentBranch(dir)).toBe('master');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'absorbs a hook failure that detached HEAD onto a colliding branch tip',
+    async () => {
+      // Branch `release` and tag `release` differ. The hook detaches HEAD onto
+      // the BRANCH tip after the switch landed; the landing check must resolve
+      // the target through refs/heads/ (a bare rev-parse prefers the tag) and
+      // absorb the detached landing instead of rolling back a correct switch.
+      const dir = makeRepo();
+      git(dir, 'tag', 'release');
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'second');
+      git(dir, 'branch', 'release');
+      const branchTip = headSha(dir);
+      installFailingHook(dir, 'git checkout -q --detach refs/heads/release');
+
+      const result = await gitCheckout(dir, 'release');
+
+      expect(result.detached).toBe(true);
+      expect(headSha(dir)).toBe(branchTip);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a detached HEAD when a failing hook moves it away',
+    async () => {
+      // The rollback's detached arm must restore the captured commit when the
+      // original HEAD was detached and a failing hook moved HEAD elsewhere.
+      const dir = makeRepo();
+      git(dir, 'branch', 'target');
+      const detachedAt = headSha(dir);
+      git(dir, 'checkout', '-q', '--detach', 'HEAD');
+      installFailingHook(dir, 'git checkout -q master');
+
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+
+      expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+      expect(headSha(dir)).toBe(detachedAt);
+    },
+  );
+
+  it('rejects a checkout that git fatally refuses on an unborn HEAD', async () => {
+    // Zero-commit repo: `git checkout main` fails with `invalid reference`,
+    // but symbolic-ref still reports `main` — the branch-equality absorption
+    // must not turn the fatal refusal into a success.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
+    tmpRoots.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+
+    await expect(gitCheckout(dir, 'main')).rejects.toThrow();
+    expect(git(dir, 'symbolic-ref', 'HEAD').trim()).toBe('refs/heads/main');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'absorbs a hook failure that bornes an unborn HEAD onto the same branch name',
+    async () => {
+      // A `--track` checkout of origin/master on a fresh repo genuinely
+      // creates refs/heads/master and attaches HEAD — an unborn→born move.
+      // The born name equals the unborn HEAD's branch name, so branch
+      // equality alone cannot tell the landed switch from a fatal refusal;
+      // only HEAD now resolving a commit proves it. Without absorption the
+      // rollback re-runs the failing hook and gitCheckout throws even though
+      // HEAD sits exactly where requested.
+      const donor = makeRepo();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
+      tmpRoots.push(dir);
+      git(dir, 'init', '-q', '-b', 'master');
+      git(dir, 'remote', 'add', 'origin', donor);
+      git(dir, 'fetch', '-q', 'origin');
+      const donorSha = headSha(donor);
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const result = await gitCheckout(dir, 'origin/master');
+
+      expect(result).toEqual({ branch: 'master', detached: false });
+      expect(headSha(dir)).toBe(donorSha);
+    },
+  );
+
+  it('rejects a refs/heads/ checkout whose branch no longer exists', async () => {
+    // Without the existence check the bare fall-through DWIMs onto the
+    // same-named tag and silently detaches HEAD.
+    const dir = makeRepo();
+    git(dir, 'tag', 'gone');
+
+    await expect(gitCheckout(dir, 'refs/heads/gone')).rejects.toThrow(
+      'branch not found: gone',
+    );
+    expect(currentBranch(dir)).toBe('master');
+  });
+});
+
+describe('gitCreateBranch rollback under colliding refs (R8)', () => {
+  it.skipIf(process.platform === 'win32')(
+    'rolls back a half-created branch that collides with a tag',
+    async () => {
+      // HEAD's branch name comes from the full symbolic ref: with a same-named
+      // tag, `symbolic-ref --short` reports the ambiguous `heads/topic` form
+      // and the stranded-HEAD comparison never matches, skipping the rollback.
+      const dir = makeRepo();
+      git(dir, 'tag', 'topic');
+      const before = currentBranch(dir);
+      const hookDir = path.join(dir, '.git', 'hooks');
+      fs.mkdirSync(hookDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hookDir, 'post-checkout'),
+        '#!/bin/sh\nexit 1\n',
+        { mode: 0o755 },
+      );
+
+      await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
+
+      expect(currentBranch(dir)).toBe(before);
+      let branchStillExists = true;
+      try {
+        git(dir, 'show-ref', '--verify', '--quiet', 'refs/heads/topic');
+      } catch {
+        branchStillExists = false;
+      }
+      expect(branchStillExists).toBe(false);
+      // The colliding tag survives the rollback.
+      expect(git(dir, 'tag', '--list', 'topic').trim()).toBe('topic');
+    },
+  );
 });
 
 describe('getDefaultBranch (R10 #3)', () => {

@@ -462,6 +462,8 @@ export type {
   DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,
   DaemonGitOperation,
+  DaemonGitDiffMode,
+  DaemonWorkspaceGitDiffOptions,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffFile,
   DaemonWorkspaceGitDiffHunks,

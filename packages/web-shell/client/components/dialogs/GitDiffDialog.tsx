@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonDiffHunk,
+  DaemonGitBranchesResult,
+  DaemonGitDiffMode,
+  DaemonGitLogEntry,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffFile,
+  DaemonWorkspaceGitDiffOptions,
 } from '@qwen-code/sdk/daemon';
+import { ArrowRightIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { BundledLanguage, ThemedToken } from 'shiki';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
@@ -21,6 +26,12 @@ import {
 import { resolveFenceLanguage } from '../messages/Markdown';
 import { languageForPath } from '../messages/ToolGroup';
 import { sanitizeControlChars } from '../messages/toolFormatting';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import {
+  displayBranchName,
+  qualifyLocalBranchRef,
+  qualifyRemoteBranchRef,
+} from '../../utils/gitRefs';
 import { DialogShell } from './DialogShell';
 import styles from './GitDiffDialog.module.css';
 
@@ -238,10 +249,12 @@ function DiffFileRow({
   workspaceCwd,
   gitCwd,
   file,
+  options,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
   file: DaemonWorkspaceGitDiffFile;
+  options?: DaemonWorkspaceGitDiffOptions;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -269,11 +282,13 @@ function DiffFileRow({
     if (next && hunks === null && !loading && !file.isBinary) {
       setLoading(true);
       setError(false);
-      client
-        .workspaceByCwd(workspaceCwd)
-        // Pass the pre-rename path so a renamed file diffs old→new (rename
-        // detection) instead of showing the new path as fully added.
-        .workspaceGitDiffFile(file.path, file.oldPath, gitCwd)
+      const ws = client.workspaceByCwd(workspaceCwd);
+      // Pass the pre-rename path so a renamed file diffs old→new (rename
+      // detection) instead of showing the new path as fully added.
+      const request = options
+        ? ws.workspaceGitDiffFile(file.path, file.oldPath, gitCwd, options)
+        : ws.workspaceGitDiffFile(file.path, file.oldPath, gitCwd);
+      request
         .then((result) => {
           if (cancelledRef.current) return;
           setHunks(result.hunks);
@@ -359,13 +374,141 @@ function DiffFileRow({
   );
 }
 
+interface DiffRefItem {
+  value: string;
+  label: string;
+}
+
+function SearchableDiffRefSelect({
+  value,
+  items,
+  prefix,
+  label,
+  searchPlaceholder,
+  noMatches,
+  note,
+  onChange,
+}: {
+  value: string;
+  items: DiffRefItem[];
+  prefix?: string;
+  label: string;
+  searchPlaceholder: string;
+  noMatches: string;
+  note?: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredItems = normalizedQuery
+    ? items.filter(
+        (item) =>
+          item.value.toLowerCase().includes(normalizedQuery) ||
+          item.label.toLowerCase().includes(normalizedQuery),
+      )
+    : items;
+  const selected = items.find((item) => item.value === value);
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) setQuery('');
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={styles.refTrigger}
+          aria-label={label}
+          aria-expanded={open}
+        >
+          {prefix && (
+            <>
+              <span className={styles.refPrefix} title={prefix}>
+                {prefix}
+              </span>
+              <ArrowRightIcon className={styles.refArrow} size={14} />
+            </>
+          )}
+          <span className={styles.refValue}>{selected?.label ?? value}</span>
+          <ChevronDownIcon size={14} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className={styles.refPopover}
+        align="start"
+        sideOffset={4}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          inputRef.current?.focus();
+        }}
+      >
+        <div className={styles.refSearch}>
+          <SearchIcon size={14} />
+          <input
+            ref={inputRef}
+            className={styles.refSearchInput}
+            value={query}
+            placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+        <div
+          className={styles.refList}
+          role="listbox"
+          aria-label={label}
+          onWheelCapture={(event) => event.stopPropagation()}
+        >
+          {filteredItems.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              role="option"
+              aria-selected={item.value === value}
+              className={`${styles.refItem} ${
+                item.value === value ? styles.refItemActive : ''
+              }`}
+              onClick={() => {
+                setOpen(false);
+                setQuery('');
+                // Re-clicking the selected ref must be a no-op: the onChange
+                // handlers reset the diff into a loading state, and with an
+                // unchanged ref no fetch effect dep changes — the view would
+                // be stuck on "Loading changes…" forever.
+                if (item.value === value) return;
+                onChange(item.value);
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+          {filteredItems.length === 0 && (
+            <div className={styles.refEmpty}>{noMatches}</div>
+          )}
+        </div>
+        {note && <div className={styles.refNote}>{note}</div>}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function GitDiffContent({
   workspaceCwd,
   gitCwd,
+  revision,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
+  /** Bumped by the host after git mutations (a commit landed) or when the
+   *  diff tab becomes visible again — refreshes the diff and the cached
+   *  commit/branch lists while keeping the selected source. */
+  revision?: number;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { t } = useI18n();
@@ -373,14 +516,165 @@ export function GitDiffContent({
   const [diff, setDiff] = useState<DaemonWorkspaceGitDiff | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [mode, setMode] = useState<DaemonGitDiffMode>('uncommitted');
+  const [commitRef, setCommitRef] = useState('');
+  const [branchRef, setBranchRef] = useState('');
+  const [commits, setCommits] = useState<DaemonGitLogEntry[] | null>(null);
+  const [commitsHasMore, setCommitsHasMore] = useState(false);
+  const [branches, setBranches] = useState<DaemonGitBranchesResult | null>(
+    null,
+  );
+  const [sourceError, setSourceError] = useState<'commit' | 'branch' | null>(
+    null,
+  );
+  const [sourceNonce, setSourceNonce] = useState(0);
 
   useEffect(() => {
+    // Refresh (not reset): the cached lists are dropped so the fetch effects
+    // below re-run against the post-mutation repository state, but the
+    // selected source stays — the resolve handlers keep it when it survives
+    // the refresh.
+    setCommits(null);
+    setCommitsHasMore(false);
+    setBranches(null);
+    setSourceError(null);
+  }, [revision]);
+
+  useEffect(() => {
+    if (mode !== 'commit' || commits !== null) return;
     let cancelled = false;
-    setLoading(true);
-    setError(false);
+    setSourceError(null);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitDiff(gitCwd)
+      .workspaceGitLog(200, 0, gitCwd)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.available === false) {
+          setSourceError('commit');
+          return;
+        }
+        setCommits(result.entries);
+        setCommitsHasMore(result.hasMore);
+        setCommitRef((current) =>
+          current && result.entries.some((entry) => entry.sha === current)
+            ? current
+            : (result.entries[0]?.sha ?? ''),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setSourceError('commit');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceCwd, gitCwd, mode, commits, sourceNonce, revision]);
+
+  useEffect(() => {
+    if (mode !== 'branch' || branches !== null) return;
+    let cancelled = false;
+    setSourceError(null);
+    client
+      .workspaceByCwd(workspaceCwd)
+      .workspaceGitBranches(gitCwd)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.available === false) {
+          setSourceError('branch');
+          return;
+        }
+        setBranches(result);
+        setBranchRef((current) => {
+          // Fully qualified values name the exact ref of the selected row,
+          // so a colliding short name resolves to the chosen target; the
+          // qualify helpers absorb git's disambiguation prefixes so an
+          // ambiguous short name never yields a double-prefixed ref.
+          const qualified = [
+            ...result.local
+              .filter((branch) => !branch.isHead)
+              .map((branch) => qualifyLocalBranchRef(branch.name)),
+            ...result.remote.map((branch) =>
+              qualifyRemoteBranchRef(branch.name),
+            ),
+          ];
+          if (current && qualified.includes(current)) return current;
+          const fallback = result.local.find((branch) => !branch.isHead);
+          if (fallback) return qualifyLocalBranchRef(fallback.name);
+          const remote = result.remote[0];
+          return remote ? qualifyRemoteBranchRef(remote.name) : '';
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setSourceError('branch');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceCwd, gitCwd, mode, branches, sourceNonce, revision]);
+
+  const options = useMemo<
+    DaemonWorkspaceGitDiffOptions | undefined | null
+  >(() => {
+    if (mode === 'uncommitted') return undefined;
+    if (mode === 'commit') {
+      return commitRef ? { mode, ref: commitRef } : null;
+    }
+    if (mode === 'branch') {
+      return branchRef ? { mode, ref: branchRef } : null;
+    }
+    return { mode };
+  }, [mode, commitRef, branchRef]);
+
+  const commitItems = useMemo(
+    () =>
+      (commits ?? []).map((commit) => ({
+        value: commit.sha,
+        label: `${commit.shortSha} ${sanitizeControlChars(commit.subject)}`,
+      })),
+    [commits],
+  );
+
+  const branchItems = useMemo(
+    () => [
+      ...(branches?.local ?? [])
+        .filter((branch) => !branch.isHead)
+        .map((branch) => ({
+          value: qualifyLocalBranchRef(branch.name),
+          label: sanitizeControlChars(displayBranchName(branch.name)),
+        })),
+      ...(branches?.remote ?? []).map((branch) => ({
+        value: qualifyRemoteBranchRef(branch.name),
+        label: sanitizeControlChars(displayBranchName(branch.name)),
+      })),
+    ],
+    [branches],
+  );
+
+  useEffect(() => {
+    if (options !== null) return;
+    setDiff(null);
+    const sourceReady =
+      mode === 'commit' ? commits !== null : branches !== null;
+    setLoading(!sourceReady && sourceError !== mode);
+    setError(sourceError === mode);
+  }, [options, mode, commits, branches, sourceError]);
+
+  // Depends only on fetch inputs: the revision refresh nulls and refills the
+  // cached lists, and including them here would cancel-and-reissue the diff
+  // request on every list transition (three identical requests per bump).
+  // `sourceNonce` is the exception: a successful source-list retry keeps the
+  // options identity stable, so the nonce bump is the only signal that must
+  // also re-issue a latched diff-fetch failure.
+  useEffect(() => {
+    if (options === null) return;
+    let cancelled = false;
+    setDiff(null);
+    setLoading(true);
+    setError(false);
+    const ws = client.workspaceByCwd(workspaceCwd);
+    const request = options
+      ? ws.workspaceGitDiff(gitCwd, options)
+      : ws.workspaceGitDiff(gitCwd);
+    request
       .then((result) => {
         if (!cancelled) setDiff(result);
       })
@@ -393,7 +687,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd]);
+  }, [client, workspaceCwd, gitCwd, options, revision, sourceNonce]);
 
   const subtitle =
     diff && diff.available
@@ -408,14 +702,59 @@ export function GitDiffContent({
     onSubtitleChange?.(subtitle);
   }, [onSubtitleChange, subtitle]);
 
+  const retrySource = () => {
+    setSourceError(null);
+    // The failed fetch left the cache at null, so only a nonce bump (not a
+    // cache reset) re-runs the guarded source effect.
+    setSourceNonce((nonce) => nonce + 1);
+  };
+
+  // Loaded-but-empty lists are a distinct dead end from "unavailable": every
+  // request succeeded, the repo just has nothing selectable (zero commits, or
+  // only the current branch).
+  const sourceListEmpty =
+    (mode === 'commit' && commits !== null && commitItems.length === 0) ||
+    (mode === 'branch' && branches !== null && branchItems.length === 0);
+
   let body: ReactNode;
   if (loading) {
     body = <div className={styles.placeholder}>{t('gitDiff.loading')}</div>;
   } else if (error) {
-    body = <div className={styles.placeholder}>{t('gitDiff.error')}</div>;
+    body = (
+      <div className={styles.placeholder}>
+        {t('gitDiff.error')}
+        {sourceError === mode && (
+          <button
+            type="button"
+            className={styles.retryButton}
+            onClick={retrySource}
+          >
+            {t('gitDiff.retry')}
+          </button>
+        )}
+      </div>
+    );
+  } else if (sourceListEmpty) {
+    body = (
+      <div className={styles.placeholder}>
+        {t(
+          mode === 'commit'
+            ? 'gitDiff.noCommitsToCompare'
+            : 'gitDiff.noBranchesToCompare',
+        )}
+      </div>
+    );
   } else if (!diff || !diff.available) {
-    body = <div className={styles.placeholder}>{t('gitDiff.unavailable')}</div>;
-  } else if (diff.files.length === 0) {
+    body = (
+      <div className={styles.placeholder}>
+        {t(
+          mode === 'uncommitted'
+            ? 'gitDiff.unavailable'
+            : 'gitDiff.comparisonUnavailable',
+        )}
+      </div>
+    );
+  } else if (diff.filesCount === 0) {
     body = <div className={styles.placeholder}>{t('gitDiff.empty')}</div>;
   } else {
     body = (
@@ -424,11 +763,13 @@ export function GitDiffContent({
           <DiffFileRow
             // Key by workspace + path so switching workspace remounts the row
             // instead of reusing another workspace's hunks/open state for a
-            // path both workspaces share.
-            key={`${workspaceCwd}:${gitCwd ?? ''}:${file.path}`}
+            // path both workspaces share. `revision` remounts on refresh so an
+            // expanded row never pairs pre-mutation hunks with new statistics.
+            key={`${workspaceCwd}:${gitCwd ?? ''}:${mode}:${options?.ref ?? ''}:${revision ?? 0}:${file.path}`}
             workspaceCwd={workspaceCwd}
             gitCwd={gitCwd}
             file={file}
+            options={options ?? undefined}
           />
         ))}
         {diff.hiddenCount > 0 && (
@@ -440,7 +781,81 @@ export function GitDiffContent({
     );
   }
 
-  return <div className={styles.content}>{body}</div>;
+  return (
+    <div className={styles.content}>
+      <div className={styles.sourceBar}>
+        <label className={styles.sourceLabel} htmlFor="git-diff-source">
+          {t('gitDiff.source.label')}
+        </label>
+        <select
+          id="git-diff-source"
+          className={styles.sourceSelect}
+          value={mode}
+          onChange={(event) => {
+            setDiff(null);
+            setLoading(true);
+            setError(false);
+            setMode(event.target.value as DaemonGitDiffMode);
+          }}
+        >
+          <option value="uncommitted">{t('gitDiff.source.uncommitted')}</option>
+          <option value="unstaged">{t('gitDiff.source.unstaged')}</option>
+          <option value="staged">{t('gitDiff.source.staged')}</option>
+          <option value="commit">{t('gitDiff.source.commit')}</option>
+          <option value="branch">{t('gitDiff.source.branch')}</option>
+        </select>
+        {mode === 'commit' && commitItems.length > 0 && (
+          <SearchableDiffRefSelect
+            value={commitRef}
+            items={commitItems}
+            label={t('gitDiff.source.selectCommit')}
+            searchPlaceholder={t('gitDiff.source.searchCommit')}
+            noMatches={t('gitDiff.source.noMatches')}
+            note={
+              commitsHasMore
+                ? t('gitDiff.source.olderCommitsOmitted')
+                : undefined
+            }
+            onChange={(ref) => {
+              setDiff(null);
+              setLoading(true);
+              setError(false);
+              setCommitRef(ref);
+            }}
+          />
+        )}
+        {mode === 'branch' && branchItems.length > 0 && (
+          <SearchableDiffRefSelect
+            value={branchRef}
+            items={branchItems}
+            prefix={branches?.head}
+            label={t('gitDiff.source.selectBranch')}
+            searchPlaceholder={t('gitDiff.source.searchBranch')}
+            noMatches={t('gitDiff.source.noMatches')}
+            onChange={(ref) => {
+              setDiff(null);
+              setLoading(true);
+              setError(false);
+              setBranchRef(ref);
+            }}
+          />
+        )}
+        {options !== null && sourceError === mode && !error && (
+          <span className={styles.sourceError}>
+            {t('gitDiff.error')}
+            <button
+              type="button"
+              className={styles.retryButton}
+              onClick={retrySource}
+            >
+              {t('gitDiff.retry')}
+            </button>
+          </span>
+        )}
+      </div>
+      {body}
+    </div>
+  );
 }
 
 export function GitDiffDialog({
@@ -458,7 +873,7 @@ export function GitDiffDialog({
       allowFullscreen
       onClose={onClose}
     >
-      <GitDiffContent workspaceCwd={workspaceCwd} />
+      <GitDiffContent key={workspaceCwd} workspaceCwd={workspaceCwd} />
     </DialogShell>
   );
 }
