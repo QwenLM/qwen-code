@@ -526,7 +526,11 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
         // removing it makes the server unreachable forever while this
         // sweep reports "Reaped".
         serverDead = isNothingToKill(stderrText);
-        dirUnusable = isSocketDirUnusable(stderrText);
+        // ACCUMULATED, like capture-tui's own reap: the reassignment this
+        // replaces let a second attempt that failed for another reason (an
+        // EMFILE spawn failure, the 15s belt) reset the flag and drop the
+        // note's one actionable parenthetical.
+        if (isSocketDirUnusable(stderrText)) dirUnusable = true;
       }
     }
     if (!serverDead) {

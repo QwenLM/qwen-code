@@ -24,9 +24,9 @@ describe('kill-server stderr classification', () => {
   const nothingToKill = [
     'no server running on /tmp/tmux-501/qwen-review-capture-1-a',
     'error connecting to /tmp/x (No such file or directory)',
-    // The bare wording, matched by its own regex branch: the entry above
-    // satisfies the `error connecting` branch AND this one, so deleting
-    // either shipped green.
+    // The bare wording, on its own branch: the entry above rides it too
+    // (the `error connecting` prefix has no branch of its own), so this
+    // capital-N fixture pins the branch independently of that shape.
     // Capital N, as strerror actually renders it: the all-lowercase
     // fixture left the /i flag on this branch unpinned while the sibling
     // `file name too long` branch had it covered by a capital F.
@@ -408,7 +408,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\nsh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\n/bin/sh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
@@ -423,7 +423,8 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       readyFile: '/ready',
     });
     // ONE layer: the plan hands tmux the holder SCRIPT, whose single
-    // `sh -c '<command>'` line is the only place the command is quoted. A
+    // `/bin/sh -c '<command>'` line is the only place the command is
+    // quoted. A
     // single quote in the command must not close that quoting. The
     // expectation is COMPOSED with the same POSIX escaping rule stated
     // independently ('→'\''): dropping esc() breaks the equality
@@ -431,7 +432,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // unmatched quote, while the structural assertions all stayed green).
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
     const cmd = `printf '%s' "it's"`;
-    const inner = `sh -c '${esc(cmd)}'`;
+    const inner = `/bin/sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
       `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
@@ -458,7 +459,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       readyFile,
     });
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
-    const inner = `sh -c '${esc('node cli.js')}'`;
+    const inner = `/bin/sh -c '${esc('node cli.js')}'`;
     const held = p.start[p.start.length - 1];
     // Single layer now: the plan hands tmux the SCRIPT itself (default-shell
     // is pinned to /bin/sh in the same invocation), so the trap lives at

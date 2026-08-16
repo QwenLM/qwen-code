@@ -33,7 +33,9 @@ export const CAPTURE_SERVER_PREFIX = 'qwen-review-capture-';
 export function isNothingToKill(stderr: string): boolean {
   return (
     /no server running/i.test(stderr) ||
-    /error connecting to .*(no such file or directory)/i.test(stderr) ||
+    // No branch of its own for the `error connecting to …` shape: that
+    // wording always carries the bare one below, and a branch it subsumes
+    // is dead logic that can never be pinned (deletion shipped 81/81 green).
     /(couldn't|could not|can't|cannot) create directory/i.test(stderr) ||
     // A socket path past sun_path (~108 bytes): tmux answers this to
     // new-session AND kill-server, so a start that never created a socket
@@ -259,7 +261,11 @@ export function tmuxPlan(opts: {
   // cannot fold the hold line either: the command sits single-quoted at
   // every layer, so no shell parses its text adjacent to the hold
   // (probe-verified with odd-run shapes on this exact plan).
-  const inner = `sh -c '${esc(opts.command)}'`;
+  // /bin/sh, never a bare `sh`: the pane resolves a bare name through its
+  // inherited PATH, and a degraded PATH without sh turned the capture into
+  // 'sh: not found' evidence while the run reported success — the same
+  // invocation's default-shell pin already guarantees /bin/sh (probed live).
+  const inner = `/bin/sh -c '${esc(opts.command)}'`;
   // tmux's CLIENT splits any argv element ending in `;` into a separate
   // command before dispatch (cmd_parse_from_arguments, unchanged since 3.1 —
   // the lowest version this command's gate admits); `--` ends option parsing

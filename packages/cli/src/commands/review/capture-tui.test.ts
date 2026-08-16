@@ -152,7 +152,7 @@ function leakedSentinels(pid: number = process.pid): string[] {
 }
 
 describe('hostStateFor', () => {
-  // Three of these four arms were asserted nowhere: reaching them through
+  // Five of these six arms were asserted nowhere: reaching them through
   // the real syscalls needs a fault injector, so deleting any one shipped
   // green while the refusal blamed the caller's --out for the host.
   it.each([
@@ -161,6 +161,8 @@ describe('hostStateFor', () => {
     ['ENOSPC', 'filesystem is full'],
     ['EDQUOT', 'disk quota is exhausted'],
     ['EROFS', 'filesystem is read-only'],
+    ['EIO', 'I/O errors'],
+    ['ESTALE', 'network filesystem handle is stale'],
   ])('names the host state for %s', (code, expected) => {
     expect(hostStateFor(code)).toContain(expected);
   });
@@ -385,6 +387,46 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
+  it('refuses small tokens that pass DENSE but overflow the cap pretty-printed', async () => {
+    // The writer emits JSON.stringify(manifest, null, 2); the gate used to
+    // measure the DENSE serialization. Pretty-printing an array of many
+    // small elements expands ~2.25x: 130k one-char --keys tokens measure
+    // ~520kB dense (under the gate) and ~1.17MB pretty — past the reader
+    // cap — so the run passed, wrote a manifest its own next run could not
+    // verify, and every re-run against the same --out refused on the
+    // collision instead (probe-reproduced).
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-prettyargs-'));
+    try {
+      const { stdout, stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          // Never matches: on pre-gate code the run proceeds, and withheld
+          // keys keep that run fast instead of typing 130k send-keys calls.
+          ready: 'NEVER-MATCHES',
+          keys: Array.from({ length: 130_000 }, () => 'k'),
+          out: join(dir, 'cap'),
+          timeoutMs: 500,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('would not fit a readable manifest');
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: expect.stringContaining('would not fit a readable manifest'),
+      });
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses the --no-keys negation with the reason that names it', async () => {
     // yargs's default boolean-negation parses `--no-keys` on the
     // array-typed option to [false] (probed on this repo's yargs): the
@@ -563,6 +605,58 @@ exit 0
         else process.env['PATH'] = realPath;
         freezeRender.bin = realBin;
         probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'spares a spared png the owner rewrote when the MANIFEST write fails',
+    async () => {
+      // The clear phase left the user's png (no manifest proved ownership)
+      // and the ladder degraded on the stamp — png null, never touched.
+      // The owner rewriting their own file inside the window then
+      // answered changed() true, and the manifest-write cleanup deleted a
+      // file the ladder had classified as not ours: changed() answers
+      // "the occupant changed", not "this run put it there"
+      // (probe-reproduced; no adversarial race — the window legally runs
+      // up to an hour). The plant stands in for the owner's rewrite AND
+      // for the manifest write failing, so the shape needs no real tmux.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngspare-'));
+      writeFileSync(join(dir, 'cap.png'), 'USER-ORIGINAL');
+      writeFakeTmux(
+        dir,
+        `    printf 'USER-REWRITTEN-BY-OWNER' > '${join(dir, 'cap.png')}'\n    mkdir '${join(dir, 'cap.json')}'`,
+      );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('cannot write capture manifest');
+        expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe(
+          'USER-REWRITTEN-BY-OWNER',
+        );
+        // The cleanup DID run — the .ans this run wrote is gone with it,
+        // and the collision occupant is never ours to remove.
+        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+        expect(statSync(join(dir, 'cap.json')).isDirectory()).toBe(true);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
         rmSync(dir, { recursive: true, force: true });
       }
     },
@@ -1062,7 +1156,7 @@ exit 0
   });
 
   it.skipIf(process.platform === 'win32')(
-    'cuts a HANGING availability probe with the belt — absent, not stuck',
+    'cuts a HANGING availability probe with the belt — wedged, not absent',
     async () => {
       // A tmux -V that hangs would otherwise block before the refusal
       // contract or any signal handler exists; through the seam the belt is

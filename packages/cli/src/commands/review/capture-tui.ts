@@ -171,6 +171,10 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   if (r.status === 0) return { status: 'ok', out: (r.stdout ?? '').trim() };
   const code = r.error && (r.error as NodeJS.ErrnoException).code;
   if (code === 'ETIMEDOUT') return { status: 'hung' };
+  // ENOBUFS is spawnSync's maxBuffer overrun — the binary RAN and spewed
+  // past the capture limit, so it answers like a non-zero exit, not like a
+  // spawn failure; the render degradation branch already discriminates it.
+  if (code === 'ENOBUFS') return { status: 'hung', code, spawned: true };
   // A spawn that could not even be attempted is NOT an absent binary: under
   // fd exhaustion (the transient condition this file names three times)
   // both probes reported 'not installed', and that false environment claim
@@ -337,6 +341,10 @@ export function hostStateFor(code: string | undefined): string | null {
       return "this user's disk quota is exhausted";
     case 'EROFS':
       return 'the filesystem is read-only';
+    case 'EIO':
+      return 'the underlying storage is reporting I/O errors';
+    case 'ESTALE':
+      return 'the network filesystem handle is stale';
     default:
       return null;
   }
@@ -910,16 +918,26 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // arguments between half the cap in characters and the cap in bytes
   // passed this gate and were rejected by the reader on the next run
   // (probe-reproduced with CJK --keys tokens).
+  // In the WRITER'S shape — JSON.stringify(manifest, null, 2) — not the
+  // dense one: pretty-printing an array of many small elements expands
+  // ~2.25x, and the dense measure passed manifests the reader cap then
+  // rejected on the next run (probe-reproduced with many one-char --keys
+  // tokens: the dense bytes passed the gate while the pretty bytes the
+  // writer emitted overflowed the cap and wedged the same--out reuse).
   const embedded = Buffer.byteLength(
-    JSON.stringify({
-      command: args.command,
-      keys: args.keys,
-      ready: args.ready,
-      until: args.until,
-      cwd: args.cwd,
-      ansPath,
-      pngPath,
-    }),
+    JSON.stringify(
+      {
+        command: args.command,
+        keys: args.keys,
+        ready: args.ready,
+        until: args.until,
+        cwd: args.cwd,
+        ansPath,
+        pngPath,
+      },
+      null,
+      2,
+    ),
     'utf8',
   );
   if (embedded > MAX_MANIFEST_BYTES / 2) {
@@ -1746,6 +1764,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         // occupant is someone else's, and removing it here would be the
         // data loss the refusal exists to prevent.
         if (e instanceof ArtifactCollision && path === manifestPath) continue;
+        // The png is ours ONLY when the render actually produced one: a
+        // degraded ladder left the occupant untouched, and an owner who
+        // rewrote their own file during the window answers changed() —
+        // deleting it then destroyed a file this run never wrote, on a run
+        // that wrote and rendered nothing (probe-reproduced; no adversarial
+        // race — the window legally runs up to an hour).
+        if (png === null && path === pngPath) continue;
         try {
           if (changed(path, stamp)) rmSync(path, { force: true });
         } catch {
