@@ -387,6 +387,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ) {
           throw new Error('--local-control-address requires --local-control.');
         }
+        if (argv['local-control-address'] === '') {
+          throw new Error('--local-control-address must not be empty.');
+        }
         return true;
       })
       .option('event-ring-size', {

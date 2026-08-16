@@ -496,6 +496,29 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it('forwards --token and --allow-origin through to runQwenServe with --local-control', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({
+        enable: vi.fn().mockResolvedValue({ active: true }),
+      }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        token: 'fixed',
+        allowOrigins: ['http://localhost:3000'],
+      }),
+    );
+  });
+
   it('closes the daemon when pairing output fails', async () => {
     const close = vi.fn().mockRejectedValue(new Error('close failed'));
     const stderrWrites: string[] = [];

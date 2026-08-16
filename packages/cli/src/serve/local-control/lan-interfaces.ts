@@ -16,7 +16,7 @@ export interface LanCandidate {
 /**
  * Only RFC 1918 private space and RFC 3927 link-local are advertised.
  *
- * `localControlUrls` (`serve.ts:57-75`) accepted every non-internal IPv4,
+ * The pre-consolidation `localControlUrls` accepted every non-internal IPv4,
  * which meant a QR could point at a VPN address or — on a host with a routable
  * address — the public internet. Local Control is scoped to "same physical
  * network"; a public address is out of scope by definition, not merely

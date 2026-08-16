@@ -20,9 +20,9 @@ The mode rejects a non-default `--hostname` and `--no-web` instead of silently c
 
 ## Security
 
-- LAN exposure requires the explicit flag.
+- LAN exposure requires an explicit operator action: `--local-control` at boot, or an enable request served only by the primary loopback listener; enable requests arriving over the LAN listener are rejected.
 - Every enable gets a new pairing token from `crypto.randomBytes(32)`; environment tokens are not reused on the LAN listener.
-- Local Control adds the advertised LAN origin to whatever origins the daemon already admits (`--allow-origin` patterns remain in effect); the LAN listener admits only that origin for browser requests, and every protected LAN route still requires the pairing token.
+- Local Control adds the advertised LAN origin to the daemon-wide origin allowlist (`--allow-origin` patterns remain in effect on both listeners while the session is active); every protected LAN route still requires the pairing token.
 - The token stays in the URL fragment, so browsers do not send it in HTTP requests, access logs, or referrers before the Web Shell stores it.
 - Existing bearer authentication, timing-safe comparison, and non-loopback boot checks remain the enforcement boundary.
 - Only private/link-local IPv4 interface addresses are advertised. Multiple interfaces surface an explicit choice rather than guessing which network is correct.

@@ -21,9 +21,9 @@ export interface ListenerScopedCredentials {
  * The daemon's accepted bearer credentials, scoped per listener.
  *
  * Before Local Control moved in-daemon, `bearerAuth` pre-hashed exactly one
- * token. That is why the CLI path handed the LAN the daemon token itself
- * (`serve.ts:787`): with a single credential there was nothing else to hand
- * out, so a paired phone held full-strength access revocable only by restart.
+ * token. That is why the CLI path handed the LAN the daemon token itself:
+ * with a single credential there was nothing else to hand out, so a paired
+ * phone held full-strength access revocable only by restart.
  *
  * The store replaces that single hash with a small set plus a scoping rule:
  *

@@ -19,7 +19,10 @@ import {
   type LocalControlStatus,
 } from '../local-control/service.js';
 import { requestWasAuthenticated } from '../auth.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStdoutLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 export interface RegisterWorkspaceLocalControlRoutesDeps {
   service: LocalControlService;
@@ -161,7 +164,9 @@ export function registerWorkspaceLocalControlRoutes(
           // needs it to pair. The daemon's own terminal is the one channel a
           // local attacker process cannot read over HTTP, so surface the URL
           // there (#9106).
-          writeStdoutLine(`qwen serve: Local Control pairing URL: ${ui.url}`);
+          writeStdoutLineSafe(
+            `qwen serve: Local Control pairing URL: ${ui.url}`,
+          );
         }
         res.status(200).json(presentStatus(req, ui));
       } catch (error) {
