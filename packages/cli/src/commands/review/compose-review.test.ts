@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
@@ -138,6 +139,7 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
+    reviewModelId?: string;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -146,6 +148,9 @@ function plan(
     JSON.stringify({
       diffPathAbsolute: DIFF,
       ...(opts.fetchedSha === undefined ? {} : { fetchedSha: opts.fetchedSha }),
+      ...(opts.reviewModelId === undefined
+        ? {}
+        : { reviewModelId: opts.reviewModelId }),
       // What fetch-pr records when the PR description contains Han
       // characters — the deterministic bilingual-body switch.
       ...(opts.han ? { prDescriptionHasHan: true } : {}),
@@ -340,6 +345,34 @@ function transcript(
 }
 
 /**
+ * Move one agent's transcript into a ledgered PRIOR session — the shape a
+ * resumed run reads.
+ *
+ * The records are re-stamped with the owning session (a transcript copied
+ * into another session's directory is not that session's evidence, and
+ * production refuses the misplaced shape), and the ledger is written by the
+ * real writer so the entries carry the plan mtime they are keyed on. The
+ * current attempt is stamped last and its resume recorded: reading prior
+ * evidence at all requires that authorization.
+ */
+function rehomeToPriorSession(planPath: string, file: string): void {
+  mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  const from = join(dir, 'subagents', 'S1', file);
+  writeFileSync(
+    join(dir, 'subagents', 'S0', file),
+    readFileSync(from, 'utf8').replaceAll(
+      '"sessionId":"S1"',
+      '"sessionId":"S0"',
+    ),
+  );
+  rmSync(from, { force: true });
+  const now = Date.now();
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+  recordResume(planPath, ENV, now + 1500);
+}
+
+/**
  * A prompt the CLI would have built: it names the diff and the read of THIS
  * chunk's lines. The offsets are the chunk's own, as `agent-prompt` emits them —
  * coverage is attributed from the range delivered, not from the words `chunk N`.
@@ -401,6 +434,7 @@ function coveredPlan(
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
+    reviewModelId?: string;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -548,14 +582,26 @@ describe('composeReview — modeled-system defect-layer cap', () => {
   ];
   const walked = (...ids: string[]) =>
     ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
-  // A genuine reverse-audit auditor: the identity line, a real diff read
-  // (so `diffToolCalls > 0`), and the given receipts as its final text.
-  const auditor = (id: string, receipts: string) =>
-    transcript(id, `${IDENTITY}\nread_file(file_path="${DIFF}")`, {
+  // A GENUINE auditor: launched with the prompt the CLI recorded for the
+  // role, and it opened the brief that prompt points at (plus a real diff
+  // read, receipts as final text). A receipt only counts from one of these —
+  // otherwise a compliant sibling's floor could carry a hand-written
+  // auditor's claims. (The earlier fixture matched on a bare IDENTITY
+  // constant; the gate no longer accepts that shape.)
+  const auditor = (id: string, receipts: string) => {
+    const planPath = join(dir, 'plan.json');
+    const brief = briefPath(planPath, 'reverse-audit');
+    const launch =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    transcript(id, launch, {
       toolCalls: 1,
       range: [0, 100],
+      opens: [brief],
       text: receipts,
     });
+  };
   const markedPlan = (domains: string[]) =>
     coveredPlan(['verify', 'reverse-audit'], {
       repositoryContext: sentinel(domains),
@@ -1840,6 +1886,23 @@ describe('composeReview — input validation (the producer is a model that omits
         modelId: MODEL,
       }),
     ).toThrow(/suggestionsInline/);
+  });
+
+  it('accepts the array form of suggestionsDiscarded, counting it by length', () => {
+    // The Step 7 prose prescribes a count, but runs following older skill
+    // revisions wrote the LIST of discarded items and used to die at this gate
+    // late, after hours of analysis. `[]` is zero; a populated list is its
+    // length — the same claim as the number, spelled the older way.
+    expect(composeReview(base({ suggestionsDiscarded: [] })).event).toBe(
+      'APPROVE',
+    );
+    const r = composeReview(
+      base({
+        suggestionsDiscarded: ['src/a.ts:12 — could not anchor', 'src/b.ts:7'],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('2 Suggestion-level finding(s)');
   });
 
   it('rejects a non-array list field and a missing or blank modelId', () => {
@@ -4712,6 +4775,89 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
   });
 
+  it('withholds the anchor when the posting model is not the reviewing model', () => {
+    // The deferred-post flow: review under A, `/model` to B, "post comments".
+    // The runtime id is sampled at POST time, so it says B while the plan's
+    // round-start stamp says A — this round cannot say who reviewed the
+    // range, so it certifies nobody and the pair is withheld. The findings
+    // still ride; the next round simply re-reviews in full.
+    const drifted = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'model-a',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'model-b',
+    );
+    expect(drifted.cappedBy).toEqual([]);
+    const withheld = parseLedger(drifted.body)!;
+    expect(withheld.sha).toBeUndefined();
+    expect(withheld.model).toBeUndefined();
+    expect(withheld.findings.length).toBeGreaterThan(0);
+
+    // Same stamp, same poster: the anchor rides, certified by that identity.
+    const agreed = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'model-a',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'model-a',
+    );
+    expect(parseLedger(agreed.body)?.sha).toBe('deadbeef00112233');
+    expect(parseLedger(agreed.body)?.model).toBe('model-a');
+  });
+
+  it('a provider-qualified identity is what gets certified, verbatim', () => {
+    // A bare model id is unique only inside one provider configuration; the
+    // runtime publishes `<model>@<8-hex of authType+baseUrl>` so two
+    // configurations exposing one name cannot pass each other's gate.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'qwen3.7-max@1a2b3c4d',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'qwen3.7-max@1a2b3c4d',
+    );
+    expect(parseLedger(r.body)?.model).toBe('qwen3.7-max@1a2b3c4d');
+    // …and the SAME model id under a different provider does not match it.
+    expect(parseLedger(r.body)?.model).not.toBe('qwen3.7-max@9f8e7d6c');
+  });
+
   it('the anchor carries its model — the same-model contract survives recovery', () => {
     // The cache pairs `lastCommitSha` with `lastModelId`, and Step 1 refuses
     // the incremental shortcut across models — but the marker's anchor rode
@@ -5994,5 +6140,70 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(performance.now() - t0).toBeLessThan(2000);
     // The multi-line entry still collapses to one list item.
     expect(r.body).toContain('comment 102 (b.ts) — body truncated');
+  });
+});
+
+describe('composeReview — a resumed run is continuity, not a coverage gap', () => {
+  it('stays APPROVE and renders the non-capping continuity note', () => {
+    // The interrupted attempt's chunk-1 agent, re-homed into session S0 and
+    // named by the run ledger; the current session covers the rest. The
+    // recovered work COUNTS as reviewed: no cap, no "Not reviewed:" entry —
+    // a capping entry here downgraded every clean resumed run to COMMENT,
+    // permanently, since the prior records never leave the ledger.
+    // Build the input FIRST: `base()`'s object literal evaluates its
+    // `planPath: coveredPlan()` default even when the caller overrides it,
+    // and `coveredPlan()` rewrites the current session's chunk-1 record —
+    // which would then supersede the prior one and (correctly) stop counting
+    // as recovered work.
+    const input = base({});
+    rehomeToPriorSession(input.planPath as string, 'agent-a1.jsonl');
+
+    const r = composeReview(input);
+    expect(r.event).toBe('APPROVE');
+    // The EXACT joined body, not a substring: on the approve path the
+    // separator is chosen per-render, and continuity is the only block
+    // present here. Asserted as a whole, a separator that forgot this block
+    // glues the note onto the verdict sentence with a single space; asserted
+    // with `toContain`, that reads identically.
+    expect(r.body).toBe(
+      'No issues found. LGTM! ✅\n\n' +
+        'Resumed run (not a gap): 1 agent result(s) from the interrupted ' +
+        'earlier attempt were re-certified from the harness records and ' +
+        'counted as reviewed.\n\n' +
+        '_— test-model via Qwen Code /review (vunknown)_',
+    );
+    expect(r.body).not.toContain('Not reviewed: review continuity');
+    expect(r.body).not.toContain('Partially reviewed');
+  });
+});
+
+describe('composeReview — continuity renders on every verdict', () => {
+  /**
+   * A resumed run: chunk-1's agent re-homed to the ledgered prior session.
+   *
+   * `base()`'s object literal evaluates its `planPath: coveredPlan()` default
+   * even when the caller overrides it, and `coveredPlan()` REWRITES
+   * `subagents/S1/agent-a1.jsonl` — so the move must happen after `base()`
+   * has been built, not before. Callers pass the input through here.
+   */
+  function resumedInput(
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    const input = base(over);
+    const p = input.planPath as string;
+    rehomeToPriorSession(p, 'agent-a1.jsonl');
+    return input;
+  }
+
+  it('renders on REQUEST_CHANGES', () => {
+    const r = composeReview(resumedInput({ criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+
+  it('renders on COMMENT', () => {
+    const r = composeReview(resumedInput({ suggestionsInline: 1 }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
   });
 });

@@ -6,7 +6,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
-  readdirSync: vi.fn(() => []),
+  // The return type is declared so `mockReturnValue` can take string arrays —
+  // the sweep-retention tests hand it the tmp-dir listing.
+  readdirSync: vi.fn((): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
@@ -164,6 +166,70 @@ describe('runCleanup', () => {
 
     expect(mocks.rmSync).toHaveBeenCalledWith(
       '/repo/.qwen/tmp/review-pr-123-base.lock',
+      { recursive: true, force: true },
+    );
+  });
+
+  it('keeps the record directory of a NON-CONVERGED reverse audit (#9206)', () => {
+    // The loop writes its stop marker inside the record directory when it
+    // runs to the round cap (or the budget) without converging, and clears
+    // it on a clean convergence — so a marker on disk is exactly the run
+    // whose certification history must survive the sweep for diagnosis.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue([
+      'qwen-review-pr-123-fetch.json',
+      'qwen-review-pr-123-fetch-prompts',
+      'qwen-review-pr-123-diff.txt',
+    ]);
+    mocks.readFileSync.mockImplementation((path: string): string => {
+      if (path.endsWith('budget-stop.json')) {
+        return JSON.stringify({
+          cause: 'round-cap',
+          cap: 5,
+          entry: 'reverse audit — did not converge within the 5-round cap of 5',
+          entryZh: '反向审计——在 5 轮的反审轮数上限内未收敛',
+          round: 6,
+          remainingSeconds: 0,
+          reserveSeconds: 0,
+          atMs: Date.now(),
+        });
+      }
+      // The fetch report without `fetchedAt`: the bypass audit skips itself.
+      return JSON.stringify({});
+    });
+
+    runCleanup('pr-123');
+
+    const removed = mocks.rmSync.mock.calls.map((c) => c[0]);
+    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-fetch.json');
+    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-diff.txt');
+    expect(removed).not.toContain(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+  });
+
+  it('still sweeps the record directory once the loop converged (#9206)', () => {
+    // A converged run cleared its marker (`refuseConverged` removes it): the
+    // certification history earned nothing, and the sweep takes it like any
+    // other side file. Same entries as the retention test, no marker.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue([
+      'qwen-review-pr-123-fetch.json',
+      'qwen-review-pr-123-fetch-prompts',
+    ]);
+    mocks.readFileSync.mockReturnValue(JSON.stringify({}));
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
       { recursive: true, force: true },
     );
   });

@@ -46,6 +46,8 @@ describe('getShellContextEnvVars', () => {
   // And QWEN_CODE_MODEL — Config claims it into process.env, so a test run
   // started from inside a qwen session inherits it too.
   let originalModel: string | undefined;
+  // And its provider-qualified twin, published from the same place.
+  let originalIdentity: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -56,6 +58,8 @@ describe('getShellContextEnvVars', () => {
     delete process.env['QWEN_CODE_PROJECT_DIR'];
     originalModel = process.env['QWEN_CODE_MODEL'];
     delete process.env['QWEN_CODE_MODEL'];
+    originalIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
   });
 
   afterEach(() => {
@@ -78,6 +82,11 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_MODEL'] = originalModel;
     } else {
       delete process.env['QWEN_CODE_MODEL'];
+    }
+    if (originalIdentity !== undefined) {
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = originalIdentity;
+    } else {
+      delete process.env['QWEN_CODE_MODEL_IDENTITY'];
     }
   });
 
@@ -347,6 +356,49 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_MODEL'] = 'model-after-switch';
       expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
         'model-after-switch',
+      );
+    });
+  });
+
+  describe('provider-qualified identity (QWEN_CODE_MODEL_IDENTITY)', () => {
+    it('passes the qualified identity down beside the bare model', () => {
+      process.env['QWEN_CODE_MODEL'] = 'qwen3-coder-plus';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'qwen3-coder-plus@1a2b3c4d';
+      const env = getShellContextEnvVars();
+      expect(env['QWEN_CODE_MODEL']).toBe('qwen3-coder-plus');
+      expect(env['QWEN_CODE_MODEL_IDENTITY']).toBe('qwen3-coder-plus@1a2b3c4d');
+    });
+
+    it('withholds another session\u2019s identity rather than mis-qualifying', () => {
+      // Daemon mode: the slot is process-global, so it holds whichever
+      // session last wrote it. Session B must not inherit A\u2019s
+      // qualification — a confidently wrong identity passes a gate the bare
+      // id would have failed. B gets its own model and no identity.
+      registerSessionModel('sess-B', 'model-B');
+      process.env['QWEN_CODE_MODEL'] = 'model-A';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'model-A@aaaaaaaa';
+
+      const b = sessionIdContext.run('sess-B', () => getShellContextEnvVars());
+      expect(b['QWEN_CODE_MODEL']).toBe('model-B');
+      expect('QWEN_CODE_MODEL_IDENTITY' in b).toBe(false);
+
+      unregisterSessionModel('sess-B');
+    });
+
+    it('matches on the whole model id, `@` in the name included', () => {
+      // Split-on-first-`@` would compare `vendor` against `vendor@2026-01`
+      // and withhold a correct identity; the suffix is what is anchored.
+      process.env['QWEN_CODE_MODEL'] = 'vendor@2026-01';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'vendor@2026-01@0f0f0f0f';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL_IDENTITY']).toBe(
+        'vendor@2026-01@0f0f0f0f',
+      );
+    });
+
+    it('omits the key when nothing published one', () => {
+      process.env['QWEN_CODE_MODEL'] = 'qwen3-coder-plus';
+      expect('QWEN_CODE_MODEL_IDENTITY' in getShellContextEnvVars()).toBe(
+        false,
       );
     });
   });
