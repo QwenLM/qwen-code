@@ -40,8 +40,7 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // author_association.
 function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
   const trusted = TRUSTED.includes(assoc);
-  const ecs =
-    !ecsDisabled && (sameRepo || trusted || mergeGroup);
+  const ecs = !ecsDisabled && (sameRepo || trusted || mergeGroup);
   return ecs ? ECS : HOSTED;
 }
 
@@ -169,7 +168,10 @@ describe('ci.yml classify_pr runner routing', () => {
       classifyRunsOn,
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
     );
-    assert.match(classifyRunsOn, /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/);
+    assert.match(
+      classifyRunsOn,
+      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+    );
     assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
   });
 });
@@ -202,9 +204,10 @@ describe('serve-ab.yml runner routing', () => {
     const wipe = steps[wipeIndex];
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
     // The script text alone does not decide whether the wipe runs: the
-    // shell wrapper, continue-on-error, and BASH_ENV — at step, job, and
-    // workflow level — all control whether the pinned command executes and
-    // whether its failure fails the job.
+    // shell wrapper, continue-on-error (step and job level), and env
+    // overrides (BASH_ENV, PATH, GITHUB_WORKSPACE) — at step, job, and
+    // workflow level — all control whether the pinned command executes
+    // and whether its failure fails the job.
     const shell =
       wipe.shell ??
       serveAbDoc.jobs.ab.defaults?.run?.shell ??
@@ -217,10 +220,17 @@ describe('serve-ab.yml runner routing', () => {
       !('continue-on-error' in wipe),
       'a failed wipe must fail the job, not bleed into the next PR',
     );
+    assert.ok(
+      !('continue-on-error' in serveAbDoc.jobs.ab),
+      'a job-level continue-on-error would mask a failed wipe',
+    );
     for (const envMap of [wipe.env, serveAbDoc.jobs.ab.env, serveAbDoc.env]) {
       assert.ok(
-        !envMap || envMap.BASH_ENV === undefined,
-        'BASH_ENV can shadow the pinned wipe command',
+        !envMap ||
+          (envMap.BASH_ENV === undefined &&
+            envMap.PATH === undefined &&
+            envMap.GITHUB_WORKSPACE === undefined),
+        'BASH_ENV, PATH, or GITHUB_WORKSPACE can shadow the pinned wipe command',
       );
     }
     // The sudo-less wipe only works because ownership-restore ran first,
@@ -231,6 +241,11 @@ describe('serve-ab.yml runner routing', () => {
     assert.ok(
       ownershipIndex !== -1,
       'the wipe depends on the ownership-restore step existing',
+    );
+    assert.match(
+      steps[ownershipIndex].run,
+      /chown -R .* "\$GITHUB_WORKSPACE"/,
+      'ownership-restore must actually chown the workspace',
     );
     assert.ok(
       ownershipIndex < wipeIndex,
@@ -254,12 +269,26 @@ describe('serve-ab.yml runner routing', () => {
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
-    assert.equal(executed.length, 2, 'expected `set -uo pipefail` + one find');
+    assert.equal(
+      executed.length,
+      4,
+      'expected `set -uo pipefail`, the find, and the kept-.git scrub',
+    );
     assert.equal(executed[0], 'set -uo pipefail');
     assert.equal(
       executed[1],
-      'find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name \'.git\' -exec rm -rf {} +',
-      'the wipe must remove every top-level workspace entry except the shared root .git',
+      'find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
+      'the wipe must keep only a REAL .git directory — a symlink or gitfile named .git can point outside the workspace',
+    );
+    assert.equal(
+      executed[2],
+      'rm -rf "$GITHUB_WORKSPACE/.git/hooks" "$GITHUB_WORKSPACE/.git/info/attributes"',
+      'the kept .git must lose its hooks and info/attributes exec vectors',
+    );
+    assert.equal(
+      executed[3],
+      '{ git config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done',
+      'the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist',
     );
   });
 });
