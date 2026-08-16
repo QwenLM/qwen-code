@@ -52,10 +52,13 @@ export interface OperatorReviewSettings {
  * its model (`attribution`), or how deeply the pipeline verifies (`effort`).
  */
 export function operatorReviewSettings(): OperatorReviewSettings {
-  // `loadSettings` throws a FatalConfigError when ANY settings file fails to
-  // read or parse, and since this is now read while a plan is being captured —
-  // the review's first step — that throw would end the whole review over a
-  // stray comma in a file none of these settings had to come from. Degrade to
+  // `loadSettings` throws a FatalConfigError when a settings file cannot be
+  // READ (or its migration fails) — malformed JSON does not reach that path,
+  // it is copied aside and recovered ("Never crash due to a corrupted settings
+  // file"). An unreadable file is enough: this is read while a plan is being
+  // captured, the review's first step, so the throw would end the whole review
+  // over a permissions bit on a file none of these settings had to come from.
+  // Degrade to
   // the defaults instead and say so: every default here is the conservative
   // side (attribution on, no auto-posting, no effort override, no round
   // ceiling), so a review that loses its operator policy loses it toward doing

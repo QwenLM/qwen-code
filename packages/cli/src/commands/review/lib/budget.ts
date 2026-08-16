@@ -276,9 +276,14 @@ export function reverseAuditRoundTier(size: DiffSize): number {
  * defects" is a property of the findings, not of a number chosen in advance.
  *
  * Below `HUGE_REVERSE_AUDIT_ROUNDS` is refused too, for the reason
- * `reverseAuditRoundCap` refuses it in a plan: a cap of one or two forces a
- * non-converged stop where the two-consecutive-dry rule would have converged
- * on its own, so it buys a capped verdict rather than a cheaper review.
+ * `reverseAuditRoundCap` refuses it in a plan — though not the reason an
+ * earlier draft of this gave. A cap of **one** refuses the convergence pair's
+ * second member, so the loop cannot produce the two dry audits convergence is
+ * defined by and every run stops non-converged. A cap of **two** does let an
+ * all-dry loop converge (the convergence check runs before the cap gate), but
+ * it leaves no round at all for a loop that reports anything, so the first
+ * finding makes the stop non-converged. Either way the purchase is a capped
+ * verdict rather than a cheaper review.
  */
 export function cappedRoundTier(
   size: DiffSize,
@@ -438,9 +443,9 @@ export function reviewBudget(
  *
  * The range stays floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the smallest cap
  * the CLI ever writes. A value of one or two is out of band (a hand-edited
- * plan): honouring it would force a non-converged round-cap stop where the
- * full loop would have kept auditing, so it too falls back to the tier —
- * never less.
+ * plan): one cannot reach convergence at all, and two leaves no round for a
+ * loop that reports anything — see `cappedRoundTier` for why neither buys a
+ * cheaper review. Both fall back to the tier, never less.
  */
 export function reverseAuditRoundCap(plan: unknown): number {
   const tier = reverseAuditRoundTier((plan ?? {}) as DiffSize);

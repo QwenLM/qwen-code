@@ -674,9 +674,12 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
 
   it('reads absent, out-of-band and garbled values as the tier', () => {
     // The range is floored at HUGE_REVERSE_AUDIT_ROUNDS (3) — the smallest
-    // cap the CLI writes — so 1 and 2 read as the tier, not as themselves:
-    // honouring them would force a non-converged round-cap stop where the
-    // full loop would have kept auditing.
+    // cap the CLI writes — so 1 and 2 read as the tier, not as themselves.
+    // Not because either always forces a non-converged stop: an all-dry loop
+    // DOES converge under a cap of two, since the convergence check runs
+    // before the cap gate. One cannot converge at all (it refuses the pair's
+    // second member), and two leaves no round for a loop that reports
+    // anything — so neither buys a cheaper review, only a capped verdict.
     for (const bad of [0, 1, 2, 2.5, '1', null] as unknown[]) {
       expect(
         reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: bad } }),
@@ -831,8 +834,11 @@ describe('cappedRoundTier — the operator ceiling may only lower a tier', () =>
   });
 
   it('refuses a ceiling below the convergence minimum', () => {
-    // One or two forces a non-converged stop where two-consecutive-dry would
-    // have converged on its own: a capped verdict, not a cheaper review.
+    // Neither one nor two buys a cheaper review, though not for the same
+    // reason: one refuses the convergence pair's second member so the loop can
+    // never reach two dry audits, while two lets an all-dry loop converge (the
+    // convergence check runs before the cap gate) but leaves no round for a
+    // loop that reports anything. Both end in a capped verdict.
     for (const bad of [0, 1, 2, -3]) {
       expect(cappedRoundTier(SMALL, bad)).toBe(10);
       expect(cappedRoundTier(HUGE, bad)).toBe(3);
