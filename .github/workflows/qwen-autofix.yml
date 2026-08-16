@@ -4218,6 +4218,21 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          # The upsert script travels as CONTENT, not as a staged copy: it
+          # runs in a clean child that reads it from this expression-context
+          # output, so there is no agent-writable copy to protect and no
+          # digest to verify. The delimiter is random per run, so script text
+          # cannot close the heredoc.
+          _upsert_delim="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "upsert_src<<${_upsert_delim}"
+            # Absent from the trusted base until this PR merges, and this
+            # step runs under -e: a hard failure here would kill every
+            # pre-merge round. An empty value reaches the consumers' own
+            # `-z` guard, which skips with "stage step never ran".
+            cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true
+            echo "${_upsert_delim}"
+          } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -5171,7 +5186,7 @@ jobs:
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or (.state // "") == "CHANGES_REQUESTED"
                   or ((.body // "") | contains("**[Critical]**")))
-              | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [rv:\(.id)] [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
@@ -5215,7 +5230,7 @@ jobs:
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or ((.body // "") | contains("**[Critical]**")))
-              | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [ic:\(.id)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
             if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
               echo
@@ -5621,6 +5636,56 @@ jobs:
             "${WORKDIR}/agent-timeout" \
             "${WORKDIR}/resolved-comments.txt" \
             "${WORKDIR}/comment-replies.json"
+          # NOT deleted with its siblings: run 2 writes its own
+          # deferred-findings.json, and a deferral dropped here is gone for
+          # good (the eval watermark filters this round's feedback out of
+          # every later round). Carry run 1's into a sidecar the upsert
+          # unions in; merge if a previous repair already left one.
+          if [[ -s "${WORKDIR}/deferred-findings.json" ]]; then
+            if [[ -s "${WORKDIR}/deferred-findings.carry.json" ]]; then
+              # This round FIRST: unique_by keeps first-of-group in original
+              # order, so a finding re-emitted with fresher text wins — the
+              # same precedence the upsert script documents for its own union.
+              if jq -s 'add' "${WORKDIR}/deferred-findings.json" \
+                "${WORKDIR}/deferred-findings.carry.json" \
+                > "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then
+                mv "${WORKDIR}/deferred-findings.carry.next" \
+                  "${WORKDIR}/deferred-findings.carry.json"
+                # Merged: this round's copy lives on inside the sidecar.
+                rm -f "${WORKDIR}/deferred-findings.json"
+              else
+                # Which side is corrupt is NOT known here — jq -s fails if
+                # EITHER input is unparseable, and today's topology cannot
+                # even produce a pre-existing carry (WORKDIR is wiped at run
+                # start and there is exactly one repair step), so this branch
+                # is defensive. Say what is certain: the merge failed, the
+                # earlier set is kept, this round's is preserved unmerged.
+                # The only loss path in this feature without a raw dump: the
+                # newer set is discarded here and the eval watermark means
+                # nothing re-derives it, so print it before deleting. `::` is
+                # neutralized because the content is agent-written and a raw
+                # `::` at line start would be parsed as a workflow command.
+                _dfsize="$(wc -c < "${WORKDIR}/deferred-findings.json" 2> /dev/null | tr -d ' ')"
+                if [[ -n "${_dfsize}" ]] && (( _dfsize > 4000 )); then
+                  echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows, TRUNCATED at 4000 of ${_dfsize} bytes — the full file rides this run's artifact dump:"
+                else
+                  echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows:"
+                fi
+                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
+                echo
+                rm -f "${WORKDIR}/deferred-findings.carry.next"
+                # Keep the discarded set ON DISK so the warning's pointer at
+                # the artifact dump is true past the 4000-byte clip. Renamed,
+                # not left in place: the upsert would otherwise union it back
+                # in as if it had merged.
+                mv "${WORKDIR}/deferred-findings.json" \
+                  "${WORKDIR}/deferred-findings.unmerged.json"
+              fi
+            else
+              mv "${WORKDIR}/deferred-findings.json" \
+                "${WORKDIR}/deferred-findings.carry.json"
+            fi
+          fi
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
@@ -5714,10 +5779,13 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              cat "${WORKDIR}/${f}"
+              # Agent-written content: a line-start `::` would be parsed as a
+              # workflow command (::error::, ::add-mask::), the same reason
+              # every other echo of these files neutralizes it.
+              sed 's/::/;;/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -5750,6 +5818,7 @@ jobs:
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
+          UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Growth-brake baseline: written into this window's FIRST report
           # comment only (growth_base_new), so later rounds' first-wins parse
@@ -5960,6 +6029,80 @@ jobs:
               echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
           }
+          # Deferred-findings persistence, shared by both arms below.
+          #
+          # No agent-writable path takes part in this. The script CONTENT
+          # travels in expression context — captured at stage time from the
+          # trusted checkout — so there is no staged copy to verify, and with
+          # it go the digest gate, its check-then-use window, and the
+          # planted-FIFO/huge-file reads that a path-based read invites. The
+          # child's own messages travel on fd 3, which the parent captures,
+          # while fd 1/2 are discarded; every loader side channel (auxv dumps,
+          # ldd traces, whatever is next) writes there and cannot reach the
+          # parsed output, and there is no log file to plant, race or bound.
+          #
+          # /usr/bin/env is invoked by ABSOLUTE PATH: bash never does
+          # function/alias lookup on a slash-bearing word, so a planted
+          # BASH_FUNC_env%% cannot intercept the bootstrap. `-i` then drops
+          # every BASH_FUNC_* import, BASH_ENV, SHELLOPTS, alias and trap.
+          # LD_* is the one family env -i cannot block (ld.so acts while
+          # loading env itself), so the ones that MATTER are cleared by
+          # command-prefix assignment and the rest are caught by verifying the
+          # RESULT: the child prints a liveness sentinel first, and its
+          # absence — trace mode, exec failure, a missing interpreter — is
+          # reported rather than passing silently for a successful round.
+          run_deferred_upsert() {
+            if [[ -z "${UPSERT_SRC:-}" ]]; then
+              # Stage never ran: nothing was deferred either.
+              echo 'deferred-findings upsert skipped: stage step never ran'
+              return 0
+            fi
+            UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
+              /usr/bin/env -i \
+              PATH="${TRUSTED_PATH}" \
+              GITHUB_TOKEN="${GITHUB_TOKEN}" \
+              GH_HOST=github.com \
+              RUNNER_TEMP="${RUNNER_TEMP}" \
+              WORKDIR="${WORKDIR}" \
+              PR="${PR}" \
+              REPO="${REPO}" \
+              AUTOFIX_BOT="${AUTOFIX_BOT}" \
+              UPSERT_SRC="${UPSERT_SRC}" \
+              bash --norc -c '
+                set -uo pipefail
+                exec >&3
+                printf "%s\n" "__upsert_child_live__"
+                if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                  echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                  exit 0
+                fi
+                export GH_CONFIG_DIR
+                bash -c "${UPSERT_SRC}" ||
+                  echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
+              ' > /dev/null 2>&1 ; } 3>&1 )" || true
+            # INSPECTION uses bash builtins only ([[ ]], read, printf — no
+            # exec): under loader trace mode every external binary, grep
+            # included, would itself print-and-exit-0, so a grep-based check
+            # would be neutered by the very condition it must detect.
+            if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
+              echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
+            fi
+            # The child's output is agent-reachable content, so a line-start
+            # `::` is neutralized before it reaches this step's stdout.
+            while IFS= read -r _upsert_line; do
+              # Wrapper-authored lines carry a marker and are emitted
+              # VERBATIM so they still render as GitHub annotations; the
+              # script's own output is agent-reachable and stays neutralized.
+              if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
+                :
+              elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
+                printf '%s\n' "${_upsert_line#__upsert_trusted__}"
+              else
+                printf '%s\n' "${_upsert_line//::/;;}"
+              fi
+            done <<< "${UPSERT_OUT}"
+          }
 
                     # Take this PAT-bearing step off every mutable host git surface —
           # both the shared config FILES and git's ENV channels — keep this
@@ -6114,6 +6257,10 @@ jobs:
               fi
             done
             resolve_and_reply_threads
+            # Best-effort: verified out-of-footprint findings persist into
+            # the per-PR tracking issue (script content from expression
+            # context; append-only comment design — see the script).
+            run_deferred_upsert
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -6168,6 +6315,10 @@ jobs:
             # origin head; resolution's own live-head guards still apply.
             PUSH_RACE_MERGED='false'
             resolve_and_reply_threads
+            # Best-effort: verified out-of-footprint findings persist into
+            # the per-PR tracking issue (script content from expression
+            # context; append-only comment design — see the script).
+            run_deferred_upsert
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
@@ -6354,7 +6505,19 @@ jobs:
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
+          UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          # NOTE: the deferred-findings upsert below runs its PAT identity
+          # check and the script itself in a sound /usr/bin/env -i child (see
+          # the block near the end of this step) — the script arrives as
+          # content from expression context, so there is no staged copy and
+          # no digest gate. This step body needs no in-shell hardening
+          # preamble for it.
+          # The handoff `gh pr comment` here is pre-existing surface at the
+          # workflow's baseline posture; hardening every pre-existing PAT gh
+          # call against BASH_FUNC/transport plants (via the same clean-child
+          # pattern) is tracked separately, out of this feature's scope.
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -6874,6 +7037,67 @@ jobs:
               fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
+          fi
+          # A failed round must not lose verified deferred findings: the
+          # agent's analysis is independent of whether this round's commit
+          # survived verification. Guarded like the handoff MINUS its
+          # outcome!=fixed/noop condition — deliberately: when the outcome IS
+          # fixed/noop but "Push and report" died before its own upsert (the
+          # push loop's exit paths), this block is the only persistence
+          # route left.
+          if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
+            if [[ -z "${UPSERT_SRC:-}" ]]; then
+              # Stage never ran (pre-stage failure): nothing was deferred.
+              echo 'deferred-findings upsert skipped: stage step never ran'
+            else
+              # Same shape as run_deferred_upsert in 'Push and report' — no
+              # agent-writable path, content from expression context, child
+              # messages on fd 3 — plus the PAT bot-identity check, because
+              # POST_HANDOFF's own check is skipped on the fixed/noop-outcome
+              # path that also reaches here.
+              UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
+                /usr/bin/env -i \
+                PATH="${TRUSTED_PATH}" \
+                GITHUB_TOKEN="${GITHUB_TOKEN}" \
+                GH_HOST=github.com \
+                RUNNER_TEMP="${RUNNER_TEMP}" \
+                WORKDIR="${WORKDIR}" \
+                PR="${PR}" \
+                REPO="${REPO}" \
+                AUTOFIX_BOT="${AUTOFIX_BOT}" \
+                UPSERT_SRC="${UPSERT_SRC}" \
+                bash --norc -c '
+                  set -uo pipefail
+                  exec >&3
+                  printf "%s\n" "__upsert_child_live__"
+                  if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                    echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                    exit 0
+                  fi
+                  export GH_CONFIG_DIR
+                  UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"
+                  if [[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                    echo "__upsert_trusted__::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got ${UPSERT_ACTOR:-none}); NOT persisted this round"
+                    exit 0
+                  fi
+                  bash -c "${UPSERT_SRC}" ||
+                    echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
+                ' > /dev/null 2>&1 ; } 3>&1 )" || true
+              # Builtin-only inspection, same rationale as the twin.
+              if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
+                echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
+              fi
+              while IFS= read -r _upsert_line; do
+                if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
+                  :
+                elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
+                  printf '%s\n' "${_upsert_line#__upsert_trusted__}"
+                else
+                  printf '%s\n' "${_upsert_line//::/;;}"
+                fi
+              done <<< "${UPSERT_OUT}"
+            fi
           fi
 
       # Flip the status comment out of "working" so a finished round never

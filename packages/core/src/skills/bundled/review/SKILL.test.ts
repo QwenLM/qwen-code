@@ -79,6 +79,86 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain('`fetch-pr` before all of them');
     expect(body).toContain('`agent-prompt --roster` after the rules load');
+    // The re-run ordering, same class as the two above and newer. A side-file
+    // `--since` re-run rewrites the fetch report from scratch, while
+    // `repo-context` enriches that same file in place: run in the other
+    // order the enrichment is silently discarded and the roster builds
+    // without the manifest's required agents.
+    expect(body).toContain(
+      '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('keeps anchor validation inside the CLI, not in the orchestrator', () => {
+    // The whole point of routing the anchor through `--since`: a hand-run
+    // check is one a run can skip, and the skill forbids hand-computed diffs
+    // everywhere else. Reverting this section to the pre-`--since` wording
+    // restores `git cat-file` / `merge-base --is-ancestor` as orchestrator
+    // steps, and nothing else in this file notices — checking out the
+    // merge-base SKILL.md leaves every other test here green.
+    const body = skillBody();
+    // The bullet's OPENING, which is the only instruction that makes `--since`
+    // fire on the primary (cache) path at all. Repo-wide sweep found zero
+    // assertions naming the cache file or `lastCommitSha`, so a revert to the
+    // pre-PR ordering — cache read beside the fetch report, after `fetch-pr` —
+    // silently degrades every cached-anchor round to a full review.
+    expect(body).toContain(
+      'read `.qwen/review-cache/pr-<n>.json` **before** `fetch-pr`',
+    );
+    expect(body).toContain('pass it to the fetch as `--since <lastCommitSha>`');
+    expect(body).toContain(
+      '**You never run `git` against an anchor yourself**',
+    );
+    // All three prohibitions. The two this test's own comment names — the
+    // hand-run `cat-file` and `merge-base --is-ancestor` — were covered by no
+    // assertion, so a partial revert restoring exactly the checks
+    // `fetch-pr --since` exists to own shipped green. (The age-rule pins
+    // further down name different commands with different operands, in a
+    // different section, and do not reach this sentence.)
+    expect(body).toContain('no `git diff <sha>..HEAD`');
+    expect(body).toContain('no `cat-file`, no `merge-base --is-ancestor`');
+    // The report field the check acts on, and the separation the reason
+    // taxonomy rests on: one field names the CAUSE, another says whether a
+    // plan exists.
+    expect(body).toContain(
+      '**Whether a PLAN exists is a separate field: `diffPath`.**',
+    );
+    // …and the re-run instruction, including the flag-replacement rule that
+    // keeps a second `--since` from reading as two anchors.
+    expect(body).toContain(
+      'REPLACING any `--since` it already carries, never appending a second one',
+    );
+  });
+
+  it('pins which refusal reasons the recovery flow may retry', () => {
+    // The orchestrator's recovery loop acts on this prose alone, and the
+    // producer deliberately manufactures both planless shapes. Deleting the
+    // retry exception strands the one shape a re-run fixes; widening the
+    // retryable set re-refuses a dead anchor every round forever.
+    const body = skillBody();
+    expect(body).toContain(
+      'Every other reason is deterministic for the same sha and must NOT be retried',
+    );
+    expect(body).toContain('Retry that one, once.');
+    // …and the exception's OTHER condition: a null merge base has two causes
+    // and only the fetch-failure one is retryable.
+    expect(body).toContain('`baseFetchFailed: true`');
+    expect(body).toContain('found no common ancestor at all');
+  });
+
+  it('records the range the round actually reviewed in provenance', () => {
+    // A saved report is read by someone who cannot re-derive its scope, so
+    // recording the merge base for a round that reviewed `diffBase..head`
+    // hands that reader a range the run never had.
+    // The whole rule, not its opening clause. The discriminating CONDITION
+    // and the fallback half were each pinned by nothing: deleting the
+    // condition, flipping it to `and upToDate`, or swapping the fallback for
+    // `fetchedSha` all shipped this file green, and each one records a scope
+    // the run never had.
+    expect(skillBody()).toContain(
+      '`incremental.diffBase` on a delta-scoped round (`incremental.effective` and no `upToDate`)',
+    );
+    expect(skillBody()).toContain('`mergeBaseSha` on every other');
   });
 
   it('launches the 3B convergence pair in the same response', () => {
