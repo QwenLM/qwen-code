@@ -1320,7 +1320,7 @@ describe('renderLedgerSection', () => {
     // The CONDITION, not just the instruction. Dropping the clause leaves the
     // tail telling the orchestrator, unconditionally and in imperative tone,
     // to re-run with a sha that may already have been deterministically
-    // refused — `not-an-ancestor`, `hunks-outside-pr-diff`, `partition-failed`
+    // refused — `not-an-ancestor`, `nothing-to-narrow`, `partition-failed`
     // — which the recovered-anchor flow says must NOT be retried.
     expect(anchored).toContain(
       "when Step 1's recovered-anchor check rules a re-run admissible",

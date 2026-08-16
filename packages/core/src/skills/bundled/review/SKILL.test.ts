@@ -143,6 +143,11 @@ describe('bundled review skill', () => {
     // …and the exception's OTHER condition: a null merge base has two causes
     // and only the fetch-failure one is retryable.
     expect(body).toContain('`baseFetchFailed: true`');
+    // The narrowing reason is deterministic for the same sha like every other
+    // non-infrastructure one: the same two captures select the same hunks. A
+    // future edit moving it into the retryable set would re-narrow to nothing
+    // every round, forever.
+    expect(body).toContain('`nothing-to-narrow` re-narrows identically');
     expect(body).toContain('found no common ancestor at all');
   });
 
