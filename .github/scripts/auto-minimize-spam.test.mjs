@@ -90,6 +90,10 @@ describe('auto-minimize-spam: event fast path', () => {
       /comment\.user\.type != 'Bot'[\s\S]*!contains\([\s\S]*OWNER[\s\S]*MEMBER[\s\S]*COLLABORATOR[\s\S]*github\.event\.comment\.author_association/,
     );
     assert.match(jobGuard, /head\.repo\.full_name == github\.repository/);
+    assert.match(
+      jobGuard,
+      /github\.event_name != 'pull_request_review_comment' \|\|/,
+    );
     assert.match(String(doc.concurrency.group), /comment\.node_id/);
     assert.equal(
       checkoutStep.with.ref,
@@ -103,14 +107,22 @@ describe('auto-minimize-spam: event fast path', () => {
       minimizeStep.env?.EVENT_COMMENT_NODE_ID,
       '${{ github.event.comment.node_id }}',
     );
-    assert.match(minimizeStep.run, /\[ -n "\$EVENT_COMMENT_NODE_ID" \]/);
+    assert.equal(
+      minimizeStep.run.match(/\[ -n "\$EVENT_COMMENT_NODE_ID" \]/g)?.length,
+      2,
+    );
     assert.match(
       minimizeStep.run,
       /ALL_CANDIDATES="\$\{EVENT_COMMENT_LOGIN\}"\$'\\t'"\$\{EVENT_COMMENT_NODE_ID\}"/,
     );
     assert.match(
       minimizeStep.run,
-      /--jq '\.data\.node\.isMinimized \/\/ "missing"'[\s\S]*\|\| printf 'missing'/,
+      /--jq 'if \.data\.node == null then "missing" else \.data\.node\.isMinimized end'[\s\S]*\|\| printf 'missing'/,
+    );
+    assert.doesNotMatch(minimizeStep.run, /2>\/dev\/null/);
+    assert.match(
+      minimizeStep.run,
+      /\[ "\$is_minimized" = "missing" \] && continue/,
     );
   });
 });

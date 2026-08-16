@@ -190,7 +190,7 @@ jobs:
                       ... on Minimizable { isMinimized }
                     }
                   }
-                " --jq '.data.node.isMinimized // "missing"' 2>/dev/null \
+                " --jq 'if .data.node == null then "missing" else .data.node.isMinimized end' \
                   || printf 'missing'
               )"
               [ "$is_minimized" = "missing" ] && continue
