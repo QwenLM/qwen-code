@@ -2591,6 +2591,14 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             // pattern is quoted: an unquoted space would split it into two
             // case words and bash rejects the line outright.
             '  *"-X DELETE"*) if [ "${CONTEXT_DELETE_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi ;;',
+            // Fast answers for the marker-invalidation upsert the strip
+            // branch now runs (upsert-bot-comment.sh): a bot login and an
+            // EMPTY listing, so --update-only no-ops instead of retrying
+            // its way through the stub's silent branches (3x sleep 10).
+            // `[]`, not `[[]]`: the upsert jq runs with -s (slurp), which
+            // wraps the document once itself.
+            '  "api user"*) echo "qwen-code-ci-bot" ;;',
+            '  *"--method GET"*) echo "[]" ;;',
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
             '  */comments*)',
             '    if [ "${CONTEXT_MARKERS_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi',
@@ -3019,13 +3027,42 @@ describe('qwen pr review concurrency routing', () => {
     // lifecycle actions reach the PR group and every review_requested (bot
     // included) falls through to the per-run group. Any requested_reviewer
     // clause here re-admits the unauthorized-requester no-op and silently
-    // re-ships the race.
+    // re-ships the race. The edited carve-out is the same protection for
+    // the other guaranteed no-op shape: a title/body edit exits
+    // should_run=false at the step's early gate, so in the shared group it
+    // could supersede a PENDING synchronize run and the pushed head would
+    // silently never review (#9193 review); only base-retarget edits join
+    // the PR group.
     expect(group).toBe(
       "${{ github.event_name == 'pull_request_target' && " +
         "github.event.action != 'review_requested' && " +
+        "(github.event.action != 'edited' || github.event.changes.base) && " +
         "format('qwen-pr-review-pr-{0}', github.event.pull_request.number) || " +
         "format('qwen-pr-review-run-{0}', github.run_id) }}",
     );
+  });
+
+  it('subscribes the edited trigger so base retargets fire the gate (#9193)', () => {
+    // The behavioural harness injects action: 'edited' straight into the
+    // step bash, bypassing the on: block — deleting '- edited' from the
+    // subscription kept the whole suite green while production base
+    // retargets would never fire this workflow again. Sibling suites pin
+    // trigger types the same way.
+    expect(parse(workflow).on.pull_request_target.types).toContain('edited');
+  });
+
+  it('keeps base-less edited runs out of the heavy jobs (#9193)', () => {
+    // Title/body edits are guaranteed no-ops; without these job-level
+    // clauses each one wakes precheck-pr (fork permission API + diff
+    // fetch), authorize, and review-pr's checkout preamble on the shared
+    // self-hosted pool. The in-step early exit stays as the tie-breaker.
+    const noBaselessEdited =
+      "github.event.action != 'edited' || github.event.changes.base";
+    for (const job of ['precheck-pr', 'authorize', 'review-pr']) {
+      expect(parse(workflow).jobs[job].if.replace(/\s+/g, ' ')).toContain(
+        noBaselessEdited,
+      );
+    }
   });
 
   it('gates the review_requested jobs on the published bot login', () => {

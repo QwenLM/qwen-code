@@ -63,11 +63,18 @@ concurrency:
   # anyone who can request the bot without write permission. The per-run group
   # costs only an occasional duplicate review when an authorized bot request
   # lands while the lifecycle run for the same head still queues: compute,
-  # never a lost review. Comment/review events use per-run groups to avoid
-  # cancelling active reviews.
+  # never a lost review. The SAME carve-out applies to `edited` runs without a
+  # base change: they exit should_run=false at the step's early gate, so in
+  # the shared group a routine title/body edit could supersede a pending
+  # synchronize run and the pushed head would silently never review. Only
+  # base-retarget edits (changes.base) join the PR group — superseding a
+  # stale pending run there reviews live state: compute, never a lost
+  # review. Comment/review events use per-run groups to avoid cancelling
+  # active reviews.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
     github.event.action != 'review_requested' &&
+    (github.event.action != 'edited' || github.event.changes.base) &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
@@ -84,6 +91,7 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action != 'closed' &&
+      (github.event.action != 'edited' || github.event.changes.base) &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
        github.event.requested_reviewer.login == 'qwen-code-ci-bot')
@@ -264,6 +272,9 @@ jobs:
       (github.event_name != 'pull_request_target' ||
        github.event.action != 'closed') &&
       (github.event_name != 'pull_request_target' ||
+       github.event.action != 'edited' ||
+       github.event.changes.base) &&
+      (github.event_name != 'pull_request_target' ||
        github.event.pull_request.head.repo.full_name == github.repository ||
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name != 'pull_request_target' ||
@@ -378,6 +389,7 @@ jobs:
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.state == 'open' &&
        !github.event.pull_request.draft &&
+       (github.event.action != 'edited' || github.event.changes.base) &&
        needs.authorize.outputs.should_review == 'true' &&
        ((github.event.action == 'review_requested' &&
          github.event.requested_reviewer.login == needs.review-config.outputs.bot_login) ||
@@ -740,6 +752,23 @@ jobs:
                 # review lane AND never age out via the stale bot.
                 if [ -n "$MARKERS" ] && gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/status%2Fon-hold" -X DELETE 2>/dev/null; then
                   echo "Removed stale status/on-hold so the stale bot can age this PR (#9193)." >> "$GITHUB_STEP_SUMMARY"
+                  # Invalidate the stale marker comment in the same pass:
+                  # markers are upserted, never deleted, so leaving it in
+                  # place keeps MARKERS non-empty forever and a maintainer
+                  # who later re-applies status/on-hold to park the PR
+                  # (documented workflow; the label is in stale.yml's
+                  # exempt-pr-labels) would hit this stale-strip again
+                  # instead of the manual-park carve-out above. Rewrite it
+                  # with a body that no longer starts with the marker
+                  # prefix; --update-only never mints a comment
+                  # (#9193 review). A failed invalidation only warns: the
+                  # worst case is one more strip of a re-applied label.
+                  invalidated_marker_file="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-marker-invalidated.XXXXXX")"
+                  printf '%s\n' "<!-- qwen-triage on-hold invalidated: stale pin stripped with the label at head ${HEAD_SHA} base ${BASE_SHA} (#9193). -->" > "$invalidated_marker_file"
+                  if ! .github/scripts/upsert-bot-comment.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" 'qwen-triage on-hold sha=' "$invalidated_marker_file" --update-only; then
+                    echo "::warning::could not invalidate the stale triage marker comment (#9193)."
+                  fi
+                  rm -f "$invalidated_marker_file"
                 elif [ -z "$MARKERS" ]; then
                   echo "status/on-hold present without a triage marker — leaving the manual label in place (#9193)." >> "$GITHUB_STEP_SUMMARY"
                 else

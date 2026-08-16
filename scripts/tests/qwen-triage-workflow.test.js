@@ -6062,7 +6062,14 @@ describe('triage skill non-functional routing (#7411)', () => {
     expect(section).toContain(
       'gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid',
     );
-    expect(section).toContain('empty base SHA — fail closed');
+    // The base is captured ONCE at review start (signature block) and only
+    // re-read here to compare — a fresh read at post time would let a
+    // mid-run retarget mint a pin matching the NEW base pair, skipping a
+    // diff the triage never certified (TOCTOU, #9193 review).
+    expect(section).toContain('NOW_BASE=$(gh pr view');
+    expect(section).toContain(
+      '[ "$NOW_BASE" = "$BASE_SHA" ] || { echo \'base moved or unreadable since classification — restart triage\'; exit 1; }',
+    );
     expect(section).toContain(
       'MARKER_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-on-hold-marker.XXXXXX")"',
     );

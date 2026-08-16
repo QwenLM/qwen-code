@@ -57,14 +57,18 @@ EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method GET --paginate
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
 
-**Signature & footer:** capture the reviewed commit's **full** OID **once, when you begin inspecting the code** — the SHA the worktree/diff actually reflects. Not a 7-char prefix (28 bits; a fork author can force-push a colliding prefix), and **not** a fresh read at post time (that would attest to code you never reviewed). Reuse this `HEAD_SHA` for every stage's footer, and before each post — and again before `--approve` — re-read the head and bail if it moved:
+**Signature & footer:** capture the reviewed commit's **full** OID **once, when you begin inspecting the code** — the SHA the worktree/diff actually reflects. Not a 7-char prefix (28 bits; a fork author can force-push a colliding prefix), and **not** a fresh read at post time (that would attest to code you never reviewed). Capture the **base** alongside it under the same discipline: the classification reads the diff against the base it saw at start, so a retarget landing mid-run invalidates the verdict exactly like a push does (a pin posted with the NEW base would match the live pair and skip a diff the triage never certified). Reuse these SHAs for every stage's footer, and before each post — and again before `--approve` — re-read head and base and bail if either moved:
 
 ```bash
 HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || exit 1
 [ -n "$HEAD_SHA" ] || { echo 'empty head SHA — fail closed'; exit 1; }   # once, at review start
+BASE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseRefOid') || exit 1
+[ -n "$BASE_SHA" ] || { echo 'empty base SHA — fail closed'; exit 1; }   # once, alongside the head
 # before any post or approval — refuse to attest to code you didn't review:
 NOW=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || exit 1
 [ -n "$NOW" ] && [ "$NOW" = "$HEAD_SHA" ] || { echo 'head moved or unreadable — restart or defer'; exit 1; }
+NOW_BASE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseRefOid') || exit 1
+[ -n "$NOW_BASE" ] && [ "$NOW_BASE" = "$BASE_SHA" ] || { echo 'base moved or unreadable — restart or defer'; exit 1; }
 ```
 
 Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signature line, then a footer recording the commit this pass reflects. Because comments are updated in place on re-run, the SHA lets a maintainer tell at a glance whether new commits landed since the last review:
@@ -303,8 +307,13 @@ classification evidence — read the diff.
    re-enables review automatically (#9193):
 
 ```bash
-BASE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseRefOid') || exit 1
-[ -n "$BASE_SHA" ] || { echo 'empty base SHA — fail closed'; exit 1; }
+# Re-read the base and compare against the SHA captured at review start —
+# the exact mirror of the head guard above. A retarget landing between
+# classification and this post must ABORT: a pin stamped with the new
+# base would match the live head/base pair and skip a diff the triage
+# never certified (#9193 review).
+NOW_BASE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseRefOid') || exit 1
+[ -n "$NOW_BASE" ] && [ "$NOW_BASE" = "$BASE_SHA" ] || { echo 'base moved or unreadable since classification — restart triage'; exit 1; }
 MARKER_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-on-hold-marker.XXXXXX")"
 printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > "$MARKER_FILE"
 .github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' "$MARKER_FILE" || { echo 'marker upsert failed — fail closed'; exit 1; }
