@@ -616,9 +616,13 @@ function withMarker(line: string): string {
  * Three rounds of hand models each shipped a new class of divergence:
  * closers counted by parity that no renderer opens, then parity itself
  * falsified, then container-nested openers, one-line self-closed comments,
- * a spaced `</script >`, and the `<?` / `<!A` / CDATA block types. The
- * parser names the swallowing block; `noticeRidesClean` proves a candidate
- * closer against the rendered page before it ships.
+ * a spaced `</script >`, and the `<?` / `<!A` / CDATA block types. A
+ * probe parse names the swallowing block — the block token carrying the
+ * appended tail IS the block extending to the end of the page, so a
+ * closed block is never blamed — and what the block layer certifies clean
+ * is decided again at the browser layer by the HTML5 swallow states.
+ * `noticeRidesClean` proves a candidate closer against the rendered page
+ * before it ships.
  */
 interface OpenBlockAtEnd {
   /** Candidate closers, natural fit first. Each one is verified. */
@@ -629,7 +633,11 @@ interface OpenBlockAtEnd {
 
 const blockGrammar = new MarkdownIt({ html: true });
 
-/** Locates the protected tail in a probe parse; no cut content carries it. */
+/**
+ * Locates the protected tail in a probe parse. Model-written cut content
+ * can QUOTE the literal, so every read resolves the TAIL occurrence — the
+ * last one — never the first.
+ */
 const NOTICE_SENTINEL = 'QWENREVIEWCUTSENTINEL';
 
 /**
@@ -646,80 +654,295 @@ const NOTICE_SENTINEL = 'QWENREVIEWCUTSENTINEL';
 function noticeRidesClean(cut: string, closer: string): boolean {
   const probe = `${cut}${closer}\n\n${NOTICE_SENTINEL}`;
   const tokens = blockGrammar.parse(probe, {});
+  // The tail is appended LAST, so the last token carrying the sentinel is
+  // the tail's own: a cut quoting the literal certifies at the tail, never
+  // at the quote.
   let noticed = false;
-  for (let i = 0; i < tokens.length; i++) {
+  for (let i = tokens.length - 1; i >= 0; i--) {
     const tok = tokens[i];
-    if (tok.type === 'inline' && tok.content.includes(NOTICE_SENTINEL)) {
+    if (!tok.content.includes(NOTICE_SENTINEL)) continue;
+    if (tok.type === 'inline') {
       noticed = tokens[i - 1]?.type === 'paragraph_open';
       break;
     }
-    if (
-      (tok.type === 'fence' || tok.type === 'html_block') &&
-      tok.content.includes(NOTICE_SENTINEL)
-    ) {
-      return false;
-    }
+    if (tok.type === 'fence' || tok.type === 'html_block') return false;
   }
   if (!noticed) return false;
   const html = blockGrammar.render(probe);
-  const at = html.indexOf(NOTICE_SENTINEL);
-  return at !== -1 && browserSwallowOpen(html.slice(0, at)) === null;
+  const at = html.lastIndexOf(NOTICE_SENTINEL);
+  return at !== -1 && scanBrowserState(html.slice(0, at)).end.kind === 'data';
 }
 
 /**
- * The swallow a browser is still inside at the end of `html`, or null when
- * it reads ordinary content there. Comments run to `-->`, script, style
- * and textarea to their closing tag, and whatever opens first owns — the
- * rest of the html is its content.
+ * The elements whose content runs to their closing tag — script, style
+ * and friends — plus `plaintext`, which runs to the end of the page and
+ * has no closer. An unclosed one swallows everything after its opener,
+ * notice included.
  */
-function browserSwallowOpen(html: string): string | null {
-  const lower = html.toLowerCase();
-  const swallows: ReadonlyArray<readonly [string, string, number]> = [
-    ['<!--', '-->', 4],
-    ['<script', '</script', 7],
-    ['<style', '</style', 6],
-    ['<textarea', '</textarea', 9],
-  ];
+const RAW_TEXT_ELEMENTS: ReadonlySet<string> = new Set([
+  'script',
+  'style',
+  'xmp',
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'textarea', // RCDATA — the same closer rule
+  'title', // RCDATA — the same closer rule
+]);
+
+type BrowserState =
+  | { kind: 'data' }
+  | { kind: 'tag' }
+  | { kind: 'markup' }
+  | { kind: 'comment' }
+  | { kind: 'raw'; tag: string };
+
+function isTagNameChar(c: string): boolean {
+  return /[a-zA-Z0-9:-]/.test(c);
+}
+
+/** The offset after the tag body's `>`, or -1 when the tag never closes. */
+function skipTagBody(s: string, k: number): number {
+  for (;;) {
+    if (k >= s.length) return -1;
+    const c = s.charAt(k);
+    if (c === '>') return k + 1;
+    if (c === '"' || c === "'") {
+      const q = s.indexOf(c, k + 1);
+      if (q === -1) return -1;
+      k = q + 1;
+      continue;
+    }
+    k++;
+  }
+}
+
+/**
+ * The browser's state after scanning `s`, resumed from `state`, and —
+ * when a swallow (comment or raw element) is open at the end — the offset
+ * within `s` where that swallow opened (-1 when inherited from `state`).
+ * This is the HTML5 swallow model, attribute-aware: a quoted `<script>`
+ * opens nothing and a quoted `</textarea>` closes nothing, the two
+ * blindnesses the indexOf scan shipped.
+ */
+function scanBrowserState(
+  s: string,
+  state: BrowserState = { kind: 'data' },
+): { end: BrowserState; swallowEnteredAt: number } {
+  const lower = s.toLowerCase();
+  let enteredAt = -1;
   let i = 0;
   for (;;) {
-    let at = -1;
-    let openerLen = 0;
-    let closer = '';
-    for (const [tag, close, len] of swallows) {
-      const pos = lower.indexOf(tag, i);
-      if (pos !== -1 && (at === -1 || pos < at)) {
-        at = pos;
-        openerLen = len;
-        closer = close;
+    if (state.kind === 'comment') {
+      let j = i;
+      let closed = -1;
+      for (;;) {
+        const cc = s.indexOf('--', j);
+        if (cc === -1) break;
+        if (s.charAt(cc + 2) === '>') {
+          closed = cc + 3;
+          break;
+        }
+        if (s.charAt(cc + 2) === '!' && s.charAt(cc + 3) === '>') {
+          closed = cc + 4;
+          break;
+        }
+        j = cc + 2;
       }
+      if (closed === -1) return { end: state, swallowEnteredAt: enteredAt };
+      i = closed;
+      state = { kind: 'data' };
+      continue;
     }
-    if (at === -1) return null;
-    const end = lower.indexOf(closer, at + openerLen);
-    if (end === -1) return closer;
-    i = end + closer.length;
+    if (state.kind === 'markup') {
+      const gt = s.indexOf('>', i);
+      if (gt === -1) return { end: state, swallowEnteredAt: enteredAt };
+      i = gt + 1;
+      state = { kind: 'data' };
+      continue;
+    }
+    if (state.kind === 'tag') {
+      // A tag carried over from an earlier string can no longer be a raw
+      // opener — markdown emits raw HTML in complete tokens, so its name
+      // was read where it opened. Closing it as ordinary is conformant.
+      const after = skipTagBody(s, i);
+      if (after === -1) return { end: state, swallowEnteredAt: enteredAt };
+      i = after;
+      state = { kind: 'data' };
+      continue;
+    }
+    if (state.kind === 'raw') {
+      if (state.tag === 'plaintext') {
+        return { end: state, swallowEnteredAt: enteredAt };
+      }
+      let j = i;
+      let closed = -1;
+      for (;;) {
+        const ct = lower.indexOf('</', j);
+        if (ct === -1) break;
+        let k = ct + 2;
+        let name = '';
+        while (k < s.length && isTagNameChar(s.charAt(k))) {
+          name += s.charAt(k).toLowerCase();
+          k++;
+        }
+        const nx = s.charAt(k);
+        if (
+          name === state.tag &&
+          (nx === '' ||
+            nx === '\t' ||
+            nx === '\n' ||
+            nx === '\f' ||
+            nx === ' ' ||
+            nx === '/' ||
+            nx === '>')
+        ) {
+          closed = nx === '>' ? k + 1 : skipTagBody(s, k);
+          break;
+        }
+        j = ct + 2;
+      }
+      if (closed === -1) return { end: state, swallowEnteredAt: enteredAt };
+      i = closed;
+      state = { kind: 'data' };
+      continue;
+    }
+    const lt = s.indexOf('<', i);
+    if (lt === -1) return { end: { kind: 'data' }, swallowEnteredAt: -1 };
+    i = lt;
+    if (s.startsWith('<!--', lt)) {
+      // `<!-->` and `<!--->` are complete comments.
+      if (s.charAt(lt + 4) === '>') {
+        i = lt + 5;
+        continue;
+      }
+      if (s.startsWith('->', lt + 4)) {
+        i = lt + 6;
+        continue;
+      }
+      state = { kind: 'comment' };
+      enteredAt = lt;
+      i = lt + 4;
+      continue;
+    }
+    if (s.startsWith('<!', lt) || s.startsWith('<?', lt)) {
+      state = { kind: 'markup' };
+      i = lt + 2;
+      continue;
+    }
+    if (s.startsWith('</', lt)) {
+      if (!/[a-zA-Z]/.test(s.charAt(lt + 2))) {
+        state = { kind: 'markup' };
+        i = lt + 2;
+        continue;
+      }
+      let k = lt + 2;
+      while (k < s.length && isTagNameChar(s.charAt(k))) k++;
+      state = { kind: 'tag' };
+      i = k;
+      continue;
+    }
+    if (/[a-zA-Z]/.test(s.charAt(lt + 1))) {
+      let k = lt + 1;
+      let name = '';
+      while (k < s.length && isTagNameChar(s.charAt(k))) {
+        name += s.charAt(k).toLowerCase();
+        k++;
+      }
+      const after = k >= s.length ? -1 : skipTagBody(s, k);
+      if (after === -1) {
+        // The tag does not complete here: a resumed scan closes it as
+        // ordinary (see the 'tag' arm). A raw opener cut mid-attribute
+        // still swallows at the page — fail closed on it below.
+        state = { kind: 'tag' };
+        i = k;
+        continue;
+      }
+      i = after;
+      if (RAW_TEXT_ELEMENTS.has(name)) {
+        state = { kind: 'raw', tag: name };
+        enteredAt = lt;
+      }
+      continue;
+    }
+    i = lt + 1;
   }
 }
 
 function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
   if (noticeRidesClean(text, '')) return null;
-  const tokens = blockGrammar.parse(text, {});
-  // An unclosed fence or raw block extends to the end of the document, so
-  // nothing follows it: the swallower is the last fence/raw token there is.
+  const probe = `${text}\n\n${NOTICE_SENTINEL}`;
+  const tokens = blockGrammar.parse(probe, {});
+  const lineStart = (line: number): number => {
+    let off = 0;
+    for (let l = 0; l < line; l++) {
+      const nl = text.indexOf('\n', off);
+      if (nl === -1) break;
+      off = nl + 1;
+    }
+    return off;
+  };
+  // The probe appends the tail at the very end, so the LAST block token
+  // carrying the sentinel is, by construction, the block that extends to
+  // the end of the page: no attribution guess over closed blocks.
   let swallow: (typeof tokens)[number] | null = null;
-  for (const tok of tokens) {
-    if (tok.type === 'fence' || tok.type === 'html_block') swallow = tok;
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const tok = tokens[i];
+    if (
+      (tok.type === 'fence' || tok.type === 'html_block') &&
+      tok.content.includes(NOTICE_SENTINEL)
+    ) {
+      swallow = tok;
+      break;
+    }
   }
   if (swallow === null || swallow.map === null) {
-    // Something swallows, but nothing recognisable: fail closed over the
-    // whole cut rather than ship an unverified closer.
-    return { closers: [], blockStart: 0 };
+    // The markdown layer left the tail clean, so the swallow is raw HTML
+    // the browser is still inside. Decide the state from the rendered
+    // page, and attribute it to the raw fragment that opened it — raw
+    // text reaches the page only through html_block and inline html
+    // tokens — so the rewind loses the swallower, not the whole cut.
+    const html = blockGrammar.render(probe);
+    const at = html.lastIndexOf(NOTICE_SENTINEL);
+    const end = scanBrowserState(at === -1 ? html : html.slice(0, at)).end;
+    const frags: Array<{ content: string; line: number }> = [];
+    for (const tok of tokens) {
+      if (tok.type === 'html_block') {
+        frags.push({ content: tok.content, line: tok.map?.[0] ?? 0 });
+      } else if (tok.type === 'inline') {
+        for (const child of tok.children ?? []) {
+          if (child.type === 'html_inline') {
+            frags.push({ content: child.content, line: tok.map?.[0] ?? 0 });
+          }
+        }
+      }
+    }
+    let state: BrowserState = { kind: 'data' };
+    let openLine = -1;
+    for (const frag of frags) {
+      const r = scanBrowserState(frag.content, state);
+      if (r.swallowEnteredAt !== -1) openLine = frag.line;
+      else if (r.end.kind !== 'data' && state.kind === 'data') {
+        openLine = frag.line;
+      }
+      state = r.end;
+    }
+    const blockStart = lineStart(Math.max(0, openLine));
+    if (end.kind === 'comment') {
+      // A bare `-->` line renders escaped inside a paragraph and closes
+      // nothing; the one-line comment form reaches the page raw, and its
+      // `-->` half closes the open comment there.
+      return { closers: ['\n<!-- -->'], blockStart };
+    }
+    if (end.kind === 'raw' && end.tag !== 'plaintext') {
+      return { closers: [`\n</${end.tag}>`], blockStart };
+    }
+    // A plaintext swallow has no closer, and an unrecognised state fails
+    // closed over the whole cut rather than ship an unverified closer.
+    return { closers: [], blockStart };
   }
-  let blockStart = 0;
-  for (let l = 0; l < swallow.map[0]; l++) {
-    const nl = text.indexOf('\n', blockStart);
-    if (nl === -1) break;
-    blockStart = nl + 1;
-  }
+  const blockStart = lineStart(swallow.map[0]);
   if (swallow.type === 'fence') {
     const run = swallow.markup.charAt(0).repeat(swallow.markup.length);
     const lineEnd = text.indexOf('\n', blockStart);
@@ -745,7 +968,10 @@ function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
     return { closers: ['\n]]>'], blockStart };
   }
   if (/^<![a-z]/i.test(opener)) return { closers: ['\n>'], blockStart };
-  const raw1 = /^<(script|pre|style|textarea)\b/i.exec(opener);
+  const raw1 =
+    /^<(script|pre|style|textarea|title|xmp|iframe|noembed|noframes|noscript)\b/i.exec(
+      opener,
+    );
   if (raw1) {
     return { closers: [`\n</${raw1[1].toLowerCase()}>`], blockStart };
   }

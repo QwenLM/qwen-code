@@ -5291,22 +5291,18 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   };
   const noticeOutsideCode = (body: string): boolean => {
     const tokens = page.parse(body, {});
-    for (let i = 0; i < tokens.length; i++) {
+    // The notice rides in the protected TAIL, so its own occurrence is the
+    // LAST one: an early paragraph that merely QUOTES the phrase must not
+    // certify at the quote's position while the real notice sits swallowed.
+    for (let i = tokens.length - 1; i >= 0; i--) {
       const tok = tokens[i];
-      if (
-        (tok.type === 'fence' || tok.type === 'html_block') &&
-        tok.content.includes('was TRUNCATED to fit')
-      ) {
-        return false;
-      }
-      if (
-        tok.type === 'inline' &&
-        tok.content.includes('was TRUNCATED to fit')
-      ) {
+      if (!tok.content.includes('was TRUNCATED to fit')) continue;
+      if (tok.type === 'fence' || tok.type === 'html_block') return false;
+      if (tok.type === 'inline') {
         if (tokens[i - 1]?.type !== 'paragraph_open') return false;
         const html = page.render(body);
-        const at = html.indexOf('was TRUNCATED to fit');
-        return !browserSwallowOpen(html.slice(0, at));
+        const at = html.lastIndexOf('was TRUNCATED to fit');
+        return at !== -1 && !browserSwallowOpen(html.slice(0, at));
       }
     }
     return false;
@@ -5916,6 +5912,10 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     const r = composeReview(base({ bodyCriticals: [commented] }));
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(countOf(r.body, '<!--')).toBe(countOf(r.body, '-->'));
+    // Parity and a clean page also hold when the whole comment block is
+    // REWIND-discarded instead of closed: only content survival tells the
+    // two apart.
+    expect(r.body).toContain('reviewer note');
     expect(noticeOutsideCode(r.body)).toBe(true);
     expect(r.body).toContain('was TRUNCATED to fit');
   });
@@ -5991,6 +5991,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.truncated).toBe(true);
     expect(noticeOutsideCode(r.body)).toBe(true);
+    // Content survival, not just parity: a rewind-discard of the comment
+    // block posts a clean page with the quoted evidence gone.
+    expect(r.body).toContain('quoted line');
     expect(r.body).toContain('was TRUNCATED to fit');
   });
 
@@ -6040,6 +6043,129 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       expect(r.body).toContain('was TRUNCATED to fit');
     },
   );
+
+  it('closes a mid-line raw-text opener the block grammar never tokenized', () => {
+    // An unclosed `<script>` MID-LINE is an inline raw token — no fence or
+    // html_block exists — so the fail-closed branch spent the ENTIRE cut:
+    // the posted body was notice and footer only, every blocker dropped,
+    // although the page's own closer was known. The cut must offer the
+    // verified closer instead of rewinding to zero.
+    const inlineOpener = 'trace: <script> var leak = 1;' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [inlineOpener] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('var leak = 1;');
+    expect(r.body).toContain('K'.repeat(1_000));
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('attributes a swallow to the inline opener AFTER a closed block', () => {
+    // The swallow belongs to whichever construct still holds the tail, not
+    // to the last block token: attributing it to the CLOSED fence above the
+    // real swallower rewound past the fence and kept 305 chars of ~64.6k,
+    // although the loop's own gate accepted the inline opener's closer.
+    const closedThenInline =
+      'log:\n```ts\nconst x = 1;\n```\nthen <script> raw ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [closedThenInline] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('const x = 1;');
+    expect(r.body).toContain('K'.repeat(1_000));
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('certifies against the TAIL sentinel when the cut quotes the literal', () => {
+    // A review discussing this very module quotes the sentinel literal.
+    // Resolving the FIRST occurrence certified at the quote's position and
+    // shipped the open fence: notice, footer and ledger marker rendered
+    // inside it. Only the tail occurrence is the probe's own.
+    const quotingSentinel =
+      'review of the QWENREVIEWCUTSENTINEL probe\n```ts\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [quotingSentinel] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('does not certify clean over an RCDATA element the scan never modelled', () => {
+    // `<title>` rides to the page and parse5 places everything after it —
+    // notice included — inside the RCDATA element until its closing tag,
+    // which the hand scan never knew. The cut must close it, and the
+    // closer must land BEFORE the notice it protects.
+    const rcdata = 'see <title> docs for ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [rcdata] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    const open = r.body.indexOf('<title>');
+    const close = r.body.indexOf('</title>', open);
+    const notice = r.body.indexOf('was TRUNCATED to fit');
+    expect(open).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(open);
+    expect(close).toBeLessThan(notice);
+  });
+
+  it('does not false-close a raw element on a closer quoted in its own opener', () => {
+    // `placeholder="</textarea>"` is an attribute value, not a closer: the
+    // element stays open and the cut owes a real one. A scan starting its
+    // closer search inside the opener tag decided the element had closed
+    // and certified the swallow clean.
+    const attrCloser =
+      'form <textarea placeholder="</textarea>"> field ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [attrCloser] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(countOf(r.body, '</textarea>')).toBeGreaterThanOrEqual(2);
+    const notice = r.body.indexOf('was TRUNCATED to fit');
+    expect(r.body.lastIndexOf('</textarea>')).toBeLessThan(notice);
+  });
+
+  it('sees no swallow when an opener sits inside a quoted attribute', () => {
+    // `onerror="<script>"` never opens a script element: the phantom
+    // swallow spent the whole cut in the fail-closed direction, dropping
+    // every blocker over an opener that does not exist.
+    const attrOpener =
+      'add <img onerror="<script>"> guard ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [attrOpener] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain('K'.repeat(1_000));
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('keeps the context-unavailable trust warning through a truncation', () => {
+    // `contextUnavailableClause` is `keep: 1` so the rung-3 cut spends
+    // blockers before the diff-only trust warning; no truncation fixture
+    // carried the clause, so deleting the tag shipped green — the untagged
+    // clause sorted to rank 3 and the cut spent the warning first.
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        contextUnavailable: true,
+        bodyCriticals: ['B'.repeat(70_000)],
+      }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain('Reviewed diff-only');
+  });
+
+  it('keeps the unlicensed-deferral disclosure through a rung-3 cut', () => {
+    // Same family: the disclosure's `keep: 1` had no oracle through a real
+    // cut — deleting the tag shipped green while the cut spent the only
+    // posted copy of the under-posting warning.
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        bodyCriticals: ['B'.repeat(70_000)],
+        deferredSuggestions: [nit(1)],
+      }),
+    );
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain('deferred without a posture licence');
+  });
 
   it('ranks the plan-gate disclosures with the not-reviewed ones, not with the deferral list', () => {
     // `deferredBlock`, `testPlanBlock` and `repositoryContextBlock` all
