@@ -10712,8 +10712,11 @@ exit 1
     // R9-20: the script-side union is the freshness guarantee — this round
     // first, so unique_by (first-of-group, original order) keeps the fresh
     // text when run 2 re-emits a carried id.
-    expect(upsertDeferredScript).toContain(
-      'jq -s \'add\' "${FINDINGS}" "${CARRY}" > "${MERGED}"',
+    // Argument order is the freshness guarantee (unique_by keeps
+    // first-of-group in original order), and both inputs must BE arrays —
+    // `add` on two non-arrays yields whatever they add to.
+    expect(upsertDeferredScript).toMatch(
+      /if \(map\(type == "array"\) \| all\) then add else empty end'[\s\S]{0,40}"\$\{FINDINGS\}" "\$\{CARRY\}" > "\$\{MERGED\}"/,
     );
     expect(repairStep).toContain(
       'mv "${WORKDIR}/deferred-findings.carry.next" \\\n                  "${WORKDIR}/deferred-findings.carry.json"',
@@ -11279,12 +11282,13 @@ exit 1
       findings: '[{"id":7,"reason":"this round is fine"}]',
       carry: 'not json at all',
     });
-    // The message no longer claims to know WHICH side is corrupt — jq -s
-    // fails if either input is unparseable (R10-12).
+    // An unparseable carry is now caught by the single-document gate, which
+    // names it precisely — and still costs only the carry: this round's
+    // valid findings are published (the asymmetry R9-18 settled on).
     expect(unparseableCarry.out).toContain(
-      "could not merge this round's deferrals with the carried sidecar",
+      'the carried deferrals are not a single JSON document',
     );
-    expect(unparseableCarry.out).toContain('one of the two is unparseable');
+    expect(unparseableCarry.out).toContain('The carried set is LOST');
     expect(unparseableCarry.calls).toContain('- rc:7 ');
     // But a bad set of OUR OWN is still a loud, total abort.
     const poisonedOwn = runUpsert({
@@ -11328,6 +11332,24 @@ exit 1
         '[{"id":21,"source":"review","reason":"修复内存泄漏问题"},' +
         '{"id":21,"source":"review","reason":"修复资源泄漏"}]',
     });
+    // A multi-document file: `jq -e` without -s judges only the LAST
+    // document, so `[valid]\n[]` used to exit 0 silently (findings lost, no
+    // warning) and `[bad]\n[valid]` used to pass the shape gate. Both are
+    // now rejected loudly, before any write.
+    for (const bad of [
+      '[{"id":7,"reason":"r"}]\n[]',
+      '[{"id":"x","reason":"r"}]\n[{"id":8,"reason":"r"}]',
+    ]) {
+      const multi = runUpsert({ findings: bad });
+      expect(multi.out).toContain('not a single JSON document');
+      expect(multi.calls).toBe('');
+    }
+    // The stage step must tolerate the script being absent from the trusted
+    // base (it only exists there after this PR merges) — the consumers' own
+    // empty-content guard then skips the round instead of killing the step.
+    expect(workflow).toContain(
+      'cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true',
+    );
     // RC-1: the resolved-id corpus grows with the round's resolutions, and
     // one argv element caps at MAX_ARG_STRLEN — the same failure `known`
     // already avoided. Both corpora go in via --rawfile now.

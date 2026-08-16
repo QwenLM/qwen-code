@@ -3992,7 +3992,11 @@ jobs:
           _upsert_delim="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
           {
             echo "upsert_src<<${_upsert_delim}"
-            cat .github/scripts/upsert-deferred-issue.sh
+            # Absent from the trusted base until this PR merges, and this
+            # step runs under -e: a hard failure here would kill every
+            # pre-merge round. An empty value reaches the consumers' own
+            # `-z` guard, which skips with "stage step never ran".
+            cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true
             echo "${_upsert_delim}"
           } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
@@ -5950,8 +5954,8 @@ jobs:
             done
             resolve_and_reply_threads
             # Best-effort: verified out-of-footprint findings persist into
-            # the per-PR tracking issue (trusted staged copy; append-only
-            # comment design — see the script).
+            # the per-PR tracking issue (script content from expression
+            # context; append-only comment design — see the script).
             run_deferred_upsert
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
@@ -6007,8 +6011,8 @@ jobs:
             PUSH_RACE_MERGED='false'
             resolve_and_reply_threads
             # Best-effort: verified out-of-footprint findings persist into
-            # the per-PR tracking issue (trusted staged copy; append-only
-            # comment design — see the script).
+            # the per-PR tracking issue (script content from expression
+            # context; append-only comment design — see the script).
             run_deferred_upsert
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
@@ -6194,10 +6198,12 @@ jobs:
           UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
-          # NOTE: the deferred-findings upsert below runs its digest gate,
-          # PAT identity check and staged-script execution in a sound
-          # /usr/bin/env -i child (see the block near the end of this step),
-          # so this step body needs no in-shell hardening preamble for it.
+          # NOTE: the deferred-findings upsert below runs its PAT identity
+          # check and the script itself in a sound /usr/bin/env -i child (see
+          # the block near the end of this step) — the script arrives as
+          # content from expression context, so there is no staged copy and
+          # no digest gate. This step body needs no in-shell hardening
+          # preamble for it.
           # The handoff `gh pr comment` here is pre-existing surface at the
           # workflow's baseline posture; hardening every pre-existing PAT gh
           # call against BASH_FUNC/transport plants (via the same clean-child

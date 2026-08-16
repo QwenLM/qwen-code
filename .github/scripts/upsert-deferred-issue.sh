@@ -23,6 +23,14 @@ set -uo pipefail
 # clear it here too so the script is safe under any caller.
 set +C
 
+# `jq -e` without -s evaluates each document of a multi-document file in turn
+# and its exit status reflects only the LAST one, so a second document can
+# hide findings from these gates or smuggle them past. Require exactly one.
+single_doc() {
+  local n
+  n="$(jq -s 'length' "$1" 2> /dev/null)" || return 1
+  [[ "${n}" == '1' ]]
+}
 FINDINGS="${WORKDIR}/deferred-findings.json"
 # Both temp files are released by ONE EXIT trap: a later `trap ... EXIT`
 # would replace an earlier one and leak the first file.
@@ -80,7 +88,20 @@ lost() {
   dump_file "${CARRY}"
 }
 
-if [[ -s "${CARRY}" ]]; then
+# A bad OWN file is a total abort; a bad CARRY only costs the carry — the
+# same asymmetry the merge-failure path settled on, because this round's
+# verified findings must not go down with a corrupt sidecar.
+if [[ -s "${FINDINGS}" ]] && ! single_doc "${FINDINGS}"; then
+  lost "this round's deferred findings are not a single JSON document"
+  exit 0
+fi
+CARRY_SKIP=''
+if [[ -s "${CARRY}" ]] && ! single_doc "${CARRY}"; then
+  echo "::warning::the carried deferrals are not a single JSON document; persisting only this round's. The carried set is LOST — raw content follows:"
+  dump_file "${CARRY}"
+  CARRY_SKIP=1
+fi
+if [[ -s "${CARRY}" && -z "${CARRY_SKIP}" ]]; then
   if [[ -s "${FINDINGS}" ]]; then
     if ! MERGED="$(mktemp)"; then
       lost 'could not create a temp file to merge the carried deferrals'
@@ -89,7 +110,10 @@ if [[ -s "${CARRY}" ]]; then
     # This round FIRST: jq's unique_by keeps the first element of each group
     # in original order, so a finding re-emitted by run 2 wins over run 1's
     # carried copy. Swapping these two arguments silently pins the stale text.
-    if jq -s 'add' "${FINDINGS}" "${CARRY}" > "${MERGED}" 2> /dev/null; then
+    # Both inputs must BE arrays: `add` on two non-arrays yields whatever
+    # they add to (or null), which the gate would then judge on its own.
+    if jq -se 'if (map(type == "array") | all) then add else empty end' \
+      "${FINDINGS}" "${CARRY}" > "${MERGED}" 2> /dev/null; then
       FINDINGS="${MERGED}"
     else
       echo "::warning::could not merge this round's deferrals with the carried sidecar (one of the two is unparseable); persisting only this round's. The carried set is LOST — raw content follows:"
@@ -236,7 +260,9 @@ fi
 # the exact failure the note below describes — passing it as --arg left the
 # same hole this script already closed once.
 RESOLVED_FILE="${WORKDIR}/resolved-comments.txt"
-if [[ ! -f "${RESOLVED_FILE}" ]]; then
+# -f/-r, not just presence: a directory or FIFO planted at this path is
+# "there" but unusable as a corpus, and jq --rawfile would fail or block.
+if [[ ! -f "${RESOLVED_FILE}" || ! -r "${RESOLVED_FILE}" ]]; then
   if ! RESOLVED_FILE="$(mktemp)"; then
     lost 'could not create a temp file for the resolved-id corpus'
     exit 0
