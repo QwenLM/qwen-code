@@ -879,9 +879,7 @@ export function useQueuedPrompts({
       sessionActions
         .submitPrompt(prompt.text, {
           images: prompt.images,
-          // Queued prompts keep their file attachments for edit/restore, but
-          // the webui submit path no longer carries files (#8977 branch
-          // rework), so they are not forwarded here.
+          files: prompt.files,
           inputAnnotations: prompt.inputAnnotations,
           optimisticUserMessage: false,
           sessionId: targetSessionId,

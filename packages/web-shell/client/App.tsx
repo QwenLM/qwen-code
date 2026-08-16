@@ -489,6 +489,7 @@ interface ActiveGoalStatus {
 interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   onAdmissionStarted?: () => void;
@@ -5539,6 +5540,7 @@ export function App({
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
+        files?: PromptFile[];
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -5690,6 +5692,7 @@ export function App({
       let admitted = false;
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
+        files: opts?.files,
         inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
@@ -8547,6 +8550,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
@@ -8614,6 +8618,7 @@ export function App({
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
         sendPrompt(promptText, promptImages, {
+          files,
           ownerRef: admissionAttachment,
           ...sendOptions,
           clearComposerOnPromptStart,
@@ -9709,16 +9714,14 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      // The composer still passes collected file attachments, but the
-      // prompt pipeline no longer carries files (#8977 branch rework
-      // removed them from the webui submit path) — accept and drop them.
-      _files?: PromptFile[],
+      files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       const accepted = handleSubmitRef.current(
         text,
         images,
+        files,
         commitComposerAccepted,
         metadata,
       );

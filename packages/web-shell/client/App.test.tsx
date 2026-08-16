@@ -625,12 +625,23 @@ vi.mock('./components/ChatEditor', async () => {
               'data-preparing': props.isPreparing ? 'true' : 'false',
               onClick: () => {
                 if (testState.inputAnnotations) {
-                  props.onSubmit(testState.prompt, undefined, undefined, editorCommit, {
-                    inputAnnotations: testState.inputAnnotations,
-                  });
+                  props.onSubmit(
+                    testState.prompt,
+                    undefined,
+                    undefined,
+                    editorCommit,
+                    {
+                      inputAnnotations: testState.inputAnnotations,
+                    },
+                  );
                   return;
                 }
-                props.onSubmit(testState.prompt, undefined, undefined, editorCommit);
+                props.onSubmit(
+                  testState.prompt,
+                  undefined,
+                  undefined,
+                  editorCommit,
+                );
               },
               type: 'button',
             },
@@ -11379,6 +11390,7 @@ describe('App session callbacks', () => {
       secondAccepted = testState.latestChatEditorProps?.onSubmit(
         'second',
         undefined,
+        undefined,
         secondCommit,
       );
       if (secondAccepted !== false) secondCommit();
@@ -13017,9 +13029,15 @@ describe('App session callbacks', () => {
     await flush();
 
     act(() => {
-      testState.latestChatEditorProps?.onSubmit('hello', images, undefined, editorCommit, {
-        inputAnnotations,
-      });
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        images,
+        undefined,
+        editorCommit,
+        {
+          inputAnnotations,
+        },
+      );
     });
     await flush();
     mockSessionActions.sendPrompt.mockClear();
@@ -17701,9 +17719,15 @@ describe('App prompt send failure retry', () => {
     await flush();
 
     act(() => {
-      testState.latestChatEditorProps?.onSubmit('hello', images, undefined, editorCommit, {
-        inputAnnotations,
-      });
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        images,
+        undefined,
+        editorCommit,
+        {
+          inputAnnotations,
+        },
+      );
     });
     testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
     await act(async () => {
