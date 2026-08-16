@@ -488,6 +488,14 @@ function classifyExistingComments(
   // still an original, and leaving it out of the ambiguity count handed the
   // id-less exemption to a sibling comment belonging to a different finding
   // (#9212 review).
+  //
+  // The unknown-login skip is a deliberate short-circuit, not a correctness
+  // boundary: the count is consumed at exactly ONE site — the id-less
+  // fallback inside the repost gate — and that gate itself requires a known
+  // login, so while the login is unknown the map built here is never
+  // consulted. The mutant that forces this guard true is provably
+  // equivalent (R6-7, #9212 review); keep the guard as defense in depth
+  // against a future move of the read site out of the gate.
   const ownOverlapCountByLocation = new Map<string, number>();
   if (currentUserLogin !== '') {
     for (const c of qwenComments) {
