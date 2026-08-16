@@ -474,6 +474,34 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('channel_worker_starting');
   });
 
+  it('returns 500 with the structured code when the stopped record cannot be cleared (R14-6)', async () => {
+    // Route-level twin of the 409 mapping pin for the OTHER new code this
+    // PR added: `clearStoppedRecord` fails on
+    // POST /workspace/channels/<name>/start|restart when the persisted
+    // stopped record cannot be cleared. If the ERROR_STATUS line is
+    // dropped in a future reordering, sendManagementError falls into the
+    // unstructured fallback and the client loses the signal that
+    // distinguishes "stopped record could not be cleared" from an opaque
+    // failure — the service test only pins the rejection code, never the
+    // HTTP mapping.
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.start).mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'Channel "bot" cannot be started: its persisted stopped record could not be cleared.',
+        ),
+        { code: 'channel_state_persist_failed' },
+      ),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/start'),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_state_persist_failed');
+  });
+
   it('carries statePersisted on the failed stop body when the record was lost (#8975)', async () => {
     const { app, primaryService } = mount();
     // A per-channel stop that already tore down workers before failing:

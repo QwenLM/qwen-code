@@ -714,6 +714,167 @@ describe('createChannelWorkerManager', () => {
       await expect(test.manager.reload()).resolves.toBeDefined();
       expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'reload');
     });
+
+    it('applies the filter to refreshWorkspaces resolves (R14-33)', async () => {
+      // refreshWorkspaces is the AUTOMATIC reconcile trigger (workspace
+      // attach/detach). An unfiltered resolve there force-starts an
+      // explicitly stopped channel between two manual reloads — a third
+      // entry point the reload/reloadWorkspace pins alone leave open.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      await test.manager.refreshWorkspaces();
+
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['feishu'] },
+        'reload',
+      );
+    });
+
+    it('commits the filtered selection so a later reload cannot resurrect the dropped name (R14-2)', async () => {
+      // Resolving with the filtered selection while committing the
+      // UNFILTERED one desyncs the bookkeeping: committedGroups is
+      // trimmed, so the next reload's owner lookup misses the filtered
+      // name, the keep-fallback (`owner ? !stoppedIn(...) : true`)
+      // retains it, and the reconcile force-starts the explicitly
+      // stopped channel — the resurrection the filter exists to prevent.
+      // Committed state must stay coherent with what was reconciled.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      await test.manager.reload();
+
+      // The committed selection is coherent with what was reconciled…
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['feishu'],
+      });
+
+      await test.manager.reload();
+
+      // …so a SECOND reload resolves the same filtered selection instead
+      // of resurrecting the dropped name through the keep-fallback.
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['feishu'] },
+        'reload',
+      );
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['feishu'],
+      });
+    });
+
+    it('commits the filtered selection on refreshWorkspaces too (R14-2 twin)', async () => {
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      await test.manager.refreshWorkspaces();
+
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['feishu'],
+      });
+    });
+  });
+
+  describe('clearStoppedRecords (R14)', () => {
+    // The explicit-set side of the reload-filter contract: a names-mode
+    // (re-)commit force-starts, but pre-existing stopped records must not
+    // survive the commit — an automatic reload-op resolve before the
+    // worker connects would otherwise filter the still-starting name out
+    // and leave it committed-but-ownerless with the record never
+    // cleared.
+    function setupWithClear(
+      clearStoppedRecords: (groups: readonly ChannelWorkspaceGroup[]) => void,
+    ) {
+      const resolveGroups = vi.fn(async (selection: ServeChannelSelection) =>
+        workspaceGroups(selection),
+      );
+      const manager = createChannelWorkerManager({
+        resolveGroups,
+        createGroup: vi.fn(() => fakeGroup()),
+        reserveLease: vi.fn(),
+        releaseLease: vi.fn(),
+        clearStoppedRecords,
+      });
+      return { manager, resolveGroups };
+    }
+
+    it('clears records after a successful names-mode commit', async () => {
+      const clearStoppedRecords = vi.fn();
+      const test = setupWithClear(clearStoppedRecords);
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram'],
+      };
+
+      await test.manager.setSelection(selection);
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(1);
+      expect(clearStoppedRecords).toHaveBeenCalledWith([
+        { workspaceCwd: PRIMARY, selection },
+      ]);
+    });
+
+    it('does not clear records on a mode-all commit', async () => {
+      // mode-`all` restore honors stopped records by design (#8975);
+      // clearing them on an all-mode commit would resurrect exactly the
+      // channels the user stopped.
+      const clearStoppedRecords = vi.fn();
+      const test = setupWithClear(clearStoppedRecords);
+
+      await test.manager.setSelection({ mode: 'all' });
+
+      expect(clearStoppedRecords).not.toHaveBeenCalled();
+    });
+
+    it('never lets a throwing clear fail an already-committed selection', async () => {
+      const clearStoppedRecords = vi.fn(() => {
+        throw new Error('state write exploded');
+      });
+      const test = setupWithClear(clearStoppedRecords);
+
+      await expect(
+        test.manager.setSelection({ mode: 'names', names: ['telegram'] }),
+      ).resolves.toBeDefined();
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['telegram'],
+      });
+    });
   });
 
   it.each([
@@ -1141,6 +1302,19 @@ describe('createChannelWorkerManager', () => {
       selection: null,
       workers: [],
     });
+    // The release was ATTEMPTED before the cleanup latched the lease
+    // (R14-16): without this pin an implementation could skip the release
+    // and latch directly — indistinguishable in state, but the lease then
+    // never gets a release attempt again.
+    expect(test.releaseLease).toHaveBeenCalledTimes(1);
+
+    // …and a follow-up stop clears the limbo state once the release
+    // succeeds.
+    test.releaseLease.mockImplementation(() => undefined);
+    await expect(test.manager.stopSelection()).resolves.toMatchObject({
+      changed: true,
+    });
+    expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
   it('clears a confirmed-stopped group when lease release fails and retries', async () => {
@@ -1207,6 +1381,38 @@ describe('createChannelWorkerManager', () => {
         { workspaceCwd: PRIMARY, names: ['telegram'] },
         { workspaceCwd: SECONDARY, names: ['feishu'] },
       ],
+    });
+  });
+
+  it('carries the captured channels when the group throws a wrapped control error (R14-17)', async () => {
+    // Twin of the multi-workspace pin with the wrapped error classes the
+    // group's stop path actually raises (ChannelWorkerStopError is a
+    // ChannelWorkerControlError subclass; the classifyFailure spread
+    // `{ ...(stoppedChannels.length > 0 ? { stoppedChannels } : {}) }`
+    // must land on the rethrown error regardless of the error class — a
+    // plain `new ChannelWorkerControlError(...)` construction would drop
+    // the captured set and the stopped channels would resurrect).
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        workspaceId: 'primary',
+        workspaceCwd: PRIMARY,
+        primary: true,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      }),
+    ]);
+    vi.mocked(group.stop).mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+
+    await expect(test.manager.stopSelection()).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+      stoppedChannels: [{ workspaceCwd: PRIMARY, names: ['telegram'] }],
     });
   });
 

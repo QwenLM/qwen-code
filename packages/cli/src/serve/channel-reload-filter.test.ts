@@ -1,0 +1,188 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ChannelStateStore } from '../commands/channel/channel-state-store.js';
+import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
+import { createDaemonReloadSelectionFilter } from './channel-reload-filter.js';
+import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
+import type { ServeChannelSelection } from './types.js';
+
+// Direct pins on the PRODUCTION reload-selection filter (R14-5): the
+// manager suite named `filterReloadSelection (R14)` injects synthetic
+// filters and pins only the manager's plumbing — nothing seeded a daemon
+// state file and drove the real filtering logic. Mutations here (dropping
+// canonicalizeWorkspace, swapping in the standalone state path, inverting
+// `!stoppedIn(...)`, flipping the no-owner default) all lived in the
+// serve wiring and shipped green through the entire suite, while the
+// escaped behavior is a names-mode recovery reconcile force-starting an
+// explicitly stopped sibling — the resurrection the filter exists to
+// prevent. These tests run the real ChannelStateStore against a temp
+// QWEN_HOME so the path derivation under test is the production one.
+describe('createDaemonReloadSelectionFilter (R14-5)', () => {
+  const workspace = '/workspace/filter';
+  let home: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    originalHome = process.env['QWEN_HOME'];
+    home = mkdtempSync(path.join(os.tmpdir(), 'qwen-reload-filter-home-'));
+    process.env['QWEN_HOME'] = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const group = (
+    workspaceCwd: string,
+    names: string[],
+  ): ChannelWorkspaceGroup => ({
+    workspaceCwd,
+    selection: { mode: 'names', names },
+  });
+
+  it('drops a name with a persisted stopped record and keeps its cleared sibling', () => {
+    // The core contract: seed the daemon state file exactly the way a
+    // stop records it (recordChannelsStopped -> the same
+    // daemonChannelRuntimeStatePath), then drive the filter. The stopped
+    // name must be dropped; a sibling without a record survives.
+    new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
+      'telegram',
+      'stopped',
+    );
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    };
+
+    expect(
+      filter(selection, [group(workspace, ['telegram', 'feishu'])]),
+    ).toEqual({ mode: 'names', names: ['feishu'] });
+  });
+
+  it('keeps a name whose record was cleared (explicit start path)', () => {
+    // clearStoppedRecord flips the record to `active` before the recovery
+    // reload; the filter must not treat a cleared (non-`stopped`) record
+    // as stopped, or an explicit by-name start could never relaunch.
+    const store = new ChannelStateStore(
+      daemonChannelRuntimeStatePath(workspace),
+    );
+    store.set('telegram', 'stopped');
+    store.set('telegram', 'active');
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+
+    expect(filter(selection, [group(workspace, ['telegram'])])).toEqual({
+      mode: 'names',
+      names: ['telegram'],
+    });
+  });
+
+  it('returns the same selection object when nothing is filtered', () => {
+    // Identity, not just equality: the manager and its callers use the
+    // returned object directly; a fresh clone on a no-op filter would be
+    // a silent behavior change this suite should notice.
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+
+    expect(filter(selection, [group(workspace, ['telegram'])])).toBe(selection);
+  });
+
+  it('keeps an ownerless name even if a record exists under the group workspace', () => {
+    // The no-owner default is KEEP: a name no group claims has no owning
+    // workspace whose record could stop it, and dropping it would turn a
+    // transient grouping gap into a silent channel loss. Flipping the
+    // default to drop must fail here.
+    new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
+      'orphan',
+      'stopped',
+    );
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['orphan', 'telegram'],
+    };
+
+    expect(filter(selection, [group(workspace, ['telegram'])])).toBe(selection);
+  });
+
+  it('passes mode-all selections through untouched', () => {
+    // The mode-`all` worker's OWN restore filter protects all-mode
+    // selections; this filter must not second-guess it.
+    new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
+      'telegram',
+      'stopped',
+    );
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = { mode: 'all' };
+
+    expect(filter(selection, [group(workspace, ['telegram'])])).toBe(selection);
+  });
+
+  it('finds the record under a divergent spelling of the same workspace', () => {
+    // Canonical derivation: the record is seeded under one spelling and
+    // the filter queries under another (dot-segment variant) — both must
+    // hit the SAME daemon state file, matching the derivation
+    // recordChannelsStopped / clearStoppedRecord use. A split derivation
+    // (raw cwd, or the standalone channelRuntimeStatePath) reads a
+    // different file and lets the explicitly stopped name through.
+    new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
+      'telegram',
+      'stopped',
+    );
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+
+    expect(
+      filter(selection, [group(path.join(workspace, '.'), ['telegram'])]),
+    ).toEqual({ mode: 'names', names: [] });
+  });
+
+  it('reads each workspace state at most once (per-filter cache)', () => {
+    // The closure memoizes per workspace; two names owned by the same
+    // workspace must not double-read the state file. A regression
+    // re-reading per name stays behaviorally identical here, so pin the
+    // observable: both names resolve consistently from one seeded read.
+    new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
+      'telegram',
+      'stopped',
+    );
+    const filter = createDaemonReloadSelectionFilter();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    };
+
+    expect(
+      filter(selection, [group(workspace, ['telegram', 'feishu'])]),
+    ).toEqual({ mode: 'names', names: ['feishu'] });
+    // A record written AFTER the filter's first read of the workspace is
+    // not visible to the same filter instance (the documented cache).
+    new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
+      'feishu',
+      'stopped',
+    );
+    expect(
+      filter(selection, [group(workspace, ['telegram', 'feishu'])]),
+    ).toEqual({ mode: 'names', names: ['feishu'] });
+  });
+});

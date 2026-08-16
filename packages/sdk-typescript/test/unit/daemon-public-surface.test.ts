@@ -260,6 +260,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       changed: boolean;
       state: DaemonChannelControlState;
       statePersisted?: boolean;
+      // R14: the attribution field rides with the loss flag so a targeted
+      // retry can aim at the affected workspaces; dropping it from the
+      // typed surface must fail the PR's typecheck.
+      statePersistFailedWorkspaces?: string[];
     }>();
     // #8975: pin the per-channel stop result's SHAPE, not just its
     // existence — `not.toBeNever()` stays green if the type degrades to
@@ -273,6 +277,8 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       snapshot: DaemonChannelsSnapshot;
       instance: DaemonChannelInstanceSnapshot;
       statePersisted?: boolean;
+      // R14 attribution twin of the whole-selection pin above.
+      statePersistFailedWorkspaces?: string[];
     }>();
     expect(typeof Public.DaemonClient.prototype.stopWorkspaceChannel).toBe(
       'function',
@@ -322,6 +328,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       error: string;
       code: string;
       statePersisted?: boolean;
+      // R14 attribution field on the FAILED-stop body too (a failed stop
+      // can also lose the record); consumers cast DaemonHttpError.body to
+      // this shape.
+      statePersistFailedWorkspaces?: string[];
       state?: DaemonChannelControlState;
     }>();
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();

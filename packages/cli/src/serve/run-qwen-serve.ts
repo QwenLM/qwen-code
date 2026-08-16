@@ -148,6 +148,7 @@ import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
+import { createDaemonReloadSelectionFilter } from './channel-reload-filter.js';
 import {
   allowOriginMode,
   listenerMaxConnections,
@@ -6868,44 +6869,44 @@ async function runQwenServeImpl(
           // explicit by-name start/restart clear the target's own record
           // before the recovery reload, so the requested name survives.
           // Never-fails: unreadable state degrades to keeping the name
-          // (the pre-R14 behavior) (#8975).
-          const filterReloadSelection = (
-            selection: ServeChannelSelection,
+          // (the pre-R14 behavior) (#8975). The closure lives in
+          // channel-reload-filter (ACP-free, so it respects the serve
+          // fast-path import boundary), mirroring the stop-record
+          // contract, so its filtering logic is directly testable (R14-5).
+          const filterReloadSelection = createDaemonReloadSelectionFilter();
+          // R14: the explicit-set side of the reload-filter contract. An
+          // explicit names-mode (re-)commit force-starts, but its
+          // pre-existing `stopped` records survive the commit; an
+          // automatic reload-op resolve before the worker connects
+          // (workspace attach/detach -> refreshWorkspaces) then filters
+          // the still-starting name out and leaves it committed-but-
+          // ownerless with the record never cleared. Clear the committed
+          // names' records on commit so the filter cannot drop them.
+          // mode-`all` groups keep their records (`--channel all` honors
+          // them by design). Never-fails: degrade to keeping the record
+          // (the pre-fix window) — a clear failure must not fail an
+          // already-committed selection (#8975).
+          const clearStoppedRecords = (
             groups: readonly ChannelWorkspaceGroup[],
-          ): ServeChannelSelection => {
-            if (selection.mode !== 'names') return selection;
-            const stateByWorkspace = new Map<string, Record<string, unknown>>();
-            const stoppedIn = (workspaceCwd: string, name: string): boolean => {
-              let states = stateByWorkspace.get(workspaceCwd);
-              if (!states) {
-                // Throw-safe canonical form: the state path is derived from
-                // the canonical workspace (matching clearStoppedRecord /
-                // recordChannelsStopped); canonicalizeWorkspace rethrows
-                // non-ENOENT fs errors, degrade to the resolved form.
-                let canonical: string;
-                try {
-                  canonical = canonicalizeWorkspace(workspaceCwd);
-                } catch {
-                  canonical = path.resolve(workspaceCwd);
-                }
-                states = new workerRuntime.ChannelStateStore(
-                  workerRuntime.daemonChannelRuntimeStatePath(canonical),
-                ).readAll();
-                stateByWorkspace.set(workspaceCwd, states);
+          ): void => {
+            for (const target of groups) {
+              if (target.selection.mode !== 'names') continue;
+              let canonical: string;
+              try {
+                canonical = canonicalizeWorkspace(target.workspaceCwd);
+              } catch {
+                canonical = path.resolve(target.workspaceCwd);
               }
-              return states[name] === 'stopped';
-            };
-            const kept = selection.names.filter((name) => {
-              const owner = groups.find(
-                (group) =>
-                  group.selection.mode === 'names' &&
-                  group.selection.names.includes(name),
+              const store = new workerRuntime.ChannelStateStore(
+                workerRuntime.daemonChannelRuntimeStatePath(canonical),
               );
-              return owner ? !stoppedIn(owner.workspaceCwd, name) : true;
-            });
-            return kept.length === selection.names.length
-              ? selection
-              : { mode: 'names', names: kept };
+              const states = store.readAll();
+              for (const name of target.selection.names) {
+                if (states[name] === 'stopped') {
+                  store.trySet(name, 'active');
+                }
+              }
+            }
           };
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
@@ -6967,6 +6968,7 @@ async function runQwenServeImpl(
             resolveGroups: (selection, operation) =>
               resolveRuntimeChannelGroups(selection, candidateApp, operation),
             filterReloadSelection,
+            clearStoppedRecords,
             createGroup,
             reserveLease: reserveChannelServicePidfile,
             releaseLease: () => {

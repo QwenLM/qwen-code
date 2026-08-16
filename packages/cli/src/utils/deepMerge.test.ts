@@ -160,4 +160,27 @@ describe('customDeepMerge', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(({} as any).polluted).toBeUndefined();
   });
+
+  it('drops a nested __proto__ key (channels.__proto__) during the merge (R14-27)', () => {
+    // End-to-end pin of the settings-merge outcome the R11-1 filter test
+    // documents as upstream: a user configuring `channels.__proto__` in a
+    // SINGLE settings scope (the common case) has it dropped here by the
+    // prototype-pollution guard — mergeRecursively `continue`s past
+    // `__proto__`, and the key-by-key recursion (no SHALLOW_MERGE when
+    // `channels` first enters the merge) never copies it. loadChannelsConfig
+    // never sees the key: no warning, no channel. This is the deliberate,
+    // silently-safe direction; pin it so a change to the skip list flips
+    // end-to-end behavior loudly instead of silently.
+    const source = JSON.parse(
+      '{"channels":{"__proto__":{"type":"feishu"},"telegram":{"type":"telegram"}}}',
+    );
+    const getMergeStrategy = () => undefined;
+
+    const result = customDeepMerge(getMergeStrategy, {}, source);
+
+    expect(result).toEqual({ channels: { telegram: { type: 'telegram' } } });
+    expect(Object.keys((result as { channels: object }).channels)).toEqual([
+      'telegram',
+    ]);
+  });
 });

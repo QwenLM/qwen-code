@@ -212,9 +212,58 @@ describe('stopCommand', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       '/tmp/qwen-home/channels/channel-state.json',
     );
+    // Write-COUNT pins, twin of the crashed-service test (R14-13).
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
     // The dead process's pidfile is cleaned up.
     expect(mockRemoveServiceInfo).toHaveBeenCalled();
     // No signal was sent.
+    expect(mockSignalService).not.toHaveBeenCalled();
+    // Success path: no false persistence-loss notice on EITHER sink
+    // (R12-3 doctrine, R14-30) — hoisting the loss write out of the
+    // `!recorded` else would print a contradictory alarm on every
+    // successful crash-window stop.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
+  });
+
+  it('does not record a serve-owned pidfile that dies between probes (R14-1)', async () => {
+    // A serve-owned pidfile carries the daemon's channels and NO
+    // workspaceCwd; recording them here would write the daemon's state
+    // into the legacy GLOBAL standalone store — every later standalone
+    // start adopts it and skips channels never stopped in standalone
+    // mode. Mirror the crash path's owner gate: a stop in one mode must
+    // not carry over to the other (#8975).
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'serve',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: undefined,
+    });
+    mockClassifyProcessAccess.mockReturnValue('dead');
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'No channel service is running.',
+    );
+    // The misleading recorded-message must NOT print.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Recorded the crashed service channels as stopped',
+      ),
+    );
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // The stale serve pidfile is still cleaned up.
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
   });
 
@@ -284,6 +333,17 @@ describe('stopCommand', () => {
     });
     expect(mockStopChannelWorker).toHaveBeenCalledWith({ timeoutMs: 75 });
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    // Full standalone-path negative set (R14-22): a daemon stop must
+    // never peek/classify/signal/unlink the standalone pidfile — hoisting
+    // standalone cleanup into shared code (the documented production
+    // shape: shared HOME/QWEN_HOME, standalone service running while
+    // `qwen channel stop --daemon-url …` runs) would orphan/corrupt a
+    // service this command never owned. The readServiceInfo negative
+    // alone does not catch it (probe-verified).
+    expect(mockPeekServiceInfo).not.toHaveBeenCalled();
+    expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
@@ -342,6 +402,10 @@ describe('stopCommand', () => {
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    expect(mockPeekServiceInfo).not.toHaveBeenCalled();
+    expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
     // Message-before-exit ordering, twin of the changed:true test
     // (R10-19).
@@ -385,6 +449,11 @@ describe('stopCommand', () => {
     expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    expect(mockPeekServiceInfo).not.toHaveBeenCalled();
+    expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
     // The no-op exit mock lets execution continue past process.exit, so it
     // cannot pin the ordering the production control flow depends on: the
@@ -440,6 +509,11 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    expect(mockPeekServiceInfo).not.toHaveBeenCalled();
+    expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
     // Order pin as in the success branch: the warning must precede the
     // exit. A throwing exit mock is not usable here (the surrounding
@@ -501,6 +575,11 @@ describe('stopCommand', () => {
     // chains treated a FAILED stop as successful — pin both failing stops
     // to exit 1 (R10-20).
     expect(vi.mocked(process.exit).mock.calls).toEqual([[1], [1]]);
+    expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    expect(mockPeekServiceInfo).not.toHaveBeenCalled();
+    expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
   });
 
   it('reports remote stop failures without falling through to standalone mode', async () => {
@@ -518,6 +597,10 @@ describe('stopCommand', () => {
       expect.stringContaining('Failed to stop daemon-managed channels: '),
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    expect(mockPeekServiceInfo).not.toHaveBeenCalled();
+    expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
     // The stderr diagnostic must precede the exit — the no-op exit mock
     // lets execution continue, so relocating the write below
@@ -528,6 +611,45 @@ describe('stopCommand', () => {
     );
     expect(mockWriteStderrLine.mock.invocationCallOrder[errCall]).toBeLessThan(
       vi.mocked(process.exit).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('keeps a successful daemon stop successful when the success write throws (R14-3)', async () => {
+    // Under the very disk condition that loses the state write
+    // (statePersisted: false), stdout redirected to a file on the same
+    // volume throws synchronously. While the loud success message shared
+    // the SDK try, its ENOSPC converted a SUCCESSFUL stop into stderr
+    // "Failed to stop daemon-managed channels…" + exit 1 — aborting
+    // `set -e`/&& teardown chains — and the loss warning never fired
+    // (the local write error has no `.body`). The success report runs
+    // outside the SDK try; a post-stop write failure degrades to the
+    // best-effort sink instead of flipping the exit code (#8975).
+    mockStopChannelWorker.mockResolvedValueOnce({
+      changed: true,
+      statePersisted: false,
+    });
+    mockWriteStdoutLine.mockImplementationOnce(() => {
+      const error = new Error('ENOSPC: no space left on device, write');
+      (error as NodeJS.ErrnoException).code = 'ENOSPC';
+      throw error;
+    });
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop({ 'daemon-url': 'http://daemon:9' });
+
+    // The successful stop still exits 0 and is never laundered into the
+    // failure diagnostic.
+    expect(process.exit).toHaveBeenCalledWith(0);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Failed to stop daemon-managed channels'),
+    );
+    // The success notice degrades to the best-effort sink…
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      'Daemon-managed channels stopped.',
+    );
+    // …and the loss warning still fires after it.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
     );
   });
 
@@ -734,6 +856,14 @@ describe('stopCommand', () => {
       ['telegram', 'feishu'],
       'stopped',
     );
+    // Write-COUNT pins (R14-13): NthCalledWith(1/2) is satisfied no matter
+    // how many ADDITIONAL writes follow — a workspace-conditional
+    // duplication of recordStoppedChannels ships green without them, and
+    // every extra legacy write bumps the generation watermark by the
+    // number of entries (applyChange), misreading the over-advance as a
+    // re-stop rewrite on the next adoption (the R13-10 hazard).
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -806,6 +936,13 @@ describe('stopCommand', () => {
     // warned about — failing the exit aborts `set -e` teardown exactly
     // where the user was told what happened (R9-21).
     expect(process.exit).toHaveBeenCalledWith(0);
+    // The SECOND (legacy) write is still ATTEMPTED when the first
+    // (scoped) write fails (R14-31): a fail-fast
+    // `if (!scoped) return scoped;` refactor of recordStoppedChannels
+    // loses the legacy global record — the only record a restart from
+    // ANOTHER workspace sees via adoption — and ships green without this
+    // count pin (the message/exit pins above pass either way).
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
     // Message-before-exit ordering, twin of the success-path pin: the
     // loss warning is the only trace that `--channel all` may resurrect
     // the channels (R10-19).

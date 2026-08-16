@@ -3207,6 +3207,12 @@ export interface DaemonChannelStopResult {
    * the channels back. Absent on the happy path (#8975).
    */
   statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the canonical workspaces
+   * whose `stopped` record write failed, so a retry can be targeted at
+   * the affected channels (R14). Absent when every record persisted.
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface DaemonChannelWorkerStartErrorResponse {
@@ -3225,16 +3231,19 @@ export interface DaemonChannelWorkerStartErrorResponse {
  * durability-loss signal as the success side: `statePersisted` is present
  * (and `false`) only when the stop failed AND its torn-down `stopped`
  * record also failed to persist — a later `--channel all` restart may bring
- * the channels back (#8975). `DaemonHttpError.body` is declared
- * `unknown`; cast it to this type to read the fields. `state` rides every
- * structured stop error body that carries the loss signal (the daemon
- * appends its control state to the stop-relevant error codes); it is
- * optional because per-channel management error bodies carry no state.
+ * the channels back (#8975). `statePersistFailedWorkspaces` names the
+ * canonical workspaces that lost their records so a retry can be targeted
+ * (R14). `DaemonHttpError.body` is declared `unknown`; cast it to this
+ * type to read the fields. `state` rides every structured stop error body
+ * that carries the loss signal (the daemon appends its control state to
+ * the stop-relevant error codes); it is optional because per-channel
+ * management error bodies carry no state.
  */
 export interface DaemonChannelStopErrorResponse {
   error: string;
   code: string;
   statePersisted?: boolean;
+  statePersistFailedWorkspaces?: string[];
   state?: DaemonChannelControlState;
 }
 
@@ -3400,6 +3409,12 @@ export interface DaemonChannelStopInstanceResult
    * may bring the channel back. Absent on the happy path (#8975).
    */
   statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the canonical workspaces
+   * whose `stopped` record write failed, so a retry can be targeted at
+   * the affected channel (R14). Absent when every record persisted.
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface DaemonChannelPairingRequest {

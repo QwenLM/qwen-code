@@ -579,6 +579,19 @@ describe('qwen channel stop → start round trip (#8975)', () => {
     const serviceExited = new Promise<number | null>((resolve) => {
       child!.once('exit', (code) => resolve(code));
     });
+    // Lost-exit-event guard: the listener attaches only after
+    // waitForLine + the pidfile poll above — an exit processed during one
+    // of those awaits is lost, and unlike the first round-trip test this
+    // one has no output assertion that would fail first: phase 2's stop
+    // on the crashed service still exits 0 (crash path via
+    // peekServiceInfo), so `await serviceExited` would hang into the
+    // 120s timeout with none of the crash output. Fail fast (R14-20).
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `service child exited prematurely before phase-2 stop ` +
+          `(code ${child.exitCode}, signal ${child.signalCode})`,
+      );
+    }
 
     // Phase 2: a real `qwen channel stop` persists the running channel as
     // stopped and terminates the service. The exit-code 0 shape is POSIX
@@ -786,6 +799,14 @@ describe('qwen channel stop → start round trip (#8975)', () => {
     const serviceExited = new Promise<number | null>((resolve) => {
       child!.once('exit', (code) => resolve(code));
     });
+    // Lost-exit-event guard, twin of the legacy-adoption round-trip pin
+    // (R14-20): same attach-after-await shape, same hang risk.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `service child exited prematurely before phase-2 stop ` +
+          `(code ${child.exitCode}, signal ${child.signalCode})`,
+      );
+    }
 
     // Phase 2: stop from workspace A — persists the scoped record AND
     // the legacy global record (the dual write under test).

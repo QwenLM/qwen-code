@@ -103,7 +103,7 @@ import {
   removeServiceInfo,
   removeServeServiceInfo,
   signalService,
-  isProcessSignalable,
+  classifyProcessAccess,
   waitForExit,
 } from './pidfile.js';
 
@@ -252,8 +252,8 @@ describe('writeServiceInfo + readServiceInfo', () => {
       // to another user (a shared HOME/QWEN_HOME). The old code lumped it
       // with ESRCH, reported the live service as crashed, and the stop
       // crash-path recorded its RUNNING channels as stopped. readServiceInfo
-      // must return the info and keep the pidfile; isProcessSignalable is
-      // the guard that tells the stop it cannot act (#8975).
+      // must return the info and keep the pidfile; classifyProcessAccess is
+      // the guard that tells the stop it cannot act (R14-8).
       const filePath = getPidFilePath();
       fsStore[filePath] = JSON.stringify({
         owner: 'channel',
@@ -262,7 +262,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
         channels: ['telegram'],
         workspaceCwd: '/workspace/a',
       });
-       
+
       process.kill = vi.fn((): never => {
         throw errnoError('EPERM');
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -274,7 +274,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
         channels: ['telegram'],
       });
       expect(filePath in fsStore).toBe(true);
-      expect(isProcessSignalable(424242)).toBe(false);
+      expect(classifyProcessAccess(424242)).toBe('other-user');
     });
 
     it('returns null for a missing or corrupt pidfile', () => {
@@ -710,33 +710,39 @@ describe('signalService', () => {
   });
 });
 
-describe('isProcessSignalable (#8975)', () => {
-  it('returns true for a live, signalable process', () => {
+describe('classifyProcessAccess (#8975, R14-26)', () => {
+  // Direct pins on the classification the stop's dead-window branch keys
+  // on: the 'other-user' vs 'dead' distinction is exactly the collapse
+  // the function exists to prevent, and no other suite exercises it
+  // unmocked. Flipping the ternary to pre-#8975 semantics (EPERM →
+  // 'dead') must fail here: stop would then unlink another user's LIVE
+  // shared-HOME pidfile and record its RUNNING channels as stopped.
+  it('returns signalable for a live process', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
-    expect(isProcessSignalable(1234)).toBe(true);
+    expect(classifyProcessAccess(1234)).toBe('signalable');
   });
 
-  it('returns false on ESRCH (confirmed dead)', () => {
+  it('returns dead on ESRCH (confirmed dead)', () => {
     process.kill = vi.fn(() => {
       throw errnoError('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
-    expect(isProcessSignalable(9999)).toBe(false);
+    expect(classifyProcessAccess(9999)).toBe('dead');
   });
 
-  it('returns false on EPERM (alive but owned by another user)', () => {
+  it('returns other-user on EPERM (alive but owned by another user)', () => {
     process.kill = vi.fn(() => {
       throw errnoError('EPERM');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
-    expect(isProcessSignalable(424242)).toBe(false);
+    expect(classifyProcessAccess(424242)).toBe('other-user');
   });
 
-  it('returns false for an invalid pid without signaling', () => {
+  it('returns dead for an invalid pid without signaling', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
-    expect(isProcessSignalable(0)).toBe(false);
+    expect(classifyProcessAccess(0)).toBe('dead');
     expect(process.kill).not.toHaveBeenCalled();
   });
 });

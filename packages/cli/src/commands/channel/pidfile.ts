@@ -207,16 +207,6 @@ export function classifyProcessAccess(
 }
 
 /**
- * True when the process is alive AND signalable by this user. A live pid
- * that raises EPERM belongs to another user (a shared HOME/QWEN_HOME):
- * callers must not signal it, must not unlink its pidfile, and must not
- * record its channels as stopped (#8975).
- */
-export function isProcessSignalable(pid: number): boolean {
-  return classifyProcessAccess(pid) === 'signalable';
-}
-
-/**
  * Read and parse the PID file WITHOUT the liveness check and WITHOUT
  * unlinking it. Lets a caller capture a stale (crashed) service's channel
  * list before `readServiceInfo` discards the file — a stop issued right

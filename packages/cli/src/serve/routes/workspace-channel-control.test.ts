@@ -245,6 +245,64 @@ describe('DELETE /workspace/channel', () => {
     );
   });
 
+  it('attributes BOTH workspaces when every state write fails (R14-34)', async () => {
+    // Sibling of the partial-failure pin for the realistic common case:
+    // both daemon state files live under the SAME ~/.qwen/channels/daemon/
+    // tree, so a single disk-level condition (ENOSPC, read-only remount,
+    // AV lock) fails BOTH writes at once. With only one failing group a
+    // failure-overwrites-failure rewrite (`failedWorkspaces =
+    // [workspaceCwd]`) produces byte-identical output and ships green;
+    // the attribution must ACCUMULATE, or the response names only the
+    // last failed workspace — the client's targeted retry misses the
+    // unreported one (a re-issued stop takes the `{changed: false}` path
+    // that can never re-record the other workspace's torn-down set) and
+    // its channels resurrect on `--channel all`.
+    const { app } = setup({
+      stop: vi.fn(async () => ({
+        changed: true,
+        state: controlState(),
+        stoppedChannels: [
+          { workspaceCwd: '/workspace/a', names: ['telegram'] },
+          { workspaceCwd: '/workspace/b', names: ['feishu'] },
+        ],
+      })),
+    });
+    const failingStore = (path: string) => {
+      const instance: MockStateStoreInstance = {
+        path,
+        setMany: vi.fn(() => {
+          throw new Error('disk full');
+        }),
+        trySetMany: (names: string[], state: 'active' | 'stopped') => {
+          try {
+            instance.setMany(names, state);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+      mockChannelStateStoreInstances.push(instance);
+      return instance;
+    };
+    // One queued failure per workspace write (both groups), so the
+    // override cannot leak into later tests.
+    mockChannelStateStore
+      .mockImplementationOnce(failingStore)
+      .mockImplementationOnce(failingStore);
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(200);
+    expect(response.body.statePersisted).toBe(false);
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+      '/workspace/b',
+    ]);
+    // Both writes were attempted.
+    expect(mockChannelStateStoreInstances).toHaveLength(2);
+  });
+
   it('records the torn-down channels carried by a failed stop (#8975)', async () => {
     const { app } = setup({
       stop: vi.fn(async () => {

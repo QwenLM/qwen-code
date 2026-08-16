@@ -172,6 +172,25 @@ export interface CreateChannelWorkerManagerOptions {
     selection: ServeChannelSelection,
     groups: readonly ChannelWorkspaceGroup[],
   ) => ServeChannelSelection;
+  /**
+   * Optional hook invoked after a SUCCESSFUL names-mode selection commit
+   * (initial start / explicit `set` / per-channel enable or disable),
+   * receiving the committed groups. Clears persisted `stopped` records
+   * for the committed names: an explicit names-mode selection
+   * force-starts regardless of persisted state (#8975), so a record
+   * surviving the re-commit lets a later automatic reload-op resolve
+   * (e.g. `refreshWorkspaces` on workspace attach/detach) filter a
+   * still-starting name out BEFORE its ready `active` write lands —
+   * leaving it committed-but-ownerless (`start` →
+   * channel_runtime_owner_mismatch, `restart` →
+   * channel_worker_not_enabled) with the record never cleared: dead
+   * until stop+start or another PUT (R14). mode-`all` commits must NOT
+   * clear: `--channel all` restore honors `stopped` records by design.
+   * Never-fails: a clear failure degrades to keeping the record (the
+   * pre-fix window); it must not fail an already-committed selection —
+   * persistence failures never flip a succeeded operation (#8975).
+   */
+  clearStoppedRecords?: (groups: readonly ChannelWorkspaceGroup[]) => void;
   createGroup: (groups: readonly ChannelWorkspaceGroup[]) => ChannelWorkerGroup;
   reserveLease: (selection: ServeChannelSelection) => void;
   releaseLease: () => void;
@@ -521,6 +540,22 @@ export function createChannelWorkerManager(
     notify();
   };
 
+  // Post-commit hook for explicit names-mode selections: clear persisted
+  // `stopped` records for the committed names (see the
+  // `clearStoppedRecords` option doc). Never-fails (R14).
+  const clearRecordsForCommit = (
+    selection: ServeChannelSelection,
+    groups: readonly ChannelWorkspaceGroup[],
+  ): void => {
+    if (!opts.clearStoppedRecords || selection.mode !== 'names') return;
+    try {
+      opts.clearStoppedRecords(groups);
+    } catch {
+      // Degrade to keeping the record (the pre-fix window); a clear
+      // failure must not fail an already-committed selection.
+    }
+  };
+
   const classifyFailure = (
     error: unknown,
     fallbackCode: 'channel_worker_start_failed' | 'channel_worker_stop_failed',
@@ -650,6 +685,7 @@ export function createChannelWorkerManager(
         );
       }
       commit(selection, targetGroups);
+      clearRecordsForCommit(selection, targetGroups);
       return {
         changed: true,
         replaced: false,
@@ -664,6 +700,7 @@ export function createChannelWorkerManager(
         onRollingBack: () => setTransition('rolling_back', selection),
       });
       commit(selection, targetGroups);
+      clearRecordsForCommit(selection, targetGroups);
       return {
         changed: result.changed || !sameSelection,
         replaced: !sameSelection,
@@ -902,12 +939,17 @@ export function createChannelWorkerManager(
           );
         }
         setTransition('reconciling', committedSelection);
+        // Resolve AND commit the filtered selection: committing the
+        // unfiltered selection with the trimmed groups desyncs the
+        // bookkeeping — the next reload's owner lookup misses the
+        // filtered name, the keep-fallback retains it, and the reconcile
+        // force-starts the explicitly stopped channel (the resurrection
+        // the filter exists to prevent). Committed state must stay
+        // coherent with what was reconciled (R14).
+        const filteredSelection = reloadSelection(committedSelection);
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
-          targetGroups = await opts.resolveGroups(
-            reloadSelection(committedSelection),
-            'reload',
-          );
+          targetGroups = await opts.resolveGroups(filteredSelection, 'reload');
         } catch (error) {
           setTransition('idle');
           throw error;
@@ -923,7 +965,7 @@ export function createChannelWorkerManager(
           setTransition('idle');
           throw classifyFailure(error, 'channel_worker_start_failed');
         }
-        commit(committedSelection, targetGroups);
+        commit(filteredSelection, targetGroups);
         const snapshots = group.snapshots();
         return publicWorkerSnapshot(
           snapshots.find((worker) => worker.primary) ??
@@ -943,12 +985,13 @@ export function createChannelWorkerManager(
           );
         }
         setTransition('reconciling', committedSelection);
+        // Resolve AND commit the filtered selection (see reload(): the
+        // committed state must stay coherent with what was reconciled,
+        // or the next reload resurrects the filtered name) (R14).
+        const filteredSelection = reloadSelection(committedSelection);
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
-          targetGroups = await opts.resolveGroups(
-            reloadSelection(committedSelection),
-            'reload',
-          );
+          targetGroups = await opts.resolveGroups(filteredSelection, 'reload');
           assertRequiredOwner(targetGroups, { name, workspaceCwd });
           if (
             targetGroups.filter(
@@ -986,7 +1029,7 @@ export function createChannelWorkerManager(
             ? targetGroup
             : committedGroup,
         );
-        commit(committedSelection, nextCommittedGroups);
+        commit(filteredSelection, nextCommittedGroups);
         const worker = group
           .snapshots()
           .find((snapshot) => snapshot.workspaceCwd === workspaceCwd);
@@ -1067,12 +1110,14 @@ export function createChannelWorkerManager(
       return enqueue(async () => {
         if (!group || !committedSelection) return;
         setTransition('reconciling', committedSelection);
+        // Resolve AND commit the filtered selection (see reload(): the
+        // committed state must stay coherent with what was reconciled,
+        // or the next reload resurrects the filtered name). This is the
+        // automatic attach/detach trigger (R14).
+        const filteredSelection = reloadSelection(committedSelection);
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
-          targetGroups = await opts.resolveGroups(
-            reloadSelection(committedSelection),
-            'reload',
-          );
+          targetGroups = await opts.resolveGroups(filteredSelection, 'reload');
         } catch (error) {
           setTransition('idle');
           throw error;
@@ -1084,7 +1129,7 @@ export function createChannelWorkerManager(
           setTransition('idle');
           throw classifyFailure(error, 'channel_worker_start_failed');
         }
-        commit(committedSelection, targetGroups);
+        commit(filteredSelection, targetGroups);
       });
     },
     workerChanged: notify,

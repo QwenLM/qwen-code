@@ -170,9 +170,29 @@ const mockSelectFirstModel = vi.hoisted(() =>
   ),
 );
 const mockSanitizeLogText = vi.hoisted(() =>
-  vi.fn((value: unknown, _maxLen?: number) =>
-    String(value).replace(/[\r\n]/g, ' '),
-  ),
+  // Mirror the REAL sanitizeLogText contract (channels/base/sanitize.ts)
+  // — cap by code points, render a real `\n` as the visible `\n` escape,
+  // then strip the C1/Unicode line-break + bidi block and the C0/DEL
+  // controls. This suite pins the not-running classifier contract
+  // end-to-end (R14-10), so the stand-in must strip the same characters
+  // the real helper does; a CR/LF-only stand-in would let NEL/U+2028/
+  // U+2029 (all rendered line breaks) through and falsify the pin.
+  vi.fn((value: unknown, maxLen?: number) => {
+    const capped =
+      maxLen === undefined
+        ? String(value)
+        : Array.from(String(value)).slice(0, maxLen).join('');
+    return (
+      capped
+        .replace(/\n/g, '\\n')
+        .replace(
+          /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu,
+          ' ',
+        )
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    );
+  }),
 );
 const mockIsChannelProactiveDeliveryError = vi.hoisted(() =>
   vi.fn(
@@ -1267,11 +1287,15 @@ describe('runChannelDaemonWorker', () => {
     });
 
     expect(mockSanitizeLogText).toHaveBeenCalledWith(unsafeName, 128);
+    // The real sanitizeLogText renders an ASCII newline as the VISIBLE
+    // `\n` escape (not a space), keeping the payload one readable log
+    // line — mirror that here (the mock now tracks the real contract,
+    // R14-10).
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      '[Channel] Connecting "evil channel"...',
+      '[Channel] Connecting "evil\\nchannel"...',
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      '[Channel] "evil channel" connected.',
+      '[Channel] "evil\\nchannel" connected.',
     );
   });
 
@@ -1351,6 +1375,14 @@ describe('runChannelDaemonWorker', () => {
     expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       '[Channel] No channels configured; serving with 0 channels.',
     );
+    // Strict sink negative (R14-25): the degrade notice must not ALSO land
+    // on the loud sink — under the exact failing-stdout condition this
+    // diagnostic exists for, a loud write raises the async stdout 'error'
+    // event and kills the worker the degrade path exists to keep alive
+    // (R11-13). The membership positive alone lets a dual-write ship green.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] No channels configured; serving with 0 channels.',
+    );
     // Never prune with an empty configured set: settings can transiently
     // recover to empty. The store no-ops prune([]) today, but keep this
     // caller-side guard pinned so a future store change cannot turn an
@@ -1427,6 +1459,10 @@ describe('runChannelDaemonWorker', () => {
       '[Channel] "feishu" skipped (stopped before restart)',
     );
     expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    // Strict sink negative, twin of the no-config degrade pin (R14-25).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       '[Channel] All configured channels are stopped; serving with 0 channels.',
     );
     expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
@@ -1728,11 +1764,27 @@ describe('runChannelDaemonWorker', () => {
       ['telegram'],
       'active',
     );
-    // Names mode never consults the restore filter: neither the prune nor
-    // the read that drives it may run, or a recorded stop could filter an
-    // explicitly requested channel out of a names selection (#8975).
-    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
-    expect(mockChannelStateStoreReadAll).not.toHaveBeenCalled();
+    // Names mode never CONSULTS the restore filter for SELECTION: the
+    // selection is the explicit name list verbatim, so a recorded stop
+    // can never filter an explicitly requested channel out (the skip
+    // negatives above + the active write below are the behavioral pin).
+    // A state READ still happens — prune's freshness cleanup reads the
+    // store (this suite's mock wires prune through the readAll spy), but
+    // the selection never sees it. Prune runs by the FULL configured set
+    // — here `['telegram','feishu']`, NOT just the selected
+    // `['telegram']`: that distinction is load-bearing (R14-11). Pruning
+    // by the selection would wipe the record of a configured-but-
+    // unselected channel (feishu), resurrecting exactly what #8975 keeps
+    // stopped; pruning by the configured set matches standalone startAll
+    // and only drops entries ABSENT from settings, so the store's
+    // freshness guarantee ("a channel removed from settings and re-added
+    // later is not skipped forever") holds without an all-mode start in
+    // the removal window.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+      'telegram',
+      'feishu',
+    ]);
     // The forced-start write lands in the SAME workspace-derived file the
     // restore filter reads (argument-derived path mock; the store is
     // pinned to the value returned for this workspace's call) — the
@@ -2474,6 +2526,46 @@ describe('runChannelDaemonWorker', () => {
     await expect(
       handle.runWebhookTask({ ...webhookTask, channelName: 'missing' }),
     ).rejects.toThrow('Channel "missing" is not running.');
+  });
+
+  it('keeps the not-running error classifier-visible for newline-laden channel names (R14-10)', async () => {
+    // classifyWebhookTaskValidationError maps the not-running message via
+    // /^Channel ".+" is not running\.$/u (no `s` flag: `.` rejects real
+    // CR/LF). A raw CR/LF/NEL/U+2028/U+2029 embedded in the task's
+    // channelName used to break the anchored match, flipping a clean 404
+    // into channel_webhook_enqueue_failed. The throws now sanitize the
+    // name through sanitizeLogText; pin the classifier contract with the
+    // anchored regex for BOTH webhook entry points.
+    const sdk = createSdk();
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const evilName = 'evil\r\n\u0085\u2028\u2029name';
+    await expect(
+      handle.runWebhookTask({ ...webhookTask, channelName: evilName }),
+    ).rejects.toThrow(/^Channel ".+" is not running\.$/u);
+    expect(() =>
+      handle.validateWebhookTask({ ...webhookTask, channelName: evilName }),
+    ).toThrow(/^Channel ".+" is not running\.$/u);
+    // The raw newline/control characters must not survive into the
+    // message either (log-line forgery, twin of the skip-notice pins).
+    await expect(
+      handle.runWebhookTask({ ...webhookTask, channelName: evilName }),
+    ).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return (
+        !message.includes('\r') &&
+        !message.includes('\n') &&
+        !message.includes('\u0085') &&
+        !message.includes('\u2028') &&
+        !message.includes('\u2029')
+      );
+    });
   });
 });
 

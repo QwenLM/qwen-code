@@ -5117,6 +5117,35 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('passes the stop durability-loss signal and R14 attribution through untouched', async () => {
+      // Runtime twin of the typetest shape pins: the client returns the
+      // parsed body as-is, so statePersisted / statePersistFailedWorkspaces
+      // survive to the caller. A destructure-and-rebuild regression
+      // (`const { changed, state } = await res.json()`) drops both fields
+      // and the CLI's loss warning never fires — nothing else catches it
+      // (the CLI duck-types the response).
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          changed: true,
+          state: {
+            enabled: false,
+            selection: null,
+            transition: 'idle',
+            workers: [],
+          },
+          statePersisted: false,
+          statePersistFailedWorkspaces: ['/workspace/a', '/workspace/b'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.stopChannelWorker()).resolves.toMatchObject({
+        changed: true,
+        statePersisted: false,
+        statePersistFailedWorkspaces: ['/workspace/a', '/workspace/b'],
+      });
+    });
+
     it('allows lifecycle mutations to outlive the generic fetch timeout', async () => {
       const fetch = vi.fn(
         (_input: RequestInfo | URL, init?: RequestInit) =>

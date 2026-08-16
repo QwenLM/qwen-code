@@ -277,8 +277,18 @@ describe('loadChannelsConfig (#8975)', () => {
     // map's prototype becomes the channel config. Channel names are
     // user-controlled settings keys, so the rebuild must be a
     // null-prototype map (the same hazard the state store's
-    // filterChannelStates avoids). JSON.parse yields `__proto__` as an
-    // own key, as settings.json does (#8975).
+    // filterChannelStates avoids) (#8975).
+    //
+    // REACHABILITY (R14-27): loadChannelsConfig consumes the ALREADY-
+    // MERGED settings. customDeepMerge's prototype-pollution guard drops
+    // a `__proto__` key in the SINGLE-scope case (the common one), so
+    // such a channel never reaches this filter from settings.json — the
+    // drop is pinned at the merge layer (deepMerge.test). This test
+    // injects merged.channels directly, covering the scopes where the
+    // key DOES survive the merge (a later scope defining `channels`
+    // takes the spread branch) and any future caller handing in a
+    // merged-equivalent map with the key as an own entry — JSON.parse
+    // yields `__proto__` as an own key, exercising exactly that shape.
     const channels = JSON.parse(
       '{"all":{"type":"telegram"},"__proto__":{"type":"feishu"},"telegram":{"type":"telegram"}}',
     ) as Record<string, unknown>;

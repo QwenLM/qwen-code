@@ -114,6 +114,7 @@ const mockAdoptLegacyChannelState = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
+const mockWriteStderrLineBestEffort = vi.hoisted(() => vi.fn());
 const mockFindCliEntryPath = vi.hoisted(() => vi.fn());
 const mockParseChannelConfig = vi.hoisted(() => vi.fn());
 const mockGetPlugin = vi.hoisted(() => vi.fn());
@@ -233,6 +234,13 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   // the start mid-flight. The EPIPE-crash resilience of the real helper
   // itself is pinned in stdioHelpers.test (R11-13).
   writeStdoutLineBestEffort: mockWriteStdoutLineBestEffort,
+  // R14-28: the unmocked runtime.ts loaded into this test's graph (via
+  // start.ts — no vi.mock('./runtime.js') here) calls
+  // writeStderrLineBestEffort in loadChannelsConfig's reserved-name
+  // branch. Without the export a reserved-channel-key regression test
+  // rejects with `No "writeStderrLineBestEffort" export is defined on
+  // the mock` instead of exercising skip-and-warn.
+  writeStderrLineBestEffort: mockWriteStderrLineBestEffort,
 }));
 
 vi.mock('./config-utils.js', () => ({
@@ -259,6 +267,7 @@ import {
   resolveProxy,
   startCommand,
 } from './start.js';
+import { resetReservedNameWarningsForTesting } from './runtime.js';
 
 type StartCommandArgs = Parameters<NonNullable<typeof startCommand.handler>>[0];
 
@@ -407,6 +416,15 @@ describe('startCommand.handler', () => {
       expect.stringContaining('managed by qwen serve'),
     );
     expect(mockBridgeStart).not.toHaveBeenCalled();
+    // Serve-owned twin of the standalone abort pins (R14-12): the
+    // serve-owned pidfile belongs to the live serve process and the
+    // daemon owns the state files — the refused start must touch
+    // neither.
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteServiceInfo).not.toHaveBeenCalled();
+    expect(mockAdoptLegacyChannelState).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
   });
 
   it('refuses to start when a standalone service is already running (#8975)', async () => {
@@ -445,6 +463,71 @@ describe('startCommand.handler', () => {
     // The duplicate-instance abort must precede full setup: no bridge
     // child may be spawned on this path (R12-16).
     expect(mockBridgeStart).not.toHaveBeenCalled();
+    // …and it must leave the RUNNING service's pidfile and the state
+    // store untouched (R14-12): a "cleanup" removeServiceInfo() in the
+    // abort branch would unlink a live service's pidfile on every
+    // refused start — stop then reports "No channel service is running."
+    // while the service lives, and the next start passes both the
+    // duplicate check and the 'wx' guard (two services on the same
+    // channels, duplicate delivery). Adoption / an active-record write
+    // moved ahead of the check would overwrite the user's explicit
+    // stopped record (resurrection).
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteServiceInfo).not.toHaveBeenCalled();
+    expect(mockAdoptLegacyChannelState).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+  });
+
+  it('skips a reserved channel key with a best-effort warning and keeps the rest (R14-28)', async () => {
+    // The natural regression test for this PR's own skip-and-warn
+    // behavior was unrunnable in this suite: the stdioHelpers mock
+    // factory omitted writeStderrLineBestEffort, so this shape rejected
+    // with `[vitest] No "writeStderrLineBestEffort" export is defined on
+    // the mock` instead of exercising loadChannelsConfig's reserved-name
+    // branch (the unmocked runtime.ts reaches it via start.ts). The
+    // factory now carries the export; pin the behavior end-to-end.
+    resetReservedNameWarningsForTesting();
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        channels: {
+          all: { type: 'telegram' },
+          telegram: { type: 'telegram' },
+        },
+      },
+    });
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    let keepAlive: NodeJS.Timeout | undefined;
+
+    try {
+      void invokeStartHandler({});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+        | NodeJS.Timeout
+        | undefined;
+
+      // The reserved entry is skipped with a best-effort warning…
+      expect(mockWriteStderrLineBestEffort).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'the name is reserved for the whole-channel selection',
+        ),
+      );
+      // …and dropped before channel creation: only the configured
+      // sibling is created.
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+    } finally {
+      if (keepAlive) clearInterval(keepAlive);
+      exitSpy.mockRestore();
+      processOnSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    }
   });
 
   it('loads settings.merged.proxy when no CLI proxy is provided', async () => {
@@ -1548,6 +1631,12 @@ describe('startCommand.handler', () => {
           '[Channel] No channels configured; serving with 0 channels.',
         );
         expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
+        // Write-COUNT pin (R14-29): membership alone cannot stop an
+        // additional writeServiceInfo(configuredNames) on the
+        // empty-effective-set path landing AFTER the `[]` write — the
+        // final pidfile would then list explicitly-stopped channels as
+        // running (the hazard this test's own comment names).
+        expect(mockWriteServiceInfo).toHaveBeenCalledTimes(1);
         expect(mockAcpBridge).not.toHaveBeenCalled();
         expect(mockCreateChannel).not.toHaveBeenCalled();
         // The empty-effective-set path must not write state either (twin
@@ -1632,6 +1721,8 @@ describe('startCommand.handler', () => {
         // child may be spawned on this path, and the keep-alive timer
         // must hold the event loop open (#8975).
         expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
+        // Write-COUNT pin, twin of the no-config test (R14-29).
+        expect(mockWriteServiceInfo).toHaveBeenCalledTimes(1);
         expect(mockAcpBridge).not.toHaveBeenCalled();
         expect(keepAlive).toBeDefined();
         expect(keepAlive!.hasRef()).toBe(true);

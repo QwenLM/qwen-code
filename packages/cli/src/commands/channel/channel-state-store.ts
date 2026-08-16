@@ -116,6 +116,48 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
 }
 
 /**
+ * Create a state file's directory tree defeating a restrictive umask at
+ * EVERY level (R14-24). A recursive `mkdirSync(..., { mode: 0o700 })`
+ * masks each created level with the process umask; under a umask that
+ * strips owner-execute (0o177/0o133) each new level lands at 0o600 (no
+ * traverse bit), so the mkdir of the SECOND missing level throws EACCES
+ * before any leaf chmod can run — the first scoped stop never persists,
+ * and the first level stays 0o600 so every retry fails identically until
+ * a manual chmod. Walk up to the deepest existing ancestor, create each
+ * missing level one at a time, and chmod 0o700 immediately after each
+ * mkdir. Shared by the store writes and legacy adoption, which mkdir the
+ * same shapes (`channels/standalone/<hash>`, `channels/daemon/<hash>`).
+ */
+function prepareStateDirectory(dir: string): void {
+  const missing: string[] = [];
+  let cursor = dir;
+  while (!existsSync(cursor)) {
+    missing.push(cursor);
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break; // filesystem root
+    cursor = parent;
+  }
+  for (const level of missing.reverse()) {
+    try {
+      mkdirSync(level, { mode: 0o700 });
+    } catch (error) {
+      // Concurrent creation between existsSync and mkdirSync is fine.
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    try {
+      chmodSync(level, 0o700);
+    } catch {
+      // Windows and some filesystems do not implement POSIX modes.
+    }
+  }
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // Windows and some filesystems do not implement POSIX modes.
+  }
+}
+
+/**
  * Migration for stops recorded to the legacy global file, which a stop
  * uses when the pidfile carries no workspace (an older release's service,
  * or a downgrade/parallel install on a mixed-version machine sharing
@@ -234,12 +276,17 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   // rewrite (the comparison cannot relax to `>=`, or a plain new stop
   // would re-apply snapshot-identical entries over an explicit restart —
   // the R9-3 direction). An entry-set-UNCHANGED rewrite is the special
-  // case where the delta exceeds zero added entries. A negative recorded
-  // watermark predates generation recording: rewrites before the first
-  // stamped generation cannot be counted, so keep the content-only diff
-  // there (R11-14). The generation lives in the content, so external
-  // mtime bumps (touch, backup restore) cannot forge the signal and
-  // coarse-mtime filesystems cannot hide a real rewrite.
+  // case where the delta exceeds zero added entries. The watermark is
+  // unified across the `-1` (pre-generation / externally materialized)
+  // boundary: the first stamped write after adoption lands at
+  // `g - (-1)` = the number of entries written, which is the SAME
+  // per-entry semantics as the `>= 0` branch. The old content-only diff
+  // at `-1` could only see entry-set-UNCHANGED rewrites, so a batched
+  // re-stop + new stop at that boundary was dropped and the re-stopped
+  // channel resurrected (#8975, R14). The generation lives in the
+  // content, so external mtime bumps (touch, backup restore) cannot
+  // forge the signal and coarse-mtime filesystems cannot hide a real
+  // rewrite.
   const addedSinceSnapshot = snapshot
     ? Object.keys(legacyChannels).filter((name) => snapshot[name] === undefined)
         .length
@@ -248,9 +295,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     snapshot !== undefined &&
     target?.adoptedLegacyGeneration !== undefined &&
     target.adoptedLegacyGeneration !== legacyGeneration &&
-    (target.adoptedLegacyGeneration >= 0
-      ? legacyGeneration - target.adoptedLegacyGeneration > addedSinceSnapshot
-      : sameChannelMaps(snapshot, legacyChannels));
+    legacyGeneration - target.adoptedLegacyGeneration > addedSinceSnapshot;
   const merged: string[] = [];
   // A corrupt/unreadable target is treated as empty by design, so reseed
   // it from the whole legacy map; a valid target without a snapshot
@@ -298,7 +343,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     if (merged.length === 0 && !legacyRewritten) return;
   }
   try {
-    mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+    prepareStateDirectory(path.dirname(targetPath));
     // Write via the atomic path (temp + fsync + rename): a failure can
     // never leave a partial (corrupt) target behind, which would be
     // treated as empty on the next start and lose both this workspace's
@@ -391,16 +436,6 @@ function filterChannelStates(
 
 function isChannelRuntimeState(value: unknown): value is ChannelRuntimeState {
   return value === 'active' || value === 'stopped';
-}
-
-/** Entry-wise equality of two state maps (both already filtered). */
-function sameChannelMaps(
-  a: Record<string, ChannelRuntimeState>,
-  b: Record<string, ChannelRuntimeState>,
-): boolean {
-  const keys = Object.keys(a);
-  if (keys.length !== Object.keys(b).length) return false;
-  return keys.every((name) => b[name] === a[name]);
 }
 
 /**
@@ -616,13 +651,7 @@ export class ChannelStateStore {
     const full = this.readFileFull();
     const channels = full?.channels ?? Object.create(null);
     mutate(channels);
-    const dir = path.dirname(this.filePath);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    try {
-      chmodSync(dir, 0o700);
-    } catch {
-      // Windows and some filesystems do not implement POSIX modes.
-    }
+    prepareStateDirectory(path.dirname(this.filePath));
     const data: ChannelStateFile = {
       version: STORE_VERSION,
       // Every write bumps the generation watermark BY THE NUMBER OF

@@ -76,6 +76,7 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
         argv.token ??
         process.env[QWEN_SERVER_TOKEN_ENV] ??
         process.env[QWEN_DAEMON_TOKEN_ENV];
+      let result: { changed: boolean; statePersisted?: boolean };
       try {
         const sdk = (await import('@qwen-code/sdk/daemon')) as unknown as {
           DaemonClient: new (opts: { baseUrl: string; token?: string }) => {
@@ -88,25 +89,9 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           baseUrl: argv['daemon-url'],
           ...(token ? { token } : {}),
         });
-        const result = await client.stopChannelWorker(
+        result = await client.stopChannelWorker(
           argv.timeout !== undefined ? { timeoutMs: argv.timeout } : undefined,
         );
-        writeStdoutLine(
-          result.changed
-            ? 'Daemon-managed channels stopped.'
-            : 'Daemon-managed channels are already stopped.',
-        );
-        // The route reports a successful stop whose `stopped` record did
-        // not persist; surface it like the standalone path does, or the
-        // stopped channels resurrect on the next `--channel all` (#8975).
-        // Best-effort sink: a warning write must not terminate the process
-        // when stdout is already failing (R11-13).
-        if (result.statePersisted === false) {
-          writeStdoutLineBestEffort(
-            'Warning: could not persist the stopped record; --channel all may restart these channels.',
-          );
-        }
-        process.exit(0);
       } catch (error) {
         writeStderrLine(
           `Failed to stop daemon-managed channels: ${
@@ -133,7 +118,42 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           );
         }
         process.exit(1);
+        return;
       }
+      // The success report runs OUTSIDE the SDK try: under the very disk
+      // condition that loses the state write (`statePersisted: false`), a
+      // redirected-to-file stdout write throws synchronously, and sharing
+      // the try converted a SUCCESSFUL stop into a reported failure —
+      // stderr "Failed to stop…", exit 1 aborting `set -e`/`&&` teardown
+      // chains — while the loss warning never printed (a local write
+      // error has no `.body`) (#8975, R14).
+      try {
+        writeStdoutLine(
+          result.changed
+            ? 'Daemon-managed channels stopped.'
+            : 'Daemon-managed channels are already stopped.',
+        );
+      } catch {
+        // stdout is the failing target; degrade the success notice to the
+        // best-effort sink so the post-stop write failure cannot flip the
+        // exit code or skip the loss warning below (R11-13, R14).
+        writeStdoutLineBestEffort(
+          result.changed
+            ? 'Daemon-managed channels stopped.'
+            : 'Daemon-managed channels are already stopped.',
+        );
+      }
+      // The route reports a successful stop whose `stopped` record did
+      // not persist; surface it like the standalone path does, or the
+      // stopped channels resurrect on the next `--channel all` (#8975).
+      // Best-effort sink: a warning write must not terminate the process
+      // when stdout is already failing (R11-13).
+      if (result.statePersisted === false) {
+        writeStdoutLineBestEffort(
+          'Warning: could not persist the stopped record; --channel all may restart these channels.',
+        );
+      }
+      process.exit(0);
       return;
     }
     // Capture the pidfile contents BEFORE readServiceInfo: a crashed
@@ -183,7 +203,14 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       // behind; a `set -e`/`&&` teardown then aborts and the next bare
       // `qwen channel start` resurrects the channels (#8975, R14).
       removeServiceInfo();
-      if (info.channels.length === 0) {
+      // Mirror the crash path's owner gate: a serve-owned pidfile carries
+      // the daemon's channels (or the literal `['all']` reservation
+      // placeholder) and NO workspaceCwd, so recording them here would
+      // write the daemon's state into the legacy GLOBAL standalone store
+      // — every later standalone start adopts it and skips channels that
+      // were never stopped in standalone mode. A stop in one mode must
+      // not carry over to the other (#8975, R14).
+      if (info.owner !== 'channel' || info.channels.length === 0) {
         writeStdoutLine('No channel service is running.');
       } else {
         const recorded = recordStoppedChannels(

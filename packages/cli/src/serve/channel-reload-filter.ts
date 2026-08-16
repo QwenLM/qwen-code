@@ -1,0 +1,81 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as path from 'node:path';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { ChannelStateStore } from '../commands/channel/channel-state-store.js';
+import type { ChannelRuntimeState } from '../commands/channel/channel-state-store.js';
+import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
+import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
+import type { ServeChannelSelection } from './types.js';
+
+/**
+ * The reload-side mirror of the daemon stop-record contract
+ * (`recordChannelsStopped` in routes/workspace-channel-control,
+ * `clearStoppedRecord` in channel-management-service): a names-mode
+ * recovery reconcile from the committed selection force-starts
+ * regardless of persisted state, so without this filter it would
+ * resurrect an explicitly STOPPED sibling — the mode-`all` worker's
+ * restore filter protects only mode-`all` selections (#8975). The
+ * returned filter drops names carrying a persisted `stopped` record in
+ * the OWNING workspace's daemon state file before every reload-op
+ * resolve; explicit by-name start/restart clear the target's own record
+ * before the recovery reload, so the requested name survives.
+ * Never-fails: unreadable state degrades to KEEPING the name (the
+ * pre-R14 behavior) — a degraded fs must not break recovery.
+ *
+ * Lives in its own module (imported by run-qwen-serve) instead of the
+ * routes file next to recordChannelsStopped: the serve fast-path import
+ * boundary forbids the ACP runtime modules the routes graph pulls in
+ * (fast-path.test pins it), and this filter needs none of them (R14-5).
+ */
+export function createDaemonReloadSelectionFilter(): (
+  selection: ServeChannelSelection,
+  groups: readonly ChannelWorkspaceGroup[],
+) => ServeChannelSelection {
+  const stateByWorkspace = new Map<
+    string,
+    Record<string, ChannelRuntimeState>
+  >();
+  const stoppedIn = (workspaceCwd: string, name: string): boolean => {
+    let states = stateByWorkspace.get(workspaceCwd);
+    if (!states) {
+      // Throw-safe canonical form: the state path is derived from the
+      // canonical workspace (matching clearStoppedRecord /
+      // recordChannelsStopped — a split derivation would read a
+      // different file than the one stop writes); canonicalizeWorkspace
+      // rethrows non-ENOENT fs errors, so degrade to the resolved form.
+      let canonical: string;
+      try {
+        canonical = canonicalizeWorkspace(workspaceCwd);
+      } catch {
+        canonical = path.resolve(workspaceCwd);
+      }
+      states = new ChannelStateStore(
+        daemonChannelRuntimeStatePath(canonical),
+      ).readAll();
+      stateByWorkspace.set(workspaceCwd, states);
+    }
+    return states[name] === 'stopped';
+  };
+  return (selection, groups) => {
+    if (selection.mode !== 'names') return selection;
+    const kept = selection.names.filter((name) => {
+      const owner = groups.find(
+        (group) =>
+          group.selection.mode === 'names' &&
+          group.selection.names.includes(name),
+      );
+      // Keep-fallback for an ownerless name: it has no owning workspace
+      // whose record could stop it, and dropping it would turn a
+      // transient grouping gap into a silent channel loss.
+      return owner ? !stoppedIn(owner.workspaceCwd, name) : true;
+    });
+    return kept.length === selection.names.length
+      ? selection
+      : { mode: 'names', names: kept };
+  };
+}

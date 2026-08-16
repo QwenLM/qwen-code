@@ -363,6 +363,45 @@ export function createChannelManagementService(
     }
   };
 
+  // Persist the torn-down set AND the requested name's own record. The
+  // carried tear-down set only includes channels that CONNECTED at least
+  // once (stoppedChannelsByWorkspace filters on the connected set), so a
+  // requested channel that never connected is absent from it even when
+  // the set is defined — and the single-name fallback was structurally
+  // unreachable whenever the carried set existed. Without the
+  // supplementary write the requested channel gets no `stopped` record
+  // and the next `--channel all` restarts it — the exact stop this call
+  // performed is silently undone (#8975, R14). Returns the workspaces
+  // whose write FAILED (empty = every record persisted).
+  const recordStopForName = (
+    name: string,
+    carried:
+      | ReadonlyArray<{
+          readonly workspaceCwd: string;
+          readonly names: readonly string[];
+        }>
+      | undefined,
+  ): string[] => {
+    const failed = carried ? recordChannelsStopped(carried) : [];
+    const target = canonicalForGuard(opts.workspaceCwd);
+    const carriedHere = (carried ?? []).some(
+      (entry) =>
+        canonicalForGuard(entry.workspaceCwd) === target &&
+        entry.names.includes(name),
+    );
+    if (carriedHere) return failed;
+    if (
+      !new ChannelStateStore(daemonChannelRuntimeStatePath(target)).trySet(
+        name,
+        'stopped',
+      ) &&
+      !failed.includes(target)
+    ) {
+      failed.push(target);
+    }
+    return failed;
+  };
+
   const runtimeFor = (name: string): ChannelRuntimeState => {
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
@@ -704,8 +743,13 @@ export function createChannelManagementService(
           // management route's error body must carry the loss, or the
           // torn-down channels silently resurrect on `--channel all`
           // (#8975). Carry the failed workspaces too, so a retry can be
-          // targeted at the affected channels (R14).
-          const failedWorkspaces = recordChannelsStopped(error.stoppedChannels);
+          // targeted at the affected channels (R14). recordStopForName
+          // also writes the requested name's own record when the carried
+          // set exists but excludes it (a never-connected channel) (R14).
+          const failedWorkspaces = recordStopForName(
+            name,
+            error.stoppedChannels,
+          );
           if (failedWorkspaces.length > 0) {
             error.statePersisted = false;
             error.statePersistFailedWorkspaces = failedWorkspaces;
@@ -783,16 +827,15 @@ export function createChannelManagementService(
       // like the catch branch and the DELETE route do — persisting only
       // this one name would leave the other torn-down workspaces
       // unrecorded, and they would resurrect on the next `--channel all`
-      // start (#8975).
-      const persistFailedWorkspaces = result.stoppedChannels
-        ? recordChannelsStopped(result.stoppedChannels)
-        : new ChannelStateStore(
-              daemonChannelRuntimeStatePath(
-                canonicalForGuard(opts.workspaceCwd),
-              ),
-            ).trySet(name, 'stopped')
-          ? []
-          : [canonicalForGuard(opts.workspaceCwd)];
+      // start (#8975). recordStopForName ALSO writes this name's own
+      // record when the carried set exists but excludes it — the carried
+      // set only holds connected channels, so a never-connected requested
+      // channel would otherwise get no `stopped` record and resurrect
+      // (R14).
+      const persistFailedWorkspaces = recordStopForName(
+        name,
+        result.stoppedChannels,
+      );
       diagnostics.delete(name);
       return {
         ...(await resultFor(name, persisted)),

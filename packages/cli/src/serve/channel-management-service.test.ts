@@ -793,6 +793,87 @@ describe('createChannelManagementService', () => {
     expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
   });
 
+  it('records the requested name when the carried tear-down set excludes it (R14-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // The carried tear-down set only includes channels that CONNECTED at
+    // least once (stoppedChannelsByWorkspace filters on the connected
+    // set). When the requested channel never connected — here `bot` is
+    // the last committed name and the connected sibling `aux` is the only
+    // carried entry — the carried set is defined but excludes it. The
+    // old ternary made the single-name fallback structurally unreachable
+    // whenever the carried set existed: bot got no stopped record and
+    // the next `--channel all` launched it — the explicit stop silently
+    // undone. The supplementary write covers the gap.
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      stoppedChannels: [{ workspaceCwd: '/ws/other', names: ['aux'] }],
+    });
+    const writesByPath = new Map<string, string[][]>();
+    mockChannelStateStore.mockImplementation((filePath: string) => ({
+      readAll: vi.fn(() => ({})),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: vi.fn((name: string, state: 'active' | 'stopped') => {
+        if (state === 'stopped') {
+          writesByPath.set(filePath, [
+            ...(writesByPath.get(filePath) ?? []),
+            [name],
+          ]);
+        }
+        mockChannelStateStoreSet(name, state);
+        return true;
+      }),
+      trySetMany: vi.fn((names: string[], state: 'active' | 'stopped') => {
+        if (state === 'stopped') {
+          writesByPath.set(filePath, [
+            ...(writesByPath.get(filePath) ?? []),
+            [...names],
+          ]);
+        }
+        return mockChannelStateStoreTrySetMany(names, state);
+      }),
+    }));
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    // The carried group is persisted…
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['aux'],
+      'stopped',
+    );
+    // …AND the requested name, absent from it, is still recorded through
+    // the single-name fallback into THIS workspace's store.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+    expect(writesByPath.get(daemonChannelRuntimeStatePath(WORKSPACE))).toEqual([
+      ['bot'],
+    ]);
+    // Every write persisted, so the happy-path shape stays unchanged.
+    expect(result).not.toHaveProperty('statePersisted');
+  });
+
+  it('records the requested name on the error path too when the carried set excludes it (R14-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Catch-branch twin: the lease-release failure shape carries the same
+    // connected-only tear-down set; the requested never-connected name
+    // must be recorded here as well.
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        stoppedChannels: [{ workspaceCwd: '/ws/other', names: ['aux'] }],
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+    });
+
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['aux'],
+      'stopped',
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
   it('does not record state when the stop itself fails (#8975)', async () => {
     const { service, manager } = setup({ committedNames: ['bot'] });
     manager.setChannelEnabled.mockRejectedValueOnce(new Error('stop failed'));
@@ -1709,6 +1790,15 @@ describe('createChannelManagementService', () => {
     // durable stop and the channel silently resurrects on `--channel all`
     // (#8975).
     expect(result.statePersisted).toBe(false);
+    // …together with the R14 attribution field on the single-name path:
+    // production sets both together; a mutation dropping or mis-sourcing
+    // the single-name attribution ships green without this pin (the
+    // group-path pin above only catches the shared-spread variant),
+    // leaving the client's targeted retry unaimable at the affected
+    // workspace (R14-32).
+    expect(result.statePersistFailedWorkspaces).toEqual([
+      path.resolve(WORKSPACE),
+    ]);
   });
 
   it('omits statePersisted when the stop record persisted (#8975)', async () => {
@@ -1933,9 +2023,14 @@ describe('createChannelManagementService', () => {
     await service.stop('bot');
 
     // The starting-window guard is workspace-scoped: another workspace's
-    // mode-`all` worker must neither block this workspace's stop nor let an
-    // unconfirmable stop persist. Dropping the workspace comparison from
-    // the guard turns this into a 409.
+    // mode-`all` worker must not block this workspace's stop; with no
+    // starting worker in THIS workspace to overwrite the record, the stop
+    // is confirmable here and IS recorded (the guard compares canonical
+    // workspaces, and a sibling workspace's worker reads/writes a
+    // different per-workspace state file). Dropping the workspace
+    // comparison from the guard turns this into a 409. (R14-14: the old
+    // comment clause "nor let an unconfirmable stop persist" contradicted
+    // the pinned behavior below.)
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
@@ -2123,20 +2218,49 @@ describe('createChannelManagementService', () => {
       committedNames: ['bot'],
       workspaceCwd: '/ws/secondary',
     });
+    // Seed a persisted stopped record (R14-15): the default empty store
+    // mock makes a clear-before-gate reorder unobservable (clearStoppedRecord
+    // early-returns when the record is not `stopped`). With the record
+    // seeded, moving the clear above the gate would flip it to `active`
+    // on a REJECTED 409 restart — resurrecting exactly the explicitly
+    // stopped channel this PR keeps stopped.
+    mockChannelStateStore.mockImplementation((_filePath: string) => ({
+      readAll: vi.fn(() => ({ bot: 'stopped' })),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: vi.fn((name: string, state: 'active' | 'stopped') => {
+        mockChannelStateStoreSet(name, state);
+        return true;
+      }),
+      trySetMany: mockChannelStateStoreTrySetMany,
+    }));
 
     await expect(service.restart('bot')).rejects.toMatchObject({
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
   it('rejects restart of a configured channel that is not enabled', async () => {
     const { service, manager } = setup({ committedNames: [] });
+    // Seeded-record twin of the pin above (R14-15).
+    mockChannelStateStore.mockImplementation((_filePath: string) => ({
+      readAll: vi.fn(() => ({ bot: 'stopped' })),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: vi.fn((name: string, state: 'active' | 'stopped') => {
+        mockChannelStateStoreSet(name, state);
+        return true;
+      }),
+      trySetMany: mockChannelStateStoreTrySetMany,
+    }));
 
     await expect(service.restart('bot')).rejects.toMatchObject({
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
   it('routes a per-channel start of a crash-dead worker channel through the workspace reload (#8975)', async () => {

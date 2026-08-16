@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { canonicalizeWorkspacePath } from '@qwen-code/channel-base';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -125,6 +125,35 @@ describe('channelRuntimeStatePath', () => {
       symlinkSync(realDir, linkDir, 'dir');
 
       expect(channelRuntimeStatePath(linkDir)).toBe(
+        channelRuntimeStatePath(realDir),
+      );
+    },
+  );
+
+  // Windows case-insensitivity collapse — the one spelling variant the
+  // production comment explicitly names (channel-state-store.ts:
+  // "Windows case-insensitivity, symlinks, trailing separators must map
+  // to ONE state file, or a stop recorded under one spelling is silently
+  // lost … and the next --channel all resurrects the explicitly stopped
+  // channels"). Case collapse is delivered solely by
+  // fs.realpathSync.native; a swap to plain realpathSync (or a manual
+  // lstat-walk) keeps every POSIX test green while case variants of one
+  // existing workspace hash to TWO state files. The merge queue runs a
+  // Windows job, so this pin actually executes there (R14-23).
+  it.runIf(process.platform === 'win32')(
+    'collapses case-variant spellings of the same directory (R14-23)',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
+      testDirs.push(root);
+      const realDir = join(root, 'CaseMixedDir');
+      mkdirSync(realDir);
+      const leaf = basename(realDir);
+      const swapped = join(
+        root,
+        leaf === leaf.toLowerCase() ? leaf.toUpperCase() : leaf.toLowerCase(),
+      );
+
+      expect(channelRuntimeStatePath(swapped)).toBe(
         channelRuntimeStatePath(realDir),
       );
     },
@@ -803,6 +832,41 @@ describe('adoptLegacyChannelState (#8975)', () => {
     new ChannelStateStore(workspacePath).set('telegram', 'active');
     // ONE batched stop of the service's whole channel list: the telegram
     // re-stop plus the new feishu stop.
+    new ChannelStateStore(legacyPath).setMany(
+      ['telegram', 'feishu'],
+      'stopped',
+    );
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+      feishu: 'stopped',
+    });
+  });
+
+  it('honors a batched re-stop + new stop at the generation-less legacy boundary (R14-21)', () => {
+    // Boundary twin of the R13-10 pin for legacy files materialized
+    // WITHOUT a generation (externally written; the sole production
+    // writer always stamps). Adoption records the watermark -1; the old
+    // `-1` branch fell back to a content-only diff, which can only see
+    // entry-set-UNCHANGED rewrites — the first stamped batched write
+    // changes the entry set, so a re-stop batched with a new stop was
+    // dropped and the explicitly re-stopped channel resurrected. The
+    // unified watermark arithmetic gives the first stamped write
+    // `g - (-1)` = entries written, the same per-entry semantics as the
+    // `>= 0` branch.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    // ONE batched stop of the service's whole channel list: the telegram
+    // re-stop plus the new feishu stop (the production recordStoppedChannels
+    // shape), landing as the first stamped write (generation 1).
     new ChannelStateStore(legacyPath).setMany(
       ['telegram', 'feishu'],
       'stopped',
@@ -1967,6 +2031,14 @@ describe('selectActiveChannels (#8975)', () => {
     expect(unicodeMessage).not.toContain('\u0085');
     expect(unicodeMessage).not.toContain('\u2028');
     expect(unicodeMessage).not.toContain('\u2029');
+    // Also pin the ABSENCE of a REAL newline (R14-9): a mutation
+    // normalizing NEL/U+2028/U+2029 to a real '\n' passes the raw-char
+    // negatives above while re-opening stdout line-forgery — both
+    // production callers pass the name to writeStdoutLineBestEffort
+    // unguarded, so a real CR/LF in the rendered message forges a second
+    // log line, the exact forgery this test's comment says it blocks.
+    expect(unicodeMessage).not.toContain('\n');
+    expect(unicodeMessage).not.toContain('\r');
     expect(unicodeMessage).toContain('skipped (stopped before restart)');
   });
 

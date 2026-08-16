@@ -500,6 +500,24 @@ export async function runChannelDaemonWorker(
       states,
       writeStdoutLineBestEffort,
     );
+  } else if (Object.keys(channelsConfig).length > 0) {
+    // Names mode also prunes, and by the FULL configured set, not the
+    // selection (R14-11): the store's freshness guarantee ("a channel
+    // removed from settings and re-added later is not skipped forever by
+    // a stale `stopped` entry") must not depend on an all-mode start
+    // happening inside the removal window. Pruning by the selection
+    // instead would delete the records of configured-but-unselected
+    // channels — resurrecting exactly the channels #8975 keeps stopped.
+    // Selection here never consults records (explicit names force-start),
+    // so a prune failure must not block the start — best-effort warning
+    // only (R11-13).
+    try {
+      stateStore.prune(Object.keys(channelsConfig));
+    } catch {
+      writeStdoutLineBestEffort(
+        '[Channel] Warning: failed to update channel state; continuing with the explicit selection.',
+      );
+    }
   }
   if (selectedNames.length === 0) {
     // Zero-channel degrade notice: the worker survives with no channels,
@@ -524,10 +542,14 @@ export async function runChannelDaemonWorker(
         );
       },
       validateWebhookTask(task: ChannelWebhookTask): void {
-        throw new Error(`Channel "${task.channelName}" is not running.`);
+        throw new Error(
+          `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+        );
       },
       async runWebhookTask(task: ChannelWebhookTask) {
-        throw new Error(`Channel "${task.channelName}" is not running.`);
+        throw new Error(
+          `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+        );
       },
       async close() {
         // No runtime was started; nothing to tear down.
@@ -799,7 +821,9 @@ export async function runChannelDaemonWorker(
       validateWebhookTask(task: ChannelWebhookTask): void {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
-          throw new Error(`Channel "${task.channelName}" is not running.`);
+          throw new Error(
+            `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+          );
         }
         channel.validateWebhookTask(task);
       },
@@ -809,7 +833,9 @@ export async function runChannelDaemonWorker(
       ): Promise<void> {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
-          throw new Error(`Channel "${task.channelName}" is not running.`);
+          throw new Error(
+            `Channel "${sanitizeLogText(task.channelName, 128)}" is not running.`,
+          );
         }
         if (options) {
           await channel.runWebhookTask(task, options);
