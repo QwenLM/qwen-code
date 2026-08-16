@@ -27,6 +27,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import {
   isPortableAbsolutePath,
   resolveManagedWorkspaceRuntimeByPathSelector,
@@ -38,6 +39,12 @@ import {
   type AcpConnection,
   type AcpConnectionDiagnostic,
 } from './connection-registry.js';
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  AcpPreAttachBudget,
+  type AcpPreAttachBudgetSnapshot,
+} from './pre-attach-budget.js';
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
@@ -526,6 +533,7 @@ export interface AcpHttpMountSnapshot {
   primary: boolean;
   connectionCount: number;
   wsStreams: number;
+  preAttachGuardFailures: number;
 }
 
 export interface AcpHttpConnectionDiagnostic extends AcpConnectionDiagnostic {
@@ -542,6 +550,10 @@ export interface AcpHttpSnapshot {
   sseStreams: number;
   wsStreams: number;
   pendingClientRequests: number;
+  bufferedConnectionFrames: number;
+  bufferedSessionFrames: number;
+  pendingDeliveryFrames: number;
+  preAttach: AcpPreAttachBudgetSnapshot;
   mounts: AcpHttpMountSnapshot[];
   connections: AcpHttpConnectionDiagnostic[];
 }
@@ -623,6 +635,10 @@ export function mountAcpHttp(
       ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
       : daemonEnv;
   const path = opts.path ?? '/acp';
+  const preAttachBudget = new AcpPreAttachBudget({
+    maxFrames: ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+    maxBytes: ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  });
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
   // 503 instead of racing torn-down registries (issue #6378 daemon shutdown).
@@ -678,6 +694,8 @@ export function mountAcpHttp(
       });
     },
     opts.maxConnections,
+    undefined,
+    preAttachBudget,
   );
   let cdpMcpRegistered = false;
   let cdpMcpRegistering: Promise<void> | undefined;
@@ -1295,6 +1313,8 @@ export function mountAcpHttp(
           });
       },
       opts.maxConnections,
+      undefined,
+      preAttachBudget,
     );
     const workspaceRememberLane = new WorkspaceRememberTaskLane(
       rt.bridge,
@@ -1378,7 +1398,9 @@ export function mountAcpHttp(
   const getOrCreateSecondaryMount = (
     rt: WorkspaceRuntime,
   ): RuntimeAcpMount | undefined => {
-    if (rt.primary || !rt.trusted) return undefined;
+    if (rt.primary || !rt.trusted || isInternalWorkspaceRuntime(rt)) {
+      return undefined;
+    }
     const existing = secondaryMounts.get(rt.workspaceId);
     if (existing) return existing;
     const mount = createSecondaryAcpMount(rt);
@@ -1678,6 +1700,12 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
+        if (isInternalWorkspaceRuntime(runtime)) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         if (!runtime.trusted) {
           logReject(`untrusted-workspace ${runtime.workspaceId}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -1725,6 +1753,12 @@ export function mountAcpHttp(
             ? resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector)
             : undefined);
         if (!rt) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        if (isInternalWorkspaceRuntime(rt)) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
           socket.destroy();
@@ -2457,6 +2491,7 @@ export function mountAcpHttp(
           snap: mount.registry.getSnapshot(),
         });
       }
+      const preAttach = preAttachBudget.snapshot();
       return {
         connectionCount: perMount.reduce(
           (n, m) => n + m.snap.connectionCount,
@@ -2473,11 +2508,22 @@ export function mountAcpHttp(
           (n, m) => n + m.snap.pendingClientRequests,
           0,
         ),
+        bufferedConnectionFrames: perMount.reduce(
+          (n, m) => n + m.snap.bufferedConnectionFrames,
+          0,
+        ),
+        bufferedSessionFrames: perMount.reduce(
+          (n, m) => n + m.snap.bufferedSessionFrames,
+          0,
+        ),
+        pendingDeliveryFrames: preAttach.pendingDeliveryFrames,
+        preAttach,
         mounts: perMount.map((m) => ({
           workspaceId: m.workspaceId,
           primary: m.primary,
           connectionCount: m.snap.connectionCount,
           wsStreams: m.snap.wsStreams,
+          preAttachGuardFailures: m.snap.preAttachGuardFailures,
         })),
         connections: perMount.flatMap((mount) =>
           mount.snap.connections.map((connection) => ({

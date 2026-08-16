@@ -224,6 +224,18 @@ export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
  *  longer buys nothing — an unanswered request is simply left for the next
  *  snapshot to settle. */
 export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
+
+/**
+ * The child's drain budget for a `sessionClose` round trip: strictly under
+ * the daemon's outer wait so the child deadline always fires first, clamped
+ * to ≥1ms so a tiny outer wait still yields a usable budget. An outer wait
+ * that fires first leaves the close outcome unknown, which the close path
+ * recovers by killing the whole channel — the coupling lives here exactly
+ * once so the ratio cannot drift between call sites.
+ */
+export function sessionCloseDrainBudgetMs(outerWaitMs: number): number {
+  return Math.max(1, Math.floor(outerWaitMs * 0.8));
+}
 /** Bounds on a single snapshot. Generous next to any real deployment — they
  *  exist so a version-skewed or buggy child cannot make the daemon walk an
  *  unbounded structure per report, not to constrain legitimate use. A packet
