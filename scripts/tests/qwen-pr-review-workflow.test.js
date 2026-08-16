@@ -2636,12 +2636,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     }
   });
 
-  it('keeps every in-job failure body linked to the run and marker-prepended', () => {
+  it('keeps every failure body linked to the run and marker-prepended', () => {
     // All four FAILURE_KIND bodies carry the workflow-logs link — dropping it
     // from a variant ships a dead-end comment on exactly that failure path.
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
+    // Same invariant for the fallback job's body: the cross-job dedup
+    // matches `actions/runs/<id>)`, anchored on the markdown link's closing
+    // paren — a body that rendered the URL differently would escape it.
+    expect(step.run).toContain('See [workflow logs](${RUN_URL}).');
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -2657,18 +2661,48 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   });
 
   it('opens the gate on any upstream failure but never on skip or resolve', () => {
-    expect(job.needs).toEqual(['review-config', 'authorize', 'review-pr']);
+    // Every job whose failure marks review-pr 'skipped' is enumerated: the
+    // incident's trigger can kill the chain's self-hosted jobs first
+    // (authorize / review-config), and a transient API failure can kill the
+    // hosted ones (precheck-pr / delay-automatic-review).
+    expect(job.needs).toEqual([
+      'precheck-pr',
+      'review-config',
+      'authorize',
+      'delay-automatic-review',
+      'review-pr',
+    ]);
     // Failure-keyed, not != 'success': resolve dispatch runs skip review-pr
     // BY DESIGN and would otherwise mint false-alarm fallbacks.
     expect(job.if).toContain("needs.review-pr.result == 'failure'");
     expect(job.if).toContain("needs.authorize.result == 'failure'");
     expect(job.if).toContain("needs.review-config.result == 'failure'");
+    expect(job.if).toContain(
+      "needs.delay-automatic-review.result == 'failure'",
+    );
+    expect(job.if).toContain("needs.precheck-pr.result == 'failure'");
     expect(job.if).not.toContain("!= 'success'");
-    // Resolve dispatch runs never review, and only there can authorize fail
-    // while review-pr is skipped by design.
-    expect(job.if).toContain("github.event.inputs.command != 'resolve'");
     expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
+    // On pull_request_target and issue_comment events review_mode is null,
+    // so collapsing this disjunction would skip the job exactly where dead
+    // review runs happen.
+    expect(job.if).toContain("(github.event_name != 'workflow_dispatch' ||");
     expect(job.if).toContain("github.event.inputs.review_mode == 'comment'");
+    // The job exists to survive whatever killed the review job; routing it
+    // onto the self-hosted ECS pool would die the same death.
+    expect(job['runs-on']).toBe('ubuntu-latest');
+  });
+
+  it('never opens the gate on a /resolve run, dispatch- or comment-driven', () => {
+    // /resolve is a first-class issue_comment command too: authorize runs on
+    // `@qwen-code /resolve` comments, and github.event.inputs is empty on
+    // issue_comment, so the dispatch exclusion alone misdiagnoses a failed
+    // resolve run as a dead review and recommends the wrong command.
+    expect(job.if).toContain("github.event.inputs.command != 'resolve'");
+    expect(job.if).toContain(
+      "!(github.event_name == 'issue_comment' &&\n" +
+        " startsWith(github.event.comment.body, '@qwen-code /resolve')) &&",
+    );
   });
 
   it('probes the runner root three levels up and _diag when present', () => {
@@ -2681,6 +2715,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(run).toContain('"$HOME"');
     expect(run).toContain('"${RUNNER_TEMP:?}"');
     expect(run).toContain('"$RUNNER_ROOT/_diag"');
+    // Polarity: _diag is probed only when it EXISTS — an inverted guard
+    // probes a nonexistent directory and fails fast on a healthy runner.
+    expect(run).toContain('if [ -d "$RUNNER_ROOT/_diag" ]; then');
     expect(run).toContain('status=1');
     expect(run.trim()).toMatch(/exit "\$status"$/);
   });
@@ -2797,12 +2834,25 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   });
 
   it('dedupes on the marker plus this run URL', () => {
+    // Mirrors a prior fallback comment's rendered shape: the run URL is a
+    // markdown link, so the run id is always immediately followed by ')'.
     const r = runFallbackStep('already', {
-      comments: `${marker}\n\nretry actions/runs/12345 now`,
+      comments: `${marker}\n\nSee [workflow logs](https://github.com/QwenLM/qwen-code/actions/runs/12345).`,
     });
     expect(r.status).toBe(0);
     expect(r.posted).toBe('');
     expect(r.summary).toContain('already exists');
+  });
+
+  it("still posts when only another run's fallback exists", () => {
+    // Run ids grow digits over time, so a later run's id (123450) contains
+    // this run's (12345) as a substring — the match must stay anchored to
+    // this run's URL or a distinct run's death is silently suppressed.
+    const r = runFallbackStep('other_run', {
+      comments: `${marker}\n\nSee [workflow logs](https://github.com/QwenLM/qwen-code/actions/runs/123450).`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
   });
 
   it('fails closed when the dedup lookup keeps failing', () => {
@@ -2858,6 +2908,26 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   it('degrades to POSTING when the head comparison lookups fail', () => {
     const r = runFallbackStep('runview_fail', {
       eventName: 'pull_request_target',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+
+  it('still posts on pull_request_target when only the run-head lookup fails', () => {
+    // A transient gh-run-view failure while gh-pr-view succeeds must not
+    // suppress the fallback: comparison unavailable means posting wins.
+    const r = runFallbackStep('runview_fail', {
+      eventName: 'pull_request_target',
+      prHead: 'newsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+
+  it('still posts on pull_request_target when only the PR-head lookup fails', () => {
+    const r = runFallbackStep('prview_fail', {
+      eventName: 'pull_request_target',
+      runHead: 'oldsha',
     });
     expect(r.status).toBe(0);
     expect(r.posted).not.toBe('');
