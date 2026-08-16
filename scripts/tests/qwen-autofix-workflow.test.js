@@ -33,6 +33,10 @@ const reviewVerificationRunner = readFileSync(
   reviewVerificationRunnerPath,
   'utf8',
 );
+const upsertDeferredScript = readFileSync(
+  '.github/scripts/upsert-deferred-issue.sh',
+  'utf8',
+);
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
@@ -9378,6 +9382,55 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
+    // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
+    // cannot reach the privileged work is the `env -i` clean child, pinned
+    // separately below; no regex over source text can be that guarantee,
+    // because the space of sweep spellings is unbounded (round 4 learned this
+    // about the sweep itself, and the same logic applies to a test that
+    // enumerates its spellings). What this loop buys is an alarm when someone
+    // reintroduces the PATTERN — round 3 did exactly that once — so it aims
+    // at the ENUMERATION PRIMITIVES a sweep needs (walking the environment,
+    // clearing functions/aliases/traps) rather than at any particular
+    // vocabulary of variable names.
+    for (const step of [
+      publishPrStep,
+      pushAndReportStep,
+      prepareStep,
+      reviewAddressReportStep,
+      // The issue-autofix job's own PAT-bearing failure paths: the comment
+      // claims a workflow-wide invariant, so the loop has to cover them.
+      issueAutofixReportStep,
+      withdrawClaimStep,
+    ]) {
+      // Property, not spelling: any in-shell sweep has to name BASH_FUNC and
+      // unset functions. Round 3's exact form is one of many spellings, and
+      // pinning only that form let a rewritten sweep back in (probed).
+      // Comment lines are excluded — the clean-child rationale legitimately
+      // names the channels it defends against.
+      const code = step
+        .split('\n')
+        .filter((l) => !l.trimStart().startsWith('#'))
+        .join('\n');
+      expect(code).not.toMatch(/BASH_FUNC/);
+      // No trailing \b on a flag: it sits between `-f` and a space (both
+      // non-word), so it fails on the standard spellings — `unset -fv name`
+      // and `trap - ERR EXIT` slipped straight through.
+      expect(code).not.toMatch(/\bunset -f/);
+      expect(code).not.toMatch(/\bhash -r/);
+      // The other enumeration families a sweep gets rewritten into: alias
+      // clearing, trap resets, and per-name proxy/loader unsets. Isolation is
+      // the clean child's job, not a list maintained in the tainted shell.
+      expect(code).not.toMatch(/\bunalias\b/);
+      expect(code).not.toMatch(/expand_aliases/);
+      expect(code).not.toMatch(/\btrap -/);
+      // The enumeration primitives: a sweep has to WALK the environment to
+      // decide what to clear, whatever vocabulary it then uses.
+      expect(code).not.toMatch(/\bcompgen -[ev]/);
+      expect(code).not.toMatch(/\bdeclare -x\b/);
+      expect(code).not.toMatch(/<\s*<\(\s*env\s*\)/);
+      expect(code).not.toMatch(/\benv\s*\|/);
+      expect(code).not.toMatch(/\bexport -n\b/);
+    }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
     // GIT_ALLOW_PROTOCOL is stripped; these pin the config level).
@@ -11510,6 +11563,1186 @@ exit 1
     expect(fuzz.advisory).toContain('outside the PR footprint');
   });
 
+  it('upserts deferred findings into a per-PR issue that survives the merge', () => {
+    // Wiring: the upsert runs after both shared resolve/reply call sites
+    // AND on the failure/handoff path (a failed round must not lose verified
+    // findings); its content is captured from the trusted base at stage
+    // time; the agent file rides the artifact dump and the repair cleanup;
+    // SKILL documents the fourth disposition. The script is executed from
+    // that content, never opened by path, at both call sites.
+    expect(workflow.split('bash -c "${UPSERT_SRC}"').length - 1).toBe(2);
+    // R10-8: bound EVERY execution of the staged path, not one spelling —
+    // `sh …`, `bash -- …`, `source …`, `. …`, `exec bash …` all re-open it.
+    expect(workflow).not.toMatch(
+      /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
+    );
+    expect(workflow).not.toMatch(
+      /(?:^|\s)(?:source|\.)\s+"?\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
+    );
+    // Placement, not just counts: the digest-gated invocation is a step-local
+    // function defined ONCE in 'Push and report' and called immediately after
+    // resolve_and_reply_threads in BOTH arms; the failure/handoff step keeps
+    // its own gated copy.
+    expect(pushAndReportStep.split('run_deferred_upsert() {').length - 1).toBe(
+      1,
+    );
+    // Its empty-content skip: without it an absent stage output would send an
+    // empty script into the child and read as a successful round.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ -z "\$\{UPSERT_SRC:-\}" \]\]; then\n(?:\s*#[^\n]*\n)*\s*echo 'deferred-findings upsert skipped: stage step never ran'\n\s*return 0/,
+    );
+    expect(
+      pushAndReportStep.match(
+        /resolve_and_reply_threads\n(?:\s*#[^\n]*\n)*\s*run_deferred_upsert\n/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    // Sound isolation, NOT an in-shell denylist: both upsert sites run the
+    // script in a fresh `/usr/bin/env -i` child. The
+    // absolute path is load-bearing — bash never does function/alias lookup
+    // on a slash-bearing word, so a planted BASH_FUNC_env%% cannot intercept
+    // it — and `-i` drops every BASH_FUNC_*/BASH_ENV/SHELLOPTS/alias/trap
+    // before any gated work. Exactly two clean-child launches (both arms of
+    // 'Push and report' share run_deferred_upsert; the failure path has its
+    // own).
+    for (const step of [pushAndReportStep, reviewAddressReportStep]) {
+      // LD_* is stripped by a command-prefix assignment BEFORE /usr/bin/env,
+      // the one channel env -i cannot block (ld.so preloads into the env
+      // binary itself at execve). Pin the assignment immediately precedes
+      // the launch (indent-agnostic across the two call sites).
+      expect(step).toMatch(
+        /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\\n\s*LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \\\n\s*\/usr\/bin\/env -i \\/,
+      );
+      expect(step).toContain('bash --norc -c');
+      // GH_CONFIG_DIR is minted INSIDE the clean child (its mktemp cannot be
+      // shadowed there); PATH is the trusted staged value and GH_HOST is
+      // pinned in the allow-list (a reroute cannot spoof the identity check).
+      // R6-7: every allow-list entry that mints the child's environment is
+      // pinned by name — a symmetric deletion from both children (invisible
+      // to the childCore equality below) must fail here.
+      // The entries must live INSIDE the `env -i` argument list (between the
+      // launch and `bash --norc -c`): a symmetric relocation out of the
+      // child's environment keeps a bare toContain — and childCore — green.
+      // Anchor on the launch LINE, not the first textual mention: a comment
+      // elsewhere in the step names `/usr/bin/env -i` too, and slicing from
+      // there swallowed the whole step (which quietly weakened these pins).
+      const argStart = step.indexOf('LD_PRELOAD= LD_AUDIT=');
+      expect(argStart).toBeGreaterThan(-1);
+      const argList = step.slice(argStart, step.indexOf('bash --norc -c'));
+      expect(argList.length).toBeGreaterThan(0);
+      // R9-10: contains-only pins accept a symmetric ADDITION that widens the
+      // child's environment. Enumerate what is actually passed and compare
+      // against the sanctioned set.
+      // Delimited tokens, not substrings: match `NAME=value` up to the line
+      // continuation, so a value swap or an extra entry is visible.
+      const assignments = (
+        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+      ).map((m) => m.trim());
+      const passed = assignments.map((m) => m.split('=')[0]);
+      // Sorted multiset, not a Set: a symmetric duplicate entry is exactly
+      // the mutation this check exists to catch, and a Set hides it.
+      expect([...passed].sort()).toEqual(
+        [
+          // the LD_* command-prefix assignments lead the launch line
+          'LD_PRELOAD',
+          'LD_AUDIT',
+          'LD_LIBRARY_PATH',
+          'LD_PROFILE',
+          'LD_PROFILE_OUTPUT',
+          'LD_DEBUG',
+          'LD_DEBUG_OUTPUT',
+          'PATH',
+          'GITHUB_TOKEN',
+          'GH_HOST',
+          'RUNNER_TEMP',
+          'WORKDIR',
+          'PR',
+          'REPO',
+          'AUTOFIX_BOT',
+          'UPSERT_SRC',
+        ].sort(),
+      );
+      // Every entry pinned by its exact token, including UPSERT_SRC — the
+      // script CONTENT, which is what makes the staged copy (and its digest
+      // gate, and its check-then-use window) unnecessary.
+      for (const entry of [
+        'LD_PRELOAD=',
+        'UPSERT_SRC="${UPSERT_SRC}"',
+        'PATH="${TRUSTED_PATH}"',
+        'GITHUB_TOKEN="${GITHUB_TOKEN}"',
+        'GH_HOST=github.com',
+        'RUNNER_TEMP="${RUNNER_TEMP}"',
+        'WORKDIR="${WORKDIR}"',
+        'PR="${PR}"',
+        'REPO="${REPO}"',
+        'AUTOFIX_BOT="${AUTOFIX_BOT}"',
+      ]) {
+        expect(assignments).toContain(entry.replace(/=$/, '='));
+      }
+      // NO AGENT-WRITABLE PATH takes part in the privileged work. The
+      // script content arrives in expression context, so there is nothing
+      // staged to verify: no digest gate, no check-then-use window, no
+      // planted-FIFO or huge-file read. Rounds 9-12 each closed one hole in
+      // the path-based shape; removing the path closes the class.
+      expect(step).toContain('bash -c "${UPSERT_SRC}"');
+      expect(step).not.toMatch(/RUNNER_TEMP\}\/upsert-deferred-issue\.sh/);
+      // …scoped to the upsert child: the step still runs the pre-existing
+      // resanitize digest gate, which is a different staged script.
+      const childBlock = step.slice(
+        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
+      );
+      expect(childBlock.length).toBeGreaterThan(0);
+      expect(childBlock).not.toMatch(/sha256sum/);
+      // The child's own messages travel on fd 3, which the parent captures,
+      // while fd 1/2 — where every loader side channel writes — are
+      // discarded. No log file to plant, race, or bound.
+      expect(step).toContain('exec >&3');
+      expect(step).toMatch(/' > \/dev\/null 2>&1 ; \} 3>&1 \)" \|\| true/);
+      expect(step).not.toMatch(/UPSERT_LOG/);
+      expect(step).not.toMatch(/autofix-upsert-log/);
+      // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS and
+      // LD_SHOW_AUXV are presence-tested — even an empty assignment leaves
+      // them on), so liveness is VERIFIED: the child prints a sentinel
+      // first, and its absence is reported.
+      expect(step).toContain('printf "%s\\n" "__upsert_child_live__"');
+      expect(step).toContain(
+        '::warning::deferred-findings upsert child never started',
+      );
+      // The inspection uses bash BUILTINS only: under trace mode an external
+      // grep would itself print-and-exit-0, neutering the very check meant to
+      // detect it (measured).
+      expect(step).toMatch(
+        /if \[\[ "\$\{UPSERT_OUT\}" != \*'__upsert_child_live__'\* \]\]; then/,
+      );
+      expect(step).not.toMatch(/UPSERT_OUT\}" \| grep/);
+      // R6-4: the child's own GH_CONFIG_DIR mktemp is guarded — an empty value
+      // would silently fall back to the shared ~/.config/gh.
+      expect(step).toContain(
+        'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
+      );
+      expect(step).toContain('::warning::could not create a gh config dir');
+      // R8-8: and the propagation half — without the export, gh never sees
+      // the throwaway dir and falls back to the shared ~/.config/gh.
+      expect(step).toMatch(/\n\s*export GH_CONFIG_DIR\n/);
+      // R8-5: the captured output is re-emitted, so the child's warnings
+      // actually reach the log (deleting both loops was invisible).
+      expect(step).toMatch(
+        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
+      );
+      // Ordering: the script executes INSIDE the clean child, after the
+      // launch — a relocation outside it must fail here.
+      const execIdx = step.indexOf('bash -c "${UPSERT_SRC}"');
+      const launchIdx = argStart;
+      expect(execIdx).toBeGreaterThan(launchIdx);
+    }
+    expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(2);
+    // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
+    // child — tie their shared security scaffold together so drift in one is
+    // caught. Compare the allow-list + prelude (everything up to where the
+    // failure path inserts its identity check), whitespace-normalized to
+    // absorb the one-level indent difference.
+    const childCore = (step) =>
+      step
+        .match(
+          /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?could not create a gh config dir[^\n]*\n\s*exit 0\n\s*fi\n\s*export GH_CONFIG_DIR/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(childCore(pushAndReportStep)).toBeTruthy();
+    expect(childCore(reviewAddressReportStep)).toBe(
+      childCore(pushAndReportStep),
+    );
+    // The failure-path clean-child launch sits INSIDE the DRY_RUN/STALE/token
+    // guard (deleting the guard or relocating the call breaks this slice).
+    expect(reviewAddressReportStep).toMatch(
+      /if \[\[ "\$\{DRY_RUN\}" != "true" && "\$\{STALE:-\}" != "true" && -n "\$\{GITHUB_TOKEN:-\}" \]\]; then(?:(?!\n {10}fi\n)[\s\S])*\/usr\/bin\/env -i(?:(?!\n {10}fi\n)[\s\S])*\n {10}fi\n/,
+    );
+    // Pre-stage failures leave UPSERT_SRC empty: that skips with a plain
+    // notice instead of imitating a tamper alarm.
+    expect(reviewAddressReportStep).toMatch(
+      /if \[\[ -z "\$\{UPSERT_SRC:-\}" \]\]; then[\s\S]*?deferred-findings upsert skipped: stage step never ran[\s\S]*?else[\s\S]*?\/usr\/bin\/env -i/,
+    );
+    // The failure path can run without POST_HANDOFF's identity check
+    // (OUTCOME=fixed/noop), so the clean child verifies the PAT identity.
+    expect(reviewAddressReportStep).toContain(
+      'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '[[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]',
+    );
+    // The identity check runs after the child launches but BEFORE the script
+    // — presence alone would survive a reordering that writes with an
+    // unverified identity.
+    const idIdx = reviewAddressReportStep.indexOf(
+      'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
+    );
+    expect(idIdx).toBeGreaterThan(
+      reviewAddressReportStep.indexOf('LD_PRELOAD= LD_AUDIT='),
+    );
+    expect(idIdx).toBeLessThan(
+      reviewAddressReportStep.indexOf('bash -c "${UPSERT_SRC}"'),
+    );
+    // R9-9: and the mismatch branch must ENFORCE — presence and ordering say
+    // nothing about whether a mismatch actually stops the write.
+    expect(reviewAddressReportStep).toMatch(
+      /\[\[ "\$\{UPSERT_ACTOR\}" != "\$\{AUTOFIX_BOT\}" \]\]; then\n[^\n]*identity check failed[^\n]*\n\s*exit 0\n/,
+    );
+    // The failure step carries TRUSTED_PATH in env so the clean child gets a
+    // trusted PATH; the in-shell BASH_FUNC/proxy sweep and the in-step PATH
+    // pin an earlier round added here were removed with the rest of the
+    // unsound denylist.
+    expect(reviewAddressReportStep).toContain(
+      "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+    );
+    const stageStep =
+      reviewAddressJob.match(
+        /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    // The script travels as CONTENT captured from the trusted checkout into
+    // expression context — no staged copy on an agent-writable path, hence
+    // no digest to record or verify.
+    // The consumers read `steps.stage.outputs.*`, so the producing step must
+    // actually be identified as `stage` — the one link whose break makes
+    // every UPSERT_SRC silently empty.
+    expect(stageStep).toMatch(/\n\s*id: 'stage'\n/);
+    expect(stageStep).toContain('echo "upsert_src<<${_upsert_delim}"');
+    expect(stageStep).toContain('cat .github/scripts/upsert-deferred-issue.sh');
+    expect(stageStep).toMatch(
+      /_upsert_delim="EOF_\$\(head -c 16 \/dev\/urandom/,
+    );
+    // …and the CLOSING delimiter: an unterminated heredoc would swallow the
+    // rest of GITHUB_OUTPUT into the value.
+    expect(stageStep).toMatch(
+      /echo "upsert_src<<\$\{_upsert_delim\}"\n(?:\s*#[^\n]*\n)*\s*cat [^\n]*\n\s*echo "\$\{_upsert_delim\}"/,
+    );
+    expect(workflow).not.toMatch(/upsert_sha256/);
+    expect(workflow).not.toMatch(
+      /cp \.github\/scripts\/upsert-deferred-issue\.sh/,
+    );
+    for (const step of [pushAndReportStep, reviewAddressReportStep]) {
+      expect(step).toContain(
+        "UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'",
+      );
+    }
+    expect(reviewAddressJob).toContain(
+      'comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff',
+    );
+    // R9-11: that dump prints agent-written files, so it neutralizes `::`
+    // like every other echo of them (a line-start `::error::` in the raw file
+    // would otherwise be a workflow command).
+    expect(reviewAddressJob).toMatch(
+      /=============== \$\{f\} ==============="\n(?:\s*#[^\n]*\n)*\s*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+    );
+    expect(reviewAddressJob).toContain(
+      '"${WORKDIR}/deferred-findings.json" \\',
+    );
+    // R7-3: the repair re-run must not delete run 1's deferrals — run 2
+    // writes its own file and the watermark means nothing re-derives them.
+    // They are carried in a sidecar the upsert unions in, and the sidecar
+    // rides the artifact dump.
+    const repairStep =
+      reviewAddressJob.match(
+        /- name: 'Repair deterministic rejection'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    expect(repairStep.length).toBeGreaterThan(0);
+    // Spelling-independent: the sibling cleanup list must not name the file
+    // in ANY form, and the file may be removed exactly once — inside the
+    // merge branch, after its content was folded into the carry sidecar.
+    const cleanupList =
+      repairStep.match(/rm -f \\\n(?:[^\n]*\\\n)*[^\n]*\n/)?.[0] ?? '';
+    expect(cleanupList).toContain('resolved-comments.txt');
+    expect(cleanupList).not.toContain('deferred-findings.json');
+    // Any rm spelling, single- or multi-line, -f or -rf: the file may be
+    // removed exactly once, and only after its content reached the sidecar.
+    const deletions =
+      repairStep.match(
+        /\brm\b(?:\s+-[a-z]+)*(?:[^\n]*\\\n)*[^\n]*deferred-findings\.json(?!\.)/g,
+      ) ?? [];
+    expect(deletions).toHaveLength(1);
+    // …and no OTHER multi-line rm list may name it either (cleanupList only
+    // inspects the first such list).
+    for (const list of repairStep.match(
+      /\brm\b(?:\s+-[a-z]+)* \\\n(?:[^\n]*\\\n)*[^\n]*\n/g,
+    ) ?? []) {
+      expect(list).not.toContain('deferred-findings.json');
+    }
+    expect(repairStep.indexOf('deferred-findings.carry.next')).toBeLessThan(
+      repairStep.search(/rm -f[^\n]*deferred-findings\.json/),
+    );
+    // R8-2: the merge internals themselves (a one-token retarget of the
+    // redirect silently truncated the carried set).
+    // Both inputs of the repair-side union, in order: carry first, then this
+    // round's (the sidecar is the accumulated history there). The old
+    // assertion was also satisfied by the else-branch `mv` line.
+    // This round FIRST, matching the script's own union precedence: unique_by
+    // keeps first-of-group, so a re-emitted finding wins with its fresher
+    // text. The old order let the carried copy win (R14-7).
+    expect(repairStep).toMatch(
+      /jq -s 'add' "\$\{WORKDIR\}\/deferred-findings\.json" \\\n\s*"\$\{WORKDIR\}\/deferred-findings\.carry\.json" \\\n\s*> "\$\{WORKDIR\}\/deferred-findings\.carry\.next" 2> \/dev\/null; then/,
+    );
+    // R9-20: the script-side union is the freshness guarantee — this round
+    // first, so unique_by (first-of-group, original order) keeps the fresh
+    // text when run 2 re-emits a carried id.
+    // Argument order is the freshness guarantee (unique_by keeps
+    // first-of-group in original order), and both inputs must BE arrays —
+    // `add` on two non-arrays yields whatever they add to.
+    expect(upsertDeferredScript).toMatch(
+      /if \(map\(type == "array"\) \| all\) then add else empty end'[\s\S]{0,40}"\$\{FINDINGS\}" "\$\{CARRY\}" > "\$\{MERGED\}"/,
+    );
+    expect(repairStep).toContain(
+      'mv "${WORKDIR}/deferred-findings.carry.next" \\\n                  "${WORKDIR}/deferred-findings.carry.json"',
+    );
+    expect(repairStep).toContain(
+      '::warning::could not merge carried deferrals across the repair',
+    );
+    // The merge-failure path QUARANTINES this round's set instead of deleting
+    // it, which is what makes the warning's artifact pointer true.
+    expect(repairStep).toContain(
+      'mv "${WORKDIR}/deferred-findings.json" \\\n                  "${WORKDIR}/deferred-findings.unmerged.json"',
+    );
+    // R8-3: that branch discards THIS run's set, so it dumps it first —
+    // `::` neutralized, like every other echo of agent-written content.
+    expect(repairStep).toMatch(
+      /could not merge carried deferrals[\s\S]*?head -c 4000 "\$\{WORKDIR\}\/deferred-findings\.json" \| sed 's\/::\/;;\/g'/,
+    );
+    expect(reviewAddressJob).toContain(
+      'mv "${WORKDIR}/deferred-findings.json" \\\n                "${WORKDIR}/deferred-findings.carry.json"',
+    );
+    expect(upsertDeferredScript).toContain(
+      'CARRY="${WORKDIR}/deferred-findings.carry.json"',
+    );
+    expect(reviewAddressJob).toContain(
+      'deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff',
+    );
+    // R7-1: all three feedback sources carry an id the agent can defer
+    // against — a review-body or issue-level finding was undeferrable (and
+    // therefore lost at merge) while only inline comments had one.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '"- [rv:\\(.id)] [\\(.state)]',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '"- [ic:\\(.id)] @\\(.user.login)',
+    );
+    const skill = readAutofixSkill();
+    expect(skill).toContain('Defer to follow-up');
+    expect(skill).toContain('deferred-findings.json');
+    expect(skill).toContain('you defer what is worth doing');
+    expect(skill).toContain('"source": "review"');
+    expect(skill).toContain('"source": "issue_comment"');
+    expect(skill).toContain('[rv:<id>]');
+    expect(skill).toContain('[ic:<id>]');
+
+    // End-to-end boundary: run the real script against a recording gh
+    // stub. Every case asserts the CALLS, not just the strings.
+    const runUpsert = ({
+      findings,
+      resolved = '',
+      list = '[]',
+      listFail = false,
+      body = '',
+      bodyFail = false,
+      comments = '[]',
+      commentsFail = false,
+      writeFail = false,
+      mktempFail = false,
+      jqFail = false,
+      bsdWc = false,
+      carry = '',
+      listPages = null,
+      listErr = '',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(dir, 'deferred-findings.json'), findings);
+      if (carry)
+        writeFileSync(join(dir, 'deferred-findings.carry.json'), carry);
+      const pagesDir = join(dir, 'pages');
+      if (listPages) {
+        mkdirSync(pagesDir);
+        listPages.forEach((body, i) =>
+          writeFileSync(join(pagesDir, `${i + 1}.json`), body),
+        );
+      }
+      if (resolved) writeFileSync(join(dir, 'resolved-comments.txt'), resolved);
+      if (jqFail) {
+        // Fail ONLY the line-builder jq (the sole call passing --rawfile), so
+        // the shape gate still passes and the failure lands where intended.
+        writeFileSync(
+          join(bin, 'jq'),
+          [
+            '#!/usr/bin/env bash',
+            'for a in "$@"; do [[ "$a" == "--rawfile" ]] && exit 3; done',
+            // Resolve the real jq through the ORIGINAL PATH (this stub shadows
+            // it): /usr/bin/jq does not exist on macOS, where jq lives in
+            // /opt/homebrew/bin or /usr/local/bin.
+            `exec env PATH="${process.env.PATH}" jq "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'jq'), 0o755);
+      }
+      if (bsdWc) {
+        // BSD/macOS `wc` pads its count with leading spaces; GNU does not, so
+        // the padding bug is invisible on Linux CI without this stub.
+        writeFileSync(
+          join(bin, 'wc'),
+          '#!/usr/bin/env bash\nprintf "%8s\\n" "$(/usr/bin/wc "$@" | tr -d \' \')"\n',
+        );
+        chmodSync(join(bin, 'wc'), 0o755);
+      }
+      if (mktempFail) {
+        // Shadow mktemp on PATH with a failing stub (simulates /tmp
+        // exhaustion): the script must warn+skip, not silently exit 0.
+        writeFileSync(join(bin, 'mktemp'), '#!/usr/bin/env bash\nexit 1\n');
+        chmodSync(join(bin, 'mktemp'), 0o755);
+      }
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GHLOG"',
+          'case "$2" in',
+          '  *"issues?state=all"*)',
+          '    if [[ "$LIST_FAIL" == 1 ]]; then printf "%s" "$LIST_ERR" >&2; exit 1; fi',
+          '    page="${2##*&page=}"',
+          '    if [[ -n "$LIST_PAGES_DIR" && -f "$LIST_PAGES_DIR/$page.json" ]]; then',
+          '      cat "$LIST_PAGES_DIR/$page.json"; exit 0',
+          '    fi',
+          '    printf "%s" "$LIST_JSON";;',
+          '  */comments?per_page=100*) [[ "$COMMENTS_FAIL" == 1 ]] && exit 1; printf "%s" "$COMMENTS_JSON";;',
+          '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
+          '  repos/*/issues) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo 77;;',
+          '  repos/*/issues/*) [[ "$BODY_FAIL" == 1 ]] && exit 1; printf "%s" "$BODY_TEXT";;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const res = spawnSync(
+        'bash',
+        ['.github/scripts/upsert-deferred-issue.sh'],
+        {
+          encoding: 'utf8',
+          // spawnSync blocks the event loop, so vitest's async timeout cannot
+          // fire — bound each subprocess directly against a hung runner.
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
+            PR: '5',
+            REPO: 'o/r',
+            AUTOFIX_BOT: 'bot',
+            GHLOG: join(dir, 'gh.log'),
+            LIST_JSON: list,
+            LIST_FAIL: listFail ? '1' : '0',
+            LIST_ERR: listErr,
+            LIST_PAGES_DIR: listPages ? pagesDir : '',
+            BODY_TEXT: body,
+            BODY_FAIL: bodyFail ? '1' : '0',
+            COMMENTS_JSON: comments,
+            COMMENTS_FAIL: commentsFail ? '1' : '0',
+            WRITE_FAIL: writeFail ? '1' : '0',
+          },
+        },
+      );
+      const calls = existsSync(join(dir, 'gh.log'))
+        ? readFileSync(join(dir, 'gh.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status: res.status, calls };
+    };
+    const marker = '<!-- autofix-deferred pr=5 -->';
+    // Create path: no existing issue → POST /issues with marker + item.
+    const created = runUpsert({
+      findings: '[{"id":7,"path":"src/a.ts","reason":"real, out of scope"}]',
+    });
+    expect(created.status).toBe(0);
+    expect(created.calls).toContain('api repos/o/r/issues -f title=');
+    expect(created.calls).toContain(marker);
+    expect(created.calls).toContain('- rc:7 `src/a.ts`: real, out of scope');
+    expect(created.out).toContain('tracked in new issue #77');
+    // Append path: existing issue found → dedupe against body+comments,
+    // then POST an issue COMMENT (append-only; no body PATCH anywhere).
+    const appended = runUpsert({
+      findings:
+        '[{"id":7,"reason":"new"},{"id":8,"reason":"dup"},{"id":9,"reason":"in-comment"}]',
+      list: JSON.stringify([
+        { number: 42, body: `x\n${marker}`, pull_request: null },
+      ]),
+      body: 'intro\n- rc:8 `x`: dup',
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rc:9 `y`: in-comment' },
+      ]),
+    });
+    expect(appended.calls).toContain(
+      'api repos/o/r/issues/42/comments -f body=',
+    );
+    expect(appended.calls).toContain('- rc:7');
+    expect(appended.calls).not.toContain('- rc:8 ');
+    expect(appended.calls).not.toContain('- rc:9 ');
+    expect(appended.calls).not.toContain('PATCH');
+    expect(appended.out).toContain('appended to issue #42');
+    // Free-text mentions do not suppress (line-anchored dedupe), and a PULL
+    // REQUEST carrying the marker is never selected as the tracking issue.
+    const anchored = runUpsert({
+      findings: '[{"id":3,"reason":"r"}]',
+      list: JSON.stringify([
+        { number: 9, body: `pr body ${marker}`, pull_request: { url: 'x' } },
+        {
+          number: 42,
+          body: `x\n${marker}\nprose mentioning rc:3 casually`,
+          pull_request: null,
+        },
+      ]),
+      body: 'prose mentioning rc:3 casually',
+      comments: '[]',
+    });
+    expect(anchored.calls).toContain('api repos/o/r/issues/42/comments');
+    expect(anchored.calls).toContain('- rc:3');
+    // Negative half: PR #9 carries the same marker and must never be adopted
+    // as the tracking issue (positive-only assertions passed an
+    // adopt-and-append-to-everything mutation).
+    expect(anchored.calls).not.toContain('issues/9/comments');
+    // A failed body read SKIPS the round — never treated as empty history.
+    const readFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      bodyFail: true,
+    });
+    expect(readFail.out).toContain('could not read deferred-findings issue');
+    expect(readFail.out).toContain('are LOST');
+    expect(readFail.calls).not.toContain('/comments -f body=');
+    // An id resolved in code this round is never deferred (contradiction).
+    const resolvedOut = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      resolved: 'rc:7\r\n',
+    });
+    expect(resolvedOut.calls).not.toContain('-f title=');
+    // Malformed path type fails the shape gate loudly, dropping nothing
+    // silently.
+    const badShape = runUpsert({
+      findings: '[{"id":7,"reason":"r","path":5}]',
+    });
+    expect(badShape.out).toContain('are malformed');
+    expect(badShape.calls).toBe('');
+    // A failed write never claims success, and says the findings are LOST —
+    // the watermark filters this round's feedback out of every later round, so
+    // "NOT persisted this round" would wrongly imply a retry. The lost bullets
+    // are named for a maintainer.
+    const writeFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      writeFail: true,
+    });
+    expect(writeFail.out).toContain('are LOST');
+    expect(writeFail.out).toContain('watermark-gated');
+    expect(writeFail.out).toContain('- rc:7 ');
+    expect(writeFail.out).not.toContain('NOT persisted this round');
+    // Path bytes are sanitized before rendering (no forged bullet lines).
+    const forged = runUpsert({
+      findings: '[{"id":4,"path":"a`\\n- rc:999 `z","reason":"r"}]',
+    });
+    expect(forged.calls).toContain('- rc:4');
+    expect(forged.calls).not.toContain('- rc:999');
+    // The lookup queries state=all: a maintainer-closed tracking issue is
+    // still found and appended to (commenting on a closed issue works), so
+    // closure cannot fork a duplicate issue.
+    expect(created.calls).toContain('issues?state=all');
+    // Multiline reason bytes are flattened before rendering (a raw newline
+    // in agent-influenced content would forge extra bullet lines).
+    const flat = runUpsert({
+      findings: '[{"id":6,"reason":"line1\\nline2"}]',
+    });
+    expect(flat.calls).toContain('- rc:6 `?`: line1 line2');
+    // Non-integer / non-positive ids fail the shape gate: a float id's dot
+    // would be a regex wildcard in the anchored dedupe and never
+    // index()-match resolved-comments ids.
+    for (const bad of [
+      '[{"id":7.5,"reason":"r"}]',
+      '[{"id":-3,"reason":"r"}]',
+    ]) {
+      const r = runUpsert({ findings: bad });
+      expect(r.out).toContain('are malformed');
+      expect(r.calls).toBe('');
+    }
+    // The 20-item cap clips LOUDLY and success is qualified — clipped items
+    // are never retried, so a silent clip would read as full persistence.
+    const capped = runUpsert({
+      findings: JSON.stringify(
+        Array.from({ length: 25 }, (_, i) => ({ id: i + 1, reason: 'r' })),
+      ),
+    });
+    expect(capped.out).toContain('persisting 20 of 25');
+    expect(capped.out).toContain('(20 of 25 new)');
+    expect(capped.calls).toContain('- rc:20 ');
+    expect(capped.calls).not.toContain('- rc:21 ');
+    // A failed tracking-issue LOOKUP skips the round (creating a duplicate
+    // is worse than deferring persistence) — no write call of either kind.
+    const listFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listFail: true,
+    });
+    expect(listFailed.out).toContain('the tracking-issue lookup failed');
+    expect(listFailed.out).toContain('are LOST');
+    expect(listFailed.calls).not.toContain('-f title=');
+    expect(listFailed.calls).not.toContain('/comments -f body=');
+    // A failed COMMENTS fetch skips too: the dedupe corpus would be
+    // incomplete and history would be re-appended.
+    const commentsFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      commentsFail: true,
+    });
+    expect(commentsFailed.out).toContain(
+      'could not read the deferred-findings comments',
+    );
+    expect(commentsFailed.out).toContain('are LOST');
+    expect(commentsFailed.calls).not.toContain('/comments -f body=');
+    // A failed APPEND write (existing issue) logs NOT persisted — the sole
+    // create-path writeFail case above never reaches this branch.
+    const appendFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      writeFail: true,
+    });
+    expect(appendFail.out).toContain('could not append');
+    expect(appendFail.out).toContain('are LOST');
+    expect(appendFail.out).toContain('- rc:7 ');
+    // The dedupe corpus is BOT-authored comments only: a third party posting
+    // a line-start bullet on the public tracking issue cannot permanently
+    // suppress a deferred finding.
+    const foreign = runUpsert({
+      findings: '[{"id":9,"reason":"real"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'mallory' }, body: '- rc:9 `y`: squatted' },
+      ]),
+    });
+    expect(foreign.calls).toContain('issues/42/comments -f body=');
+    expect(foreign.calls).toContain('- rc:9 ');
+    // Intra-batch dedupe: duplicate ids collapse to one bullet.
+    const dup = runUpsert({
+      findings: '[{"id":7,"reason":"a"},{"id":7,"reason":"b"}]',
+    });
+    expect(dup.calls.split('- rc:7 ').length - 1).toBe(1);
+    expect(dup.out).toContain('(1 of 1 new)');
+    // Identity anchors: only a MARKER-carrying issue is adopted (an
+    // unrelated bot issue falls through to the create path), and the source
+    // pins the creator= authorship filter the stub cannot observe.
+    const markerless = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        { number: 41, body: 'no marker here', pull_request: null },
+      ]),
+    });
+    expect(markerless.calls).toContain('-f title=');
+    expect(markerless.calls).not.toContain('issues/41/comments');
+    expect(upsertDeferredScript).toContain('creator=${AUTOFIX_BOT}');
+    // The page loop's correctness rests on these: newest-first ordering makes
+    // "first match wins" find THIS PR's issue, and per_page=100 is what the
+    // short-page-means-exhausted test compares against. The recording stub
+    // serves pages by index and cannot see query parameters.
+    expect(upsertDeferredScript).toContain(
+      'per_page=100&sort=created&direction=desc&page=${lookup_page}',
+    );
+    expect(upsertDeferredScript).toContain('contains($m)');
+    // Marker neutralization is behavioural, not just a source pin: a comment
+    // opener in agent-influenced content reaches the write call defused.
+    // (Append path: the create path's own body legitimately carries the raw
+    // tracking marker.)
+    const neutralized = runUpsert({
+      findings: '[{"id":11,"reason":"see <!-- autofix-eval ts=x --> marker"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+    });
+    expect(neutralized.calls).toContain('<!\\-\\-');
+    expect(neutralized.calls).not.toContain('<!--');
+    // The common case — nothing deferred this round — is a clean exit 0 with
+    // no gh call and no warning (empty file: the -s guard). Deleting that
+    // guard would send an empty file into the shape gate and warn falsely.
+    const empty = runUpsert({ findings: '' });
+    expect(empty.calls).toBe('');
+    expect(empty.out).not.toContain('malformed');
+    expect(empty.out).not.toContain('::warning');
+    // A contract-valid empty array is a no-op too, NOT a corruption alarm:
+    // `[]` passes the -s check (3 bytes) yet must not warn "malformed".
+    const emptyArray = runUpsert({ findings: '[]' });
+    expect(emptyArray.calls).toBe('');
+    expect(emptyArray.out).not.toContain('malformed');
+    // noclobber cannot silently empty the dedupe corpus: the script clears
+    // it (`set +C`), and the workflow additionally runs it in an env -i
+    // child that drops the read-only SHELLOPTS entirely.
+    expect(upsertDeferredScript).toContain('set +C');
+    // R5-3: an integer-valued float that jq renders in scientific notation
+    // past 2^53 (1e21 -> "1E+21") carries a regex-active byte into the
+    // anchored dedupe. The shape gate's plain-digits belt rejects it loudly.
+    const sci = runUpsert({ findings: '[{"id":1e21,"reason":"r"}]' });
+    expect(sci.out).toContain('are malformed');
+    expect(sci.calls).toBe('');
+    // R5-4: an unguarded mktemp failure would turn the whole upsert into a
+    // silent exit 0 — the one failure path that skips the header contract.
+    // Now it warns and makes no gh call.
+    const mktempFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      mktempFail: true,
+    });
+    expect(mktempFailed.out).toContain('could not create a temp file');
+    expect(mktempFailed.out).toContain('are LOST');
+    expect(mktempFailed.calls).not.toContain('-f title=');
+    // R5-10: the anchored dedupe's trailing-space boundary. A corpus bullet
+    // `- rc:70 …` must NOT suppress this round's id 7 (space-less prefix
+    // match would); removing the `+ " "` in the script would flip this.
+    const prefixCollide = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rc:70 `x`: unrelated' },
+      ]),
+    });
+    expect(prefixCollide.calls).toContain('- rc:7 ');
+    // R5-2: the cap warning names the dropped bullets (they are NOT
+    // re-evaluated — watermark-gated) instead of promising a later re-defer.
+    const capped2 = runUpsert({
+      findings: JSON.stringify(
+        Array.from({ length: 22 }, (_, i) => ({ id: i + 1, reason: 'r' })),
+      ),
+    });
+    expect(capped2.out).toContain('will NOT be re-evaluated');
+    expect(capped2.out).not.toContain('re-defer them in a later round');
+    expect(capped2.out).toContain('- rc:21 ');
+    expect(capped2.out).toContain('- rc:22 ');
+    // R6-9: the reason is agent-influenced prose published under the bot
+    // identity, so mentions are defused before rendering. Bare `@` gets a
+    // ZWSP; the entity spellings GitHub decodes BEFORE its mention filter
+    // (&#64; &#x40; &#0064; &commat;) get their `&` escaped. Both measured
+    // inert against the real renderer — `\@` and leaving `&` alone are NOT.
+    const mentions = runUpsert({
+      findings:
+        '[{"id":12,"reason":"ping @wenshao &#64;bot &#x40;x &commat;y &#0064;z"}]',
+    });
+    expect(mentions.calls).toContain('@\u200bwenshao');
+    expect(mentions.calls).not.toMatch(/@wenshao/);
+    for (const ent of ['&#64;', '&#x40;', '&commat;', '&#0064;']) {
+      expect(mentions.calls).toContain(`&amp;${ent.slice(1)}`);
+    }
+    // R6-2: the shape gate's reason-type clause and the `. > 0` id bound.
+    // id 0 is the discriminator for the latter — "0" passes the plain-digits
+    // belt, so only `. > 0` rejects it.
+    for (const bad of ['[{"id":7,"reason":5}]', '[{"id":0,"reason":"r"}]']) {
+      const r = runUpsert({ findings: bad });
+      expect(r.out).toContain('are malformed');
+      expect(r.calls).toBe('');
+    }
+    // R6-6: a line-builder failure warns instead of exiting silently as
+    // "nothing new" (the last path that skipped the header contract).
+    const builderFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      jqFail: true,
+    });
+    expect(builderFail.out).toContain(
+      'could not build the deferred-findings lines',
+    );
+    expect(builderFail.calls).not.toContain('-f title=');
+    // R7-2: an abort is PERMANENT for these findings (watermark + the next
+    // run's workspace reset), so every abort path says LOST and dumps the raw
+    // deferrals for manual recovery — with `::` neutralized, since the dump is
+    // agent-influenced and a raw `::` at line start is a workflow command.
+    const lostDump = runUpsert({
+      findings:
+        '[{"id":7,"reason":"r","path":5},{"id":8,"reason":"::error::forged"}]',
+    });
+    expect(lostDump.out).toContain('are LOST');
+    expect(lostDump.out).toContain('watermark-gated');
+    expect(lostDump.out).toContain('"id":8');
+    expect(lostDump.out).toContain(';;error;;forged');
+    expect(lostDump.out).not.toContain('::error::forged');
+    expect(lostDump.calls).toBe('');
+    // R7-1: a review-body / issue-level finding is deferrable, anchored under
+    // its own prefix so id spaces cannot collide across sources.
+    const sources = runUpsert({
+      findings:
+        '[{"id":21,"source":"review","reason":"from a review body"},' +
+        '{"id":21,"source":"issue_comment","reason":"from an issue comment"},' +
+        '{"id":21,"reason":"from an inline comment"}]',
+    });
+    expect(sources.calls).toContain('- rv:21 ');
+    expect(sources.calls).toContain('- ic:21 ');
+    expect(sources.calls).toContain('- rc:21 ');
+    expect(sources.out).toContain('(3 of 3 new)');
+    // Dedupe is per source: an existing `- rv:21` bullet suppresses only the
+    // review-body item, and resolved-comment ids (inline only) never suppress
+    // a same-numbered finding from another source.
+    const perSource = runUpsert({
+      findings:
+        '[{"id":21,"source":"review","reason":"dup"},' +
+        '{"id":21,"source":"issue_comment","reason":"fresh"}]',
+      resolved: 'rc:21\n',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rv:21 `?`: dup' },
+      ]),
+    });
+    // Suppression for the multi-finding sources is per RENDERED LINE, not per
+    // id: the corpus carries this exact bullet, so the review item is already
+    // tracked while the issue-comment sibling is new. (Keying those on the id
+    // alone silently ate every sibling but the first — R9-2.)
+    expect(perSource.calls).not.toContain('`?`: dup');
+    expect(perSource.calls).toContain('- ic:21 ');
+    // A DIFFERENT finding under the same review id is still appended.
+    const siblingFinding = runUpsert({
+      findings:
+        '[{"id":21,"source":"review","reason":"a second, distinct finding"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rv:21 `?`: dup' },
+      ]),
+    });
+    expect(siblingFinding.calls).toContain('a second, distinct finding');
+    // R9-2: a review body / issue comment carries ONE id but can raise
+    // several findings. Keying the intra-batch dedupe on the id collapsed
+    // them and reported success ("2 of 2 new") while losing one for good.
+    const multiPerId = runUpsert({
+      findings:
+        '[{"id":77,"source":"review","reason":"first"},' +
+        '{"id":77,"source":"review","reason":"second"},' +
+        '{"id":78,"source":"review","reason":"third"}]',
+    });
+    expect(multiPerId.calls.split('- rv:77 ').length - 1).toBe(2);
+    expect(multiPerId.calls).toContain('first');
+    expect(multiPerId.calls).toContain('second');
+    expect(multiPerId.out).toContain('(3 of 3 new)');
+    // Byte-identical records still collapse — the dedupe is per finding, not
+    // per record.
+    const identicalTwice = runUpsert({
+      findings:
+        '[{"id":77,"source":"review","reason":"same"},{"id":77,"source":"review","reason":"same"}]',
+    });
+    expect(identicalTwice.calls.split('- rv:77 ').length - 1).toBe(1);
+    // R9-19: the SKILL documents review_comment as the default when omitted,
+    // so the explicit spelling must be accepted too (and is pinned in SKILL).
+    const explicitDefault = runUpsert({
+      findings: '[{"id":41,"source":"review_comment","reason":"explicit"}]',
+    });
+    expect(explicitDefault.calls).toContain('- rc:41 ');
+    expect(skill).toContain('review_comment');
+    // R9-14: which findings survive the 20-item cap is decided by the sort
+    // order of the dedupe, not the agent's write order. Feed DESCENDING ids
+    // across two sources so the two orders disagree, and pin the survivors.
+    const capOrder = runUpsert({
+      findings: JSON.stringify(
+        Array.from({ length: 12 }, (_, i) => ({
+          id: 100 - i,
+          source: 'review',
+          reason: `r${100 - i}`,
+        })).concat(
+          Array.from({ length: 12 }, (_, i) => ({
+            id: 200 - i,
+            reason: `c${200 - i}`,
+          })),
+        ),
+      ),
+    });
+    expect(capOrder.out).toContain('persisting 20 of 24');
+    // MEASURED, not assumed: unique_by sorts by [source, id] ("review" <
+    // "review_comment"), so the survivors are all 12 rv plus rc:189-196 —
+    // the four rc records written FIRST (197-200) are the ones dropped, and
+    // rc:189, written LAST, survives. Input order and survivor order really
+    // do disagree.
+    expect(capOrder.calls).toContain('- rc:189 ');
+    expect(capOrder.calls).not.toContain('- rc:200 ');
+    expect(capOrder.out).toContain('- rc:200 ');
+    expect(capOrder.calls).toContain('- rv:89 ');
+    expect(capOrder.calls).toContain('- rv:100 ');
+    // R9-15 / R9-18: a carried sidecar that PARSES but fails the shape gate
+    // must not take this round's valid deferrals with it — the unparseable
+    // branch already persists this round only, and this is the same
+    // situation one step later.
+    const poisonedCarry = runUpsert({
+      findings: '[{"id":7,"reason":"this round is fine"}]',
+      carry: '[{"id":-1,"reason":"carried but invalid"}]',
+    });
+    expect(poisonedCarry.out).toContain('the carried deferrals are malformed');
+    expect(poisonedCarry.out).toContain('carried but invalid');
+    expect(poisonedCarry.calls).toContain('- rc:7 ');
+    // An UNPARSEABLE carry takes the same route through the merge branch.
+    const unparseableCarry = runUpsert({
+      findings: '[{"id":7,"reason":"this round is fine"}]',
+      carry: 'not json at all',
+    });
+    // An unparseable carry is now caught by the single-document gate, which
+    // names it precisely — and still costs only the carry: this round's
+    // valid findings are published (the asymmetry R9-18 settled on).
+    expect(unparseableCarry.out).toContain(
+      'the carried deferrals are not a single JSON document',
+    );
+    expect(unparseableCarry.out).toContain('The carried set is LOST');
+    expect(unparseableCarry.calls).toContain('- rc:7 ');
+    // But a bad set of OUR OWN is still a loud, total abort.
+    const poisonedOwn = runUpsert({
+      findings: '[{"id":-1,"reason":"bad"}]',
+      carry: '[{"id":8,"reason":"carried ok"}]',
+    });
+    expect(poisonedOwn.out).toContain('are LOST');
+    expect(poisonedOwn.calls).toBe('');
+    // R9-20 behaviourally: a duplicate id in both files keeps THIS round's
+    // text (the union puts it first and unique_by keeps first-of-group).
+    const freshWins = runUpsert({
+      findings: '[{"id":9,"reason":"fresh"}]',
+      carry: '[{"id":9,"reason":"stale"}]',
+    });
+    expect(freshWins.calls).toContain('fresh');
+    expect(freshWins.calls).not.toContain('stale');
+    // R14-13: the intra-batch identity comes from the UNCAPPED text —
+    // deriving it from the rendered line let two siblings that differ only
+    // past the 500-char reason cap collide, and one vanished silently.
+    const past = 'x'.repeat(520);
+    const beyondCap = runUpsert({
+      findings: JSON.stringify([
+        { id: 21, source: 'review', reason: past + 'AAA' },
+        { id: 21, source: 'review', reason: past + 'BBB' },
+      ]),
+    });
+    expect(beyondCap.out).toContain('(2 of 2 new)');
+    // R14-14: a resolved id survives stray surrounding whitespace.
+    const paddedResolved = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      resolved: '  rc:7  \n',
+    });
+    // (the lookup still runs; what must not happen is a write)
+    expect(paddedResolved.calls).not.toContain('-f title=');
+    expect(paddedResolved.calls).not.toContain('/comments -f body=');
+    // R14-1: EVERY wrapper-authored warning carries the trusted marker, so
+    // none of them is demoted to plain text by the `::` neutralization.
+    for (const step of [pushAndReportStep, reviewAddressReportStep]) {
+      // …scoped to the clean child: warnings elsewhere in the step reach the
+      // log directly and never pass through the neutralizing replay.
+      const child = step.slice(
+        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
+      );
+      const wrapperWarnings =
+        child.match(/echo "(?:__upsert_trusted__)?::warning::[^"]*"/g) ?? [];
+      expect(wrapperWarnings.length).toBeGreaterThan(0);
+      for (const w of wrapperWarnings) {
+        expect(w).toContain('__upsert_trusted__');
+      }
+    }
+    // BSD/macOS `wc -l` pads with leading spaces, and the count is
+    // interpolated into the cap warning and the success line — so the script
+    // strips it. Driven with a padding `wc` stub, since GNU wc never pads and
+    // the regression is invisible on Linux otherwise.
+    const padded = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      bsdWc: true,
+    });
+    expect(padded.out).toContain('(1 of 1 new)');
+    expect(padded.out).not.toMatch(/\(\s+1 of/);
+    expect(padded.out).not.toMatch(/of\s{2,}1 new/);
+    // R10-4: the 200-char path cap and 500-char reason cap are behaviour, so
+    // they get behavioural coverage rather than a static pin.
+    const cappedFields = runUpsert({
+      findings: JSON.stringify([
+        {
+          id: 51,
+          path: 'src/' + 'a'.repeat(300) + '.ts',
+          reason: 'b'.repeat(700),
+        },
+      ]),
+    });
+    const bullet =
+      cappedFields.calls.split('\n').find((l) => l.includes('- rc:51 ')) ?? '';
+    expect(bullet).toContain('a'.repeat(190));
+    expect(bullet).not.toContain('a'.repeat(210));
+    expect(bullet).toContain('b'.repeat(490));
+    expect(bullet).not.toContain('b'.repeat(510));
+    // The rv/ic identity must be LOSSLESS on content: an earlier version
+    // stripped every non-[a-z0-9] byte and capped at 160 chars, which merged
+    // CJK siblings (this repo is bilingual) and, on a long path, cut the
+    // reason out of the identity altogether — silent loss, the one outcome
+    // this feature exists to prevent.
+    const cjkSiblings = runUpsert({
+      findings:
+        '[{"id":21,"source":"review","reason":"修复内存泄漏问题"},' +
+        '{"id":21,"source":"review","reason":"修复资源泄漏"}]',
+    });
+    // A multi-document file: `jq -e` without -s judges only the LAST
+    // document, so `[valid]\n[]` used to exit 0 silently (findings lost, no
+    // warning) and `[bad]\n[valid]` used to pass the shape gate. Both are
+    // now rejected loudly, before any write.
+    for (const bad of [
+      '[{"id":7,"reason":"r"}]\n[]',
+      '[{"id":"x","reason":"r"}]\n[{"id":8,"reason":"r"}]',
+    ]) {
+      const multi = runUpsert({ findings: bad });
+      expect(multi.out).toContain('not a single JSON document');
+      expect(multi.calls).toBe('');
+    }
+    // The stage step must tolerate the script being absent from the trusted
+    // base (it only exists there after this PR merges) — the consumers' own
+    // empty-content guard then skips the round instead of killing the step.
+    expect(workflow).toContain(
+      'cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true',
+    );
+    // RC-1: the resolved-id corpus grows with the round's resolutions, and
+    // one argv element caps at MAX_ARG_STRLEN — the same failure `known`
+    // already avoided. Both corpora go in via --rawfile now.
+    expect(
+      upsertDeferredScript.match(/--rawfile \w+ "\$\{[A-Z_]+\}"/g) ?? [],
+    ).toHaveLength(2);
+    expect(upsertDeferredScript).not.toMatch(/--arg resolved/);
+    const bigResolved = runUpsert({
+      findings: '[{"id":999999,"reason":"not resolved"}]',
+      resolved: Array.from({ length: 40000 }, (_, i) => `rc:${i + 1}`).join(
+        '\n',
+      ),
+    });
+    expect(bigResolved.calls).toContain('- rc:999999 ');
+    expect(cjkSiblings.out).toContain('(2 of 2 new)');
+    expect(cjkSiblings.calls).toContain('修复内存泄漏问题');
+    expect(cjkSiblings.calls).toContain('修复资源泄漏');
+    const longPath = 'src/' + 'a'.repeat(200) + '.ts';
+    const longPathSiblings = runUpsert({
+      findings: JSON.stringify([
+        {
+          id: 22,
+          source: 'review',
+          path: longPath,
+          reason: 'first distinct finding',
+        },
+        {
+          id: 22,
+          source: 'review',
+          path: longPath,
+          reason: 'second distinct finding',
+        },
+      ]),
+    });
+    expect(longPathSiblings.out).toContain('(2 of 2 new)');
+    expect(longPathSiblings.calls).toContain('first distinct finding');
+    expect(longPathSiblings.calls).toContain('second distinct finding');
+    // R10-18: the marker lives in the maintainer-editable BODY, so the title
+    // is a second identity anchor — an issue whose body lost the marker is
+    // still adopted instead of forking a duplicate.
+    const markerStripped = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        {
+          number: 42,
+          title: 'Deferred review findings from PR #5',
+          body: 'a maintainer edited this body and dropped the marker',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(markerStripped.calls).toContain('issues/42/comments -f body=');
+    expect(markerStripped.calls).not.toContain('-f title=');
+    // …but a same-titled PULL REQUEST is still never adopted.
+    const titledPr = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        {
+          number: 9,
+          title: 'Deferred review findings from PR #5',
+          body: 'x',
+          pull_request: { url: 'u' },
+        },
+      ]),
+    });
+    expect(titledPr.calls).toContain('-f title=');
+    expect(titledPr.calls).not.toContain('issues/9/comments');
+    // An unknown source value fails the gate loudly rather than silently
+    // rendering under the default prefix.
+    const badSource = runUpsert({
+      findings: '[{"id":7,"reason":"r","source":"nope"}]',
+    });
+    expect(badSource.out).toContain('are LOST');
+    expect(badSource.calls).toBe('');
+    // R7-4: a present-but-non-string path fails the gate — `//` treats false
+    // as absent, so `false` used to be coerced to "?" against the gate's own
+    // fail-loudly contract.
+    const pathFalse = runUpsert({
+      findings: '[{"id":7,"reason":"r","path":false}]',
+    });
+    expect(pathFalse.out).toContain('are LOST');
+    expect(pathFalse.calls).toBe('');
+    // R7-3: deferrals carried across a repair re-run are persisted — both
+    // when run 2 defers nothing (carry only) and merged with run 2's own.
+    const carryOnly = runUpsert({
+      findings: '',
+      carry: '[{"id":31,"reason":"carried"}]',
+    });
+    expect(carryOnly.calls).toContain('- rc:31 ');
+    const carryMerged = runUpsert({
+      findings: '[{"id":32,"reason":"this round"}]',
+      carry: '[{"id":31,"reason":"carried"},{"id":32,"reason":"dup"}]',
+    });
+    expect(carryMerged.calls).toContain('- rc:31 ');
+    expect(carryMerged.calls).toContain('- rc:32 ');
+    expect(carryMerged.calls.split('- rc:32 ').length - 1).toBe(1);
+    // R2-6: the lookup is bounded and newest-first, stopping at the first
+    // marker match — the common case costs ONE request instead of paginating
+    // every issue the bot has ever opened.
+    const lookupReqs = (r) =>
+      r.calls.split('\n').filter((l) => l.includes('issues?state=all')).length;
+    const fullPage = JSON.stringify(
+      Array.from({ length: 100 }, (_, i) => ({
+        number: 1000 + i,
+        body: 'filler',
+        pull_request: null,
+      })),
+    );
+    const hitPage = JSON.stringify([
+      { number: 42, body: marker, pull_request: null },
+    ]);
+    const firstPageHit = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: [hitPage],
+    });
+    expect(lookupReqs(firstPageHit)).toBe(1);
+    expect(firstPageHit.calls).toContain('issues/42/comments -f body=');
+    // A short page means the corpus is exhausted: create, still one request.
+    const emptyCorpus = runUpsert({ findings: '[{"id":7,"reason":"r"}]' });
+    expect(lookupReqs(emptyCorpus)).toBe(1);
+    expect(emptyCorpus.calls).toContain('-f title=');
+    // A full page without a match walks to the next one and stops there.
+    const secondPageHit = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: [fullPage, hitPage],
+    });
+    expect(lookupReqs(secondPageHit)).toBe(2);
+    expect(secondPageHit.calls).toContain('issues/42/comments -f body=');
+    // Cap reached with the corpus never exhausted: SKIP rather than create a
+    // second tracking issue for the same PR.
+    const cappedLookup = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: Array.from({ length: 12 }, () => fullPage),
+    });
+    expect(lookupReqs(cappedLookup)).toBe(10);
+    expect(cappedLookup.out).toContain('10-page cap');
+    expect(cappedLookup.calls).not.toContain('-f title=');
+    // R2-10: warnings NAME the cause — a rate limit, a bad credential and a
+    // transport error were indistinguishable while stderr went to /dev/null.
+    const rateLimited = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listFail: true,
+      listErr: 'HTTP 403: API rate limit exceeded for user ID 1',
+    });
+    expect(rateLimited.out).toContain('API rate limit exceeded');
+    const badCreds = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: [hitPage],
+      writeFail: true,
+    });
+    expect(badCreds.out).toContain('could not append');
+    // The captured stderr is `::`-neutralized like every other echoed
+    // API/agent content — an error body is not trusted to be command-free.
+    const forgedErr = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listFail: true,
+      listErr: '::error::forged from an API body',
+    });
+    expect(forgedErr.out).toContain(';;error;;forged');
+    expect(forgedErr.out).not.toContain('::error::forged');
+  });
+
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
     const block = reviewVerificationRunner.match(
       /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
@@ -12250,7 +13483,7 @@ exit 1
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL EIGHT agent-derived publish sites
+    // Token-breaking neutralization at ALL NINE workflow publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
     // gate-rejection body, the comment-reply body whose content is agent
     // stdout that can echo external comment text, the two
@@ -12266,6 +13499,22 @@ exit 1
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
     expect(escapeSites).toHaveLength(9);
+    // The tenth agent-derived publish site lives in
+    // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
+    // sed afterwards: the rv/ic dedupe identity is the rendered line, so
+    // escaping after the corpus comparison meant a reason containing `<!--`
+    // never matched its stored form and republished every round (R10-5).
+    const scriptEscapeSites =
+      upsertDeferredScript.match(/gsub\("<!--"; "[^"]*"\)/g) ?? [];
+    expect(scriptEscapeSites).toHaveLength(1);
+    for (const site of scriptEscapeSites) {
+      expect(site).toBe('gsub("<!--"; "<!\\\\-\\\\-")');
+    }
+    expect(upsertDeferredScript).not.toMatch(/sed 's\/<!--/);
+    // …and it precedes the dedupe comparison, not follows it.
+    expect(upsertDeferredScript.indexOf('gsub("<!--"')).toBeLessThan(
+      upsertDeferredScript.indexOf('index($r.key)'),
+    );
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }

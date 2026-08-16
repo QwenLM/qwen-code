@@ -66,6 +66,7 @@ import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
+  LEDGER_ID_READBACK,
   serializeLedger,
   type Ledger,
   type LedgerFinding,
@@ -73,6 +74,7 @@ import {
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
+  carriedClaimLine,
   countInlineFindings,
   severityOf,
   unmarkedComments,
@@ -355,8 +357,13 @@ export interface ComposeReviewInput {
    * toward `C` exactly like anchored Criticals.
    */
   bodyCriticals?: string[];
-  /** Suggestions discarded as unanchorable (offline validation or 422). */
-  suggestionsDiscarded?: number;
+  /**
+   * Suggestions discarded as unanchorable (offline validation or 422). A
+   * count, as the Step 7 prose prescribes; the list form that older skill
+   * revisions wrote — `[]`, or one entry per discarded item — is accepted
+   * and counted by its length.
+   */
+  suggestionsDiscarded?: number | readonly unknown[];
   /**
    * Suggestions this review confirmed but did not re-post because they are
    * already reported on the PR (a prior round, or a concurrent reviewer) —
@@ -717,6 +724,12 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
 // body-Critical-only input into an APPROVE that dropped the only blocker.
 function toCount(value: unknown, field: string): number {
   if (value === undefined || value === null) return 0;
+  // The Step 7 prose prescribes a COUNT for these fields —
+  // `suggestionsDiscarded` above all — but runs following older skill
+  // revisions wrote the LIST of discarded items and used to die at this gate
+  // after hours of analysis. Its length IS the count, so count it rather than
+  // refuse: `[]` is zero, `["a", "b"]` is two.
+  if (Array.isArray(value)) return value.length;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new TypeError(
       `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,
@@ -2925,16 +2938,6 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /**
- * A carried-forward finding names its ORIGINAL id right after the severity
- * marker — `**[Critical]** R1-2: the same claim, re-reported`. Step 6 already
- * mandates re-reporting a still-standing entry under the id it has; reading
- * that id back here is what makes the machine ledger agree with the report it
- * rides in, instead of renumbering the entry to a fresh `R<round>-<n>` the
- * report never used.
- */
-const CARRIED_ID_RE = /^(R\d+-\d+)[:.)\]]?(?=\s|$)\s*/;
-
-/**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
  * never reach either input (they are terminal-only), so the ledger holds only
@@ -2961,10 +2964,17 @@ export function buildLedger(
     taken.add(id);
     return id;
   };
-  /** The first line of what follows the severity marker, minus any carried id. */
+  /**
+   * The first line of what follows the severity marker, minus any carried id.
+   * A carried-forward finding names its ORIGINAL id right after the marker —
+   * `**[Critical]** R1-2: the same claim, re-reported` — and reading it back
+   * here is what makes the machine ledger agree with the report it rides in,
+   * instead of renumbering the entry to a fresh `R<round>-<n>` the report
+   * never used.
+   */
   const titleOf = (rest: string): { id?: string; title: string } => {
     const line = rest.split('\n')[0].trim();
-    const carried = CARRIED_ID_RE.exec(line);
+    const carried = LEDGER_ID_READBACK.exec(line);
     return {
       id: carried?.[1],
       title: (carried ? line.slice(carried[0].length) : line).trim(),
@@ -2992,11 +3002,8 @@ export function buildLedger(
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
     if (!sev) continue;
-    const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-    const body = (typeof c.body === 'string' ? c.body : '').trimStart();
-    const { id: carried, title } = titleOf(
-      body.slice(marker.length).replace(/^:?\s*/, ''),
-    );
+    const line = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
+    const { id: carried, title } = titleOf(line ?? '');
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
       id: idFor(carried),
