@@ -1,0 +1,193 @@
+--- snapshot: after job 1 (shared root .git now exists)
+workspace top level:
+    .dockerignore
+    .editorconfig
+    .git
+    .gitattributes
+    .github
+    .gitignore
+    .husky
+    .npmrc
+    .nvmrc
+    .prettierignore
+    .prettierrc.json
+    .qwen
+    .vscode
+    .yamllint.yml
+    AGENTS.md
+    CHANGELOG.md
+    CLAUDE.md
+    CONTRIBUTING.md
+    Dockerfile
+    LICENSE
+    Makefile
+    README.md
+    SECURITY.md
+    docs
+    docs-site
+    esbuild.config.js
+    eslint-rules
+    eslint.config.js
+    eslint.legacy-filenames.mjs
+    integration-tests
+    integrations
+    package-lock.json
+    package.json
+    packages
+    patches
+    scripts
+    tsconfig.json
+    vitest.config.ts
+root .git present: yes
+root .git bytes: 323728545
+root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+planted post-checkout hook present: no
+worktree files tracked-present: 37
+stale sentinels still present:
+    head/STALE-FROM-PREVIOUS-PR.txt            gone
+    base/STALE-FROM-PREVIOUS-PR.txt            gone
+    .git-credentials                           gone
+    .stale-cache/leftover.bin                  gone
+    readonly-leftover.txt                      gone
+hook fire log: 0 line(s)
+--- snapshot: after planting leftovers
+workspace top level:
+    .dockerignore
+    .editorconfig
+    .git
+    .git-credentials
+    .gitattributes
+    .github
+    .gitignore
+    .husky
+    .npmrc
+    .nvmrc
+    .prettierignore
+    .prettierrc.json
+    .qwen
+    .stale-cache
+    .vscode
+    .yamllint.yml
+    AGENTS.md
+    CHANGELOG.md
+    CLAUDE.md
+    CONTRIBUTING.md
+    Dockerfile
+    LICENSE
+    Makefile
+    README.md
+    SECURITY.md
+    base
+    docs
+    docs-site
+    esbuild.config.js
+    eslint-rules
+    eslint.config.js
+    eslint.legacy-filenames.mjs
+    head
+    integration-tests
+    integrations
+    package-lock.json
+    package.json
+    packages
+    patches
+    readonly-leftover.txt
+    scripts
+    tsconfig.json
+    vitest.config.ts
+root .git present: yes
+root .git bytes: 323728651
+root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+planted post-checkout hook present: yes
+worktree files tracked-present: 42
+stale sentinels still present:
+    head/STALE-FROM-PREVIOUS-PR.txt            PRESENT
+    base/STALE-FROM-PREVIOUS-PR.txt            PRESENT
+    .git-credentials                           PRESENT
+    .stale-cache/leftover.bin                  PRESENT
+    readonly-leftover.txt                      PRESENT
+hook fire log: 0 line(s)
+--- snapshot: after the wipe step (arm=head)
+workspace top level:
+    .git
+root .git present: yes
+root .git bytes: 323728651
+root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+planted post-checkout hook present: yes
+worktree files tracked-present: 0
+stale sentinels still present:
+    head/STALE-FROM-PREVIOUS-PR.txt            gone
+    base/STALE-FROM-PREVIOUS-PR.txt            gone
+    .git-credentials                           gone
+    .stale-cache/leftover.bin                  gone
+    readonly-leftover.txt                      gone
+hook fire log: 0 line(s)
+--- snapshot: after job 2 A/B checkouts
+workspace top level:
+    .git
+    base
+    head
+root .git present: yes
+root .git bytes: 323728651
+root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+planted post-checkout hook present: yes
+worktree files tracked-present: 2
+stale sentinels still present:
+    head/STALE-FROM-PREVIOUS-PR.txt            gone
+    base/STALE-FROM-PREVIOUS-PR.txt            gone
+    .git-credentials                           gone
+    .stale-cache/leftover.bin                  gone
+    readonly-leftover.txt                      gone
+hook fire log: 0 line(s)
+--- snapshot: after job 3
+workspace top level:
+    .dockerignore
+    .editorconfig
+    .git
+    .gitattributes
+    .github
+    .gitignore
+    .husky
+    .npmrc
+    .nvmrc
+    .prettierignore
+    .prettierrc.json
+    .qwen
+    .vscode
+    .yamllint.yml
+    AGENTS.md
+    CHANGELOG.md
+    CLAUDE.md
+    CONTRIBUTING.md
+    Dockerfile
+    LICENSE
+    Makefile
+    README.md
+    SECURITY.md
+    docs
+    docs-site
+    esbuild.config.js
+    eslint-rules
+    eslint.config.js
+    eslint.legacy-filenames.mjs
+    integration-tests
+    integrations
+    package-lock.json
+    package.json
+    packages
+    patches
+    scripts
+    tsconfig.json
+    vitest.config.ts
+root .git present: yes
+root .git bytes: 323729114
+root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+planted post-checkout hook present: yes
+worktree files tracked-present: 37
+stale sentinels still present:
+    head/STALE-FROM-PREVIOUS-PR.txt            gone
+    base/STALE-FROM-PREVIOUS-PR.txt            gone
+    .git-credentials                           gone
+    .stale-cache/leftover.bin                  gone
+    readonly-leftover.txt                      gone
+hook fire log: 2 line(s)

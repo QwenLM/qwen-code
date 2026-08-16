@@ -1,0 +1,12 @@
+E1 GITHUB_WORKSPACE unset          base   rc=1 canary=intact
+E2 orphaned tmp_pack_* in .git     base   rc=0 tmp_pack=reclaimed
+E3 .git-credentials/.gitconfig     base   rc=0 left=[]
+E4 .git is a gitfile, not a dir    base   rc=0 gitfile=removed junk=gone
+E5 already-empty workspace         base   rc=0
+E6 read-only + odd names           base   rc=1 left=[dir with space]
+E1 GITHUB_WORKSPACE unset          head   rc=1 canary=intact
+E2 orphaned tmp_pack_* in .git     head   rc=0 tmp_pack=SURVIVES
+E3 .git-credentials/.gitconfig     head   rc=0 left=[.git]
+E4 .git is a gitfile, not a dir    head   rc=0 gitfile=kept junk=gone
+E5 already-empty workspace         head   rc=0
+E6 read-only + odd names           head   rc=1 left=[.git dir with space]

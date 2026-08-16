@@ -1,0 +1,13 @@
+OK    00 baseline (unmutated PR head)                      expect=pass got=pass
+OK    01 revert wipe line to base (whole-workspace wipe)   expect=fail got=fail
+OK    02 revert the entire workflow file to base           expect=fail got=fail
+OK    03 add continue-on-error: true to the wipe           expect=fail got=fail
+OK    04 force shell: sh on the wipe                       expect=fail got=fail
+OK    05 inject job-level BASH_ENV                         expect=fail got=fail
+OK    06 move the wipe before ownership-restore            expect=fail got=fail
+OK    07 move 'Checkout PR head' before the wipe           expect=fail got=fail
+OK    08 typo the exclusion: .git -> .gitignore            expect=fail got=fail
+OK    09 delete the wipe step entirely                     expect=fail got=fail
+OK    10 rename the wipe step back to the old name         expect=fail got=fail
+
+11/11 as expected; holes: 0
