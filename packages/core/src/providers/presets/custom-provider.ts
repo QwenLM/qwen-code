@@ -111,9 +111,9 @@ export const customProvider: ProviderConfig = {
   modelNamePrefix: '',
   showAdvancedConfig: true,
   // Detect existing custom entries by our env-key namespace for UI/ACP flows,
-  // but merge installs by id+baseUrl so /auth can add another custom model
-  // without deleting models from other endpoints or different models on the
-  // same endpoint.
+  // while install plans scope replacement to the selected endpoint. The
+  // submitted modelIds are the complete list for that endpoint, so omitted
+  // entries are removed without deleting models from sibling endpoints.
   ownsModel: (model) =>
     typeof model.envKey === 'string' &&
     model.envKey.startsWith(CUSTOM_API_KEY_ENV_PREFIX),

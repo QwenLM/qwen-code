@@ -825,6 +825,73 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('preserves an ignored version when inferring from base-URL-less legacy metadata', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const codingTemplate = buildProviderTemplate(kimiProvider, codingUrl);
+    const codingVersion = computeModelListVersion(codingTemplate);
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: codingTemplate.slice(0, -1),
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = {
+      version: 'legacy-version',
+      ignoredVersion: codingVersion,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--coding-plan.ignoredVersion`,
+      codingVersion,
+    );
+  });
+
+  it('preserves a postponed cooldown when inferring from base-URL-less legacy metadata', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const codingTemplate = buildProviderTemplate(kimiProvider, codingUrl);
+    const codingVersion = computeModelListVersion(codingTemplate);
+    const postponedAt = Date.now();
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: codingTemplate.slice(0, -1),
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = {
+      version: 'legacy-version',
+      postponedVersion: codingVersion,
+      postponedAt,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--coding-plan.postponedVersion`,
+      codingVersion,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--coding-plan.postponedAt`,
+      postponedAt,
+    );
+  });
+
   it('does not infer coding metadata from a sibling endpoint credential', () => {
     const codingUrl = 'https://api.kimi.com/coding/v1';
     mockSettings.merged['modelProviders'] = {

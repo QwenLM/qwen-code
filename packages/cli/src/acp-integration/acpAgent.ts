@@ -2421,8 +2421,14 @@ function readProviderSetupInputs(
   )?.models;
   const preserveModels = existingModels?.filter((model) => {
     if (!config.mergeModelsByIdentity) {
+      // Base-URL-less legacy customs are regenerated at the selected
+      // canonical endpoint from their requested ID. Preserving the legacy
+      // object as well would give it a distinct identity and create a
+      // duplicate entry.
+      if (model.baseUrl === undefined) {
+        return !hasExplicitModelIds && !defaultModelIdSet.has(model.id);
+      }
       const belongsToAnotherEndpoint =
-        model.baseUrl !== undefined &&
         normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint;
       return (
         belongsToAnotherEndpoint ||

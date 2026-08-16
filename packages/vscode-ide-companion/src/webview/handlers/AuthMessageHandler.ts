@@ -391,9 +391,13 @@ export class AuthMessageHandler extends BaseMessageHandler {
           : model.baseUrl === undefined ||
               normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
       };
-      const restoredModels =
-        existing?.models.filter(isSelectedEndpointModel) ?? [];
-      const restoredIds = restoredModels.map((model) => model.id);
+      const restoredModels = (
+        existing?.models.filter(isSelectedEndpointModel) ?? []
+      ).filter(
+        (model, index, models) =>
+          models.findIndex((candidate) => candidate.id === model.id) === index,
+      );
+      const restoredIds = [...new Set(restoredModels.map((model) => model.id))];
       const seededModelIds = [
         ...defaults,
         ...restoredIds.filter((id) => !defaults.includes(id)),
@@ -406,10 +410,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
         required: true,
       });
       if (!modelInput) return;
-      modelIds = modelInput
-        .split(',')
-        .map((id) => id.trim())
-        .filter(Boolean);
+      modelIds = [
+        ...new Set(
+          modelInput
+            .split(',')
+            .map((id) => id.trim())
+            .filter(Boolean),
+        ),
+      ];
       if (modelIds.length === 0) {
         // E.g. user typed only whitespace/commas like ", , ,". No
         // authCancelled — see the base-URL validation note above.
@@ -426,6 +434,10 @@ export class AuthMessageHandler extends BaseMessageHandler {
               !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
           )
         : existing?.models.filter((model) => {
+            // Legacy base-URL-less customs are represented by modelIds and
+            // regenerated at the canonical endpoint. Preserving the old
+            // object too would create a duplicate identity.
+            if (model.baseUrl === undefined) return false;
             if (!isSelectedEndpointModel(model)) return true;
             return !defaultIdSet.has(model.id) && selectedIdSet.has(model.id);
           });

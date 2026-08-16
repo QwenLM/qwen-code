@@ -11,6 +11,7 @@ import type {
   ProviderModelProvidersPatch,
   ProviderSettingsAdapter,
 } from './types.js';
+import { normalizeBaseUrlForMatching } from './provider-config.js';
 
 /**
  * Environment variable names an install plan must never set — they alter
@@ -40,7 +41,11 @@ function isSameModelIdentity(
   a: { id: string; baseUrl?: string },
   b: { id: string; baseUrl?: string },
 ): boolean {
-  return a.id === b.id && (a.baseUrl ?? '') === (b.baseUrl ?? '');
+  return (
+    a.id === b.id &&
+    normalizeBaseUrlForMatching(a.baseUrl) ===
+      normalizeBaseUrlForMatching(b.baseUrl)
+  );
 }
 
 function applyModelProvidersPatch(
@@ -306,19 +311,36 @@ export async function applyProviderInstallPlan(
                 model,
               ),
         );
-      const invalidatedIdOnlySibling =
+      const invalidatedCurrentSibling =
         typeof currentModelId === 'string' &&
-        (currentBaseUrl === '' || currentBaseUrl === undefined) &&
         (updatedModelProviders[plan.authType] ?? []).some(
           (model) =>
             model.id === currentModelId &&
+            (currentBaseUrl === '' || currentBaseUrl === undefined
+              ? true
+              : isSameModelIdentity(
+                  { id: currentModelId, baseUrl: currentBaseUrl },
+                  model,
+                )) &&
             model.envKey !== undefined &&
             overwrittenEnvKeys.has(model.envKey) &&
             !installedModels.some((installed) =>
               isSameModelIdentity(installed, model),
             ),
         );
-      if (planOffersCurrentModel && !invalidatedIdOnlySibling) {
+      const installedCurrentModel =
+        typeof currentModelId === 'string'
+          ? installedModels.find((model) => model.id === currentModelId)
+          : undefined;
+      if (invalidatedCurrentSibling && installedCurrentModel) {
+        // The shared credential moved an id-only selection to this endpoint.
+        // Keep the user's current model when the target offers it instead of
+        // falling back to the plan's first/default model.
+        effectiveModelSelection = {
+          modelId: installedCurrentModel.id,
+          baseUrl: installedCurrentModel.baseUrl,
+        };
+      } else if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
       }
     }

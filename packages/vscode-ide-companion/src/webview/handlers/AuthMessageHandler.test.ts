@@ -109,13 +109,19 @@ describe('AuthMessageHandler', () => {
   });
 
   it('restores proxy custom models for a non-merge provider', async () => {
-    const seeded = ['deepseek-v4-pro', 'deepseek-v4-flash'];
+    const seeded = ['deepseek-v4-pro', 'deepseek-v4-flash', 'legacy-custom'];
     const proxyCustom = {
       id: 'proxy-custom',
       name: '[DeepSeek] proxy-custom',
       baseUrl: 'https://corp-proxy.example/v1',
       envKey: 'DEEPSEEK_API_KEY',
       generationConfig: { contextWindowSize: 12345 },
+    };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
     };
     mockShowQuickPick.mockResolvedValueOnce({ value: 'deepseek' });
     mockShowInputBox
@@ -136,6 +142,7 @@ describe('AuthMessageHandler', () => {
             envKey: 'DEEPSEEK_API_KEY',
           },
           proxyCustom,
+          legacyCustom,
         ],
       }),
     );
@@ -296,6 +303,11 @@ describe('AuthMessageHandler', () => {
             envKey: 'KIMI_CODE_API_KEY',
           },
           savedCustom,
+          {
+            ...savedCustom,
+            baseUrl: `${codingUrl}/`,
+            generationConfig: { contextWindowSize: 99999 },
+          },
           {
             id: 'legacy-custom',
             name: '[Kimi Code] legacy-custom',

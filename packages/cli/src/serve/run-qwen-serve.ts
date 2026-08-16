@@ -971,14 +971,20 @@ export function buildProviderSetupInputs(
     helpers.getDefaultModelIds,
   );
   const defaultIds = new Set(helpers.getDefaultModelIds(provider, baseUrl));
+  const hasExplicitModelIds = req.modelIds !== undefined;
   const selectedEndpoint = helpers.normalizeBaseUrlForMatching?.(baseUrl);
   const preserveModels = helpers.existingModels?.filter((model) => {
     if (!provider.mergeModelsByIdentity) {
+      // A base-URL-less legacy custom is rebuilt at the resolved endpoint
+      // from modelIds. Carrying the old object too would create a second,
+      // identity-distinct copy.
+      if (model.baseUrl === undefined) {
+        return !hasExplicitModelIds && !defaultIds.has(model.id);
+      }
       return (
         !defaultIds.has(model.id) ||
-        (model.baseUrl !== undefined &&
-          helpers.normalizeBaseUrlForMatching?.(model.baseUrl) !==
-            selectedEndpoint)
+        helpers.normalizeBaseUrlForMatching?.(model.baseUrl) !==
+          selectedEndpoint
       );
     }
     return (

@@ -211,7 +211,30 @@ describe('buildProviderSetupInputs', () => {
       envKey: 'DEEPSEEK_API_KEY',
       generationConfig: { contextWindowSize: 12345 },
     };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
     const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'deepseek',
+        apiKey: 'sk-deepseek',
+        modelIds: ['deepseek-v4-pro', 'legacy-custom'],
+      },
+      provider!,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [savedProxy, legacyCustom],
+      },
+    );
+
+    expect(inputs.preserveModels).toEqual([savedProxy]);
+
+    const implicitInputs = buildProviderSetupInputs(
       {
         providerId: 'deepseek',
         apiKey: 'sk-deepseek',
@@ -221,11 +244,13 @@ describe('buildProviderSetupInputs', () => {
         getDefaultModelIds: qwenCore.getDefaultModelIds,
         resolveBaseUrl: qwenCore.resolveBaseUrl,
         normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
-        existingModels: [savedProxy],
+        existingModels: [savedProxy, legacyCustom],
       },
     );
-
-    expect(inputs.preserveModels).toEqual([savedProxy]);
+    expect(implicitInputs.preserveModels).toEqual([
+      savedProxy,
+      legacyCustom,
+    ]);
   });
 });
 

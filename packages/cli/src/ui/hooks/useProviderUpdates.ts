@@ -329,7 +329,21 @@ function resolveUpdateTargets(
     const installedBuiltins = endpointModels.filter((model) =>
       builtinIds.has(model.id),
     );
+    const legacySuppression = legacyMetadata.baseUrl
+      ? {}
+      : {
+          ...(legacyMetadata.ignoredVersion
+            ? { ignoredVersion: legacyMetadata.ignoredVersion }
+            : {}),
+          ...(legacyMetadata.postponedVersion
+            ? { postponedVersion: legacyMetadata.postponedVersion }
+            : {}),
+          ...(typeof legacyMetadata.postponedAt === 'number'
+            ? { postponedAt: legacyMetadata.postponedAt }
+            : {}),
+        };
     const inferredMetadata = {
+      ...legacySuppression,
       ...endpointMetadata,
       version: computeModelListVersion(installedBuiltins),
     };

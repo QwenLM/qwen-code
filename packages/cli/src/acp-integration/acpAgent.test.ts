@@ -12242,6 +12242,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       envKey: 'DEEPSEEK_API_KEY',
       generationConfig: { contextWindowSize: 12345 },
     };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
     const settings = {
       ...baseSettings,
       merged: {
@@ -12255,6 +12261,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               envKey: 'DEEPSEEK_API_KEY',
             },
             proxyModel,
+            legacyCustom,
           ],
         },
       },
@@ -12272,15 +12279,29 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod('qwen/providers/connect', {
         providerId: 'deepseek',
         apiKey: 'sk-test',
-        modelIds: ['deepseek-chat'],
+        modelIds: ['deepseek-chat', 'legacy-custom'],
       }),
     ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
 
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({
-        modelIds: ['deepseek-chat'],
+        modelIds: ['deepseek-chat', 'legacy-custom'],
         preserveModels: [proxyModel],
+      }),
+    );
+
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        preserveModels: [proxyModel, legacyCustom],
       }),
     );
 

@@ -323,13 +323,13 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
-  it('falls back to id+baseUrl identity when ownsModel is omitted', async () => {
+  it('normalizes baseUrl identity when ownsModel is omitted', async () => {
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [
         // Same id, different baseUrl → should be preserved (different identity)
         { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
-        // Same id+baseUrl as incoming → should be removed
-        { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
+        // Same normalized id+baseUrl as incoming → should be removed
+        { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1/' },
         // Different id, same baseUrl as incoming → should be preserved
         { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
       ],
@@ -431,7 +431,7 @@ describe('applyProviderInstallPlan', () => {
       [AuthType.USE_OPENAI]: [...chinaModels, ...intlModels],
     });
     adapter.getValue.mockImplementation((key: string) => {
-      if (key === 'model.name') return 'kimi-k3';
+      if (key === 'model.name') return 'kimi-k2.6';
       if (key === 'model.baseUrl') return chinaUrl;
       return '';
     });
@@ -450,7 +450,7 @@ describe('applyProviderInstallPlan', () => {
       delete process.env[KIMI_API_ENV_KEY];
     }
 
-    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'kimi-k3');
+    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'kimi-k2.6');
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
   });
 
@@ -463,7 +463,7 @@ describe('applyProviderInstallPlan', () => {
       [AuthType.USE_OPENAI]: [...chinaModels, ...intlModels],
     });
     adapter.getValue.mockImplementation((key: string) => {
-      if (key === 'model.name') return 'kimi-k3';
+      if (key === 'model.name') return 'kimi-k2.7-code';
       if (key === 'model.baseUrl') return '';
       return '';
     });
@@ -482,8 +482,44 @@ describe('applyProviderInstallPlan', () => {
       delete process.env[KIMI_API_ENV_KEY];
     }
 
-    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'kimi-k3');
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'model.name',
+      'kimi-k2.7-code',
+    );
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
+  });
+
+  it('retains a current model whose stored baseUrl differs only by a trailing slash', async () => {
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: intlModels,
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return 'kimi-k2.7-code';
+      if (key === 'model.baseUrl') return `${intlUrl}/`;
+      return '';
+    });
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: intlUrl,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: intlModels.map((model) => model.id),
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, {
+      settings: adapter,
+      doRefreshAuth: false,
+    });
+
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
   });
 
   it('does not let another provider suppress a new provider selection', async () => {
@@ -780,7 +816,7 @@ describe('applyProviderInstallPlan', () => {
       modelIds: ['model-b'],
     });
 
-    expect(plan.modelProviders?.[0]?.ownsModel).toBeUndefined();
+    expect(plan.modelProviders?.[0]?.ownsModel).toBeTypeOf('function');
     expect(plan.modelSelection).toEqual({ modelId: 'model-b', baseUrl });
 
     try {
@@ -794,14 +830,13 @@ describe('applyProviderInstallPlan', () => {
     }
 
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'model-b', name: 'model-b', baseUrl, envKey },
       {
         id: 'model-b',
         name: 'model-b',
         baseUrl: otherBaseUrl,
         envKey: otherEnvKey,
       },
-      { id: 'model-a', name: 'model-a', baseUrl, envKey },
+      { id: 'model-b', name: 'model-b', baseUrl, envKey },
       {
         id: 'shared-model',
         name: 'shared-model',
@@ -816,6 +851,54 @@ describe('applyProviderInstallPlan', () => {
       'model-b',
       baseUrl,
     );
+  });
+
+  it('removes omitted custom models only from the selected endpoint', async () => {
+    const baseUrl = 'https://custom.example/v1';
+    const siblingBaseUrl = 'https://sibling.example/v1';
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    const siblingEnvKey = generateCustomEnvKey(
+      AuthType.USE_OPENAI,
+      siblingBaseUrl,
+    );
+    const siblingModel = {
+      id: 'm',
+      name: 'm',
+      baseUrl: siblingBaseUrl,
+      envKey: siblingEnvKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        { id: 'm', name: 'm', baseUrl, envKey },
+        { id: 'm', name: 'm', baseUrl: `${baseUrl}/`, envKey },
+        siblingModel,
+      ],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['other-model'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[envKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      {
+        id: 'other-model',
+        name: 'other-model',
+        baseUrl,
+        envKey,
+      },
+      siblingModel,
+    ]);
   });
 
   it('keeps the selected sibling endpoint model when reconnecting', async () => {

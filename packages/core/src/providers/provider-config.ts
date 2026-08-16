@@ -385,7 +385,8 @@ export function buildInstallPlan(
   const providerOwnsModel = resolveOwnsModel(config);
   const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const ownsModel = config.mergeModelsByIdentity
-    ? Array.isArray(config.baseUrl) && providerOwnsModel
+    ? (Array.isArray(config.baseUrl) || config.baseUrl === undefined) &&
+      providerOwnsModel
       ? (model: ProviderModelConfig) =>
           providerOwnsModel(model) &&
           normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
