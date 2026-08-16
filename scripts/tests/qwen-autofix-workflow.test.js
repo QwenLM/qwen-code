@@ -10411,13 +10411,12 @@ exit 1
   });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
-    // Wiring: the staged script runs after both shared resolve/reply call
-    // sites AND on the failure/handoff path (a failed round must not lose
-    // verified findings); it is staged from the trusted base; the agent
-    // file rides the artifact dump and the repair cleanup; SKILL documents
-    // the fourth disposition.
-    // The staged script is executed from the bytes read and hashed in the
-    // child, never re-opened by path (R9-1), at both call sites.
+    // Wiring: the upsert runs after both shared resolve/reply call sites
+    // AND on the failure/handoff path (a failed round must not lose verified
+    // findings); its content is captured from the trusted base at stage
+    // time; the agent file rides the artifact dump and the repair cleanup;
+    // SKILL documents the fourth disposition. The script is executed from
+    // that content, never opened by path, at both call sites.
     expect(workflow.split('bash -c "${UPSERT_SRC}"').length - 1).toBe(2);
     // R10-8: bound EVERY execution of the staged path, not one spelling —
     // `sh …`, `bash -- …`, `source …`, `. …`, `exec bash …` all re-open it.
@@ -10440,7 +10439,7 @@ exit 1
       ) ?? [],
     ).toHaveLength(2);
     // Sound isolation, NOT an in-shell denylist: both upsert sites run the
-    // digest gate + staged script in a fresh `/usr/bin/env -i` child. The
+    // script in a fresh `/usr/bin/env -i` child. The
     // absolute path is load-bearing — bash never does function/alias lookup
     // on a slash-bearing word, so a planted BASH_FUNC_env%% cannot intercept
     // it — and `-i` drops every BASH_FUNC_*/BASH_ENV/SHELLOPTS/alias/trap
@@ -10570,9 +10569,8 @@ exit 1
       expect(step).toMatch(
         /while IFS= read -r _upsert_line; do\n\s*\[\[ "\$\{_upsert_line\}" == '__upsert_child_live__' \]\] \|\|\n\s*printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"\n\s*done <<< "\$\{UPSERT_OUT\}"/,
       );
-      // Ordering: the digest gate runs, and ONLY on a match does the staged
-      // script execute — both inside the same clean child. A reordering or a
-      // gate-condition flip must fail here.
+      // Ordering: the script executes INSIDE the clean child, after the
+      // launch — a relocation outside it must fail here.
       const execIdx = step.indexOf('bash -c "${UPSERT_SRC}"');
       const launchIdx = argStart;
       expect(execIdx).toBeGreaterThan(launchIdx);
@@ -10580,9 +10578,9 @@ exit 1
     expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(2);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
-    // caught. Compare the allow-list + prelude + digest gate (everything up
-    // to where the failure path inserts its identity check), whitespace-
-    // normalized to absorb the one-level indent difference.
+    // caught. Compare the allow-list + prelude (everything up to where the
+    // failure path inserts its identity check), whitespace-normalized to
+    // absorb the one-level indent difference.
     const childCore = (step) =>
       step
         .match(
@@ -10611,9 +10609,9 @@ exit 1
     expect(reviewAddressReportStep).toContain(
       '[[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]',
     );
-    // R6-5: and it runs AFTER the digest gate but BEFORE the staged script —
-    // presence alone would survive a reordering that writes with an unverified
-    // identity.
+    // The identity check runs after the child launches but BEFORE the script
+    // — presence alone would survive a reordering that writes with an
+    // unverified identity.
     const idIdx = reviewAddressReportStep.indexOf(
       'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
     );
@@ -12266,7 +12264,7 @@ exit 1
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
     expect(escapeSites).toHaveLength(9);
-    // The tenth agent-derived publish site lives in the staged
+    // The tenth agent-derived publish site lives in
     // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
     // sed afterwards: the rv/ic dedupe identity is the rendered line, so
     // escaping after the corpus comparison meant a reason containing `<!--`
