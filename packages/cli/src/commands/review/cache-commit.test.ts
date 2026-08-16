@@ -296,6 +296,21 @@ describe('cache-commit', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses when a symlink sits at the cache DIRECTORY, not just the file',
+    () => {
+      // `noFollow` guards the final element only; planting the link one
+      // layer up needs no guess at the file name (`local.json` is fixed)
+      // and lands the merged cache in the attacker's directory.
+      const elsewhere = join(dir, 'elsewhere');
+      mkdirSync(elsewhere, { recursive: true });
+      symlinkSync(elsewhere, join(dir, 'cache'));
+      const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: 'm1' });
+      expect(() => run(argv)).toThrow(/resolves to .* Refusing/s);
+      expect(existsSync(join(elsewhere, 'pr-7.json'))).toBe(false);
+    },
+  );
+
   it('refuses an EMPTY lastModelId, not just a missing one', () => {
     const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: '' });
     expect(() => run(argv)).toThrow(/lastModelId/);

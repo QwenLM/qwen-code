@@ -199,7 +199,7 @@ function rewriteCandidateForScope(
   mergeBaseSha: string,
   fetchedSha: string,
   allPaths: readonly string[],
-  delta: ReadonlySet<string>,
+  deltaLive: ReadonlySet<string>,
 ): boolean {
   const candidatePath = plan.cacheCandidatePath;
   if (typeof candidatePath !== 'string' || candidatePath === '') return false;
@@ -249,8 +249,12 @@ function rewriteCandidateForScope(
     const next: FileVerdicts = Object.create(null) as FileVerdicts;
     let carried = 0;
     for (const p of allPaths) {
-      if (delta.has(p)) {
-        // Reviewed in FULL this round: its pair is certified.
+      if (deltaLive.has(p)) {
+        // Reviewed in FULL this round: its pair is certified. `deltaLive`,
+        // not `delta`: a restored file is in the widening set but its
+        // section was sliced out of the composite, so no agent read it —
+        // certifying it would promote a pair nobody verified (the shape a
+        // mode-only change takes once `restored()` is mode-aware).
         next[p] = current[p];
       } else if (
         recorded !== null &&
@@ -269,7 +273,7 @@ function rewriteCandidateForScope(
     if (dropped > 0 || carried > 0) {
       writeStderrLine(
         `rescope: cache candidate narrowed to this round's scope — ` +
-          `${[...delta].filter((p) => allPaths.includes(p)).length} ` +
+          `${[...deltaLive].filter((p) => allPaths.includes(p)).length} ` +
           `reviewed pair(s) kept, ${carried} carried from the previous ` +
           `clean round, ${dropped} dropped as certified by no one.`,
       );
@@ -779,7 +783,7 @@ function runRescope(args: RescopeArgs): void {
     mergeBaseSha,
     fetchedSha,
     allPaths,
-    delta,
+    deltaLive,
   );
   const result = {
     ...(plan as Record<string, unknown>),
