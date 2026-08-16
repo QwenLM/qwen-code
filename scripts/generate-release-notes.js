@@ -48,10 +48,6 @@ const IMAGE_HOST_ALLOWLIST = [
   'user-images.githubusercontent.com/',
   'private-user-images.githubusercontent.com/',
 ];
-// raw.githubusercontent.com serves whatever its ref points at today, so a
-// branch ref lets its owner swap images in an already-published release;
-// only commit-SHA refs share the immutability of the hosts above.
-const RAW_IMAGE_PREFIX = 'https://raw.githubusercontent.com/';
 // Captured URLs are interpolated verbatim into ![alt](url), so every URL
 // capture class refuses Markdown-active characters or a crafted value
 // breaks out of the image syntax in renderReleaseNotesV2. The HTML match is
@@ -210,21 +206,70 @@ export function classifyChange(entry) {
   const type = /^(\w+)(?:\([^)]*\))?:/
     .exec(entry.title.trim())?.[1]
     ?.toLowerCase();
-  return TYPE_CATEGORIES[type] ?? 'Internal Changes';
+  // Own-key guard: Object.prototype members like "constructor" are truthy
+  // lookups on a plain object and would bypass the fallback.
+  return Object.hasOwn(TYPE_CATEGORIES, type)
+    ? TYPE_CATEGORIES[type]
+    : 'Internal Changes';
 }
 
 export function isAllowedImageUrl(url) {
-  if (!/^https:\/\//i.test(url)) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
     return false;
   }
-  if (url.startsWith(RAW_IMAGE_PREFIX)) {
-    // Path shape is owner/repo/ref/…; only a 40-hex ref pins the content.
-    const ref = url.slice(RAW_IMAGE_PREFIX.length).split('/')[2] ?? '';
-    return /^[0-9a-f]{40}$/i.test(ref);
+  if (parsed.protocol !== 'https:') {
+    return false;
   }
-  return IMAGE_HOST_ALLOWLIST.some((prefix) =>
-    url.startsWith(`https://${prefix}`),
-  );
+  // Credentials and ports were refused by the old literal-prefix shape; keep
+  // the admitted surface unchanged.
+  if (parsed.username || parsed.password || parsed.port) {
+    return false;
+  }
+  // Decide on the parsed URL, never the literal string: GitHub's fetchers
+  // decode %2F into a path separator and resolve dot segments before
+  // serving, and CommonMark strips "\/" escapes at render time, so those
+  // forms are refused before segment matching.
+  if (/%2f|\\/i.test(url)) {
+    return false;
+  }
+  const segments = [];
+  for (const raw of parsed.pathname.split('/').slice(1)) {
+    let segment;
+    try {
+      segment = decodeURIComponent(raw);
+    } catch {
+      return false;
+    }
+    if (!segment || segment === '.' || segment === '..') {
+      return false;
+    }
+    segments.push(segment);
+  }
+  if (segments.length === 0) {
+    return false;
+  }
+  if (parsed.hostname === 'raw.githubusercontent.com') {
+    // Path shape is owner/repo/ref/…; a branch ref lets its owner swap
+    // images in an already-published release, so only a 40-hex commit ref
+    // is admitted.
+    return (
+      segments.length >= 4 &&
+      /^[A-Za-z0-9._-]+$/.test(segments[0]) &&
+      /^[A-Za-z0-9._-]+$/.test(segments[1]) &&
+      /^[0-9a-f]{40}$/i.test(segments[2])
+    );
+  }
+  const path = `/${segments.join('/')}`;
+  return IMAGE_HOST_ALLOWLIST.some((prefix) => {
+    const slash = prefix.indexOf('/');
+    return (
+      parsed.hostname === prefix.slice(0, slash) &&
+      path.startsWith(prefix.slice(slash))
+    );
+  });
 }
 
 // PR-derived text is interpolated verbatim into Markdown: brackets re-form
@@ -299,14 +344,15 @@ function validateModelText(value, label, maxLength) {
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text) ||
     /(^|[^\w/])@[A-Za-z0-9-]+(?:\/[A-Za-z0-9_.-]+)?/.test(text) ||
     /(^|[^\w])#\d+\b/.test(text) ||
-    // Single markers format too (*em*, ~~del~~), and a ~~~ intro opens a
-    // code fence that swallows the rest of the release.
-    /([*~]|__|`)/.test(text) ||
+    // Single markers format too (*em*, _em_, ~~del~~), and a ~~~ intro
+    // opens a code fence that swallows the rest of the release.
+    /([*_~]|`)/.test(text) ||
     /^#/.test(text) ||
     /^([-_*])( *\1){2,}$/.test(text) ||
-    /^[-*+]\s/.test(text) ||
-    // CommonMark ordered-list markers run to nine digits.
-    /^\d{1,9}[.)]\s/.test(text)
+    // CommonMark accepts these list markers at end of line too, and
+    // ordered-list markers run to nine digits.
+    /^[-*+](\s|$)/.test(text) ||
+    /^\d{1,9}[.)](\s|$)/.test(text)
   ) {
     throw new Error(`${label} must be plain text without links or HTML.`);
   }

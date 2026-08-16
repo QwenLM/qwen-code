@@ -124,6 +124,10 @@ describe('classifyChange', () => {
     ['perf: speed up x', [], 'Performance'],
     ['docs: explain x', [], 'Documentation'],
     ['test(core): cover x', [], 'Internal Changes'],
+    // Object.prototype members must fall back like any unknown type instead
+    // of resolving to their inherited truthy value.
+    ['constructor: rebuild session flow', [], 'Internal Changes'],
+    ['__proto__: rebuild session flow', [], 'Internal Changes'],
   ])('classifies %s deterministically', (title, labels, expected) => {
     expect(classifyChange(entry(1, title, labels))).toBe(expected);
   });
@@ -221,6 +225,15 @@ describe('isAllowedImageUrl', () => {
     // Branch refs are mutable: the repo owner can swap the image in an
     // already-published release.
     'https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/x.png',
+    // GitHub's fetchers normalize before serving: empty path segments and
+    // %2F shift the validated position, dot segments resolve away, and
+    // CommonMark strips backslash escapes at render time.
+    'https://raw.githubusercontent.com/attacker//0123456789abcdef0123456789abcdef01234567/main/payload.png',
+    'https://raw.githubusercontent.com/attacker/repo%2Fsub/0123456789abcdef0123456789abcdef01234567/main/payload.png',
+    'https://raw.githubusercontent.com/QwenLM/qwen-code/0123456789abcdef0123456789abcdef01234567/../../other/repo/main/payload.png',
+    'https://raw.githubusercontent.com/QwenLM/qwen-code/%2e%2e/main/payload.png',
+    'https://github.com/user-attachments/../../attacker/repo/raw/main/payload.png',
+    'https://github.com/user-attachments/assets/..\\..\\attacker/payload.png',
     'http://github.com/user-attachments/assets/abc',
     'https://evil.example.com/github.com/user-attachments/assets/abc',
     'https://evil.example.com/x.png',
@@ -458,6 +471,28 @@ describe('renderReleaseNotesV2', () => {
     expect(markdown).toContain(
       `see docs(https://attacker.example/q) ([#5](${PR(5)}))`,
     );
+  });
+
+  it('lists prototype-key titles instead of dropping them from the appendix', () => {
+    const markdown = renderReleaseNotesV2({
+      ...base,
+      entries: [
+        entry(1, 'constructor: rebuild session flow'),
+        entry(2, 'feat(web-shell): upload files'),
+      ],
+      summaries: new Map(),
+      summariesZh: new Map(),
+      highlights: [],
+      themes: [],
+    });
+
+    expect(markdown).toContain(
+      '<summary>Complete Change List (2 pull requests)</summary>',
+    );
+    // Once in the catch-all digest and once in the Internal Changes appendix;
+    // an inherited prototype member used to classify as a non-string that
+    // matched no section, silently dropping the appendix occurrence.
+    expect(markdown.match(/\[#1\]/g)).toHaveLength(2);
   });
 
   it('renders the bilingual digest, catch-all, and collapsed appendix', () => {
@@ -984,6 +1019,41 @@ describe('generateAiContent themes', () => {
     expect(result.themes.map((theme) => theme.intro)).toEqual(['', '', '']);
     expect(result.warnings).toEqual([
       'Theme intro fallback for 3 theme field(s); the intro was dropped.',
+    ]);
+  });
+
+  it('drops bare list markers and single-underscore emphasis intros', async () => {
+    const entries = [1, 2, 3, 4, 5].map((number) =>
+      entry(number, `feat: change ${number}`),
+    );
+
+    const result = await generateAiContent(
+      entries,
+      themeComplete([
+        { title: 'A', titleZh: '甲', intro: '-', introZh: '', items: [1] },
+        { title: 'B', titleZh: '乙', intro: '+', introZh: '', items: [2] },
+        { title: 'C', titleZh: '丙', intro: '1.', introZh: '', items: [3] },
+        { title: 'D', titleZh: '丁', intro: '2)', introZh: '', items: [4] },
+        {
+          title: 'E',
+          titleZh: '戊',
+          // CommonMark accepts list markers at end of line, and _em_ formats.
+          intro: '_Known issues_ coming soon',
+          introZh: '',
+          items: [5],
+        },
+      ]),
+    );
+
+    expect(result.themes.map((theme) => theme.intro)).toEqual([
+      '',
+      '',
+      '',
+      '',
+      '',
+    ]);
+    expect(result.warnings).toEqual([
+      'Theme intro fallback for 5 theme field(s); the intro was dropped.',
     ]);
   });
 
