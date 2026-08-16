@@ -9528,20 +9528,26 @@ describe('createServeApp', () => {
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
 
-    it('400 when `content` carries an SVG block (raster-only policy)', async () => {
-      // The upload route rejects SVG with an explicit security rationale;
-      // the inline-block path must enforce the same policy.
-      const bridge = fakeBridge();
-      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
-        message: 'hi',
-        content: [
-          { type: 'image', data: 'PHN2Zz4=', mimeType: 'image/svg+xml' },
-        ],
-      });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe('SVG images are not supported');
-      expect(bridge.enqueueMidTurnCalls).toEqual([]);
-    });
+    it.each([
+      ['exact', 'image/svg+xml'],
+      ['parameter suffix', 'image/svg+xml;charset=utf-8'],
+      ['uppercase', 'image/SVG+XML'],
+    ])(
+      '400 when `content` carries an SVG block: %s (raster-only policy)',
+      async (_label, mimeType) => {
+        // The upload route rejects SVG after normalizing the media type;
+        // the inline-block gate must reject the same spelling variants — an
+        // exact-string match lets standards-conformant variants through.
+        const bridge = fakeBridge();
+        const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+          message: 'hi',
+          content: [{ type: 'image', data: 'PHN2Zz4=', mimeType }],
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('SVG images are not supported');
+        expect(bridge.enqueueMidTurnCalls).toEqual([]);
+      },
+    );
 
     it('forwards reference-form media blocks to the bridge verbatim', async () => {
       const bridge = fakeBridge();
@@ -12875,24 +12881,32 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(0);
     });
 
-    it('400 when a prompt media block is SVG (raster-only policy)', async () => {
-      const bridge = fakeBridge({
-        promptImpl: async () => ({ stopReason: 'end_turn' }),
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .post('/session/session-A/prompt')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({
-          prompt: [
-            { type: 'text', text: 'hi' },
-            { type: 'image', data: 'PHN2Zz4=', mimeType: 'image/svg+xml' },
-          ],
+    it.each([
+      ['exact', 'image/svg+xml'],
+      ['parameter suffix', 'image/svg+xml;charset=utf-8'],
+      ['uppercase', 'image/SVG+XML'],
+    ])(
+      '400 when a prompt media block is SVG: %s (raster-only policy)',
+      async (_label, mimeType) => {
+        // Same normalizing gate as the mid-turn route and the upload route.
+        const bridge = fakeBridge({
+          promptImpl: async () => ({ stopReason: 'end_turn' }),
         });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe('SVG images are not supported');
-      expect(bridge.promptCalls).toHaveLength(0);
-    });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [
+              { type: 'text', text: 'hi' },
+              { type: 'image', data: 'PHN2Zz4=', mimeType },
+            ],
+          });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('SVG images are not supported');
+        expect(bridge.promptCalls).toHaveLength(0);
+      },
+    );
 
     it('202 still admits legacy inline audio blocks (child-side validation)', async () => {
       // The per-block validation is scoped to image blocks; legacy audio

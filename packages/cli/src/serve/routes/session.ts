@@ -206,6 +206,15 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // reference every stored item.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
 
+// SVG can carry scripts; this origin also hosts the daemon API and Web
+// Shell UI, and stored bytes are served back to browsers — raster formats
+// only. Compare the normalized media type: standards-conformant spelling
+// variants (`image/svg+xml;charset=utf-8`, `image/SVG+XML`) must not slip
+// past an exact-string match.
+function isSvgMimeType(mimeType: string | undefined): boolean {
+  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'image/svg+xml';
+}
+
 // Shared per-block validation for the prompt and mid-turn routes. SVG can
 // carry scripts; this origin also hosts the daemon API and Web Shell UI, and
 // stored bytes are served back to browsers — raster formats only, matching
@@ -239,7 +248,7 @@ function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
   ) {
     return { valid: false, code: 'invalid-shape' };
   }
-  if (mimeType === 'image/svg+xml') {
+  if (isSvgMimeType(mimeType)) {
     return { valid: false, code: 'svg' };
   }
   return {
@@ -3394,7 +3403,7 @@ export function registerSessionRoutes(
         // SVG can carry scripts; this origin also hosts the daemon API and
         // Web Shell UI, and the bytes are served back to browsers, so an
         // inline SVG would run same-origin. Raster formats only.
-        if (contentType === 'image/svg+xml') {
+        if (isSvgMimeType(contentType)) {
           res.status(415).json({ error: 'SVG uploads are not supported' });
           return;
         }

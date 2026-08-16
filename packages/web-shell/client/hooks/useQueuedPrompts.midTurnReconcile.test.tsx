@@ -2649,4 +2649,188 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.dispose();
     }
   });
+
+  it('clears summary-only when a refresh restores fully hydrated images into an existing row', async () => {
+    // A pending prompt whose references transiently fail hydration rebuilds
+    // as summary-only; once a later refresh hydrates them, the existing row
+    // must regain its images AND its editability.
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-flaky',
+          text: 'flaky prompt',
+          content: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      for (let i = 0; i < 2; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      const degraded = harness.result().queuedPrompts[0];
+      expect(degraded).toMatchObject({
+        serverPromptId: 'p-flaky',
+        payloadCompleteness: 'summary-only',
+      });
+      expect(degraded?.images).toBeUndefined();
+
+      // The next refresh hydrates fully: the row regains images and the
+      // summary-only flag clears.
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'p-flaky',
+            text: 'flaky prompt',
+            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+          },
+        ],
+      });
+      await harness.render({ streamingState: 'idle', connected: false });
+      await harness.render({ streamingState: 'idle', connected: true });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        serverPromptId: 'p-flaky',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
+      });
+      expect(row?.payloadCompleteness).not.toBe('summary-only');
+
+      // Editing proceeds instead of early-returning.
+      sdkMock.actions.removePendingPrompt.mockResolvedValue({ removed: true });
+      await act(async () => {
+        void harness.result().editQueuedPrompt(row!.id);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+        'p-flaky',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps a partially hydrated pending-prompt row summary-only', async () => {
+    // One attachment hydrated, one still an unhydrated reference: restoring
+    // only the survivor and marking the row complete would let editing
+    // silently discard the attachment the daemon still holds.
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-partial',
+          text: 'look at both',
+          content: [
+            { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+            {
+              type: 'image',
+              mediaId: 'media-2',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      for (let i = 0; i < 2; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        serverPromptId: 'p-partial',
+        payloadCompleteness: 'summary-only',
+      });
+      expect(row?.images).toBeUndefined();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('drops the pinned admission when the session changes after the enqueue was dispatched', async () => {
+    // Upload complete, enqueue in flight, session switched: the abort
+    // rejects the dispatched enqueue. The admission (with its base64 images)
+    // must be dropped instead of staying pinned until reload and
+    // materializing a stale row on return.
+    let rejectEnqueue: ((error: Error) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectEnqueue = reject;
+      }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+      });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('leak this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      // Let the upload settle so the enqueue is dispatched (enqueueStarted).
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+      await harness.render({
+        sessionId: 'session-b',
+        streamingState: 'responding',
+      });
+      await act(async () => {
+        rejectEnqueue?.(new DOMException('Aborted', 'AbortError'));
+        await Promise.resolve();
+      });
+
+      // Returning to session-a must not materialize the stale admission row.
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+      });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
 });

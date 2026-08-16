@@ -188,8 +188,10 @@ import type {
 } from './bridgeTypes.js';
 import {
   isSessionMediaReference,
+  SESSION_MEDIA_MAX_TOTAL_BYTES,
   SessionMediaReferenceError,
   SessionMediaStore,
+  withMediaDegradationMarker,
 } from './sessionMedia.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -2050,6 +2052,21 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // a `BridgeOptions` knob the same way `maxPendingPromptsPerSession` (the
 // analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
+// Inline base64 blocks never pass through the media store, so the store's
+// caps never see them: bound the aggregate queued inline bytes instead, or a
+// full queue of body-limit-sized messages pins hundreds of MiB per session
+// and re-embeds them into every reconciliation snapshot.
+const inlineMediaBlockBytes = (
+  blocks: readonly BridgePromptContentBlock[],
+): number => {
+  let total = 0;
+  for (const block of blocks) {
+    if (block.type === 'image' && 'data' in block) {
+      total += block.data.length;
+    }
+  }
+  return total;
+};
 const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -7105,10 +7122,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     originatorClientId?: string,
     content?: readonly BridgePromptContentBlock[],
   ) => {
-    const prompt: BridgePromptContentBlock[] = [
+    // Drop references that are already gone BEFORE admission: the admission
+    // check throws on the first dead reference, and the fallback would then
+    // replace the ENTIRE prompt with the marker, discarding the siblings the
+    // store still holds.
+    const resolvableBlocks: BridgePromptContentBlock[] = [];
+    let degraded = 0;
+    for (const block of content ?? []) {
+      try {
+        entry.media.assertReference(block);
+        resolvableBlocks.push(block);
+      } catch (error) {
+        if (!(error instanceof SessionMediaReferenceError)) throw error;
+        degraded += 1;
+      }
+    }
+    let prompt: BridgePromptContentBlock[] = [
       ...(text ? [{ type: 'text', text } as ContentBlock] : []),
-      ...(content ?? []),
+      ...resolvableBlocks,
     ];
+    if (degraded > 0) {
+      prompt = withMediaDegradationMarker(prompt);
+    }
     const context = {
       promptId: messageId,
       promotedMidTurn: { originatorClientId },
@@ -7121,14 +7156,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.sessionId,
         {
           sessionId: entry.sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: text
-                ? `${text}\n[Attached media is no longer available]`
-                : '[Attached media is no longer available]',
-            },
-          ],
+          prompt: withMediaDegradationMarker(
+            text ? [{ type: 'text', text } as ContentBlock] : [],
+          ),
         },
         undefined,
         context,
@@ -7974,17 +8004,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ) {
                     throw error;
                   }
-                  const text = extractPromptText(req.prompt);
-                  dispatchBlocks = [
-                    {
-                      type: 'text',
-                      text: text
-                        ? `${text}\n[Attached media is no longer available]`
-                        : '[Attached media is no longer available]',
-                    } as ContentBlock,
-                  ];
-                  resolvedPrompt =
-                    await entry.media.resolveContent(dispatchBlocks);
+                  // Degrade per block: one dead reference drops itself and
+                  // keeps its resolvable siblings instead of replacing the
+                  // whole prompt with the marker.
+                  const perBlock =
+                    await entry.media.resolveContentDegrading(dispatchBlocks);
+                  dispatchBlocks = perBlock.retainedBlocks;
+                  // The batch resolve threw on a dead reference, so the
+                  // marker always applies here.
+                  resolvedPrompt = withMediaDegradationMarker(
+                    perBlock.resolvedBlocks,
+                  );
                 }
                 const normalized: PromptRequest = telemetry.injectPromptContext(
                   {
@@ -10401,6 +10431,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // in-flight POST, or a refresh re-enqueueing from the snapshot) must
       // settle idempotently instead of failing with session_media_gone.
       entry.media.assertReferences(mediaBlocks);
+      const inlineBytes = inlineMediaBlockBytes(mediaBlocks);
+      if (inlineBytes > 0) {
+        const queuedInlineBytes = entry.midTurnMessageQueue.reduce(
+          (total, queued) =>
+            total + inlineMediaBlockBytes(queued.content ?? []),
+          0,
+        );
+        if (queuedInlineBytes + inlineBytes > SESSION_MEDIA_MAX_TOTAL_BYTES) {
+          writeStderrLine(
+            `[mid-turn] session=${entry.sessionId} rejected: queued inline media exceeds the ${SESSION_MEDIA_MAX_TOTAL_BYTES}-byte session budget`,
+          );
+          return { accepted: false };
+        }
+      }
       const messageId = requestedMessageId ?? randomUUID();
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.

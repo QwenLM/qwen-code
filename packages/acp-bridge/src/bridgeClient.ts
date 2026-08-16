@@ -86,6 +86,9 @@ import type {
 } from './sessionArtifacts.js';
 import {
   isSessionMediaReference,
+  SessionMediaReferenceError,
+  SESSION_MEDIA_MAX_DRAIN_BYTES,
+  withMediaDegradationMarker,
   type SessionMediaReference,
   type SessionMediaStore,
 } from './sessionMedia.js';
@@ -1261,50 +1264,85 @@ export class BridgeClient implements Client {
     // several queued messages reference is read and base64-encoded once
     // instead of once per message.
     const mediaMemo = new Map<string, Promise<ContentBlock>>();
+    // Admission dedupes a mediaId only WITHIN one message, so one stored blob
+    // can be referenced once per queued message and the drain re-serializes
+    // its base64 into every referencing message's content — unbounded
+    // amplification of the bounded store. Budget the aggregate resolved bytes
+    // across the batch in queue order; references over budget degrade to the
+    // unavailable marker instead of materializing on the wire.
+    let drainMediaBudget = SESSION_MEDIA_MAX_DRAIN_BYTES;
     const items: Array<{
       messageId: string;
       displayText: string;
       content: ContentBlock[];
       mediaReferences?: SessionMediaReference[];
-    }> = await Promise.all(
-      drained.map(async (item) => {
+    }> = [];
+    try {
+      for (const item of drained) {
+        const planned: Array<ContentBlock | SessionMediaReference> = [];
+        let degraded = 0;
+        for (const block of item.content ?? []) {
+          if (isSessionMediaReference(block)) {
+            if (block.size > drainMediaBudget) {
+              degraded += 1;
+              continue;
+            }
+            drainMediaBudget -= block.size;
+          }
+          planned.push(block);
+        }
+        let resolvedBlocks: ContentBlock[];
+        let mediaReferences: SessionMediaReference[];
         try {
-          const mediaReferences = (item.content ?? []).filter(
+          resolvedBlocks = await entry.media.resolveContent(planned, mediaMemo);
+          mediaReferences = planned.filter(isSessionMediaReference);
+        } catch (error) {
+          // Only a gone/invalid reference degrades — per block, so one dead
+          // reference drops itself and keeps its siblings. Any other error
+          // (fd exhaustion, I/O failure) propagates instead of silently
+          // destroying the media of every message sharing the mediaId.
+          if (!(error instanceof SessionMediaReferenceError)) throw error;
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} degraded media for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          );
+          const perBlock = await entry.media.resolveContentDegrading(
+            planned,
+            mediaMemo,
+          );
+          resolvedBlocks = perBlock.resolvedBlocks;
+          mediaReferences = perBlock.retainedBlocks.filter(
             isSessionMediaReference,
           );
-          return {
-            messageId: item.messageId,
-            displayText: item.text,
-            content: [
-              ...(item.text
-                ? [{ type: 'text' as const, text: item.text }]
-                : []),
-              ...(await entry.media.resolveContent(
-                item.content ?? [],
-                mediaMemo,
-              )),
-            ],
-            ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
-          };
-        } catch (error) {
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} could not resolve media for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
-          );
-          return {
-            messageId: item.messageId,
-            displayText: item.text,
-            content: [
-              {
-                type: 'text' as const,
-                text: item.text
-                  ? `${item.text}\n[Attached media is no longer available]`
-                  : '[Attached media is no longer available]',
-              },
-            ],
-          };
+          degraded += perBlock.degraded;
         }
-      }),
-    );
+        let content: ContentBlock[] = [
+          ...(item.text ? [{ type: 'text' as const, text: item.text }] : []),
+          ...resolvedBlocks,
+        ];
+        if (degraded > 0) content = withMediaDegradationMarker(content);
+        items.push({
+          messageId: item.messageId,
+          displayText: item.text,
+          content,
+          ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
+        });
+      }
+    } catch (error) {
+      // Non-media resolution failure after the splice + settle above: the
+      // store still holds the bytes, so hand the messages back to the queue
+      // for the next drain instead of losing them, and take their ids back
+      // out of the settled ring so a same-id retry is not acked as already
+      // delivered.
+      const requeued = new Set(drained.map((queued) => queued.messageId));
+      const ring = entry.settledMidTurnMessageIds;
+      const kept = ring.filter((id) => !requeued.has(id));
+      ring.splice(0, ring.length, ...kept);
+      entry.midTurnMessageQueue.unshift(...drained);
+      writeStderrLine(
+        `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+      );
+      throw error;
+    }
     // Queue-only entries are private coordinator steering, not UI transcript.
     const echoed = drained.filter((item) => !item.queueOnly);
     const messages = drained.map((item) => item.text);

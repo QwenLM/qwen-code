@@ -110,7 +110,10 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
-import { SessionMediaStore } from './sessionMedia.js';
+import {
+  SESSION_MEDIA_MAX_TOTAL_BYTES,
+  SessionMediaStore,
+} from './sessionMedia.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -28139,6 +28142,213 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
+    await bridge.shutdown();
+  });
+
+  it('keeps resolvable siblings when one reference is removed before settle', async () => {
+    // The settle-time degrade must drop only the removed reference: the
+    // sibling the store still holds reaches the model instead of being
+    // swallowed by a wholesale marker.
+    const prompts: unknown[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(req.prompt);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      { sessionId: session.sessionId, prompt: [{ type: 'text', text: 't1' }] },
+      undefined,
+      { clientId: session.clientId },
+    );
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    const kept = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(1, 2),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    const removed = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(3, 4),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'two images',
+      { clientId: session.clientId },
+      'mixed-media',
+      { content: [removed, kept] },
+    );
+    await bridge.removeSessionMedia(session.sessionId, removed.mediaId, {
+      clientId: session.clientId,
+    });
+
+    releases[0]!();
+    await first;
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[1]).toEqual([
+      {
+        type: 'text',
+        text: 'two images\n[Attached media is no longer available]',
+      },
+      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+    ]);
+    releases[1]!();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
+  it('keeps a resolvable sibling when one reference dies between admission and dispatch', async () => {
+    const prompts: unknown[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(req.prompt);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'p1' }] },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-p1' },
+    );
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    const kept = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(1, 2),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    const removed = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(3, 4),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'm1',
+        { clientId: session.clientId },
+        'mid-m1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'mid-m1' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'm2',
+        { clientId: session.clientId },
+        'mid-m2',
+        { content: [removed, kept] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'mid-m2' });
+
+    releases[0]!();
+    await first;
+    // m1 promoted to running; m2 admitted queued behind it.
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+
+    await bridge.removeSessionMedia(session.sessionId, removed.mediaId, {
+      clientId: session.clientId,
+    });
+
+    releases[1]!();
+    await vi.waitFor(() => expect(prompts).toHaveLength(3));
+    // The dispatch-time degrade drops only the dead reference; the stored
+    // sibling still reaches the model.
+    expect(prompts[2]).toEqual([
+      {
+        type: 'text',
+        text: 'm2\n[Attached media is no longer available]',
+      },
+      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+    ]);
+    releases[2]!();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
+  it('rejects queued inline media past the session byte budget', async () => {
+    // Inline base64 never passes through the media store, so admission must
+    // budget the aggregate queued inline bytes per session instead of
+    // letting a full queue pin hundreds of MiB.
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const busy = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 't1' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const half = 'x'.repeat(SESSION_MEDIA_MAX_TOTAL_BYTES / 2 + 1024);
+    const inline = {
+      type: 'image',
+      data: half,
+      mimeType: 'image/png',
+    } as const;
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'first half',
+        { clientId: session.clientId },
+        'inline-1',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'inline-1' });
+    // The second payload pushes the queued inline total past the budget.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'second half',
+        { clientId: session.clientId },
+        'inline-2',
+        { content: [inline] },
+      ),
+    ).toEqual({ accepted: false });
+    // A small inline payload stays admissible under the budget.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'small',
+        { clientId: session.clientId },
+        'inline-3',
+        {
+          content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+        },
+      ),
+    ).toEqual({ accepted: true, messageId: 'inline-3' });
+
+    releases[0]!();
+    await busy;
     await bridge.shutdown();
   });
 

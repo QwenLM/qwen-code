@@ -70,7 +70,10 @@ import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
-import { SessionMediaStore } from './sessionMedia.js';
+import {
+  SESSION_MEDIA_MAX_ITEM_BYTES,
+  SessionMediaStore,
+} from './sessionMedia.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -3473,6 +3476,174 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(entry.midTurnMessageQueue).toEqual([]);
     expect(entry.settledMidTurnMessageIds).toEqual(['mid-expired', 'mid-ok']);
     expect(publish).toHaveBeenCalledOnce();
+  });
+
+  it('bounds aggregate resolved media per drain batch and degrades the excess', async () => {
+    // Admission dedupes a mediaId only within ONE message: the same stored
+    // blob referenced from every queued message used to be re-serialized
+    // into each message's content at drain, amplifying the bounded store
+    // into gigabytes of response. The drain must budget the aggregate
+    // resolved bytes across the batch and degrade the excess references.
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionMediaStore();
+    try {
+      const blob = new Uint8Array(SESSION_MEDIA_MAX_ITEM_BYTES).fill(7);
+      const refs = [
+        await media.put(blob, 'image/png'),
+        await media.put(blob, 'image/png'),
+        await media.put(blob, 'image/png'),
+      ];
+      const entry = {
+        sessionId: 'sess:budget',
+        midTurnMessageQueue: [
+          { messageId: 'mid-a', text: 'a', content: [...refs] },
+          { messageId: 'mid-b', text: 'b', content: [...refs] },
+        ],
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        media,
+      };
+      const client = makeClientWithEntry('sess:budget', entry);
+
+      const result = (await client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:budget',
+      })) as {
+        items: Array<{
+          content: Array<Record<string, unknown>>;
+          mediaReferences?: unknown[];
+        }>;
+      };
+
+      const [itemA, itemB] = result.items;
+      // Two 8 MiB references fit the 16 MiB drain budget; the third
+      // degrades to the marker (merged into the message text) while its
+      // fitting siblings survive.
+      expect(itemA?.content.filter((b) => b['type'] === 'image')).toHaveLength(
+        2,
+      );
+      expect(itemA?.content[0]).toEqual({
+        type: 'text',
+        text: 'a\n[Attached media is no longer available]',
+      });
+      expect(itemA?.mediaReferences).toEqual(refs.slice(0, 2));
+      // The second message arrives after the budget is spent: all of its
+      // references degrade.
+      expect(itemB?.content).toEqual([
+        {
+          type: 'text',
+          text: 'b\n[Attached media is no longer available]',
+        },
+      ]);
+      expect(itemB?.mediaReferences).toBeUndefined();
+    } finally {
+      await media.close();
+    }
+  });
+
+  it('requeues drained messages when media resolution fails with a non-media error', async () => {
+    // A transient fs error (fd exhaustion) must not silently degrade the
+    // media of every queued message: the store still holds the bytes, so the
+    // drain surfaces the error and hands the messages back for the next one.
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionMediaStore();
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
+      );
+    try {
+      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const entry = {
+        sessionId: 'sess:emfile',
+        midTurnMessageQueue: [
+          { messageId: 'mid-a', text: 'a', content: [reference] },
+          { messageId: 'mid-b', text: 'b' },
+        ],
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        media,
+      };
+      const client = makeClientWithEntry('sess:emfile', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile',
+        }),
+      ).rejects.toThrow('too many open files');
+      // Requeued for the next drain; the settled ring no longer claims the
+      // ids, and nothing was echoed to the browser.
+      expect(entry.midTurnMessageQueue.map((item) => item.messageId)).toEqual([
+        'mid-a',
+        'mid-b',
+      ]);
+      expect(entry.settledMidTurnMessageIds).toEqual([]);
+      expect(publish).not.toHaveBeenCalled();
+
+      // The retry drain re-reads the still-stored bytes and delivers both.
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile',
+        }),
+      ).resolves.toMatchObject({
+        items: [
+          {
+            messageId: 'mid-a',
+            content: [
+              { type: 'text', text: 'a' },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+          },
+          { messageId: 'mid-b', content: [{ type: 'text', text: 'b' }] },
+        ],
+      });
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
+  it('keeps a resolvable sibling when one reference is gone at drain', async () => {
+    // One dead reference must drop only itself, not the whole message's
+    // media: the sibling the store still holds reaches the child.
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionMediaStore();
+    try {
+      const live = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const gone = await media.put(Uint8Array.of(4, 5), 'image/png');
+      await media.remove(gone.mediaId);
+      const entry = {
+        sessionId: 'sess:mixed',
+        midTurnMessageQueue: [
+          { messageId: 'mid-mixed', text: 'mixed', content: [gone, live] },
+        ],
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        media,
+      };
+      const client = makeClientWithEntry('sess:mixed', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:mixed',
+        }),
+      ).resolves.toMatchObject({
+        items: [
+          {
+            messageId: 'mid-mixed',
+            content: [
+              {
+                type: 'text',
+                text: 'mixed\n[Attached media is no longer available]',
+              },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+            mediaReferences: [live],
+          },
+        ],
+      });
+    } finally {
+      await media.close();
+    }
   });
 
   it('does not publish an injected frame for anonymous steering', async () => {

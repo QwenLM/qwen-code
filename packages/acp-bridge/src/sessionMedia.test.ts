@@ -307,6 +307,56 @@ describe('SessionMediaStore', () => {
     }
   });
 
+  it('evicts a rejected memo entry so siblings and retries read again', async () => {
+    // A transient non-ENOENT read failure must not be cached in a shared
+    // memo: every message referencing the same mediaId would otherwise await
+    // the cached rejection although the store still holds the bytes.
+    const store = new SessionMediaStore();
+    const readFile = vi
+      .spyOn(fs, 'readFile')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
+      );
+    try {
+      const reference = await store.put(Uint8Array.of(9, 9), 'image/png');
+      const memo = new Map<string, Promise<ContentBlock>>();
+
+      await expect(store.resolveContent([reference], memo)).rejects.toThrow(
+        'too many open files',
+      );
+      // The failed entry must not stay cached: the next resolution re-reads
+      // from disk and succeeds.
+      await expect(store.resolveContent([reference], memo)).resolves.toEqual([
+        { type: 'image', data: 'CQk=', mimeType: 'image/png' },
+      ]);
+      expect(readFile).toHaveBeenCalledTimes(2);
+    } finally {
+      readFile.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('resolveContentDegrading drops only the unresolvable reference', async () => {
+    const store = new SessionMediaStore();
+    try {
+      const live = await store.put(Uint8Array.of(1, 2), 'image/png');
+      const gone = await store.put(Uint8Array.of(3, 4), 'image/png');
+      await store.remove(gone.mediaId);
+      const text = { type: 'text', text: 'both' } as ContentBlock;
+
+      const result = await store.resolveContentDegrading([text, gone, live]);
+
+      expect(result.degraded).toBe(1);
+      expect(result.retainedBlocks).toEqual([text, live]);
+      expect(result.resolvedBlocks).toEqual([
+        text,
+        { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('does not make byte accounting negative when close races put', async () => {
     let finishWrite: (() => void) | undefined;
     const write = vi.spyOn(fs, 'writeFile').mockImplementationOnce(

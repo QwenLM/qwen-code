@@ -359,6 +359,13 @@ export function useQueuedPrompts({
         );
         // Extract images from the server prompt's content field (if present)
         const serverImages = contentToImages(serverPrompt.content);
+        // A partially hydrated payload (a loss placeholder or a raw,
+        // unhydrated reference) must not upgrade a row: editing it would
+        // silently discard the attachments the daemon still holds. Only
+        // fully hydrated content restores images and clears summary-only.
+        const contentFullyHydrated =
+          !contentHasDegradedMedia(serverPrompt.content) &&
+          !contentHasUnhydratedMedia(serverPrompt.content);
         if (existingIndex !== -1) {
           if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
@@ -369,9 +376,12 @@ export function useQueuedPrompts({
             ...(next[existingIndex]!.payloadCompleteness === 'summary-only'
               ? { text: serverPrompt.text }
               : {}),
-            // Restore images from server content if local row doesn't have them
-            ...(serverImages && !next[existingIndex]!.images
-              ? { images: serverImages }
+            // Restore images from server content if local row doesn't have
+            // them; clearing summary-only makes the restored row editable.
+            ...(serverImages &&
+            contentFullyHydrated &&
+            !next[existingIndex]!.images
+              ? { images: serverImages, payloadCompleteness: undefined }
               : {}),
             midTurnState: undefined,
             midTurnMessageId: undefined,
@@ -419,13 +429,19 @@ export function useQueuedPrompts({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: serverPrompt.text,
-          ...(serverImages ? { images: serverImages } : {}),
+          ...(serverImages && contentFullyHydrated
+            ? { images: serverImages }
+            : {}),
           serverPromptId: serverPrompt.promptId,
           serverState: serverPrompt.state,
-          // A row rebuilt with hydrated images is payload-complete; pinning
-          // it to summary-only would disable editing until the user deletes
-          // (and loses) the attachments.
-          payloadCompleteness: serverImages ? undefined : 'summary-only',
+          // A row rebuilt with fully hydrated images is payload-complete;
+          // pinning it to summary-only would disable editing until the user
+          // deletes (and loses) the attachments. A partially hydrated
+          // payload stays summary-only so editing cannot silently discard
+          // the attachments the daemon still holds — a later fully hydrated
+          // refresh upgrades the row.
+          payloadCompleteness:
+            serverImages && contentFullyHydrated ? undefined : 'summary-only',
         });
       }
       if (areQueuedPromptsEqual(queuedPromptsRef.current, next)) return;
@@ -1406,13 +1422,13 @@ export function useQueuedPrompts({
               latestWorkspaceCwdRef.current !== targetWorkspaceCwd ||
               !targetSessionId
             ) {
-              // Nothing reached the daemon, so the draft is still ours to
-              // return: drop the admission and restore it to the current
-              // editor instead of leaking it across the session switch.
+              completionCallbacksRef.current.delete(midTurnMessageId);
+              const pendingAdmissionStillOwned =
+                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               if (!enqueueStarted) {
-                completionCallbacksRef.current.delete(midTurnMessageId);
-                const pendingAdmissionStillOwned =
-                  pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+                // Nothing reached the daemon, so the draft is still ours to
+                // return: restore it to the current editor instead of
+                // leaking it across the session switch.
                 if (pendingAdmissionStillOwned) {
                   restoreQueuedPromptsToEditor(
                     [pendingAdmission],
@@ -1422,6 +1438,11 @@ export function useQueuedPrompts({
                   reportError(error, t('queue.queueFailed'));
                 }
               }
+              // An enqueue already dispatched when the session changed may
+              // have reached the daemon: keep the uploaded media (a queued
+              // message may reference it) and drop only the admission, so
+              // its base64 payload is not pinned until reload and no stale
+              // row materializes when returning to the old session.
               return;
             }
             if (!enqueueStarted) {
