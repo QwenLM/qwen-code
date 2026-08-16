@@ -519,6 +519,11 @@ jobs:
           # runner workspace may be wiped.
           RWS="${RUNNER_WORKSPACE:?}"
           RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
+          # Mirror the WS strip: without realpath, a trailing slash would
+          # turn the allowlist pattern into "$RWS"//* and refuse the real
+          # workspace; "/" stripped empty would match every path instead.
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
           case "$WS" in
             "$RWS"/*) ;;
             *) echo "::error::refusing to wipe workspace outside the runner workspace: $WS"; exit 1 ;;

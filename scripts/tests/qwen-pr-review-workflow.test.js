@@ -2794,13 +2794,15 @@ describe('checkout self-heal', () => {
   // run spent six minutes trying to delete `/` before it was killed). So
   // `rm` is a PATH-fronted recorder: with the guard gone, the call log
   // shows the attempted delete and the test fails having deleted nothing.
-  // The trailing-slash variants pin the normalization: the case arms are
-  // exact matches, so `/home/` would otherwise slip past the guard. The
-  // dot-component and double-slash variants pin canonicalization: the kernel
-  // resolves them to the guarded roots (`/home/.` -> /home, `//usr` -> /usr),
-  // so the guard must resolve them the same way before matching. `/tmp` and
-  // `/opt` stand in for every root the denylist does not enumerate — only
-  // the runner-workspace allowlist refuses them.
+  // The trailing-slash variants pin the strip loop for the realpath-absent
+  // case: the case arms are exact matches, so `/home/` would otherwise slip
+  // past the guard. The dot-component and double-slash variants are the
+  // kernel-resolvable spellings of the guarded roots (`/home/.` -> /home,
+  // `//usr` -> /usr); they sit outside the allowlist root, so the allowlist
+  // refuses them whether canonicalization runs or not — the escape test
+  // below is what pins the realpath line itself. `/tmp` and `/opt` stand in
+  // for every root the denylist does not enumerate — only the
+  // runner-workspace allowlist refuses them.
   it('refuses suspicious workspace paths without invoking rm', () => {
     const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
     try {
@@ -2857,6 +2859,125 @@ describe('checkout self-heal', () => {
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an allowlist-escaping .. path via canonicalization', () => {
+    // The bad paths above all sit outside the recorder dir, so the allowlist
+    // refuses them identically whether canonicalization runs or not — they
+    // cannot pin the realpath line. This one string-matches "$RWS"/* but
+    // canonicalizes out of it, so only `realpath -m` can refuse it: with the
+    // line deleted, the raw path passes the allowlist and reaches rm
+    // (executed mutant: exit 0, canary in the call log).
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    const outside = mkdtempSync(join(tmpdir(), 'checkout-heal-outside-'));
+    mkdirSync(join(dir, 'sub'));
+    writeFileSync(join(outside, 'canary'), 'x');
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      writeFileSync(calls, '');
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          // Keep the '..' spelling raw — resolving it here would
+          // canonicalize the fixture away before the script sees it.
+          GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+          RUNNER_WORKSPACE: dir,
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  // Fronts PATH with a failing realpath so the script's `|| printf`
+  // fallback engages — the realpath-absent case the strip loops' comments
+  // justify themselves by.
+  const stubRealpath = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
+    writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'realpath'), 0o755);
+    return bin;
+  };
+
+  it('wipes a legitimate workspace despite a trailing-slash RUNNER_WORKSPACE when realpath is absent', () => {
+    // Without the RWS strip loop the allowlist pattern becomes "$RWS//*"
+    // and refuses the real workspace — the heal would degrade to a
+    // retry-without-wipe on exactly the runner this step exists for.
+    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-rws-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    const bin = stubRealpath();
+    try {
+      runWipe({
+        GITHUB_WORKSPACE: ws,
+        RUNNER_WORKSPACE: `${parent}/`,
+        PATH: `${bin}:${process.env.PATH}`,
+      }); // must not throw
+      expect(readdirSync(ws)).toEqual([]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when RUNNER_WORKSPACE resolves to /', () => {
+    // "/" strips to empty, and an empty RWS would degenerate the allowlist
+    // pattern to the match-all "/*" — so the strip loop refuses its own
+    // pathological input instead of weakening the guard.
+    const ws = mkdtempSync(join(tmpdir(), 'checkout-heal-root-rws-'));
+    try {
+      expect(() =>
+        runWipe(
+          { GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: '/' },
+          { stdio: 'pipe' },
+        ),
+      ).toThrow();
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when RUNNER_WORKSPACE is unset or empty', () => {
+    // The allowlist's own `:?` layer: an empty RWS would degenerate the
+    // pattern to the match-all "/*". Later layers also catch the degenerate
+    // expansion (realpath resolves '' to the cwd, and the strip loop refuses
+    // an empty result), so only the error text pins WHICH layer aborts — a
+    // dropped `:?` dies in the strip loop's refusal, which does not name the
+    // variable. The realpath stub engages the fallback axis, and the
+    // GITHUB_WORKSPACE test below aborts at the first `:?` before RWS is
+    // read, so this layer needs its own probe.
+    const ws = mkdtempSync(join(tmpdir(), 'checkout-heal-rws-empty-'));
+    const bin = stubRealpath();
+    try {
+      let stderr = '';
+      try {
+        runWipe(
+          {
+            GITHUB_WORKSPACE: ws,
+            RUNNER_WORKSPACE: '',
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          { stdio: 'pipe' },
+        );
+      } catch (err) {
+        stderr = String(err.stderr);
+      }
+      expect(stderr).toContain('RUNNER_WORKSPACE');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
     }
   });
 
