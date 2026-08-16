@@ -5189,17 +5189,6 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   const countOf = (haystack: string, needle: string): number =>
     haystack.split(needle).length - 1;
-  /** A cumulative findings file with one entry the verifier never ruled on. */
-  const findingsWithUnverifiedTag = (): string => {
-    const f = join(dir, 'qwen-review-findings-budget.md');
-    writeFileSync(
-      f,
-      '- **File:** src/pay.ts:42\n' +
-        '- **Issue:** off-by-one in the retry cap\n' +
-        '- **Severity:** Critical — [unverified]\n',
-    );
-    return f;
-  };
   const nit = (i: number): DeferredEntry => ({
     file: `f${i}.ts`,
     line: 1,
