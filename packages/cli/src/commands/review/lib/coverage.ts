@@ -54,7 +54,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import {
-  readTranscripts,
+  readRunTranscripts,
   wasGivenTheDiff,
   TranscriptsUnavailableError,
   type AgentRecord,
@@ -64,6 +64,8 @@ import {
   wasDeliveredVerbatim,
   briefPath,
   findingsPointerOf,
+  findingsFilePath,
+  recordedPromptPath,
 } from './prompt-record.js';
 import {
   requiredAgents,
@@ -82,6 +84,23 @@ export interface CoverageFromTranscripts {
   ok: boolean;
   /** How many subagent transcripts the harness wrote for this run. */
   agents: number;
+  /**
+   * Agents whose certified work came from an EARLIER attempt's session — a
+   * resumed run crediting the interrupted attempt's evidence. Zero on any run
+   * that never resumed; reading the prior directory grants nothing by itself.
+   *
+   * The bar is a STRICT SUBSET of the live credit bars, deliberately: a
+   * verbatim-delivered CLI prompt plus an opened brief or diff, with none of
+   * the drift rescues. Those rescues exist so a run is not made to relaunch
+   * agents over a normalized word — they protect work this run can still
+   * see. This number only reports how much a continuation reused, it caps
+   * nothing (compose-review renders it as a non-capping note), so it should
+   * under-claim rather than announce reuse the pairing cannot fully vouch
+   * for. Coverage itself still applies its own rescue-inclusive bars to the
+   * same records, so nothing is under-credited where credit decides
+   * anything.
+   */
+  recoveredAgents: number;
   /**
    * Chunk agents launched with a prompt that never named the diff.
    *
@@ -248,6 +267,16 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   return { plan, mtimeMs: statSync(path).mtimeMs };
 }
 
+/**
+ * How far apart the shard keys of ONE findings digest may be written.
+ *
+ * The round builder writes a digest's records in one pass, so they land within
+ * milliseconds; a previous list's records are a round apart at minimum. Wide
+ * enough to keep a slow write together, far narrower than the gap it must
+ * separate.
+ */
+const DIGEST_WINDOW_MS = 5000;
+
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
 export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
@@ -390,7 +419,22 @@ export function coverageFromTranscripts(
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
   const { plan, mtimeMs } = readPlan(planPath);
-  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  // The RUN's transcripts, not the session's: a resumed run (`--resume`)
+  // continues in a new session, and the interrupted attempt's evidence lives
+  // under the session id the run ledger recorded. Same fence (the plan's
+  // mtime), which a resume deliberately leaves untouched.
+  // `currentDirOptional`: a resumed continuation that recovered everything and
+  // launched nothing has no current-session dir yet (the harness creates it on
+  // the first launch), and this gate must read the prior attempt's evidence
+  // rather than refusing as broken infrastructure. Only ENOENT is absorbed.
+  const allRecords = readRunTranscripts(
+    planPath,
+    mtimeMs,
+    env,
+    plan.diffPathAbsolute,
+    { currentDirOptional: true },
+  );
+  const records = liveRecords(allRecords);
   const built = readRecordedPrompts(planPath);
 
   const blindAgents: string[] = [];
@@ -467,18 +511,40 @@ export function coverageFromTranscripts(
   // suppressed when ANOTHER record satisfies the same target — same chunk served
   // by a verbatim launch that opened the diff, or same built prompt delivered
   // verbatim to an agent that opened its brief.
-  const chunkSatisfied = (c: number, self: AgentRecord): boolean => {
+  // `only` narrows WHICH records may supersede. Left open (the default) for
+  // the gap and uncoverable walks, where any qualifying record is a genuine
+  // repair whichever attempt ran it; narrowed to the current session for the
+  // recovery COUNT — see `supersededByCurrent`.
+  const chunkSatisfied = (
+    c: number,
+    self: AgentRecord,
+    only: (r: AgentRecord) => boolean = () => true,
+  ): boolean => {
     const b = builtOf(`chunk-${c}`);
     if (b === undefined) return false;
     return records.some(
       (r) =>
         r !== self &&
+        only(r) &&
+        // A superseding record must have RETURNED. Current-session records
+        // with empty finalText stay in `records` for the idle checks, and
+        // without this a verbatim relaunch that read the diff once and died
+        // mid-flight (a) suppressed an honest `Uncoverable:` declaration and
+        // earned the chunk off the told-range presumption, (b) let two
+        // honest declarations of one chunk annihilate into `missingChunks`,
+        // and (c) silenced a prior attempt's `Budget gap:` disclosure as a
+        // "genuine repair" — three symptoms of the one missing requirement
+        // `certifies()` and `liveRecords()` already impose.
+        r.returned &&
         assignedChunk(r) === c &&
         wasDeliveredVerbatim(r.launchPrompt, b) &&
         r.diffToolCalls > 0,
     );
   };
-  const keySatisfied = (rec: AgentRecord): boolean => {
+  const keySatisfied = (
+    rec: AgentRecord,
+    only: (r: AgentRecord) => boolean = () => true,
+  ): boolean => {
     for (const key of built.keys()) {
       const b = builtOf(key);
       if (b === undefined) continue;
@@ -488,6 +554,9 @@ export function coverageFromTranscripts(
         records.some(
           (r) =>
             r !== rec &&
+            only(r) &&
+            // Same return requirement as the chunk branch above.
+            r.returned &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
             r.successfulCallArgs.some((a) => a.includes(needle)),
         )
@@ -499,6 +568,26 @@ export function coverageFromTranscripts(
   };
   const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
     chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
+  /**
+   * Was this prior-session record's obligation redone in THIS session?
+   *
+   * The recovery count answers "what work did this run reuse", so only a
+   * current-session relaunch supersedes: two prior records that both clear the
+   * bar — a whiff-relaunch inside the interrupted attempt, say — otherwise
+   * supersede EACH OTHER and both vanish from the count, while coverage still
+   * credits their chunk. The continuity note would then under-report work the
+   * same report simultaneously counts as reviewed, which on a single-chunk
+   * plan means the recovered work appears nowhere at all.
+   */
+  const supersededByCurrent = (
+    rec: AgentRecord,
+    chunk: number | null,
+  ): boolean => {
+    const current = (r: AgentRecord): boolean => r.fromPriorSession !== true;
+    return chunk !== null
+      ? chunkSatisfied(chunk, rec, current)
+      : keySatisfied(rec, current);
+  };
 
   // Parsed once per record: the gap scan also feeds the supersession check
   // below, and the parse is not free on a long return.
@@ -521,6 +610,10 @@ export function coverageFromTranscripts(
       return records.some(
         (r) =>
           r !== rec &&
+          // Returned, like every superseding record: an empty return has no
+          // gaps BECAUSE it has nothing at all, and reading that as a
+          // gap-free repair silences the disclosure it never addressed.
+          r.returned &&
           assignedChunk(r) === chunk &&
           wasDeliveredVerbatim(r.launchPrompt, b) &&
           r.diffToolCalls > 0 &&
@@ -538,6 +631,7 @@ export function coverageFromTranscripts(
         records.some(
           (r) =>
             r !== rec &&
+            r.returned &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
             r.successfulCallArgs.some((a) => a.includes(needle)) &&
             gapsOf(r).length === 0,
@@ -695,7 +789,26 @@ export function coverageFromTranscripts(
 
     const u = UNCOVERABLE_RE.exec(rec.finalText);
     if (u && chunk !== null && Number(u[1]) === chunk) {
-      uncoverable.add(chunk);
+      // The same supersession guard the sibling flags carry. Without it a
+      // stale declaration — a prior attempt's agent on a resumed run, or a
+      // relaunched agent's first try — permanently deletes live coverage
+      // below (`for (const id of uncoverable) covered.delete(id)` is
+      // post-loop and order-independent), so no compliant relaunch can ever
+      // clear it and the verdict caps on lines this run demonstrably read.
+      //
+      // Narrowed to records that do not THEMSELVES declare this chunk: a
+      // returned declarer clears `chunkSatisfied`'s bar (verbatim launch,
+      // diff read), so two honest declarations otherwise annihilate each
+      // other — the chunk lands in `missingChunks`, whose remediation
+      // relaunches an agent that re-declares, forever. `gapsSuperseded`
+      // below excludes same-shape records for exactly this reason.
+      const redeclares = (r: AgentRecord): boolean => {
+        const ru = UNCOVERABLE_RE.exec(r.finalText);
+        return ru !== null && Number(ru[1]) === chunk;
+      };
+      if (!chunkSatisfied(chunk, rec, (r) => !redeclares(r))) {
+        uncoverable.add(chunk);
+      }
       continue;
     }
 
@@ -958,6 +1071,67 @@ export function coverageFromTranscripts(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
 
+  // Prior-attempt records that clear the SAME certification bar as a live
+  // launch — the resumed run's recovered work. The bar is deliberately the
+  // pairing predicates above, not "the file existed": a fabricated ledger
+  // entry can point the reader at a directory, but only a harness transcript
+  // whose launch verbatim-contains a CLI-built prompt and shows the brief or
+  // the diff actually opened earns a count here.
+  const certifies = (r: AgentRecord): boolean => {
+    // Same bar as the coverage walk: a prior agent that never returned did
+    // not finish, so it is not recovered work either — and "returned" means
+    // terminal text, not progress narrated between tool calls.
+    if (!r.returned) return false;
+    // A record whose own return declares ITS OWN chunk unreachable did not
+    // review it; counting it as recovered would have the body announce work
+    // "counted as reviewed" beside the gap that same record disclosed. The
+    // veto is chunk-scoped like the walk's: applied raw it also matches a
+    // QUOTATION, and a recovered whole-diff auditor legitimately quotes the
+    // declarations it audited.
+    const declaredUnc = UNCOVERABLE_RE.exec(r.finalText);
+    if (declaredUnc !== null) {
+      const own = assignedChunk(r);
+      if (own !== null && Number(declaredUnc[1]) === own) return false;
+      if (own === null && r.diffToolCalls > 0 && assignedChunk(r) === null) {
+        // A whole-diff record quoting a declaration is not declaring.
+      }
+    }
+    const c = assignedChunk(r);
+    if (c !== null) {
+      const b = builtOf(`chunk-${c}`);
+      return (
+        b !== undefined &&
+        wasDeliveredVerbatim(r.launchPrompt, b) &&
+        r.diffToolCalls > 0
+      );
+    }
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined) continue;
+      if (wasDeliveredVerbatim(r.launchPrompt, b) && openedBriefOf(r, key)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  // NOT pushed through `disclose()`: that channel caps (compose-review folds
+  // every disclosure into the unreviewed-dimension cap and the "Not
+  // reviewed:" rendering), and recovered work is the OPPOSITE of a gap — a
+  // capping entry here would downgrade every clean resumed run to COMMENT,
+  // permanently, since the prior records never leave the ledger.
+  // compose-review reads the count off this report and renders its own
+  // non-capping continuity note, beside the other disclosed-but-not-capping
+  // blocks (deferred lint, test-plan notes).
+  const recoveredAgents = records.filter(
+    (r) =>
+      r.fromPriorSession &&
+      certifies(r) &&
+      // Not if a CURRENT record already satisfied the same obligation: the
+      // count is what the continuity note reports, and announcing recovery
+      // for superseded work would misdescribe what this run reused.
+      !supersededByCurrent(r, assignedChunk(r)),
+  ).length;
+
   return {
     ok:
       blindAgents.length === 0 &&
@@ -972,6 +1146,7 @@ export function coverageFromTranscripts(
       uncoverable.size === 0 &&
       missingChunks.length === 0,
     agents: records.length,
+    recoveredAgents,
     blindAgents,
     idleAgents,
     unopenedAgents,
@@ -1306,6 +1481,37 @@ export interface VerificationReport {
 }
 
 /**
+ * Drop a PRIOR attempt's agents that never returned.
+ *
+ * A session that died mid-flight left records whose findings never existed:
+ * the agent opened its brief, said nothing, and the process went away. Such a
+ * record still carries a recorded prompt and an opened brief, which is the
+ * whole of the Step 4/5 delivery floor — so left in, it certifies a
+ * verification nobody performed. An empty return in the CURRENT session is a
+ * different thing entirely: an agent still running, which the idle checks own.
+ *
+ * Every CERTIFYING gate goes through here — coverage and the Step 4/5
+ * floor. Two run-scoped readers do not call this helper but enforce the
+ * same `returned` requirement at their own sites: the layer-audit
+ * corroboration filter and the retirement scheduler's classify pipeline.
+ * The earlier premise for exempting them — "an empty return already
+ * contributes nothing" — was true only of EMPTY returns: `returned ===
+ * false` also covers non-empty narration followed by tool traffic, and a
+ * died-mid-flight auditor's receipt-shaped narration corroborated layers
+ * and retired chunks through both readers. Their filters are pinned in
+ * their own suites; this note exists so the next reader does not
+ * reintroduce the exemption on the old premise.
+ */
+function liveRecords(all: AgentRecord[]): AgentRecord[] {
+  // `returned`, not merely non-empty: `finalText` keeps the last non-empty
+  // assistant text, which includes progress narrated between tool calls — an
+  // agent that opened its inputs, said "reading the diff now…" and died
+  // carries plausible text that certifies nothing. A record with tool
+  // traffic after its text never returned.
+  return all.filter((r) => !(r.fromPriorSession && !r.returned));
+}
+
+/**
  * Did Step 4 (verify) and Step 5 (reverse audit) actually run, and read their
  * briefs?
  *
@@ -1337,7 +1543,13 @@ export function verificationGaps(
   env: NodeJS.ProcessEnv = process.env,
 ): VerificationReport {
   const { plan, mtimeMs } = readPlan(planPath);
-  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  // Run-scoped for the same reason as `coverageFromTranscripts`: a resumed
+  // run's Step 4/5 evidence may sit in the interrupted attempt's session dir.
+  const records = liveRecords(
+    readRunTranscripts(planPath, mtimeMs, env, plan.diffPathAbsolute, {
+      currentDirOptional: true,
+    }),
+  );
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];
   const remediation: string[] = [];
@@ -1410,6 +1622,61 @@ export function verificationGaps(
     return 'not-launched';
   };
 
+  /**
+   * Narrow a step's keys to the CURRENT findings digest.
+   *
+   * `verify--<digest>` is one key per shard per digest, and the records
+   * accumulate: a run that finds new Criticals writes a new digest's keys
+   * beside the old ones. Taking the best delivery across ALL of them let a
+   * verifier that succeeded against an EARLIER findings list satisfy the floor
+   * for a list it never opened — and widening the record set to prior sessions
+   * is what made that reachable in practice.
+   *
+   * The digest's own findings file dates it. Keys written together (the shards
+   * of one digest) land within the same moment, so the newest file plus a
+   * small window is the current set; anything older is a previous list's
+   * verification and does not vouch for this one. Keys with no findings file
+   * on disk stay in: they cannot be dated, and they also cannot reach `ok` —
+   * `deliveryOf` requires the findings read — so they can only make the
+   * verdict stricter.
+   */
+  const currentDigestKeys = (planPath: string, keys: string[]): string[] => {
+    // A key with no findings file is dated by its PROMPT RECORD instead —
+    // the `<key>.txt` the builder always writes. Dropping undatable keys
+    // whenever any dated key existed failed in the mirror direction: when
+    // the CURRENT digest's findings write failed (the documented
+    // `writeFindingsFile` → inline fallback), its keys were the undatable
+    // ones, the window kept the PREVIOUS round's dated cluster, and the
+    // floor passed `ok` on an earlier list's verifier — certifying a
+    // verification that never happened. The record file dates every built
+    // key, so the current generation stays in the window and a genuinely
+    // stale pointerless generation still falls out of it.
+    const dated: Array<{ key: string; mtimeMs: number }> = [];
+    const undatable: string[] = [];
+    for (const key of keys) {
+      try {
+        dated.push({
+          key,
+          mtimeMs: statSync(findingsFilePath(planPath, key)).mtimeMs,
+        });
+      } catch {
+        try {
+          dated.push({
+            key,
+            mtimeMs: statSync(recordedPromptPath(planPath, key)).mtimeMs,
+          });
+        } catch {
+          undatable.push(key);
+        }
+      }
+    }
+    if (dated.length === 0) return keys;
+    const newest = Math.max(...dated.map((d) => d.mtimeMs));
+    return dated
+      .filter((d) => d.mtimeMs >= newest - DIGEST_WINDOW_MS)
+      .map((d) => d.key);
+  };
+
   /** The best shape across a step's keys — the floor is one agent, not all of them. */
   const bestDelivery = (keys: string[]): Delivery => {
     if (keys.length === 0) return 'not-built';
@@ -1437,7 +1704,13 @@ export function verificationGaps(
   const reverseKeys = [...built.keys()].filter(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
-  const reverse = bestDelivery(reverseKeys);
+  // Narrowed to the current digest exactly like the verify floor below:
+  // reverse keys accumulate per round/digest the same way, and ranging over
+  // all of them let a round-1 auditor's delivered receipt satisfy the floor
+  // after the findings list changed and the current round's audit was never
+  // delivered — with the prior-session widening making that stale auditor
+  // reachable across attempts too.
+  const reverse = bestDelivery(currentDigestKeys(planPath, reverseKeys));
   // A TIME-budget stop marker means the round builder refused the reverse
   // audit on the run's time budget. Exactly ONE gap shape is then by design:
   // `not-built` — the refusal writes no record, so an audit with no records
@@ -1492,7 +1765,7 @@ export function verificationGaps(
     const verifyKeys = [...built.keys()].filter(
       (k) => k === 'verify' || k.startsWith('verify--'),
     );
-    verify = bestDelivery(verifyKeys);
+    verify = bestDelivery(currentDigestKeys(planPath, verifyKeys));
     if (verify !== 'ok') {
       unverifiedFindings = true;
       remediation.push(

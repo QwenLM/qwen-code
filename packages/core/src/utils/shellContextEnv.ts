@@ -69,6 +69,19 @@ function isUnusableScriptEntry(path: string): boolean {
   return unusable;
 }
 
+/**
+ * Does `identity` qualify exactly `model`?
+ *
+ * The qualified form is `<model>@<8 lowercase hex>`; an unqualified one is the
+ * bare model id. Anchored on the SUFFIX rather than split on `@`, because a
+ * model id may itself contain one (`vendor@2026-01`), and splitting on the
+ * first would compare the wrong halves.
+ */
+function identityDescribes(identity: string, model: string): boolean {
+  const head = /^(.*)@[0-9a-f]{8}$/.exec(identity)?.[1] ?? identity;
+  return head === model;
+}
+
 export function getShellContextEnvVars(): Record<string, string> {
   const env: Record<string, string> = {};
 
@@ -148,6 +161,24 @@ export function getShellContextEnvVars(): Record<string, string> {
     process.env['QWEN_CODE_MODEL'];
   if (model) {
     env['QWEN_CODE_MODEL'] = model;
+  }
+
+  // The same model qualified by WHERE it resolves (`<model>@<8-hex of
+  // authType+baseUrl>`), for consumers that must not treat one id exposed by
+  // two provider configurations as one model — /review's incremental anchor
+  // above all.
+  //
+  // The slot itself is process-global (Config republishes it beside the model
+  // on every change), so unlike the model above it cannot be keyed per
+  // session — and in daemon mode the global one belongs to whichever session
+  // last wrote it. Handing that to another session's subprocess would be
+  // worse than handing it nothing: a confidently WRONG identity passes a gate
+  // the bare id would have failed. So it rides only while it still describes
+  // the model resolved for THIS session, and a mismatch withholds it — the
+  // subprocess then falls back to the bare id, which is coarser but true.
+  const modelIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  if (modelIdentity && model && identityDescribes(modelIdentity, model)) {
+    env['QWEN_CODE_MODEL_IDENTITY'] = modelIdentity;
   }
 
   // For agent/prompt IDs: explicitly set empty string when no ALS context
