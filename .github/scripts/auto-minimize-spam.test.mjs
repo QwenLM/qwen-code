@@ -107,7 +107,10 @@ describe('auto-minimize-spam: event fast path', () => {
       jobGuard,
       /github\.event_name != 'pull_request_review_comment' \|\|/,
     );
-    assert.match(String(doc.concurrency.group), /comment\.node_id/);
+    assert.equal(
+      String(doc.concurrency.group),
+      "auto-minimize-spam-${{ github.event.comment.node_id || 'scan' }}",
+    );
     assert.equal(
       checkoutStep.with.ref,
       '${{ github.event.repository.default_branch }}',
@@ -129,10 +132,6 @@ describe('auto-minimize-spam: event fast path', () => {
       /ALL_CANDIDATES="\$\{EVENT_COMMENT_LOGIN\}"\$'\\t'"\$\{EVENT_COMMENT_NODE_ID\}"/,
     );
     assert.equal(
-      runMinimizableStateFilter({ data: { node: null } }),
-      '"missing"',
-    );
-    assert.equal(
       runMinimizableStateFilter({
         data: { node: { isMinimized: false } },
       }),
@@ -144,7 +143,13 @@ describe('auto-minimize-spam: event fast path', () => {
       }),
       'true',
     );
-    assert.match(minimizeStep.run, /\|\| printf 'missing'/);
+    assert.match(
+      minimizeStep.env?.LOOKBACK_HOURS,
+      /github\.event_name == 'push' && '72'/,
+    );
+    assert.match(minimizeStep.run, /if ! is_minimized="\$\(/);
+    assert.match(minimizeStep.run, /then\n\s+is_minimized="missing"\n\s+fi/);
+    assert.doesNotMatch(minimizeStep.run, /\|\| printf 'missing'/);
     assert.doesNotMatch(minimizeStep.run, /2>\/dev\/null/);
     assert.match(
       minimizeStep.run,

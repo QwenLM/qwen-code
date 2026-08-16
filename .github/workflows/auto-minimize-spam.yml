@@ -79,7 +79,7 @@ jobs:
       - name: 'Minimize comments from blocklisted users'
         env:
           GH_TOKEN: '${{ github.token }}'
-          LOOKBACK_HOURS: "${{ inputs.hours || '2' }}"
+          LOOKBACK_HOURS: "${{ inputs.hours || (github.event_name == 'push' && '72') || '2' }}"
           EVENT_COMMENT_LOGIN: '${{ github.event.comment.user.login }}'
           EVENT_COMMENT_NODE_ID: '${{ github.event.comment.node_id }}'
         run: |-
@@ -183,16 +183,17 @@ jobs:
             [ -z "$login" ] && continue
             login_lc="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
             if printf '%s\n' "$BLOCKED_USERS" | grep -qxF "$login_lc"; then
-              is_minimized="$(
+              if ! is_minimized="$(
                 gh api graphql -F id="$node_id" -f query="
                   query(\$id: ID!) {
                     node(id: \$id) {
                       ... on Minimizable { isMinimized }
                     }
                   }
-                " --jq 'if .data.node == null then "missing" else .data.node.isMinimized end' \
-                  || printf 'missing'
-              )"
+                " --jq 'if .data.node == null then "missing" else .data.node.isMinimized end'
+              )"; then
+                is_minimized="missing"
+              fi
               [ "$is_minimized" = "missing" ] && continue
               [ "$is_minimized" = "true" ] && continue
               MATCHED_IDS="${MATCHED_IDS}${node_id}"$'\n'
