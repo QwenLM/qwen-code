@@ -65,6 +65,7 @@ damage_truncate_pack() {
 damage_kill_head()      { rm -f "$WS/.git/HEAD"; }
 damage_leave_tmp_pack() { head -c 419430400 /dev/urandom > "$WS/.git/objects/pack/tmp_pack_dead"; }
 damage_index_lock()     { : > "$WS/.git/index.lock"; }
+damage_gitfile()        { rm -rf "$WS/.git.bak"; mv "$WS/.git" "$WS/.git.bak"; echo 'gitdir: /nowhere/.git/worktrees/x' > "$WS/.git"; }
 damage_none()           { :; }
 
 printf '%-30s %-10s %-8s %-12s %s\n' case wipe-rc ckout-rc bytes result | tee "$OUT/results.txt"
