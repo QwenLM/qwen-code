@@ -97,6 +97,58 @@ describe('TaskListTool', () => {
     expect(result.llmContent).not.toContain('Pending');
   });
 
+  it('lists tasks when optional filters are omitted', async () => {
+    const pending = await createTask(TEAM, {
+      subject: 'Pending task',
+      description: 'desc',
+    });
+    const running = await createTask(TEAM, {
+      subject: 'Running task',
+      description: 'desc',
+    });
+    await updateTask(TEAM, running.id, {
+      status: 'in_progress',
+      owner: 'worker',
+    });
+
+    const pendingResult = await tool
+      .build({ status: 'pending' })
+      .execute(new AbortController().signal);
+    const ownerResult = await tool
+      .build({ owner: 'worker' })
+      .execute(new AbortController().signal);
+
+    expect(pendingResult.llmContent).toContain(pending.subject);
+    expect(ownerResult.llmContent).toContain(running.subject);
+    expect(ownerResult.llmContent).not.toContain(pending.subject);
+  });
+
+  it('treats a blank owner filter as omitted', async () => {
+    const pending = await createTask(TEAM, {
+      subject: 'Pending task',
+      description: 'desc',
+    });
+
+    const result = await tool
+      .build({ status: 'pending', owner: '' })
+      .execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain(pending.subject);
+  });
+
+  it('treats a blank blockedBy filter as omitted', async () => {
+    const pending = await createTask(TEAM, {
+      subject: 'Pending task',
+      description: 'desc',
+    });
+
+    const result = await tool
+      .build({ status: 'pending', blockedBy: '' })
+      .execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain(pending.subject);
+  });
+
   it('returns TaskListResultDisplay', async () => {
     await createTask(TEAM, {
       subject: 'Task X',
