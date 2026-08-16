@@ -8,10 +8,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loadSettingsMock = vi.hoisted(() => vi.fn());
 const stderr = vi.hoisted(() => vi.fn());
+// The two writers are NOT interchangeable, so the mock must not make them so:
+// `writeStderrLine` throws what the underlying write throws, and
+// `writeStderrLineSafe` swallows it. Mapping both to one non-throwing spy
+// would mock away the exact distinction the degrade path depends on.
+const stderrSafe = vi.hoisted(() =>
+  vi.fn((message: string) => {
+    try {
+      stderr(message);
+    } catch {
+      /* the real safe writer swallows a failed write */
+    }
+  }),
+);
 vi.mock('../../../utils/stdioHelpers.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../../utils/stdioHelpers.js')>();
-  return { ...actual, writeStderrLine: stderr };
+  return {
+    ...actual,
+    writeStderrLine: stderr,
+    writeStderrLineSafe: stderrSafe,
+  };
 });
 vi.mock('../../../config/settings.js', async (importOriginal) => {
   const actual =
@@ -29,6 +46,7 @@ describe('operatorReviewSettings', () => {
   beforeEach(() => {
     loadSettingsMock.mockReset();
     stderr.mockReset();
+    stderrSafe.mockClear();
   });
 
   it('resolves from operator scopes only — a repository must not set review policy', () => {
@@ -128,6 +146,28 @@ describe('operatorReviewSettings', () => {
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('review settings could not be loaded'),
     );
+  });
+
+  it('survives a stderr that throws while announcing the degrade', () => {
+    // The degrade exists so a broken settings file cannot end a review. If it
+    // announces itself with the THROWING writer, the announcement can end the
+    // review instead — `process.stderr.write` throws on EPIPE or a closed fd,
+    // which is reachable whenever the reader goes away (`qwen … | head`) or a
+    // daemon redirects its stderr. Both failures at once is exactly the case
+    // this path was written for.
+    loadSettingsMock.mockImplementation(() => {
+      throw new Error('Error in /home/u/.qwen/settings.json: Unexpected token');
+    });
+    stderr.mockImplementation(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+    expect(() => operatorReviewSettings()).not.toThrow();
+    expect(operatorReviewSettings()).toEqual({
+      attribution: true,
+      comment: false,
+      effort: undefined,
+      reverseAuditRounds: undefined,
+    });
   });
 
   it('passes a real reverse-audit ceiling through as a number', () => {

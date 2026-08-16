@@ -5,7 +5,7 @@
  */
 
 import { loadSettings } from '../../../config/settings.js';
-import { writeStderrLine } from '../../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
 /** What every field reads as when the settings cannot be loaded at all. */
 const SAFE_DEFAULTS: OperatorReviewSettings = {
@@ -65,7 +65,11 @@ export function operatorReviewSettings(): OperatorReviewSettings {
     review = loadSettings(undefined, { skipWorkspaceSettings: true }).merged
       .review;
   } catch (error) {
-    writeStderrLine(
+    // The SAFE writer, not the throwing one. `process.stderr.write` throws on
+    // EPIPE or a closed fd, and this NOTE is incidental to the degrade — a
+    // throw here would propagate out of the catch and end the review by the
+    // very path added to stop a broken settings file from ending it.
+    writeStderrLineSafe(
       `NOTE: review settings could not be loaded (${
         error instanceof Error ? error.message.split('\n')[0] : String(error)
       }); this review uses the defaults — attribution on, no auto-posting, no ` +
