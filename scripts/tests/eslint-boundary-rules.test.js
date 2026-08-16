@@ -20,7 +20,6 @@ const eslint = new ESLint({ cwd: repoRoot });
 const RULE_ID = 'qwen-boundary/no-serve-boundary-cross';
 const ACP_FIXTURE = 'packages/cli/src/acp-integration/boundary-fixture.ts';
 const RUNTIME_FIXTURE = 'packages/cli/src/runtime/boundary-fixture.ts';
-const UTILS_FIXTURE = 'packages/cli/src/utils/boundary-fixture.ts';
 
 const lintCliFile = (filePath, code) =>
   eslint.lintText(code, { filePath: path.join(repoRoot, filePath) });

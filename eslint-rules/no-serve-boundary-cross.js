@@ -131,6 +131,10 @@ export default {
       // normalized form or C0-prefixed data:/file: URLs slip past it.
       const normalized = raw.replace(/[\t\n\r]/g, '').replace(/\\/g, '/');
       const trimmed = normalized.replace(
+        // The C0-control range is deliberate: it mirrors the WHATWG URL
+        // parser's edge stripping, which is exactly what scheme detection
+        // must reproduce here.
+        // eslint-disable-next-line no-control-regex
         /^[\u0000-\u0020]+|[\u0000-\u0020]+$/g,
         '',
       );
