@@ -154,9 +154,11 @@ Deterministic extraction, no model involvement:
   `![alt](url)`, `<img src="url">`, and bare image URLs.
 - Host allowlist (https only): `github.com/user-attachments/`,
   `user-images.githubusercontent.com`,
-  `private-user-images.githubusercontent.com`, `raw.githubusercontent.com`,
-  `camo.githubusercontent.com`. Anything else is ignored — the release
-  body must never become a hotlinking vector.
+  `private-user-images.githubusercontent.com`, `raw.githubusercontent.com`.
+  Anything else is ignored — the release body must never become a hotlinking
+  vector. The camo image proxy is deliberately not allowed even though GitHub
+  serves it: its HMAC signs arbitrary external URLs without repository
+  binding, so admitting it would re-admit every excluded host.
 - First two matches per entry; first eight images per release; images render
   only under digest items (never in the collapsed appendix).
 
@@ -188,7 +190,8 @@ visible in the Actions run without failing the release.
   emitted at `##` so the demotion lands it at `###`, the same sibling rank
   v1's `## Complete Change List` reaches, keeping one skeleton across v1/v2
   releases in the same file,
-- drops image lines,
+- drops image lines and the `---` divider that precedes the Chinese
+  digest (release-page chrome),
 - otherwise applies the existing heading demotion.
 
 v1 bodies keep today's verbatim embedding.

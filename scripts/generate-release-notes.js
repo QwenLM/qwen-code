@@ -40,12 +40,14 @@ const CATCH_ALL_THEME_TITLE = 'Other Changes';
 const CATCH_ALL_THEME_TITLE_ZH = '其他变更';
 // Release bodies render remote images, so only hosts whose content GitHub
 // already serves for repository PRs may appear; anything else is dropped.
+// camo is excluded even though GitHub serves it: its HMAC signs arbitrary
+// external URLs without repository binding, so admitting it would re-admit
+// every host this list exists to exclude.
 const IMAGE_HOST_ALLOWLIST = [
   'github.com/user-attachments/',
   'user-images.githubusercontent.com/',
   'private-user-images.githubusercontent.com/',
   'raw.githubusercontent.com/',
-  'camo.githubusercontent.com/',
 ];
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g;
 // Quoted HTML attributes legally allow whitespace and Markdown
@@ -226,27 +228,31 @@ export function extractImages(
   body,
   { maxPerEntry = MAX_IMAGES_PER_ENTRY } = {},
 ) {
+  const text = body || '';
+  const candidates = [];
+  for (const match of text.matchAll(MARKDOWN_IMAGE_RE)) {
+    candidates.push({ index: match.index, url: match[2], alt: match[1] });
+  }
+  for (const match of text.matchAll(HTML_IMAGE_RE)) {
+    candidates.push({ index: match.index, url: match[1], alt: '' });
+  }
+  for (const match of text.matchAll(BARE_IMAGE_URL_RE)) {
+    candidates.push({ index: match.index, url: match[1], alt: '' });
+  }
+  // Apply the cap in body order, not syntax-group order, so a leading <img>
+  // screenshot is not dropped in favor of later markdown images.
+  candidates.sort((a, b) => a.index - b.index);
   const images = [];
   const seen = new Set();
-  const push = (url, alt) => {
+  for (const { url, alt } of candidates) {
     if (images.length >= maxPerEntry || seen.has(url)) {
-      return;
+      continue;
     }
     if (!isAllowedImageUrl(url)) {
-      return;
+      continue;
     }
     seen.add(url);
     images.push({ url, alt: alt.replace(/\s+/g, ' ').trim() });
-  };
-  const text = body || '';
-  for (const match of text.matchAll(MARKDOWN_IMAGE_RE)) {
-    push(match[2], match[1]);
-  }
-  for (const match of text.matchAll(HTML_IMAGE_RE)) {
-    push(match[1], '');
-  }
-  for (const match of text.matchAll(BARE_IMAGE_URL_RE)) {
-    push(match[1], '');
   }
   return images;
 }
@@ -263,6 +269,8 @@ function validateModelText(value, label, maxLength) {
     /[<>]/.test(text) ||
     /&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);/i.test(text) ||
     /\[[^\]]*\]\([^)]*\)/.test(text) ||
+    // Reference definitions arm shortcut links in sibling model-text fields.
+    /^\[[^\]]*\]:/.test(text) ||
     /https?:\/\//i.test(text) ||
     /\bwww\.[^\s]+/i.test(text) ||
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text) ||
@@ -270,7 +278,9 @@ function validateModelText(value, label, maxLength) {
     /(^|[^\w])#\d+\b/.test(text) ||
     /(\*\*|__|`)/.test(text) ||
     /^#/.test(text) ||
-    /^-{3,}$/.test(text)
+    /^([-_*])( *\1){2,}$/.test(text) ||
+    /^[-*+]\s/.test(text) ||
+    /^\d{1,3}[.)]\s/.test(text)
   ) {
     throw new Error(`${label} must be plain text without links or HTML.`);
   }
@@ -979,7 +989,7 @@ export function renderReleaseNotesV2({
     for (const entry of breaking) {
       lines.push(renderChangeLine(entry, displaySummary(entry.number)));
       const zh = summariesZh.get(entry.number);
-      if (zh) {
+      if (zh && zh !== displaySummary(entry.number)) {
         lines.push(`  - ${zh}`);
       }
     }
@@ -1049,7 +1059,10 @@ export function renderReleaseNotesV2({
         theme.titleZh !== theme.title ||
         (theme.introZh !== '' && theme.introZh !== theme.intro),
     ) ||
-    [...renderedItemNumbers].some((number) => summariesZh.has(number));
+    [...renderedItemNumbers].some((number) => {
+      const zh = summariesZh.get(number);
+      return zh !== undefined && zh !== displaySummary(number);
+    });
   if (hasChinese) {
     lines.push('---', '', '## 中文摘要', '');
     if (highlights.length > 0) {

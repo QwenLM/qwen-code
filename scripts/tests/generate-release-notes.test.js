@@ -210,12 +210,14 @@ describe('isAllowedImageUrl', () => {
     'https://user-images.githubusercontent.com/1/x.png',
     'https://private-user-images.githubusercontent.com/1/x.png',
     'https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/x.png',
-    'https://camo.githubusercontent.com/dead/beef',
   ])('accepts %s', (url) => {
     expect(isAllowedImageUrl(url)).toBe(true);
   });
 
   it.each([
+    // camo signs arbitrary external URLs with a deployment-wide key, so it
+    // would re-admit every host the allowlist exists to exclude.
+    'https://camo.githubusercontent.com/dead/beef',
     'http://github.com/user-attachments/assets/abc',
     'https://evil.example.com/github.com/user-attachments/assets/abc',
     'https://evil.example.com/x.png',
@@ -248,6 +250,22 @@ describe('extractImages', () => {
         url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/after.png',
         alt: '',
       },
+    ]);
+  });
+
+  it('applies the per-entry cap in body order across syntaxes', () => {
+    const body = [
+      '<img src="https://user-images.githubusercontent.com/9/before.png" width="400">',
+      `![After 1](${ATTACHMENT})`,
+      `![After 2](${ATTACHMENT_2})`,
+    ].join('\n');
+
+    expect(extractImages(body)).toEqual([
+      {
+        url: 'https://user-images.githubusercontent.com/9/before.png',
+        alt: '',
+      },
+      { url: ATTACHMENT, alt: 'After 1' },
     ]);
   });
 
@@ -480,6 +498,9 @@ describe('renderReleaseNotesV2', () => {
     });
 
     expect(markdown.match(/^ {2}!\[/gm)).toHaveLength(8);
+    // The degraded-release shape keeps its user-visible placeholders.
+    expect(markdown).toContain('_See the complete change list below._');
+    expect(markdown).toContain('No known breaking changes.');
     expect(markdown).toContain(
       '![Screenshot from pull request 1](https://github.com/user-attachments/assets/a1)',
     );
@@ -520,6 +541,39 @@ describe('renderReleaseNotesV2', () => {
     expect(markdown).not.toContain('## 中文摘要');
     expect(markdown).not.toContain('\n---\n');
     expect(markdown).not.toContain('  - Removes the legacy v1 API endpoint.');
+  });
+
+  it('omits the Chinese block when Chinese summaries only echo English', () => {
+    const markdown = renderReleaseNotesV2({
+      ...base,
+      summariesZh: new Map([[1, 'Upload workspace files from the composer.']]),
+      highlights: base.highlights.map((highlight) => ({
+        ...highlight,
+        textZh: highlight.text,
+      })),
+      themes: themes.map((theme) => ({
+        ...theme,
+        titleZh: theme.title,
+        introZh: '',
+      })),
+    });
+
+    expect(markdown).not.toContain('## 中文摘要');
+  });
+
+  it('omits the breaking sub-line when the Chinese summary echoes English', () => {
+    const markdown = renderReleaseNotesV2({
+      ...base,
+      summariesZh: new Map([[4, 'Removes the legacy v1 API endpoint.']]),
+      highlights: [],
+      themes: [],
+    });
+
+    expect(markdown).toContain(
+      `Removes the legacy v1 API endpoint. ([#4](${PR(4)})) by @alice`,
+    );
+    expect(markdown).not.toContain('  - Removes the legacy v1 API endpoint.');
+    expect(markdown).not.toContain('## 中文摘要');
   });
 
   it('normalizes fallback titles in digest items like the appendix does', () => {
@@ -760,7 +814,9 @@ describe('generateAiContent themes', () => {
   });
 
   it('drops intros that would inject Markdown structure', async () => {
-    const entries = [entry(1, 'feat: one'), entry(2, 'feat: two')];
+    const entries = [1, 2, 3, 4, 5, 6].map((number) =>
+      entry(number, `feat: change ${number}`),
+    );
 
     const result = await generateAiContent(
       entries,
@@ -779,12 +835,48 @@ describe('generateAiContent themes', () => {
           introZh: '',
           items: [2],
         },
+        {
+          title: 'C',
+          titleZh: '丙',
+          // A reference definition arms shortcut links in sibling fields.
+          intro: '[click]: //evil.example/phish',
+          introZh: '',
+          items: [3],
+        },
+        {
+          title: 'D',
+          titleZh: '丁',
+          intro: '- - -',
+          introZh: '',
+          items: [4],
+        },
+        {
+          title: 'E',
+          titleZh: '戊',
+          intro: '- nested list item',
+          introZh: '',
+          items: [5],
+        },
+        {
+          title: 'F',
+          titleZh: '己',
+          intro: '1. numbered list item',
+          introZh: '',
+          items: [6],
+        },
       ]),
     );
 
-    expect(result.themes.map((theme) => theme.intro)).toEqual(['', '']);
+    expect(result.themes.map((theme) => theme.intro)).toEqual([
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+    ]);
     expect(result.warnings).toEqual([
-      'Theme intro fallback for 2 theme field(s); the intro was dropped.',
+      'Theme intro fallback for 6 theme field(s); the intro was dropped.',
     ]);
   });
 

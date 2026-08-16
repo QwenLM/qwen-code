@@ -351,6 +351,8 @@ describe('formatRelease', () => {
     expect(block).not.toContain('</details>');
     expect(block).not.toContain('<summary>');
     expect(block).not.toContain('user-attachments');
+    // The release-page divider before the Chinese block is release chrome.
+    expect(block).not.toContain('\n---\n');
     expect(block).not.toContain('qwen-release-notes:v2');
   });
 });

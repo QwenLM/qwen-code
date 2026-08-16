@@ -148,13 +148,16 @@ export function formatEntry(entry, cat = categorize(entry.title)) {
  * Per-line adjustments applied before the heading demotion. v1 notes embed
  * verbatim; v2 notes are a digest with a collapsed appendix and inline
  * screenshots, and the changelog keeps the text while unwrapping the
- * collapse and dropping the images.
+ * collapse and dropping the images and the Chinese-digest divider.
  */
 export function transformCuratedLine(line, version) {
   if (version < 2) {
     return [line];
   }
   if (/^\s*!\[[^\]]*\]\(/.test(line)) {
+    return [];
+  }
+  if (/^\s*---\s*$/.test(line)) {
     return [];
   }
   if (/^\s*<\/?details>\s*$/.test(line)) {
