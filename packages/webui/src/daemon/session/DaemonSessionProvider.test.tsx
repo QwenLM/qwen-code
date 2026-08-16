@@ -4109,7 +4109,10 @@ describe('DaemonSessionProvider', () => {
               update: {
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: 'retained tail' },
-                _meta: { 'qwen.session.recordId': 'record-retained' },
+                _meta: {
+                  'qwen.session.recordId': 'record-retained',
+                  qwenTranscript: { sourceRecordIds: ['record-retained'] },
+                },
               },
             },
           },
@@ -4119,9 +4122,12 @@ describe('DaemonSessionProvider', () => {
       events: async function* liveDiagnostics(
         opts: { signal?: AbortSignal } = {},
       ) {
+        // LIMIT-2 live events so the post-merge total (live + the two
+        // fresh history entries, the overlap deduped away) lands exactly
+        // on the cap without newest-wins eviction.
         for (
           let index = 0;
-          index < UNRECOGNIZED_DIAGNOSTICS_LIMIT - 1;
+          index < UNRECOGNIZED_DIAGNOSTICS_LIMIT - 2;
           index++
         ) {
           if (index === 0) {
@@ -4132,7 +4138,13 @@ describe('DaemonSessionProvider', () => {
               data: {
                 update: {
                   sessionUpdate: 'mystery_kind_from_newer_daemon_overlap',
-                  _meta: { 'qwen.session.recordId': 'record-overlap' },
+                  // Production replay frames stamp BOTH keys (acp-bridge
+                  // buildUpdateMeta); the normalizer's dedupe reads
+                  // qwenTranscript.sourceRecordIds.
+                  _meta: {
+                    'qwen.session.recordId': 'record-overlap',
+                    qwenTranscript: { sourceRecordIds: ['record-overlap'] },
+                  },
                 },
               },
             };
@@ -4168,7 +4180,10 @@ describe('DaemonSessionProvider', () => {
           data: {
             update: {
               sessionUpdate: `mystery_kind_from_newer_daemon_${id}`,
-              _meta: { 'qwen.session.recordId': `record-old-${id}` },
+              _meta: {
+                'qwen.session.recordId': `record-old-${id}`,
+                qwenTranscript: { sourceRecordIds: [`record-old-${id}`] },
+              },
             },
           },
         })),
@@ -4179,7 +4194,10 @@ describe('DaemonSessionProvider', () => {
           data: {
             update: {
               sessionUpdate: 'mystery_kind_from_newer_daemon_overlap',
-              _meta: { 'qwen.session.recordId': 'record-overlap' },
+              _meta: {
+                'qwen.session.recordId': 'record-overlap',
+                qwenTranscript: { sourceRecordIds: ['record-overlap'] },
+              },
             },
           },
         },
@@ -4207,7 +4225,7 @@ describe('DaemonSessionProvider', () => {
 
     expect(history?.hasMore).toBe(true);
     await vi.waitFor(() =>
-      expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT - 1),
+      expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT - 2),
     );
 
     await act(async () => {
@@ -4215,11 +4233,24 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
+    // Merge order: history entries first (older), then the live ones; the
+    // page's duplicate of the live overlap record is deduped away, so the
+    // two fresh history entries plus the live stream land exactly on the
+    // cap.
     expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT);
     expect(diagnostics[0]).toEqual(
-      expect.objectContaining({ debugReason: 'unrecognized_session_update' }),
+      expect.objectContaining({
+        debugReason: 'unrecognized_session_update',
+        sourceRecordIds: ['record-old-1'],
+      }),
     );
     expect(diagnostics[1]).toEqual(
+      expect.objectContaining({
+        debugReason: 'unrecognized_session_update',
+        sourceRecordIds: ['record-old-2'],
+      }),
+    );
+    expect(diagnostics[2]).toEqual(
       expect.objectContaining({
         debugReason: 'unrecognized_session_update',
         sourceRecordIds: ['record-overlap'],
@@ -4235,7 +4266,7 @@ describe('DaemonSessionProvider', () => {
         entry.sourceRecordIds?.includes('record-old-1'),
       ),
     ).toHaveLength(1);
-    expect(diagnostics[2]).toEqual(
+    expect(diagnostics[3]).toEqual(
       expect.objectContaining({ debugReason: 'unrecognized_event' }),
     );
   });
