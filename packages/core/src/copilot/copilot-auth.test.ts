@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  statSync,
+  readFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspect } from 'node:util';
@@ -9,6 +15,7 @@ import {
   exchangeGhuForCapi,
   createCopilotTokenManager,
   runCopilotDeviceFlow,
+  persistGithubToken,
 } from './copilot-auth.js';
 
 describe('parseProxyEp', () => {
@@ -98,6 +105,81 @@ describe('discoverGithubToken', () => {
     );
     const result = await discoverGithubToken({ overridePath: file });
     expect(result.token).toBe('ghu_VSCODE1234');
+  });
+});
+
+describe('persistGithubToken', () => {
+  let tempDir: string;
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'copi-hosts-'));
+  });
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('writes token to hosts.json under Copilot client ID key', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    await persistGithubToken('ghu_test123', { hostsFilePath: hostsFile });
+    const raw = readFileSync(hostsFile, 'utf-8');
+    const parsed = JSON.parse(raw);
+    expect(parsed['github.com:Iv1.b507a08c87ecfe98'].oauth_token).toBe(
+      'ghu_test123',
+    );
+  });
+
+  it('preserves existing entries when writing', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    writeFileSync(
+      hostsFile,
+      JSON.stringify({ 'github.com:other-app': { oauth_token: 'existing' } }),
+    );
+    await persistGithubToken('ghu_test456', { hostsFilePath: hostsFile });
+    const raw = readFileSync(hostsFile, 'utf-8');
+    const parsed = JSON.parse(raw);
+    expect(parsed['github.com:other-app'].oauth_token).toBe('existing');
+    expect(parsed['github.com:Iv1.b507a08c87ecfe98'].oauth_token).toBe(
+      'ghu_test456',
+    );
+  });
+
+  it('updates existing Copilot entry in place', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    writeFileSync(
+      hostsFile,
+      JSON.stringify({
+        'github.com:Iv1.b507a08c87ecfe98': { oauth_token: 'ghu_old' },
+      }),
+    );
+    await persistGithubToken('ghu_new', { hostsFilePath: hostsFile });
+    const raw = readFileSync(hostsFile, 'utf-8');
+    const parsed = JSON.parse(raw);
+    expect(parsed['github.com:Iv1.b507a08c87ecfe98'].oauth_token).toBe(
+      'ghu_new',
+    );
+  });
+
+  it('sets file permissions to 0o600', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    await persistGithubToken('ghu_perm', { hostsFilePath: hostsFile });
+    const st = statSync(hostsFile);
+    expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  it('creates parent directory if missing', async () => {
+    const hostsFile = join(tempDir, 'sub', 'dir', 'hosts.json');
+    await persistGithubToken('ghu_mkdir', { hostsFilePath: hostsFile });
+    const raw = readFileSync(hostsFile, 'utf-8');
+    const parsed = JSON.parse(raw);
+    expect(parsed['github.com:Iv1.b507a08c87ecfe98'].oauth_token).toBe(
+      'ghu_mkdir',
+    );
+  });
+
+  it('persisted token is discoverable by discoverGithubToken', async () => {
+    const hostsFile = join(tempDir, 'hosts.json');
+    await persistGithubToken('ghu_roundtrip', { hostsFilePath: hostsFile });
+    const result = await discoverGithubToken({ overridePath: hostsFile });
+    expect(result.token).toBe('ghu_roundtrip');
   });
 });
 

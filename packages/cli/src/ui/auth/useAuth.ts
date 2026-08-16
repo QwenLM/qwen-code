@@ -14,6 +14,10 @@ import {
   applyProviderInstallPlan,
   type ProviderConfig,
   type ProviderSetupInputs,
+  discoverGithubToken,
+  CopilotTokenNotFoundError,
+  runCopilotDeviceFlow,
+  persistGithubToken,
 } from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -171,6 +175,48 @@ export const useAuthCommand = (
         setPendingAuthType(protocol);
         setIsAuthenticating(true);
         setAuthError(null);
+
+        // Copilot device flow: if the user has no pre-existing ghu_/gho_
+        // token (from gh CLI, VS Code Copilot, etc.), run RFC 8628 device
+        // flow so they can authorize via browser. The resulting token is
+        // persisted to ~/.config/github-copilot/hosts.json, which
+        // discoverGithubToken searches at request time.
+        if (protocol === AuthType.USE_COPILOT) {
+          try {
+            await discoverGithubToken();
+          } catch (err) {
+            if (!(err instanceof CopilotTokenNotFoundError)) throw err;
+            const { token } = await runCopilotDeviceFlow({
+              notify: (event) => {
+                if (event.type === 'device_code') {
+                  setExternalAuthState({
+                    title: t('GitHub Copilot Login'),
+                    message: t(
+                      'Go to {{verificationUri}} and enter code: {{userCode}}',
+                      {
+                        verificationUri: event.verificationUri,
+                        userCode: event.userCode,
+                      },
+                    ),
+                    detail: t('Expires in {{expiresInSeconds}}s', {
+                      expiresInSeconds: String(event.expiresInSeconds),
+                    }),
+                  });
+                } else if (event.type === 'progress') {
+                  setExternalAuthState((prev) =>
+                    prev ? { ...prev, detail: event.message } : prev,
+                  );
+                } else if (event.type === 'error') {
+                  setExternalAuthState((prev) =>
+                    prev ? { ...prev, detail: event.message } : prev,
+                  );
+                }
+              },
+            });
+            await persistGithubToken(token);
+            setExternalAuthState(null);
+          }
+        }
 
         const plan = buildInstallPlan(providerConfig, inputs);
         await applyProviderInstallPlan(plan, {

@@ -158,6 +158,41 @@ export async function discoverGithubToken(opts?: {
   );
 }
 
+const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
+const COPILOT_SCOPE = 'read:user';
+const DEFAULT_COPILOT_DOMAIN = 'github.com';
+const COPILOT_HOSTS_KEY = `github.com:${COPILOT_CLIENT_ID}`;
+
+export async function persistGithubToken(
+  token: string,
+  opts?: { hostsFilePath?: string },
+): Promise<void> {
+  const filePath =
+    opts?.hostsFilePath ??
+    join(homedir(), '.config', 'github-copilot', 'hosts.json');
+
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = await readFile(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // file missing or invalid — start fresh
+  }
+
+  const updated = {
+    ...existing,
+    [COPILOT_HOSTS_KEY]: { oauth_token: token },
+  };
+
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.tmp.${process.pid}`;
+  await writeFile(tmp, JSON.stringify(updated, null, 2), { mode: 0o600 });
+  await rename(tmp, filePath);
+}
+
 export class CopilotExchangeError extends Error {
   constructor(message: string) {
     super(message);
@@ -401,10 +436,6 @@ export function createCopilotTokenManager(opts?: {
 
   return { getSnapshot, forceRefresh, getAvailableModelIds };
 }
-
-const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
-const COPILOT_SCOPE = 'read:user';
-const DEFAULT_COPILOT_DOMAIN = 'github.com';
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

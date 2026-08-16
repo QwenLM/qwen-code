@@ -15,6 +15,8 @@ import {
   generateCustomEnvKey as generateCustomApiKeyEnvKey,
   getDefaultModelIds,
   resolveBaseUrl,
+  findProviderById,
+  CopilotTokenNotFoundError,
   type ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -23,12 +25,29 @@ import {
   maskApiKey,
 } from './useAuth.js';
 
+const copilotMocks = vi.hoisted(() => ({
+  discoverGithubToken: vi.fn(),
+  runCopilotDeviceFlow: vi.fn(),
+  persistGithubToken: vi.fn(),
+}));
+
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
     qwenAuthState: {},
     cancelQwenAuth: vi.fn(),
   })),
 }));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    discoverGithubToken: copilotMocks.discoverGithubToken,
+    runCopilotDeviceFlow: copilotMocks.runCopilotDeviceFlow,
+    persistGithubToken: copilotMocks.persistGithubToken,
+  };
+});
 
 vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
   const actual =
@@ -387,6 +406,126 @@ describe('useAuthCommand', () => {
     // directly here, but the visible side effects above all depend on
     // handleAuthFailure having seen pendingAuthType.)
     expect(result.current.pendingAuthType).toBe(AuthType.USE_OPENAI);
+  });
+
+  it('runs Copilot device flow when no GitHub token is found', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    copilotMocks.discoverGithubToken.mockRejectedValueOnce(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockResolvedValueOnce({
+      token: 'ghu_mock',
+    });
+    copilotMocks.persistGithubToken.mockResolvedValueOnce(undefined);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    act(() => {
+      result.current.openAuthDialog();
+    });
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+    });
+
+    expect(copilotMocks.discoverGithubToken).toHaveBeenCalledTimes(1);
+    expect(copilotMocks.runCopilotDeviceFlow).toHaveBeenCalledTimes(1);
+    expect(copilotMocks.persistGithubToken).toHaveBeenCalledWith('ghu_mock');
+    // Device flow succeeded → externalAuthState cleared
+    expect(result.current.externalAuthState).toBeNull();
+    // buildInstallPlan proceeded: auth type set to copilot
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_COPILOT,
+    );
+    expect(result.current.isAuthDialogOpen).toBe(false);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Successfully configured GitHub Copilot'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('skips device flow when a GitHub token already exists', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    copilotMocks.discoverGithubToken.mockResolvedValueOnce({
+      token: 'ghu_existing',
+      source: 'mock',
+    });
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+    });
+
+    expect(copilotMocks.discoverGithubToken).toHaveBeenCalledTimes(1);
+    expect(copilotMocks.runCopilotDeviceFlow).not.toHaveBeenCalled();
+    expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_COPILOT,
+    );
+    expect(result.current.isAuthDialogOpen).toBe(false);
+  });
+
+  it('surfaces device flow error as auth error when runCopilotDeviceFlow rejects', async () => {
+    const copilotProvider = findProviderById('copilot')!;
+    const settings = createSettings();
+    const config = createConfig();
+    const addItem = vi.fn();
+
+    copilotMocks.discoverGithubToken.mockRejectedValueOnce(
+      new CopilotTokenNotFoundError('mock: no token'),
+    );
+    copilotMocks.runCopilotDeviceFlow.mockRejectedValueOnce(
+      new Error('Device code expired'),
+    );
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(copilotProvider, {
+        baseUrl: resolveBaseUrl(copilotProvider),
+        apiKey: '',
+        modelIds: getDefaultModelIds(copilotProvider),
+      });
+    });
+
+    expect(copilotMocks.runCopilotDeviceFlow).toHaveBeenCalledTimes(1);
+    expect(copilotMocks.persistGithubToken).not.toHaveBeenCalled();
+    expect(result.current.authError).toEqual(
+      expect.stringContaining('Device code expired'),
+    );
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.externalAuthState).toBeNull();
+    expect(addItem).not.toHaveBeenCalled();
   });
 });
 
