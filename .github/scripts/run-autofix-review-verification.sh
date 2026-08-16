@@ -102,14 +102,22 @@ reject_fix() {
   # step means the gate itself crashed, so losing the detail file must not turn
   # a deterministic rejection into an infrastructure retry.
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  # Write BOTH routing flags on every rejection: the host-side translation
+  # refuses a verdict whose retryable=/preexisting= lines are missing,
+  # repeated, or both true, and branch code can append to the mounted verdict
+  # file — a lone forged `retryable=true` used to flip a deliberately
+  # non-retryable rejection (e.g. the bite check, which wrote neither flag)
+  # into a PAT-backed repair round.
   if [[ "${preexisting}" == 'true' ]]; then
     # NOT retryable: the repair agent is only allowed to amend this round's
     # fix, and a failure that exists without the fix is outside that boundary
     # by definition — the 18-minute repair budget cannot reach it. The remedy
     # is a base update (merge main into the branch), not a repair.
     echo "preexisting=true" >> "${GITHUB_OUTPUT}"
-  elif [[ "${retryable}" == 'true' ]]; then
-    echo "retryable=true" >> "${GITHUB_OUTPUT}"
+    echo "retryable=false" >> "${GITHUB_OUTPUT}"
+  else
+    echo "preexisting=false" >> "${GITHUB_OUTPUT}"
+    echo "retryable=${retryable}" >> "${GITHUB_OUTPUT}"
   fi
   # The evidence tail flexes so the WHOLE document stays under the report
   # step's head -c 3900 render cap: truncating the finished document from

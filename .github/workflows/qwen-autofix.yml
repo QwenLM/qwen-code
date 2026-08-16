@@ -4592,17 +4592,17 @@ jobs:
             2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
 
           # The gate reads rc.json/rv.json AFTER its build legs (the bite
-          # check), but the wrapper's verdict-input baseline is captured at
-          # gate start — AFTER the agent step, whose sandbox mounts WORKDIR
-          # (/tmp) rw at the same path as the runner uid. A truncation
-          # planted during the agent step would therefore BECOME the
-          # baseline and stay invisible to the compare. Digest these two
-          # host-authored files at creation time into expression context —
-          # the same shape as the staged-script digests — for the gate
-          # steps to verify before the wrapper's baseline runs. Per-file
-          # digests, so a boundary shift between the two files cannot keep
-          # the value stable.
-          echo "verdict_inputs_sha256=$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          # check) and the host's breaker reads ic.json AFTER the gate, but
+          # the wrapper's verdict-input baseline is captured at gate start —
+          # AFTER the agent step, whose sandbox mounts WORKDIR (/tmp) rw at
+          # the same path as the runner uid. A truncation planted during the
+          # agent step would therefore BECOME the baseline and stay
+          # invisible to the compare. Digest these three host-authored files
+          # at creation time into expression context — the same shape as the
+          # staged-script digests — for the gate steps to verify before the
+          # wrapper's baseline runs. Per-file digests, so a boundary shift
+          # between the files cannot keep the value stable.
+          echo "verdict_inputs_sha256=$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
@@ -5560,16 +5560,32 @@ jobs:
           # the forgery lands host-side, outside the container. This step
           # writes no outputs of its own, so the channels are dropped for
           # the whole agent process tree.
+          # The unset severs only variable INHERITANCE: the runner reads
+          # this step's channel files at step END and injects whatever was
+          # appended there into every later step regardless of any process
+          # environment (#9214 review). Capture the paths before the unset
+          # and unlink the files after the agent returns, so a BASH_ENV (or
+          # BASH_FUNC_*, or PATH) planted during the run reaches nothing —
+          # the gate steps pin BASH_ENV empty as defense in depth. The
+          # OUTPUT file needs no unlink: this step has no id, so nothing
+          # can consume outputs planted there.
+          SEVERED_ENV_FILE="${GITHUB_ENV:-}"
+          SEVERED_PATH_FILE="${GITHUB_PATH:-}"
           unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT
           # Trusted staged copy in the mirrored layout — resolves
           # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
+          AGENT_RC=0
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}" \
             --conflict "${CONFLICT}" \
-            --base "${BASE}"
+            --base "${BASE}" || AGENT_RC="$?"
+          # Runs even when the agent failed (bash -e would otherwise abort
+          # at the node line and leave the planted channel files live).
+          rm -f "${SEVERED_ENV_FILE}" "${SEVERED_PATH_FILE}"
+          exit "${AGENT_RC}"
 
       - name: 'Verification gate'
         id: 'verify'
@@ -5601,6 +5617,11 @@ jobs:
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Same precedence, same reason (#9214 review): bash sources a
+          # planted BASH_ENV before line 1 of the run block — before the
+          # PATH pin, the digest checks and the wrapper — so pin it empty
+          # even though the agent steps unlink their channel files.
+          BASH_ENV: ''
         run: |-
           # The gate decides whether the PAT push runs, and it executes the
           # branch's OWN build/test — so it runs inside an ephemeral container
@@ -5613,8 +5634,8 @@ jobs:
           # verifying cannot themselves be swapped.
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
-          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null
+          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
+          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
           # The helpers the gate executes are staged in the same writable
           # RUNNER_TEMP, so verify them as one blob before the wrapper copies
           # them across the container wall.
@@ -5623,15 +5644,29 @@ jobs:
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
             exit 1
           fi
-          # rc.json/rv.json are host-authored in prepare but read by the
-          # gate AFTER its build legs, and the wrapper's baseline is
-          # captured only at gate start — after the agent step, whose
-          # sandbox mounts WORKDIR rw at the same path as the runner uid.
-          # Verify the prepare-time digest first, so a plant during the
-          # agent step fails here instead of becoming the baseline.
-          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d' ' -f1)"
+          # rc.json/rv.json are read by the gate AFTER its build legs and
+          # ic.json by the host's breaker after the gate — all host-authored
+          # in prepare, while the wrapper's baseline is captured only at gate
+          # start — after the agent step, whose sandbox mounts WORKDIR rw at
+          # the same path as the runner uid. Verify the prepare-time digest
+          # first, so a plant during the agent step fails here instead of
+          # becoming the baseline.
+          # Type discipline before hashing (the wrapper's own shape): WORKDIR
+          # is attacker-writable, and a planted FIFO or device symlink would
+          # hang sha256sum's open() until the step's 60-minute timeout — a
+          # one-line per-round DoS of the verification loop.
+          for _vi in rc.json rv.json ic.json; do
+            case "$(stat -c '%F' "${WORKDIR}/${_vi}" 2> /dev/null || true)" in
+              'regular file' | 'regular empty file') : ;;
+              *)
+                echo "::error::verdict input ${_vi} is not a regular file — refusing to run the gate."
+                exit 1
+                ;;
+            esac
+          done
+          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)"
           if [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
-            echo "::error::verdict inputs rc.json/rv.json no longer match the digest recorded at prepare time; refusing to run the gate."
+            echo "::error::verdict inputs rc.json/rv.json/ic.json no longer match the digest recorded at prepare time; refusing to run the gate."
             exit 1
           fi
           bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"
@@ -5778,15 +5813,24 @@ jobs:
           # Same severing as 'Triage and address': the repair agent runs
           # branch code again, and its attempted= output was already
           # written above, so the runner's mutation channels are dropped
-          # for the whole agent process tree.
+          # for the whole agent process tree. The unset severs only
+          # variable INHERITANCE (#9214 review): the runner still reads
+          # the channel files at step END, so capture them before the
+          # unset and unlink them after the agent returns. The OUTPUT file
+          # stays — the attempted= output above must survive to step END.
+          SEVERED_ENV_FILE="${GITHUB_ENV:-}"
+          SEVERED_PATH_FILE="${GITHUB_PATH:-}"
           unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT
+          AGENT_RC=0
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}" \
             --conflict "${CONFLICT}" \
-            --base "${BASE}"
+            --base "${BASE}" || AGENT_RC="$?"
+          rm -f "${SEVERED_ENV_FILE}" "${SEVERED_PATH_FILE}"
+          exit "${AGENT_RC}"
 
       - name: 'Repair verification gate'
         id: 'verify_repair'
@@ -5812,6 +5856,11 @@ jobs:
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Same precedence, same reason (#9214 review): bash sources a
+          # planted BASH_ENV before line 1 of the run block — before the
+          # PATH pin, the digest checks and the wrapper — so pin it empty
+          # even though the agent steps unlink their channel files.
+          BASH_ENV: ''
         run: |-
           # The gate decides whether the PAT push runs, and it executes the
           # branch's OWN build/test — so it runs inside an ephemeral container
@@ -5824,8 +5873,8 @@ jobs:
           # verifying cannot themselves be swapped.
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
-          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null
+          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
+          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
           # The helpers the gate executes are staged in the same writable
           # RUNNER_TEMP, so verify them as one blob before the wrapper copies
           # them across the container wall.
@@ -5834,15 +5883,29 @@ jobs:
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
             exit 1
           fi
-          # rc.json/rv.json are host-authored in prepare but read by the
-          # gate AFTER its build legs, and the wrapper's baseline is
-          # captured only at gate start — after the agent step, whose
-          # sandbox mounts WORKDIR rw at the same path as the runner uid.
-          # Verify the prepare-time digest first, so a plant during the
-          # agent step fails here instead of becoming the baseline.
-          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d' ' -f1)"
+          # rc.json/rv.json are read by the gate AFTER its build legs and
+          # ic.json by the host's breaker after the gate — all host-authored
+          # in prepare, while the wrapper's baseline is captured only at gate
+          # start — after the agent step, whose sandbox mounts WORKDIR rw at
+          # the same path as the runner uid. Verify the prepare-time digest
+          # first, so a plant during the agent step fails here instead of
+          # becoming the baseline.
+          # Type discipline before hashing (the wrapper's own shape): WORKDIR
+          # is attacker-writable, and a planted FIFO or device symlink would
+          # hang sha256sum's open() until the step's 60-minute timeout — a
+          # one-line per-round DoS of the verification loop.
+          for _vi in rc.json rv.json ic.json; do
+            case "$(stat -c '%F' "${WORKDIR}/${_vi}" 2> /dev/null || true)" in
+              'regular file' | 'regular empty file') : ;;
+              *)
+                echo "::error::verdict input ${_vi} is not a regular file — refusing to run the gate."
+                exit 1
+                ;;
+            esac
+          done
+          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)"
           if [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
-            echo "::error::verdict inputs rc.json/rv.json no longer match the digest recorded at prepare time; refusing to run the gate."
+            echo "::error::verdict inputs rc.json/rv.json/ic.json no longer match the digest recorded at prepare time; refusing to run the gate."
             exit 1
           fi
           bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"

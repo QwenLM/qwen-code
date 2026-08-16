@@ -111,7 +111,9 @@ done
 # detail chain AHEAD of the fingerprinted summary files, agent-api-error
 # forces the model-error retry sentinel and injects its text into the
 # published headline, rc.json truncated flips the bite check's BITE_ENFORCE
-# off so the bogus-fix round it exists to reject exits 0 as `fixed`, and
+# off so the bogus-fix round it exists to reject exits 0 as `fixed`, ic.json
+# feeds the post-gate consecutive-failure breaker file-preferred, so planted
+# bot failure headlines trip its cap and mark the PR terminal, and
 # deferred-findings.json feeds the post-gate upsert. Fingerprint them
 # before the run and refuse the verdict if they moved. The two gate-
 # authored files stay out of the set for the opposite reason (see the
@@ -125,7 +127,7 @@ done
 verdict_inputs_digest() {
   local f type
   for f in no-action.md address-summary.md resolved-comments.txt \
-    comment-replies.json rc.json rv.json failure.md handoff.md \
+    comment-replies.json rc.json rv.json ic.json failure.md handoff.md \
     deferred-feedback.md agent-api-error agent-api-error-kind \
     agent-timeout deferred-findings.json deferred-findings.carry.json; do
     type="$(stat -c '%F' "${WORKDIR}/${f}" 2> /dev/null || true)"
@@ -224,32 +226,39 @@ case "${GATE_RC}" in
     fi
     ;;
   1)
-    # preexisting and retryable are mutually exclusive at the source
-    # (reject_fix: a pre-existing failure is NOT retryable — the repair
-    # agent may only amend this round's fix). Both present is therefore
-    # proof of an append the gate never made, so refuse the verdict BEFORE
-    # forwarding any of it: a planted `preexisting=true` overriding a
-    # genuine `retryable=true` would otherwise skip the repair the round is
-    # entitled to and permanently misclassify a fixable rejection as a
-    # terminal pre-existing failure. The crash path retries with a fresh
-    # checkout instead.
-    if [[ "${PREEXISTING}" == 'true' && "${RETRYABLE}" == 'true' ]]; then
-      echo "::error::verdict carries both preexisting and retryable — the gate never emits both; refusing the verdict as tampered."
-      exit 125
-    fi
-    # A deterministic rejection: reject_fix writes outcome=failed to the file
-    # and exits 1. Take `failed` only from the FILE — the gate also has
-    # exit-1 paths that deliberately write NO verdict (the baseline-A/B and
-    # bite tree-restore failures), where an EVALUATED rejection would advance
-    # the watermark and hand the item off for good, and an unset outcome is
-    # what routes them to the gate-crashed retry instead. A forged
-    # `outcome=fixed` still cannot pass: `fixed` is accepted only on exit 0,
-    # so here it leaves the outcome unset and the round retries.
+    # A deterministic rejection (reject_fix) writes outcome=failed plus BOTH
+    # routing flags, exactly once each and mutually exclusive at the source
+    # (a pre-existing failure is NOT retryable — the repair agent may only
+    # amend this round's fix). Any other shape — a flag line missing,
+    # repeated, or both true — is proof the file was touched after the gate
+    # wrote it (branch code can append to the mounted verdict file), so
+    # refuse the verdict BEFORE forwarding any of it: a lone forged
+    # `retryable=true` would otherwise flip a deliberately non-retryable
+    # rejection (e.g. the bite check) into a PAT-backed repair round, and a
+    # planted `preexisting=true` overriding a genuine `retryable=true` would
+    # skip the repair the round is entitled to and permanently misclassify a
+    # fixable rejection as a terminal pre-existing failure. The crash path
+    # retries with a fresh checkout instead.
     if [[ "${OUTCOME}" == 'failed' ]]; then
+      RETRYABLE_LINES="$(grep -c '^retryable=' "${VERDICT}" 2> /dev/null || true)"
+      PREEXISTING_LINES="$(grep -c '^preexisting=' "${VERDICT}" 2> /dev/null || true)"
+      if [[ "${RETRYABLE_LINES:-0}" -ne 1 ]] ||
+        [[ "${PREEXISTING_LINES:-0}" -ne 1 ]] ||
+        [[ "${PREEXISTING}" == 'true' && "${RETRYABLE}" == 'true' ]]; then
+        echo "::error::verdict carries a forged routing flag (retryable lines: ${RETRYABLE_LINES:-0}, preexisting lines: ${PREEXISTING_LINES:-0}) — refusing the verdict as tampered."
+        exit 125
+      fi
       echo "outcome=failed" >> "${GITHUB_OUTPUT}"
       [[ "${PREEXISTING}" == 'true' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
       [[ "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
     else
+      # Take `failed` only from the FILE — the gate also has exit-1 paths
+      # that deliberately write NO verdict (the baseline-A/B and bite
+      # tree-restore failures), where an EVALUATED rejection would advance
+      # the watermark and hand the item off for good, and an unset outcome is
+      # what routes them to the gate-crashed retry instead. A forged
+      # `outcome=fixed` still cannot pass: `fixed` is accepted only on exit 0,
+      # so here it leaves the outcome unset and the round retries.
       echo "::warning::gate container exited 1 without a deterministic verdict (outcome='${OUTCOME}') — reporting as a gate crash so the next scan retries."
     fi
     ;;

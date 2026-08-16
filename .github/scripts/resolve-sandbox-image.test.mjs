@@ -77,13 +77,17 @@ test('exportImage publishes the resolved image as a step output', () => {
   }
 });
 
-function withDockerStub(scriptBody, fn) {
+// async + `return await`: a bare `return fn(stub)` would run the `finally`
+// unlink BEFORE the async body's promise settles, racing the spawned child's
+// script-open — the parent wins often enough to flake the success path with
+// a misleading 'no repository digest' error (probe: 23/30 loops failed).
+async function withDockerStub(scriptBody, fn) {
   const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-stub-'));
   const stub = join(dir, 'docker-stub');
   try {
     writeFileSync(stub, `#!/bin/sh\n${scriptBody}\n`, { mode: 0o755 });
     chmodSync(stub, 0o755);
-    return fn(stub);
+    return await fn(stub);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -103,6 +107,22 @@ test('repoDigestOf resolves a pulled image to its content digest', async () => {
       );
     },
   );
+});
+
+test('withDockerStub keeps the stub alive until the async body settles', async () => {
+  // One success-path call per process hides the unlink race above, so drive
+  // the spawn→open window in a loop.
+  for (let i = 0; i < 30; i++) {
+    await withDockerStub(
+      'printf "%s\\n" "ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef"',
+      async (stub) => {
+        assert.equal(
+          await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+          'ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef',
+        );
+      },
+    );
+  }
 });
 
 test('repoDigestOf refuses an image without a repository digest', async () => {
