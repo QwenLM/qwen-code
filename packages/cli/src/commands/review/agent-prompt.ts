@@ -41,7 +41,11 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   MAX_RESUME_CALLS,
   SHELL_TOOL_MAX_TIMEOUT_MS,
@@ -59,6 +63,7 @@ import {
   verifyBudgetMessage,
   writeBudgetStop,
   writeRoundCapStop,
+  hasReviewDeadline,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -66,6 +71,7 @@ import {
   type DiffChunk,
 } from './lib/diff-plan.js';
 import {
+  promptRecordDir,
   recordPrompt,
   writeBrief,
   writeFindingsFile,
@@ -214,6 +220,8 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - Copy it **verbatim** from the diff, indentation included. Strip the leading \`+\`.
 - Prefer **added (\`+\`) lines** — that is what a review comments on. An unchanged context line inside a hunk resolves too. A **removed (\`-\`) line does not**: deleted code has no line on the side a comment can attach to. To comment on a deletion, anchor on the line that *replaced* it.
 - Give **enough lines to be unique**. A bare \`}\` or \`});\` appears everywhere in the file and will resolve to whichever one happens to be nearest. Two or three lines are almost always unique; one distinctive line is fine.
+- A finding about a file this diff does **not** touch — a docs page or a caller the change falsifies — cannot anchor there: a comment attaches only to files the PR changes. Quote the diff line that creates the problem, and name the affected file in **Issue**.
+- A line too long to quote whole — a multi-KB single-line Markdown paragraph — may be quoted as a distinctive verbatim **fragment** of at least 12 characters (measured after whitespace collapse); it resolves to the line containing it.
 - Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
 **The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
@@ -2034,7 +2042,8 @@ function admitReverseAuditRound(
   // The plan's round cap first: deterministic, and cheaper than the
   // deadline arithmetic. One value per topology (`reverseAuditRoundTier`) —
   // ten on a 3A diff, where a round is one auditor; five on a 3B one, where
-  // it is one per non-retired chunk; a reduced three for a huge
+  // it is one per non-retired chunk; and — only in a run that has a deadline,
+  // since the reduction answers a ceiling — a reduced three for a huge
   // diff, where a single reverse-audit round is ~90 minutes and the full
   // loop cannot finish (measured: the 6-hour CI reviews that posted nothing
   // were 4,000-5,300-line PRs). A round past the cap writes a marker so
@@ -2103,6 +2112,29 @@ function refuseConverged(planPath: string): void {
       'it.',
   );
   process.exitCode = 5;
+}
+
+/**
+ * The stderr NOTE naming the bar each twice-audited chunk fell at (#9206),
+ * shared by the round builder and the per-chunk rebuild path so the two
+ * cannot drift on the spelling. `diagnostics` is already narrowed to the
+ * chunk(s) this build covers; stdout stays the deliverable the orchestrator
+ * pastes. The write is incidental to the work in hand — the Safe writer,
+ * matching `writeFindingsFile`: a throw on a closed stderr here would
+ * abandon the very round the note exists to name (#9213).
+ */
+function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
+  if (diagnostics.length === 0) return;
+  writeStderrLineSafe(
+    `NOTE: reverse-audit retirement certified nothing for ` +
+      `${diagnostics.length} twice-audited chunk(s) — they stay under ` +
+      `audit (the safe direction), but a chunk that looks dry and never ` +
+      `retires is the cost this schedule exists to stop paying. The bar ` +
+      `each round fell at:\n` +
+      diagnostics.join('\n') +
+      `\nCompare the recorded prompts in ${promptRecordDir(planPath)} ` +
+      `against this session's subagent transcripts to see the mismatch.`,
+  );
 }
 
 /**
@@ -2178,18 +2210,33 @@ function runAllChunks(
           ? report.diffPathAbsolute
           : undefined,
       );
-    } catch {
+    } catch (err) {
       // Transcripts unavailable, an unreadable plan stat, anything: the
       // schedule is an optimization, and a broken optimizer must degrade to
       // today's behaviour — every territory audited — never to fewer
-      // auditors. `null` below means "everything is due".
+      // auditors. `null` below means "everything is due". But not SILENTLY
+      // (#9206): a schedule that dies here retires nothing for the rest of
+      // the run, and the round's own output is where the reader can see it.
       schedule = null;
+      writeStderrLineSafe(
+        `NOTE: reverse-audit retirement unavailable this round — ` +
+          `${(err as Error).message ?? String(err)} — auditing every chunk.`,
+      );
     }
   }
 
   if (schedule !== null && schedule.converged) {
     refuseConverged(planPath);
     return;
+  }
+
+  // A chunk audited twice that is neither retired nor hot failed
+  // CERTIFICATION somewhere; the schedule names the bar per round (#9206 —
+  // the silent version of this ran a 12-chunk loop five rounds to the cap
+  // with no word of why nothing retired). stderr, never stdout: the round
+  // blocks below are the deliverable the orchestrator pastes.
+  if (schedule !== null) {
+    noteUncertifiedChunks(planPath, schedule.diagnostics);
   }
 
   // The budget gate, deferred here from the single-build path for
@@ -2207,7 +2254,7 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       chunks.length,
     )
   ) {
@@ -2263,7 +2310,10 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
-  const planRoundCap = reverseAuditRoundCap(report);
+  const planRoundCap = reverseAuditRoundCap(
+    report,
+    hasReviewDeadline(process.env),
+  );
   const retirementNote =
     skipped.length === 0
       ? []
@@ -2626,7 +2676,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       1,
     )
   ) {
@@ -2656,7 +2706,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // The reverse-audit gate for a --chunk build, placed after the plan read
   // because its convergence half reads the plan's chunk list. A round
   // holding an admission stamp is being REPAIRED — a truncated delivery,
-  // rebuilt per chunk — and bypasses everything: its cost and its schedule
+  // rebuilt per chunk — and bypasses the gates: its cost and its schedule
   // were ruled on when the round was admitted, and refusing the repair
   // leaves the truncation unrepairable (the auditor never launched,
   // nothing writing the unreviewedDimensions entry for it) under a
@@ -2672,12 +2722,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // below), and the ones after it are repairs of it. A chunk merely
   // retired inside a live round is still buildable: refusing it could only
   // spare an audit, and sparing audits is never this file's failure
-  // direction.
-  if (
-    args.role === 'reverse-audit' &&
-    hasChunk &&
-    !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
-  ) {
+  // direction. The one thing EVERY build of the round carries, stamped or
+  // not, is the chunk's own certification diagnostic (#9213 on #9206): a
+  // round built one auditor at a time stamps on its FIRST chunk build, so
+  // gating the note on the stamp re-silenced chunks 2..N — the exact
+  // never-retire shape the note exists to name. The schedule read is
+  // read-only; only the convergence and budget rulings stay gated.
+  if (args.role === 'reverse-audit' && hasChunk) {
+    const roundAdmitted = readRoundStamps(args.plan).some(
+      (s) => s.round === (args.round ?? null),
+    );
     const planChunkIds = (
       Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : []
     )
@@ -2695,29 +2749,55 @@ function runAgentPrompt(args: AgentPromptArgs): void {
             ? report.diffPathAbsolute
             : undefined,
         );
-      } catch {
+      } catch (err) {
         // Same degradation as the round builder: an unreadable history must
-        // fall back to building the auditor, never to refusing it.
+        // fall back to building the auditor, never to refusing it — named,
+        // as the round builder names it (#9206). Named only on the builds
+        // that are NOT repairs: the round's admission build (its first
+        // chunk build, or the round builder itself) already spoke for it,
+        // and a repair stays the clean rebuild its exemption promises.
         schedule = null;
+        if (!roundAdmitted) {
+          writeStderrLineSafe(
+            `NOTE: reverse-audit retirement unavailable this round — ` +
+              `${(err as Error).message ?? String(err)} — auditing the chunk.`,
+          );
+        }
       }
-      if (schedule !== null && schedule.converged) {
+      if (!roundAdmitted && schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
         return;
       }
+      // The round builder's diagnostic, narrowed to this chunk (#9213 on
+      // #9206): rounds built one auditor at a time used to drop it,
+      // re-silencing the never-retire shape exactly when delivery is
+      // degraded.
+      if (schedule !== null && typeof args.chunk === 'number') {
+        const prefix = `chunk ${args.chunk} — `;
+        noteUncertifiedChunks(
+          args.plan,
+          schedule.diagnostics.filter((d) => d.startsWith(prefix)),
+        );
+      }
     }
     if (
+      !roundAdmitted &&
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report),
+        reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
         planChunkIds.length,
       )
     )
       return;
-    noteTopologyMismatch(
-      report,
-      `--chunk ${args.chunk} is building a per-chunk auditor`,
-    );
+    // The note belongs to the round's ADMISSION — a stamped rebuild
+    // was ruled on when the round was admitted, so it stays silent.
+    if (!roundAdmitted) {
+      noteTopologyMismatch(
+        report,
+        `--chunk ${args.chunk} is building a per-chunk auditor`,
+      );
+    }
   }
 
   if (args.allChunks && args.role && findingsContent !== undefined) {

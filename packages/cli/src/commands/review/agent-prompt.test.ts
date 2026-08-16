@@ -1029,6 +1029,62 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it('takes the round cap from the CLOCK as well, on a sized huge plan', () => {
+    // Every other cap test here uses the unsized `PLAN` fixture, whose tier is
+    // the LARGE fallback whatever the clock says, or forces a cap by storing
+    // one — so the `hasReviewDeadline(process.env)` argument at all four call
+    // sites was mutation-invisible: hardcoding it to either constant left the
+    // whole suite green. A SIZED huge plan is the only shape where the flag
+    // decides anything.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-clock-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      const before = process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+      const huge = join(dir, 'huge.json');
+      writeFileSync(
+        huge,
+        JSON.stringify({ ...PLAN, srcDiffLines: 5000, diffLines: 5000 }),
+      );
+      try {
+        // No clock: the huge reduction does not apply, so the 3B tier stands
+        // and round 4 builds.
+        delete process.env[DEADLINE_ENV];
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 4 });
+        expect(process.exitCode).toBeUndefined();
+        expect(readRecordedPrompts(huge).size).toBe(1);
+
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 6 });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 5');
+
+        // A clock: the same plan, the same round, refused at the reduced tier.
+        process.env[DEADLINE_ENV] = String(
+          Math.floor(Date.now() / 1000) + 7200,
+        );
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 4 });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 3');
+      } finally {
+        if (before === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = before;
+      }
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('takes the round cap from the plan’s topology on the chunkless path', () => {
     // 3A is the topology that actually runs this path — one auditor a round,
     // the whole diff — and it is the one the tier raises. Both arms use the
@@ -3959,6 +4015,48 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('retirement:');
   });
 
+  it('certification failures are diagnosed on stderr, chunk by chunk (#9206)', () => {
+    // The silent half of the reported run: chunks audited twice that are
+    // neither retired nor hot failed CERTIFICATION, and the round said
+    // nothing about it. The builder must name the bar each chunk fell at —
+    // on stderr; stdout stays the deliverable the orchestrator pastes.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    runRound(2);
+    auditorTranscript(recordOf(2, 13), WHIFF, { calls: 0 });
+    // 14's round-2 auditor left no transcript at all.
+    auditorTranscript(recordOf(2, 15), YIELD);
+
+    runRound(3);
+
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement certified nothing');
+    expect(err).toContain('chunk 13 — round 2: no successful tool calls');
+    expect(err).toContain('chunk 14 — round 2: no matching transcript');
+    // A yielded chunk explains its own heat — no diagnostic for it.
+    expect(err).not.toContain('chunk 15');
+  });
+
+  it('a schedule with no readable transcripts names itself (#9206)', () => {
+    // The scheduler's catch used to swallow every exception without a word;
+    // a transcript-less round then retired nothing for the rest of the run,
+    // invisibly. The degradation direction stands — every chunk audited —
+    // but the round must say why nothing can retire.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+
+    const out = runRound(3);
+
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement unavailable this round');
+    expect(err).toContain('auditing every chunk');
+  });
+
   it('huge cap: a chunk dry in rounds 1 and 2 retires with a final certificate', () => {
     // Under the reduced 3-round cap, chunk 13's next cold check (round 4) is
     // past the cap, so the retirement note must read `certificate final`, not
@@ -4563,6 +4661,216 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .map((c) => c[0])
       .join('\n');
     expect(msg).toContain('CONVERGED');
+  });
+
+  it('a per-chunk build prints the chunk\u2019s own certification failures (#9206)', () => {
+    // Rounds built one auditor at a time (the measured per-chunk flow)
+    // must carry the SAME note the round builder prints — the schedule's
+    // diagnostics used to die on this twin path, re-silencing the exact
+    // never-retire shape this suite exists to name. Rounds 1-2 are built
+    // per chunk and answered by NO transcript, so round 3's schedule
+    // names the bar both rounds fell at.
+    for (const round of [1, 2]) {
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        chunk: 13,
+        round,
+      });
+    }
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+
+    expect(process.exitCode).toBeUndefined();
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement certified nothing');
+    expect(err).toContain(
+      'chunk 13 \u2014 round 1: no matching transcript; round 2: no matching transcript',
+    );
+    // The chunk still builds — the diagnostic rides stderr beside it.
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('You are review agent');
+    expect(keysOf(3)).toHaveLength(1);
+  });
+
+  it('every chunk build of the round carries its own failures, not just the first (#9213)', () => {
+    // A round built one auditor at a time stamps on its FIRST chunk build;
+    // the builds after it used to skip the diagnostic block entirely, so
+    // chunks 2..N re-audited in the exact silence this PR exists to end —
+    // the paired test above builds a single chunk per round and cannot see
+    // it. Build rounds 1-2 per chunk for chunks 13 and 14 with NO
+    // transcripts, then build round 3 one auditor at a time.
+    for (const round of [1, 2]) {
+      for (const chunk of [13, 14]) {
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          findings,
+          chunk,
+          round,
+        });
+      }
+    }
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+    let err = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain(
+      'chunk 13 \u2014 round 1: no matching transcript; round 2: no matching transcript',
+    );
+    // The first build admitted the round — its stamp is what used to gate
+    // the second build's diagnostic out.
+    expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 14,
+      round: 3,
+    });
+    expect(process.exitCode).toBeUndefined();
+    err = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement certified nothing');
+    expect(err).toContain(
+      'chunk 14 \u2014 round 1: no matching transcript; round 2: no matching transcript',
+    );
+    // The repair semantics stand: a stamped round still builds its chunk.
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('You are review agent');
+    expect(keysOf(3)).toHaveLength(2);
+  });
+
+  it('a per-chunk build with no readable transcripts names itself too (#9206)', () => {
+    // Mirror of the all-chunks catch test for the --chunk twin: an
+    // unreadable history degrades to building the auditor — never to
+    // refusing it — and the round says why nothing can retire.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+
+    expect(process.exitCode).toBeUndefined();
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement unavailable this round');
+    expect(err).toContain('auditing the chunk');
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('You are review agent');
+    expect(keysOf(3)).toHaveLength(1);
+  });
+
+  it('a throwing stderr cannot zero the round — the schedule catch NOTE writes safe (#9213)', () => {
+    // EPIPE model: process.stderr.write throws (a headless retry whose
+    // stderr is redirected or closed — the very #9206 shape this loop
+    // serves). The catch's NOTE is informational on the CONTINUING build
+    // path; a throw out of it destroys the round that must audit every
+    // chunk, against the catch's own rationale.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLine as unknown as Mock).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    try {
+      const out = runRound(3);
+      expect(out).toContain(
+        '3 auditors required this round \u2014 one per chunk.',
+      );
+      expect(keysOf(3)).toHaveLength(3);
+    } finally {
+      (writeStderrLine as unknown as Mock).mockReset();
+    }
+  });
+
+  it('a throwing stderr cannot zero the round — the uncertified-chunks NOTE writes safe (#9213)', () => {
+    // Diagnostics non-empty on the admission build: noteUncertifiedChunks
+    // prints with no try around it, before the budget gate. A throw out of
+    // it abandons the round in the exact never-retire shape the note
+    // exists to name.
+    answerRound(1, { 13: null, 14: null, 15: null });
+    answerRound(2, { 13: null, 14: null, 15: null });
+    (writeStderrLine as unknown as Mock).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    try {
+      const out = runRound(3);
+      expect(out).toContain(
+        '3 auditors required this round \u2014 one per chunk.',
+      );
+      expect(keysOf(3)).toHaveLength(3);
+    } finally {
+      (writeStderrLine as unknown as Mock).mockReset();
+    }
+  });
+
+  it('a throwing stderr cannot refuse the per-chunk build either (#9213)', () => {
+    // The per-chunk twin of the catch NOTE: the same continuing path —
+    // the chunk still builds when stderr is gone.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLine as unknown as Mock).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    try {
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        chunk: 13,
+        round: 3,
+      });
+      expect(process.exitCode).toBeUndefined();
+      const out = (writeStdoutLine as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(out).toContain('You are review agent');
+      expect(keysOf(3)).toHaveLength(1);
+    } finally {
+      (writeStderrLine as unknown as Mock).mockReset();
+    }
   });
 
   it('the #9242 note stays below the convergence gate — a converged round notes nothing', () => {

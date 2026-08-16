@@ -1850,21 +1850,21 @@ describe('composeReview — input validation (the producer is a model that omits
     ).toThrow(/suggestionsInline/);
   });
 
-  it('tells a caller that sent a LIST for a count what to send instead', () => {
-    // The wrong shape callers actually write: `suggestionsDiscarded` sits
-    // between two list fields in the skill's field list and is described in
-    // list language, and two of four live runs (PRs #9094, #9109) sent `[]`
-    // — one recovering by rewriting its own state file with `perl -pi`. The
-    // generic message left them to guess which end was wrong.
-    expect(() =>
-      composeReview({
-        suggestionsDiscarded: [
-          'src/a.ts:1 — anchor lost',
-          'src/b.ts:2 — anchor lost',
-        ] as unknown as number,
-        modelId: MODEL,
+  it('accepts the array form of suggestionsDiscarded, counting it by length', () => {
+    // The Step 7 prose prescribes a count, but runs following older skill
+    // revisions wrote the LIST of discarded items and used to die at this gate
+    // late, after hours of analysis. `[]` is zero; a populated list is its
+    // length — the same claim as the number, spelled the older way.
+    expect(composeReview(base({ suggestionsDiscarded: [] })).event).toBe(
+      'APPROVE',
+    );
+    const r = composeReview(
+      base({
+        suggestionsDiscarded: ['src/a.ts:12 — could not anchor', 'src/b.ts:7'],
       }),
-    ).toThrow(/suggestionsDiscarded.*COUNT, not a list: send 2/s);
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('2 Suggestion-level finding(s)');
   });
 
   it('rejects a non-array list field and a missing or blank modelId', () => {
