@@ -64,6 +64,15 @@ export function runCommentBody(args: CommentBodyArgs): {
     assertWritableOutPath(args.out);
   }
   const platform = getPlatformReader({ host: args.host });
+  // Aone addresses comment bodies per-MR for EVERY kind — enforce it before
+  // the auth gate (this file's rule: usage errors precede auth; `a1 auth
+  // login` can never fix a missing --pr). The GitHub `kind === 'review'`
+  // guard above gets the same pre-auth treatment.
+  if (platform.kind === 'aone' && args.prNumber === undefined) {
+    throw new TypeError(
+      'aone comment bodies are addressed per-MR — pass `--pr <mr id>`',
+    );
+  }
   platform.ensureAuthenticated();
   const body = platform.getCommentBody(
     args.kind,

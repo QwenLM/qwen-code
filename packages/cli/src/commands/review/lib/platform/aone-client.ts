@@ -94,9 +94,28 @@ export function ensureAoneAuthenticated(): void {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
     }
+    const e = err as Error & { signal?: string };
+    // The 120 s deadline kills the child (signal set, usually no stderr); a
+    // persistent network failure is also not an auth state. Neither is
+    // remedied by `a1 auth login`.
+    if (e.signal) {
+      throw new Error(
+        'a1 auth check timed out or was killed — check the network / a1 install.',
+      );
+    }
+    // execFileSync failure messages BEGIN with the fixed preamble
+    // "Command failed: a1 auth whoami"; a1's real first stderr line is the
+    // first NON-empty line after it. `.split('\n')[0]` would render only the
+    // preamble and drop the cause.
+    const cause =
+      e.message
+        .split('\n')
+        .slice(1)
+        .map((l) => l.trim())
+        .find(Boolean) ?? '';
     throw new Error(
-      `a1 CLI is not authenticated — run \`a1 auth login\` first. ` +
-        `(${(err as Error).message.split('\n')[0]})`,
+      `a1 CLI is not authenticated — run \`a1 auth login\` first.` +
+        (cause ? ` (${cause})` : ''),
     );
   }
 }

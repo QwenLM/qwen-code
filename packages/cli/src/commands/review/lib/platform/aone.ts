@@ -12,6 +12,7 @@
 
 import { git, gitRaw } from '../git.js';
 import { isOwnerRepo } from '../gh.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 import { a1Json, ensureAoneAuthenticated } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -98,14 +99,19 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
   if (m) return take(m[1], m[2]);
   // scp-like: [user@]host:group[/subgroup]/project. `(?!\/\/)` keeps a
   // scheme URL out of this branch; user@ is optional.
-  m = /^(?:[^@/:]+@)?([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
+  m = /^(?:[^@/]+@)?([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
   if (m) return take(m[1], m[2]);
   return null;
 }
 
-/** Redact a `user:token@` userinfo prefix before putting a URL in a message. */
+/** Redact a userinfo prefix before putting a URL in a message. Covers both
+ *  the URL form (`//user:token@`) and the scp form (`user:token@host:…`,
+ *  common for `insteadOf`/token-bearing origins) — the raw secret must not
+ *  reach stderr/logs/the transcript. */
 function redactUrl(url: string): string {
-  return url.replace(/\/\/[^@/]+@/, '//<redacted>@');
+  return url
+    .replace(/\/\/[^@/]+@/, '//<redacted>@')
+    .replace(/^[^@/]+@/, '<redacted>@');
 }
 
 function mrView(
@@ -214,6 +220,31 @@ export const aoneReader: ReviewPlatformReader = {
 
   fetchDiff(prNumber: number, ownerRepo: string): string {
     checkOwnerRepo(ownerRepo);
+    // Aone has no `gh pr diff`; the diff is git-local and fetched from
+    // `origin`. Verify origin IS the repo the seam was called with — the
+    // GitHub path's `gh pr diff <n> --repo <o/r>` provided that scoping; a
+    // lightweight run from a DIFFERENT Aone clone would otherwise fetch the
+    // ref from the wrong repository (ref-not-found, or a wrong MR's diff
+    // written as evidence if the global id happens to exist there).
+    let originUrl: string | undefined;
+    try {
+      originUrl = git('remote', 'get-url', 'origin').trim();
+    } catch {
+      originUrl = undefined;
+    }
+    const originIdentity = originUrl ? parseRemoteUrl(originUrl) : null;
+    if (
+      originIdentity === null ||
+      `${originIdentity.owner}/${originIdentity.repo}` !== ownerRepo
+    ) {
+      throw new Error(
+        `the cwd clone is ${
+          originIdentity
+            ? `${originIdentity.host}/${originIdentity.owner}/${originIdentity.repo}`
+            : 'not a readable git clone'
+        }, not ${ownerRepo} — run from inside a clone of the target repo`,
+      );
+    }
     // Aone has no `gh pr diff`; the diff is git-local. Fetch the MR head into
     // a throwaway ref, merge-base it against the target branch, and diff.
     const view = mrView(prNumber, ownerRepo);
@@ -224,15 +255,19 @@ export const aoneReader: ReviewPlatformReader = {
       // earlier run would otherwise make this fetch fail whenever the MR head
       // was rewritten — the normal AGit-Flow iteration shape.
       git('fetch', 'origin', `+refs/merge-requests/${prNumber}/head:${ref}`);
-      // Fetch the target branch so the merge-base is current — merge-basing
-      // against a stale origin/<target> produces a structurally complete but
-      // wrong-base diff (the failure lib/merge-base.ts was extracted to
-      // prevent). If the fetch fails, fall back to whatever origin/<target>
-      // is locally (best available).
+      // Fetch the target branch so the merge-base is current. If the fetch
+      // fails (transient network, expired credential), DISCLOSE it: merge-base
+      // then resolves against a possibly-stale local ref, and the diff may
+      // carry every commit merged into the target since the clone. Mirrors
+      // fetch-pr's `baseFetchFailed` → WARNING.
       try {
         git('fetch', 'origin', target);
       } catch {
-        // keep the local origin/<target> as-is
+        process.stderr.write(
+          `WARNING: could not fetch origin/${target} — the merge-base is ` +
+            `resolved from a possibly stale local ref, so the diff may not be ` +
+            `the one under review.\n`,
+        );
       }
       let base: string;
       try {
@@ -246,7 +281,15 @@ export const aoneReader: ReviewPlatformReader = {
       // a routine monorepo diff), rewrites \r\n→\n (altering every CRLF-file
       // hunk), and decodes utf8 while fetch-diff writes latin1 (dropping CJK
       // bytes). gitRaw is 512 MiB, no CRLF rewrite; latin1 matches the write.
-      return gitRaw('diff', `${base}..${ref}`).toString('latin1');
+      // Spread the pinned diff config/flags (as fetch-pr/local-diff do): an
+      // un-pinned `color.diff=always` makes every `diff --git` line
+      // unrecognisable and computeDiffStats returns zeros.
+      return gitRaw(
+        ...PINNED_DIFF_CONFIG,
+        'diff',
+        ...PINNED_DIFF_FLAGS,
+        `${base}..${ref}`,
+      ).toString('latin1');
     } finally {
       try {
         git('branch', '-D', ref);

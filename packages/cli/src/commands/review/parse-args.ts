@@ -25,6 +25,7 @@ import {
 } from '../../utils/stdioHelpers.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
+import { isAoneHost } from './lib/platform/registry.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -108,11 +109,12 @@ const PR_URL_RE =
 // The group path may be nested (`group/subgroup/project`) — the repo identity
 // keeps the last two segments, mirroring aone.parseRemoteUrl. Unlike
 // `…/pull/<n>` (which any GHE host legitimately serves), the host is
-// constrained to Aone: a `/codereview/` URL on any other host is not a valid
-// target and must hit the fail-closed `invalid-url` refusal, not become a
-// live PR target.
+// constrained to a REAL Aone subdomain: `(?:[A-Za-z0-9-]+\.)+alibaba-inc.com`
+// requires a dot boundary, so lookalikes (`evilalibaba-inc.com`,
+// `notalibaba-inc.com`) hit the fail-closed invalid-url refusal instead of
+// becoming live targets — matching isAoneHost's dot-boundary semantics.
 const AONE_CR_URL_RE =
-  /^(https?):\/\/([A-Za-z0-9.-]*alibaba-inc\.com(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
+  /^(https?):\/\/((?:[A-Za-z0-9-]+\.)+alibaba-inc\.com(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
 
 /**
  * Case-insensitive: `--effort High` has exactly one plausible meaning, and
@@ -188,6 +190,11 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (urlMatch) {
     const [, scheme, host, owner, repo, num] = urlMatch;
     const lowerHost = host.toLowerCase();
+    // Aone serves no `/pull/` pages — a `/pull/<n>` URL on an Aone host is a
+    // fabrication (the Aone CR grammar is `…/codereview/<id>`, keyed on the
+    // global MR id). Refuse it fail-closed, mirroring the Aone-only
+    // constraint on `/codereview/` (a non-Aone host there is refused too).
+    if (isAoneHost(lowerHost)) return 'invalid-url';
     return {
       type: 'pr-url',
       url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/pull/${Number(num)}`,

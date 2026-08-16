@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Provider registry + detection. The platform is chosen from (in order) an
-// explicit `--platform` hint, a `--host` whose host is an Aone host, a
-// remote URL whose host is an Aone host, the current clone's origin remote,
-// and finally GitHub. Detection is read-only and never throws — an
-// unreadable origin simply falls through to GitHub.
+// Provider registry + detection. The platform is chosen from (in order) a
+// `--host` whose host is an Aone host, a remote URL whose host is an Aone
+// host, an explicit NON-Aone host/remote (beats the cwd probe), the current
+// clone's origin remote, and finally GitHub. Detection is read-only and never
+// throws — an unreadable origin simply falls through to GitHub. (There is no
+// `--platform` flag; an explicit `--host` is the practical override.)
 
 import { execFileSync } from 'node:child_process';
 import { aoneReader } from './aone.js';
@@ -24,7 +25,7 @@ export interface PlatformHint {
 }
 
 /** Hosts that identify Aone Code (web host + git host). */
-function isAoneHost(host: string | undefined): boolean {
+export function isAoneHost(host: string | undefined): boolean {
   if (!host) return false;
   const h = host.toLowerCase().replace(/:\d+$/, '');
   return (
@@ -34,13 +35,19 @@ function isAoneHost(host: string | undefined): boolean {
   );
 }
 
-/** scheme://[user@]host/… or git@host:… → host. */
+/** scheme://[user@]host/… or [user@]host:path → host. */
 function hostOfRemoteUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
-  const scp = /^[^@/]+@([^:/]+):/.exec(url);
-  if (scp) return scp[1].toLowerCase();
+  // URL form first: scheme://[user@]host/…
   const u = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)[:/]/i.exec(url);
-  return u?.[1]?.toLowerCase();
+  if (u) return u[1].toLowerCase();
+  // scp-like: [user@]host:path — user@ optional and may itself carry a colon
+  // (token-bearing `oauth2:SECRET@host:…` from ssh-config / `url.insteadOf`).
+  // `(?!\/\/)` keeps a scheme URL out of this branch; a plain local path has
+  // no host:path shape. Mirrors aone.parseRemoteUrl / remote-match.
+  const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/\/)(.+)$/.exec(url);
+  if (scp) return scp[1].toLowerCase();
+  return undefined;
 }
 
 /** The cwd clone's origin URL, or undefined when unreadable / not a repo. */

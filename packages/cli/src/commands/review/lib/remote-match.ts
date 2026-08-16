@@ -39,9 +39,11 @@ export function hostsEquivalent(a: string, b: string): boolean {
  * Parse one remote URL into its host / owner / repo, or null when it is
  * neither of the two shapes `git remote -v` prints for a GitHub-style host —
  * `git@<host>:<owner>/<repo>(.git)` and `https://<host>/<owner>/<repo>(.git)`
- * — nor the `ssh://` spelling of the first. Anything else (a local path, an
- * `http` URL with extra path segments, a bundle file) is not a candidate and
- * must never match.
+ * — nor the `ssh://` spelling of the first. Two-or-more path segments collapse
+ * to the LAST two (nested-group repos, e.g. Aone `group/subgroup/project`);
+ * a local path, a scheme-less name without a `host:path` shape, or a bundle
+ * file is not a candidate and never matches. Host comparison at the call site
+ * runs through `hostsEquivalent` (Aone web/git alias), not raw equality.
  */
 export function parseRemoteUrl(raw: string): RemoteIdentity | null {
   const url = raw.trim();

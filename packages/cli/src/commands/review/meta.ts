@@ -56,16 +56,29 @@ export function runMeta(args: MetaArgs): MetaResult {
   let host: string;
   let ownerRepo: string;
   if (args.repo !== undefined) {
-    // Explicit repo: the host comes from the flag/env, defaulting to
-    // github.com — there is no URL to derive it from. Gate it the same way
-    // the discovery branch does: `resolveGhHost` also reads the GH_HOST env
-    // and never validates, so an unroutable env value (underscore intranet
-    // alias) must not be emitted as the host label while every sibling
-    // rejects it when welded back as --host. An env-sourced failure is
-    // environmental (exit 1), a --host typo was already classified exit 2 by
-    // the handler's own setGhHost.
+    // Explicit repo: the host comes from the flag/env. On GitHub it may
+    // default to github.com; on any other platform there is NO default —
+    // emitting `platform: 'aone'` beside `host: 'github.com'` would hand a
+    // consumer a contradiction (feeding the host back flips detection to
+    // GitHub and retargets at the same-named repo), so require `--host`.
     ownerRepo = args.repo;
-    host = resolveGhHost(args.host) ?? 'github.com';
+    const resolvedHost = resolveGhHost(args.host);
+    if (resolvedHost === undefined) {
+      if (platform.kind !== 'github') {
+        throw new TypeError(
+          `--repo on a ${platform.kind} target needs --host — there is no default host off GitHub`,
+        );
+      }
+      host = 'github.com';
+    } else {
+      host = resolvedHost;
+    }
+    // Gate it the same way the discovery branch does: `resolveGhHost` also
+    // reads the GH_HOST env and never validates, so an unroutable env value
+    // (underscore intranet alias) must not be emitted as the host label while
+    // every sibling rejects it when welded back as --host. An env-sourced
+    // failure is environmental (exit 1), a --host typo was already classified
+    // exit 2 by the handler's own setGhHost.
     if (!HOSTNAME_RE.test(host)) {
       throw new Error(
         `cannot route at the ${

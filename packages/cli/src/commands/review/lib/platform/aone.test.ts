@@ -25,6 +25,7 @@ vi.mock('../git.js', () => ({
 }));
 
 import { aoneReader } from './aone.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 
 describe('aoneReader.getCommentBody', () => {
   beforeEach(() => {
@@ -103,12 +104,17 @@ describe('aoneReader.fetchDiff', () => {
     });
     gitMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'merge-base') return 'base-sha';
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
       return '';
     });
     gitRawMock.mockReturnValue(Buffer.from('diff --git a/x b/x\n', 'latin1'));
     const diff = aoneReader.fetchDiff(7, 'g/p');
+    // The diff capture spreads the pinned diff config/flags (an un-pinned
+    // `color.diff=always` would make every `diff --git` unrecognisable).
     expect(gitRawMock).toHaveBeenCalledWith(
+      ...PINNED_DIFF_CONFIG,
       'diff',
+      ...PINNED_DIFF_FLAGS,
       'base-sha..__qwen-review-diff-7',
     );
     expect(diff).toBe('diff --git a/x b/x\n');
@@ -135,16 +141,31 @@ describe('aoneReader.fetchDiff', () => {
     });
     gitMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'merge-base') throw new Error('no merge-base');
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
       return '';
     });
     gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
     aoneReader.fetchDiff(7, 'g/p');
     expect(gitRawMock).toHaveBeenCalledWith(
+      ...PINNED_DIFF_CONFIG,
       'diff',
-      'base-sha..__qwen-review-diff-7'.replace(
-        'base-sha',
-        '__qwen-review-diff-7~1',
-      ),
+      ...PINNED_DIFF_FLAGS,
+      '__qwen-review-diff-7~1..__qwen-review-diff-7',
     );
+  });
+
+  it('refuses to diff from a clone of a DIFFERENT repo', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'git@gitlab.alibaba-inc.com:other/repo.git';
+      return '';
+    });
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+      /not g\/p — run from inside a clone of the target repo/,
+    );
+    expect(gitRawMock).not.toHaveBeenCalled();
   });
 });

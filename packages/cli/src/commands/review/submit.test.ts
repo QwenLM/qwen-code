@@ -42,10 +42,13 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
 // The Aone refusal guard probes the platform (cwd origin via
 // node:child_process) when no host is passed; pin it to GitHub so these
 // GitHub tests neither spawn a real `git` in the vitest cwd nor couple to the
-// machine's actual clone origin.
-vi.mock('./lib/platform/registry.js', () => ({
-  getPlatformReader: () => ({ kind: 'github' }),
-}));
+// machine's actual clone origin. importOriginal keeps the real exports
+// (isAoneHost, now imported by parse-args) available.
+vi.mock('./lib/platform/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./lib/platform/registry.js')>();
+  return { ...actual, getPlatformReader: () => ({ kind: 'github' }) };
+});
 
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 const writeStderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
