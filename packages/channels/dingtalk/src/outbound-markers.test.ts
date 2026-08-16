@@ -51,7 +51,7 @@ describe('outbound media markers', () => {
     expect(stripPartialOutboundMediaMarker(inline, 'FILE', '')).toBe(inline);
     expect(
       findTrailingPartialOutboundMediaMarker('The format is `[IMAGE: '),
-    ).toBeUndefined();
+    ).toEqual({ start: 14 });
     expect(
       findTrailingPartialOutboundMediaMarker(
         'Use `first line\n[FILE: /tmp/report.txt]` here',
@@ -272,5 +272,94 @@ describe('outbound media markers', () => {
     expect(
       findTrailingPartialOutboundMediaMarker('[FILE: /tmp/report ['),
     ).toEqual({ start: 0, markerName: 'FILE' });
+  });
+
+  it('closes markers before prose and Markdown followers', () => {
+    const cjk = '文件[FILE: /tmp/a.pdf]、[链接](https://example.com)已发出';
+    expect(findOutboundMediaMarkers(cjk, 'FILE')[0]?.path).toBe('/tmp/a.pdf');
+    expect(sanitizeOutboundMediaMarkers(cjk, 'FILE', '')).toBe(
+      '文件、[链接](https://example.com)已发出',
+    );
+    expect(findOutboundMediaMarkers('[FILE: a]𠮷]', 'FILE')[0]?.path).toBe('a');
+    expect(
+      findOutboundMediaMarkers('[FILE: a.pdf][link](url)', 'FILE')[0]?.path,
+    ).toBe('a.pdf');
+  });
+
+  it('preserves prose around nested image wrappers', () => {
+    expect(
+      unwrapFileMarkersAroundImages('[FILE: [IMAGE: a.png]] x [IMAGE: b.png]'),
+    ).toBe('[IMAGE: a.png] x [IMAGE: b.png]');
+    expect(
+      unwrapFileMarkersAroundImages('[FILE: [IMAGE: a.png]，请查收]'),
+    ).toBe('[IMAGE: a.png]，请查收');
+    expect(unwrapFileMarkersAroundImages('[FILE: [IMAGE: a.png] thanks]')).toBe(
+      '[IMAGE: a.png] thanks',
+    );
+    expect(unwrapFileMarkersAroundImages('[FILE: [IMAGE: a.png] summary')).toBe(
+      '[IMAGE: a.png]',
+    );
+  });
+
+  it('parks uncertain code and trailing escape state across chunks', () => {
+    expect(
+      findTrailingPartialOutboundMediaMarker(
+        'see `x [IMAGE: /Users/ben/private/',
+      ),
+    ).toEqual({ start: 4 });
+    expect(findTrailingPartialOutboundMediaMarker('see \\')).toEqual({
+      start: 4,
+    });
+    expect(
+      findTrailingPartialOutboundMediaMarker('\\``` [IMAGE: /tmp/a.png]'),
+    ).toEqual({ start: 2, markerName: 'IMAGE', complete: true });
+  });
+
+  it('does not park malformed wrappers from earlier lines', () => {
+    expect(
+      findTrailingPartialOutboundMediaMarker(
+        '[FILE: [IMAGE: a.png]\nmore text',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does not rewrite newline-terminated marker prefixes', () => {
+    expect(
+      stripPartialOutboundMediaMarker(
+        'see [im\nmore',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('see [im\nmore');
+    expect(stripPartialOutboundMediaMarker('A [f\nB', 'FILE', '')).toBe(
+      'A [f\nB',
+    );
+  });
+
+  it('keeps the next line after an unclosed marker opening', () => {
+    expect(
+      stripPartialOutboundMediaMarker(
+        'You can use [file:\nto attach documents.',
+        'FILE',
+        '',
+      ),
+    ).toBe('You can use \nto attach documents.');
+  });
+
+  it('does not unwrap escaped file wrappers', () => {
+    const text = String.raw`\[FILE: [IMAGE: /tmp/a.png]]`;
+    expect(unwrapFileMarkersAroundImages(text)).toBe(text);
+    expect(findOutboundMediaMarkers(text, 'IMAGE')).toHaveLength(1);
+  });
+
+  it('does not strip through protected marker openings', () => {
+    const inCode = 'A [IMAGE: /tmp/x `[FILE: /workspace/secret.pdf]` B';
+    const escaped = String.raw`A [IMAGE: /tmp/x \[FILE: /workspace/secret.pdf]`;
+    expect(
+      stripPartialOutboundMediaMarker(inCode, 'IMAGE', '[Image pending]'),
+    ).toBe(inCode);
+    expect(
+      stripPartialOutboundMediaMarker(escaped, 'IMAGE', '[Image pending]'),
+    ).toBe(escaped);
   });
 });

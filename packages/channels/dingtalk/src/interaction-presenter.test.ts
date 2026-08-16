@@ -770,6 +770,59 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('neutralizes escaped image markers in text fallbacks', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      String.raw`see \[IMAGE: /Users/ben/private/leak.png] done`,
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      String.raw`see \[Image pending] done`,
+      'session-1',
+    );
+  });
+
+  it('protects live image markers while neutralizing malformed syntax', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '` a [FILE: x`] [IMAGE: /tmp/i.png] `',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      '` a  [IMAGE: /tmp/i.png] `',
+      'session-1',
+    );
+  });
+
+  it('does not let neutralization consume protected images or trailing prose', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    const output =
+      '格式如 `[IMAGE: demo.png]` 所示，实际输出 [IMAGE: /tmp/out.png]，引用[2]';
+    presenter.appendOutput(segment('segment-1'), output);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      '格式如 `[Image pending]` 所示，实际输出 [IMAGE: /tmp/out.png]，引用[2]',
+      'session-1',
+    );
+  });
+
   it('neutralizes complete file markers in text fallbacks', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
     const presenter = new DingtalkInteractionPresenter({ sendFallback });

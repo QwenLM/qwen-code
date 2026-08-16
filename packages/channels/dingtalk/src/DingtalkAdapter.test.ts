@@ -3354,6 +3354,49 @@ describe('DingtalkChannel reply mentions', () => {
     });
   });
 
+  it('sanitizes a code-quoted image marker on the fallback hop', async () => {
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await (
+        channel as unknown as {
+          sendFallbackReply(
+            chatId: string,
+            text: string,
+            sessionId: string,
+          ): Promise<void>;
+        }
+      ).sendFallbackReply(
+        'cid123',
+        `\` a  [IMAGE: ${image.path}] \``,
+        'session-1',
+      );
+
+      expect(
+        fetchSpy.mock.calls.filter(([input]) =>
+          String(input).startsWith('https://oapi.dingtalk.com/media/upload'),
+        ),
+      ).toHaveLength(0);
+      const webhookCall = fetchSpy.mock.calls.find(([input]) =>
+        String(input).startsWith(
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        ),
+      );
+      const body = JSON.parse(
+        String((webhookCall![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(body.markdown.text).toBe('` a  [Image pending] `');
+      expect(body.markdown.text).not.toContain(image.path);
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the final answer mention after a mid-run card fallback', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid-1');
@@ -4475,6 +4518,122 @@ describe('DingtalkChannel outbound file delivery', () => {
       '[File delivery failed: incomplete marker]',
       'Next answer.',
     ]);
+  });
+
+  it('keeps an active response carry isolated from one-shot delivery', async () => {
+    const file = createTempFile('report.txt');
+    try {
+      const channel = createChannel({
+        blockStreaming: 'on',
+        cwd: file.dir,
+      });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+      const stem = file.path.slice(0, -'.txt'.length);
+
+      await getResponseHook(channel)(
+        'cid123',
+        `Answer [FILE: ${stem}`,
+        'session-1',
+      );
+      await getOneShotResponseHook(channel)(
+        'cid123',
+        'Background notice',
+        'session-1',
+      );
+      await getResponseHook(channel)('cid123', '.txt] done', 'session-1');
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      const bodies = markdownCalls().map(
+        (call) =>
+          (
+            JSON.parse(String((call[1] as RequestInit).body)) as {
+              markdown: { text: string };
+            }
+          ).markdown.text,
+      );
+      expect(bodies).toEqual([
+        'Answer ',
+        'Background notice',
+        '[File sent: report.txt] done',
+      ]);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validates the exact marker close before longer candidates', async () => {
+    const file = createTempFile('a.pdf');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `文件[FILE: ${file.path}]、[链接](https://example.com)已发出`,
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      const body = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(body.markdown.text).toBe(
+        '文件[File sent: a.pdf]、[链接](https://example.com)已发出',
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when multiple bracketed file paths are valid', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dingtalk-ambiguous-file-'));
+    const shorter = join(root, 'a[1');
+    const longer = `${shorter}]foo`;
+    writeFileSync(shorter, 'wrong');
+    writeFileSync(longer, 'right');
+    try {
+      const channel = createChannel({ cwd: root });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage('cid123', `[FILE: ${longer}] done`);
+
+      expect(uploadCalls()).toHaveLength(0);
+      expect(fileCalls()).toHaveLength(0);
+      const body = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(body.markdown.text).toBe('[File delivery failed: a_1_foo] done');
+      expect(body.markdown.text).not.toContain(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not expose a code-quoted file marker through partial stripping', async () => {
+    const file = createTempFile('secret.pdf');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `A [IMAGE: /tmp/x \`[FILE: ${file.path}]\` B`,
+      );
+
+      expect(uploadCalls()).toHaveLength(0);
+      expect(fileCalls()).toHaveLength(0);
+      const body = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(body.markdown.text).not.toContain(file.path);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
   });
 
   it('does not upload a file when the reply webhook is unavailable', async () => {

@@ -22,7 +22,6 @@ import {
   DingTalkMediaUploadError,
   findImageMarkers,
   readValidatedImage,
-  replaceImageMarkers,
   sanitizeStreamingImageMarkers,
   stripPartialImageMarker,
   type ImageMarker,
@@ -41,6 +40,7 @@ import {
 import {
   findTrailingPartialOutboundMediaMarker,
   replaceOutboundMediaMarkers,
+  type OutboundMediaMarker,
   unwrapFileMarkersAroundImages,
 } from './outbound-markers.js';
 import {
@@ -650,30 +650,46 @@ export class DingtalkChannel extends ChannelBase {
           .replace(/[\r\n[\]]+/g, '_')
           .slice(0, 100) || 'image';
       try {
-        let image: ReturnType<typeof readValidatedImage> | undefined;
+        const validated: Array<{
+          candidate: { end: number; path: string };
+          image: ReturnType<typeof readValidatedImage>;
+        }> = [];
         let validationError: unknown;
-        for (const candidate of [
-          ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
-        ].sort((left, right) => right.end - left.end)) {
+        for (const candidate of this.orderedMarkerCandidates(marker)) {
           if (candidate.end < marker.end) {
             validationError = new Error('Image marker path is incomplete');
             continue;
           }
           try {
-            image = readValidatedImage(candidate.path, {
-              workspaceDir: this.config.cwd,
+            validated.push({
+              candidate,
+              image: readValidatedImage(candidate.path, {
+                workspaceDir: this.config.cwd,
+              }),
             });
-            resolvedMarker = { ...marker, ...candidate, candidates: undefined };
-            fileName =
-              basename(candidate.path)
-                .replace(/[\r\n[\]]+/g, '_')
-                .slice(0, 100) || 'image';
-            break;
           } catch (error) {
             validationError = error;
           }
         }
-        if (!image) throw validationError ?? new Error('Invalid image path');
+        if (validated.length > 1) {
+          const longest = validated.reduce((left, right) =>
+            left.candidate.end >= right.candidate.end ? left : right,
+          ).candidate;
+          resolvedMarker = { ...marker, ...longest, candidates: undefined };
+          fileName =
+            basename(longest.path)
+              .replace(/[\r\n[\]]+/g, '_')
+              .slice(0, 100) || 'image';
+          throw new Error('Image marker path is ambiguous');
+        }
+        const match = validated[0];
+        if (!match) throw validationError ?? new Error('Invalid image path');
+        const { candidate, image } = match;
+        resolvedMarker = { ...marker, ...candidate, candidates: undefined };
+        fileName =
+          basename(candidate.path)
+            .replace(/[\r\n[\]]+/g, '_')
+            .slice(0, 100) || 'image';
         let mediaId: string | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           const token = await this.getProactiveToken();
@@ -713,16 +729,6 @@ export class DingtalkChannel extends ChannelBase {
     return { markers: resolvedMarkers, replacements };
   }
 
-  private async prepareOutgoingImages(text: string): Promise<string> {
-    const markers = findImageMarkers(text);
-    if (markers.length === 0) return stripPartialImageMarker(text);
-    const prepared = await this.prepareImageReplacements(markers);
-
-    return stripPartialImageMarker(
-      replaceImageMarkers(text, prepared.markers, prepared.replacements),
-    );
-  }
-
   private async prepareFileReplacements(
     markers: readonly FileMarker[],
   ): Promise<{
@@ -745,27 +751,40 @@ export class DingtalkChannel extends ChannelBase {
       let resolvedMarker = marker;
       let fileName = safeFileName(marker.path);
       try {
-        let file: ReturnType<typeof readValidatedFile> | undefined;
+        const validated: Array<{
+          candidate: { end: number; path: string };
+          file: ReturnType<typeof readValidatedFile>;
+        }> = [];
         let validationError: unknown;
-        for (const candidate of [
-          ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
-        ].sort((left, right) => right.end - left.end)) {
+        for (const candidate of this.orderedMarkerCandidates(marker)) {
           if (candidate.end < marker.end) {
             validationError = new Error('File marker path is incomplete');
             continue;
           }
           try {
-            file = readValidatedFile(candidate.path, {
-              workspaceDir: this.config.cwd,
+            validated.push({
+              candidate,
+              file: readValidatedFile(candidate.path, {
+                workspaceDir: this.config.cwd,
+              }),
             });
-            resolvedMarker = { ...marker, ...candidate, candidates: undefined };
-            fileName = safeFileName(candidate.path);
-            break;
           } catch (error) {
             validationError = error;
           }
         }
-        if (!file) throw validationError ?? new Error('Invalid file path');
+        if (validated.length > 1) {
+          const longest = validated.reduce((left, right) =>
+            left.candidate.end >= right.candidate.end ? left : right,
+          ).candidate;
+          resolvedMarker = { ...marker, ...longest, candidates: undefined };
+          fileName = safeFileName(longest.path);
+          throw new Error('File marker path is ambiguous');
+        }
+        const match = validated[0];
+        if (!match) throw validationError ?? new Error('Invalid file path');
+        const { candidate, file } = match;
+        resolvedMarker = { ...marker, ...candidate, candidates: undefined };
+        fileName = safeFileName(candidate.path);
         let mediaId: string | undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           const token = await this.getProactiveToken();
@@ -854,6 +873,16 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     return { text: result, files };
+  }
+
+  private orderedMarkerCandidates(marker: OutboundMediaMarker) {
+    return [
+      ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
+    ].sort((left, right) => {
+      if (left.end === marker.end) return -1;
+      if (right.end === marker.end) return 1;
+      return right.end - left.end;
+    });
   }
 
   private async sendPreparedReplyWithFiles(
@@ -1859,12 +1888,30 @@ export class DingtalkChannel extends ChannelBase {
       await this.sendResponseText(chatId, text, sessionId);
       return;
     }
-    await this.flushBlockStreamingMediaCarry(chatId, sessionId);
-    const ready = this.takeBlockStreamingText(sessionId, text);
-    if (ready !== undefined) {
+    const partial = findTrailingPartialOutboundMediaMarker(text);
+    if (!partial) {
+      await this.sendResponseText(chatId, text, sessionId);
+      return;
+    }
+    const ready = text.slice(0, partial.start);
+    if (ready.trim()) {
       await this.sendResponseText(chatId, ready, sessionId);
     }
-    await this.flushBlockStreamingMediaCarry(chatId, sessionId);
+    const pending = text.slice(partial.start);
+    if (partial.complete) {
+      await this.sendResponseText(chatId, pending, sessionId);
+      return;
+    }
+    const failure = partial.markerName
+      ? partial.markerName === 'IMAGE'
+        ? '[Image delivery failed: incomplete marker]'
+        : '[File delivery failed: incomplete marker]'
+      : pending;
+    await this.sendPreparedResponse(
+      chatId,
+      { text: failure, files: [] },
+      sessionId,
+    );
   }
 
   private async sendResponseText(
@@ -1906,8 +1953,8 @@ export class DingtalkChannel extends ChannelBase {
       await this.sendPreparedReply(chatId, text, atUserId);
       return;
     }
-    const outgoingText = await this.prepareOutgoingImages(text);
-    await this.sendPreparedReply(chatId, outgoingText, atUserId);
+    const prepared = await this.prepareOutgoingContent(text);
+    await this.sendPreparedReplyWithFiles(chatId, prepared, atUserId);
   }
 
   protected override async onResponseComplete(

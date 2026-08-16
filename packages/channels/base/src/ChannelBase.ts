@@ -5791,7 +5791,7 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
-        if (cancelledBeforeFailure) {
+        if (promptState.cancelled || promptState.cancellationEmitted) {
           return;
         }
         throw err;

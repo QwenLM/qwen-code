@@ -93,11 +93,17 @@ function unclosedBacktickStart(
   let delimiterLength = 0;
   let delimiterStart = -1;
   for (const match of text.slice(0, before).matchAll(/`+/gu)) {
-    if (isEscaped(text, match.index!)) continue;
+    let runStart = match.index!;
+    let runLength = match[0].length;
+    if (isEscaped(text, runStart)) {
+      runStart++;
+      runLength--;
+    }
+    if (runLength === 0) continue;
     if (delimiterLength === 0) {
-      delimiterLength = match[0].length;
-      delimiterStart = match.index!;
-    } else if (delimiterLength === match[0].length) {
+      delimiterLength = runLength;
+      delimiterStart = runStart;
+    } else if (delimiterLength === runLength) {
       delimiterLength = 0;
       delimiterStart = -1;
     }
@@ -109,33 +115,8 @@ function previousOpenBracket(text: string, open: number): number {
   return open === 0 ? -1 : text.lastIndexOf('[', open - 1);
 }
 
-function isMarkerCloseBoundary(
-  text: string,
-  close: number,
-  boundary: number,
-): boolean {
-  let cursor = close + 1;
-  if (
-    cursor >= boundary ||
-    /[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(
-      text[cursor]!,
-    )
-  ) {
-    return true;
-  }
-  while (
-    cursor < boundary &&
-    /[.,;:!?)}\]，。；：！？）】]/u.test(text[cursor]!)
-  ) {
-    cursor++;
-  }
-  return (
-    cursor > close + 1 &&
-    (cursor >= boundary ||
-      /[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(
-        text[cursor]!,
-      ))
-  );
+function isLikelyMarkerPathContinuation(suffix: string): boolean {
+  return /^(?:\.[^\s[\]]+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)$/u.test(suffix);
 }
 
 function findMarkerClose(
@@ -151,8 +132,18 @@ function findMarkerClose(
     closes.push(close);
     close = text.indexOf(']', close + 1);
   }
-  for (const candidate of closes) {
-    if (isMarkerCloseBoundary(text, candidate, boundary)) return candidate;
+  for (let index = 0; index < closes.length - 1; index++) {
+    const candidate = closes[index]!;
+    const next = closes[index + 1]!;
+    if (!isLikelyMarkerPathContinuation(text.slice(candidate + 1, next))) {
+      return candidate;
+    }
+  }
+  if (
+    lastClose !== -1 &&
+    isLikelyMarkerPathContinuation(text.slice(lastClose + 1, boundary))
+  ) {
+    return -1;
   }
   return lastClose;
 }
@@ -212,22 +203,18 @@ function markerSanitizationEnd(
   text: string,
   marker: OutboundMediaMarker,
 ): number {
-  if (/\[IMAGE$/iu.test(text.slice(0, marker.start))) return marker.end;
-  const opening = text.slice(marker.start).match(/^\[(IMAGE|FILE):\s*/iu);
-  if (!opening) return marker.end;
-  const pathStart = marker.start + opening[0].length;
-  const nextOpeningOffset = text.slice(pathStart).search(MEDIA_MARKER_PATTERN);
-  const boundary = markerBoundary(
-    text,
-    pathStart,
-    nextOpeningOffset === -1 ? undefined : pathStart + nextOpeningOffset,
-  );
-  const primaryPath = text.slice(pathStart, marker.end - 1);
-  const end = primaryPath.includes('[')
-    ? (marker.candidates?.at(-1)?.end ?? marker.end)
-    : marker.end;
-  if (isMarkerCloseBoundary(text, end - 1, boundary)) return end;
-  return primaryPath.includes('[') ? boundary : end;
+  const lastCandidate = marker.candidates?.at(-1);
+  if (
+    marker.path.includes('[') &&
+    lastCandidate &&
+    lastCandidate.end > marker.end &&
+    /^\s+(?:[~./\\]|[A-Za-z]:[\\/])[^\r\n]*$/u.test(
+      text.slice(marker.end, lastCandidate.end - 1),
+    )
+  ) {
+    return lastCandidate.end;
+  }
+  return marker.end;
 }
 
 export function truncateOutboundMediaText(
@@ -353,6 +340,10 @@ export function stripPartialOutboundMediaMarker(
         searchFrom = open + 1;
         continue;
       }
+      if (lineEnd !== text.length) {
+        searchFrom = open + 1;
+        continue;
+      }
     } else {
       const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
       if (!opening) {
@@ -363,16 +354,22 @@ export function stripPartialOutboundMediaMarker(
       const nextMarkerOffset = text
         .slice(pathStart)
         .search(MEDIA_MARKER_PATTERN);
-      const boundary = markerBoundary(
-        text,
-        pathStart,
-        nextMarkerOffset === -1 ? undefined : pathStart + nextMarkerOffset,
-      );
+      const nextMarkerOpen =
+        nextMarkerOffset === -1 ? undefined : pathStart + nextMarkerOffset;
+      const boundary = markerBoundary(text, pathStart, nextMarkerOpen);
+      if (
+        nextMarkerOpen === boundary &&
+        ((!includeEscaped && isEscaped(text, nextMarkerOpen)) ||
+          codeOpenings.has(nextMarkerOpen))
+      ) {
+        searchFrom = open + 1;
+        continue;
+      }
       if (findMarkerClose(text, pathStart, boundary) !== -1) {
         searchFrom = open + 1;
         continue;
       }
-      end = boundary;
+      end = Math.min(boundary, lineEnd);
     }
     const nextMarker = text.slice(end).match(/^\[(IMAGE|FILE):\s*/iu);
     const replacement =
@@ -483,10 +480,17 @@ export function findTrailingPartialOutboundMediaMarker(
             markerName,
             complete: true,
           };
+        } else {
+          pending = { start: uncertainCodeStart };
         }
         continue;
       }
-      if (wrapper && !wrapper.complete && wrapper.end === lineEnd) {
+      if (
+        wrapper &&
+        !wrapper.complete &&
+        wrapper.end === lineEnd &&
+        lineEnd === text.length
+      ) {
         pending = { start: open, markerName };
         continue;
       }
@@ -497,7 +501,7 @@ export function findTrailingPartialOutboundMediaMarker(
       const trailingBracketedPath =
         close !== -1 &&
         text.slice(pathStart, close).includes('[') &&
-        !isMarkerCloseBoundary(text, close, boundary);
+        isLikelyMarkerPathContinuation(text.slice(close + 1, boundary));
       if (
         boundary === text.length &&
         (close === -1 || ambiguousBracketedPath || trailingBracketedPath)
@@ -510,6 +514,13 @@ export function findTrailingPartialOutboundMediaMarker(
       }
     }
     open = previousOpenBracket(text, open);
+  }
+  const trailingBackslashes = text.match(/\\+$/u);
+  if (
+    trailingBackslashes?.index !== undefined &&
+    (!pending || trailingBackslashes.index < pending.start)
+  ) {
+    pending = { start: trailingBackslashes.index };
   }
   return pending;
 }
@@ -524,20 +535,23 @@ interface FileMarkerAroundImages {
 function isWrapperPathSuffix(suffix: string): boolean {
   if (!suffix) return true;
   if (/^(?:[~/\\]|\.{1,2}[\\/]|[A-Za-z]:[\\/])/u.test(suffix)) return true;
-  return !/[\s[\]]/u.test(suffix);
+  return /^(?:[^\s[\]]+[\\/])+[^\s[\]]+$|^.+\.[A-Za-z0-9]{1,16}$/u.test(suffix);
 }
 
 function fileMarkersAroundImages(text: string): FileMarkerAroundImages[] {
   const images = findOutboundMediaMarkers(text, 'IMAGE', true, true);
   const openings = markerOpenings(text, true).filter(
-    (opening) => opening[1]?.toLowerCase() === 'file',
+    (opening) =>
+      opening.index !== undefined &&
+      !isEscaped(text, opening.index) &&
+      opening[1]?.toLowerCase() === 'file',
   );
   return openings.flatMap((opening) => {
     const start = opening.index!;
     const pathStart = start + opening[0].length;
     const lineBreak = text.slice(pathStart).search(/[\r\n]/u);
     const lineEnd = lineBreak === -1 ? text.length : pathStart + lineBreak;
-    const nested = images.filter(
+    let nested = images.filter(
       (image) => image.start >= pathStart && image.end <= lineEnd,
     );
     if (
@@ -546,6 +560,12 @@ function fileMarkersAroundImages(text: string): FileMarkerAroundImages[] {
     ) {
       return [];
     }
+    const wrapperCloseGap = nested.findIndex(
+      (image, index) =>
+        index > 0 &&
+        text.slice(nested[index - 1]!.end, image.start).includes(']'),
+    );
+    if (wrapperCloseGap !== -1) nested = nested.slice(0, wrapperCloseGap);
     const lastImage = nested.at(-1)!;
     const nextClose = text.indexOf(']', lastImage.end);
     const closedSuffix =
@@ -555,9 +575,14 @@ function fileMarkersAroundImages(text: string): FileMarkerAroundImages[] {
     const complete =
       nextClose !== -1 &&
       nextClose < lineEnd &&
-      isWrapperPathSuffix(closedSuffix ?? '');
+      !(closedSuffix ?? '').includes('[');
     const trailingSuffix = text.slice(lastImage.end, lineEnd).trim();
-    const hidesTrailingSuffix = complete || isWrapperPathSuffix(trailingSuffix);
+    const hidesTrailingSuffix = complete
+      ? isWrapperPathSuffix(closedSuffix ?? '')
+      : !/[\s[\]]/u.test(trailingSuffix);
+    const replacement = nested
+      .map((image) => text.slice(image.start, image.end))
+      .join(' ');
     return [
       {
         start,
@@ -566,9 +591,13 @@ function fileMarkersAroundImages(text: string): FileMarkerAroundImages[] {
           : hidesTrailingSuffix
             ? lineEnd
             : nested[0]!.start,
-        replacement: hidesTrailingSuffix
-          ? nested.map((image) => text.slice(image.start, image.end)).join(' ')
-          : '',
+        replacement: complete
+          ? `${replacement}${
+              hidesTrailingSuffix ? '' : text.slice(lastImage.end, nextClose)
+            }`
+          : hidesTrailingSuffix
+            ? replacement
+            : '',
         complete,
       },
     ];

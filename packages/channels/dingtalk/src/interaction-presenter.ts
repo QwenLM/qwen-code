@@ -59,9 +59,7 @@ function sanitizeFallbackOutput(text: string): string {
     const image = text.slice(marker.start, marker.end);
     originalImageCounts.set(image, (originalImageCounts.get(image) ?? 0) + 1);
   }
-  let result = sanitizeStreamingFileMarkers(
-    unwrapFileMarkersAroundImages(text),
-  );
+  let result = unwrapFileMarkersAroundImages(text);
   const imageMarkers = findImageMarkers(result).flatMap((marker) => {
     const image = result.slice(marker.start, marker.end);
     const count = originalImageCounts.get(image) ?? 0;
@@ -76,15 +74,27 @@ function sanitizeFallbackOutput(text: string): string {
   });
   const images = imageMarkers.map((marker) => marker.replacementImage);
   result = replaceImageMarkers(result, imageMarkers, sentinels);
+  result = sanitizeStreamingFileMarkers(result);
   while (true) {
     const withoutFiles = sanitizeStreamingFileMarkers(result);
-    const markers = findOutboundMediaMarkers(withoutFiles, 'IMAGE', true);
+    const markers = findOutboundMediaMarkers(
+      withoutFiles,
+      'IMAGE',
+      true,
+      true,
+    ).filter(
+      (marker) =>
+        !sentinels.some((sentinel) =>
+          withoutFiles.slice(marker.start, marker.end).includes(sentinel),
+        ),
+    );
     const next = stripPartialImageMarker(
       replaceOutboundMediaMarkers(
         withoutFiles,
         markers,
         markers.map(() => '[Image pending]'),
       ),
+      true,
       true,
     );
     if (next === result) break;

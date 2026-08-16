@@ -13995,7 +13995,7 @@ describe('ChannelBase', () => {
       await expect(ch.cancelPromptForTest('s-1')).resolves.toBe(true);
       releaseSend();
 
-      await expect(running).rejects.toThrow('agent failed');
+      await running;
       expect(
         ch.taskEvents.filter((event) => event.type === 'cancelled'),
       ).toHaveLength(1);

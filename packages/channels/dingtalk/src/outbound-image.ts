@@ -38,12 +38,14 @@ export function replaceImageMarkers(
 export function stripPartialImageMarker(
   text: string,
   includeCode = false,
+  includeEscaped = false,
 ): string {
   return stripPartialOutboundMediaMarker(
     text,
     'IMAGE',
     '[Image pending]',
     includeCode,
+    includeEscaped,
   );
 }
 
