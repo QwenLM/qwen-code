@@ -52,6 +52,30 @@ const lines = (n: number, tag = 'L') =>
   Array.from({ length: n }, (_, i) => `${tag}${i + 1}`).join('\n') + '\n';
 
 /**
+ * Commit after recording an exec-bit flip THROUGH GIT. `chmodSync` alone is
+ * invisible on Windows: libuv cannot set the exec bit there, and git's
+ * `core.fileMode` is false anyway, so the capture the test drives would
+ * carry no mode section on the Windows CI leg. The index-native form
+ * records the mode on every platform; the filesystem chmod keeps the
+ * worktree consistent with the index where `core.fileMode` IS true.
+ */
+const commitModeChange = (
+  msg: string,
+  file: string,
+  exec: boolean,
+  files: Record<string, string>,
+) => {
+  for (const [name, body] of Object.entries(files)) {
+    writeFileSync(join(repo, name), body);
+  }
+  chmodSync(join(repo, file), exec ? 0o755 : 0o644);
+  git('add', '-A');
+  git('update-index', `--chmod=${exec ? '+x' : '-x'}`, file);
+  git('commit', '-qm', msg, '--no-verify');
+  return git('rev-parse', 'HEAD').trim();
+};
+
+/**
  * The invariant, checked directly: every line of the narrowed text appears in
  * the full capture. Not a sample of shapes — the whole output.
  */
@@ -100,9 +124,10 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, head);
-    const delta = capture(anchor, head);
+    const deltaBytes = captureBytes(anchor, head);
     const narrowed =
-      narrowToDelta(captureBytes(base, head), delta)?.toString('utf8') ?? null;
+      narrowToDelta(captureBytes(base, head), deltaBytes)?.toString('utf8') ??
+      null;
 
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('c.ts');
@@ -127,18 +152,22 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, head);
-    const delta = capture(anchor, head);
-    expect(delta).toContain('-X1'); // the delta really does carry it
+    const deltaBytes = captureBytes(anchor, head);
+    expect(deltaBytes.toString('utf8')).toContain('-X1'); // really carries it
     expect(full).not.toContain('X1'); // and the PR's diff never mentions it
 
     const narrowed =
-      narrowToDelta(captureBytes(base, head), delta)?.toString('utf8') ?? null;
+      narrowToDelta(captureBytes(base, head), deltaBytes)?.toString('utf8') ??
+      null;
+    // The scenario is constructed to narrow — the delta's surviving edit
+    // overlaps the full capture's one hunk — so assert it outright. A
+    // regression refusing on ANY missed delta range (all-or-nothing emission
+    // instead of per-hunk) must not ship green behind a null-tolerant check.
+    expect(narrowed).not.toBeNull();
     // Whatever it narrowed to, the deleted lines cannot be in it: the output
     // is assembled from `full`, which does not contain them.
-    expect(narrowed ?? '').not.toContain('X1');
-    if (narrowed !== null) {
-      expect(everyLineIsDisplayed(narrowed, full)).toBe(true);
-    }
+    expect(narrowed!).not.toContain('X1');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
   it('narrows to a post-anchor file the PR diff also carries', () => {
@@ -154,15 +183,19 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, head);
-    const delta = capture(anchor, head);
+    const deltaBytes = captureBytes(anchor, head);
     const narrowed =
-      narrowToDelta(captureBytes(base, head), delta)?.toString('utf8') ?? null;
+      narrowToDelta(captureBytes(base, head), deltaBytes)?.toString('utf8') ??
+      null;
+    // The scenario is constructed to narrow, so assert it outright: a
+    // regression returning null for new-file delta sections must not pass
+    // with zero assertions executed behind a null guard.
+    expect(narrowed).not.toBeNull();
     // `untracked-elsewhere.txt` IS in both captures, so this narrows to it —
     // and the assertion that matters is the invariant, not the emptiness.
-    if (narrowed !== null) {
-      expect(everyLineIsDisplayed(narrowed, full)).toBe(true);
-      expect(narrowed).not.toContain('q.ts');
-    }
+    expect(narrowed).toContain('untracked-elsewhere.txt');
+    expect(narrowed).not.toContain('q.ts');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
   it('refuses to narrow a capture that does not round-trip through utf8', () => {
@@ -178,8 +211,32 @@ describe('narrowToDelta on real-git captures', () => {
     ]);
     expect(invalid.toString('utf8')).not.toBe(invalid.toString('latin1'));
     expect(
-      narrowToDelta(invalid, 'diff --git a/f b/f\n@@ -1,1 +1,1 @@\n+ok\n'),
+      narrowToDelta(
+        invalid,
+        Buffer.from('diff --git a/f b/f\n@@ -1,1 +1,1 @@\n+ok\n', 'utf8'),
+      ),
     ).toBeNull();
+  });
+
+  it('refuses to narrow a delta that does not round-trip through utf8', () => {
+    // Symmetric with the full-side refusal: the delta's decoded paths drive
+    // the guard and the join, so a lossily pre-decoded delta folds an
+    // invalid path byte onto U+FFFD, which can collide with a legitimate
+    // U+FFFD path the full capture carries and publish an unchanged file's
+    // hunks. Fatal-decoding the delta refuses the shape instead; the round
+    // keeps the full range.
+    const delta = Buffer.concat([
+      Buffer.from('diff --git a/f'),
+      Buffer.from([0xff]),
+      Buffer.from(' b/f'),
+      Buffer.from([0xff]),
+      Buffer.from('\n@@ -1,1 +1,1 @@\n-x\n+y\n'),
+    ]);
+    const full = Buffer.from(
+      'diff --git a/g.ts b/g.ts\n--- a/g.ts\n+++ b/g.ts\n@@ -1,1 +1,1 @@\n-a\n+b\n',
+      'utf8',
+    );
+    expect(narrowToDelta(full, delta)).toBeNull();
   });
 
   it('falls back rather than scoping when the captures key a change differently', () => {
@@ -204,10 +261,49 @@ describe('narrowToDelta on real-git captures', () => {
     git('add', '-A');
     git('commit', '-qm', 'rename-fallback round 2', '--no-verify');
 
-    const delta = capture(anchor, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    const delta = deltaBytes.toString('utf8');
     expect(delta).toContain('b/new.ts');
     expect(delta).not.toContain('b/old.ts');
-    expect(narrowToDelta(captureBytes(base, 'HEAD'), delta)).toBeNull();
+    expect(narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)).toBeNull();
+  });
+
+  it('refuses to narrow a rewrite the delta keys as a rename', () => {
+    // Round 1 completely rewrites old.ts (similarity below git's rename
+    // threshold); round 2 renames it and edits another file. `base..head`
+    // nets the chain to a `new.ts` addition plus an `old.ts` deletion;
+    // `anchor..head` carries a 100%-similarity rename keyed on the NEW
+    // path. The path guard cannot see the divergence — the new path IS in
+    // the full capture, as the addition — while the rename's deletion half
+    // sits under the old path, keyed only there. Narrowing would publish
+    // the addition and silently drop the deletion, so the rename guard
+    // refuses instead: the round keeps the full range, which still displays
+    // it.
+    const base = commit('rewrite-rename base', {
+      'rw-old.ts': lines(8, 'O'),
+      'rw-other.ts': lines(8, 'T'),
+    });
+    commit('rewrite-rename round 1', {
+      'rw-old.ts': lines(8, 'W'),
+      'rw-other.ts': lines(8, 'T'),
+    });
+    const anchor = git('rev-parse', 'HEAD').trim();
+    git('mv', 'rw-old.ts', 'rw-new.ts');
+    writeFileSync(
+      join(repo, 'rw-other.ts'),
+      lines(8, 'T').replace('T3\n', 'T3-EDIT\n'),
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'rewrite-rename round 2', '--no-verify');
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    const delta = deltaBytes.toString('utf8');
+    // The scenario's premise: the two captures key the move differently.
+    expect(delta).toContain('rename from rw-old.ts');
+    expect(full).not.toContain('rename from');
+    expect(full).toContain('-O1'); // the deletion the PR's diff displays
+    expect(narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)).toBeNull();
   });
 
   it('emits the full section whole for a hunk-less delta touch', () => {
@@ -223,17 +319,17 @@ describe('narrowToDelta on real-git captures', () => {
       'm.sh': lines(8, 'M').replace('M2\n', 'M2-EDIT\n'),
       'other.ts': lines(8, 'T'),
     });
-    chmodSync(join(repo, 'm.sh'), 0o755);
-    commit('mode round 2', {
+    commitModeChange('mode round 2', 'm.sh', true, {
       'm.sh': lines(8, 'M').replace('M2\n', 'M2-EDIT\n'),
       'other.ts': lines(8, 'T').replace('T4\n', 'T4-EDIT\n'),
     });
 
     const full = capture(base, 'HEAD');
-    const delta = capture(anchor, 'HEAD');
     const narrowed =
-      narrowToDelta(captureBytes(base, 'HEAD'), delta)?.toString('utf8') ??
-      null;
+      narrowToDelta(
+        captureBytes(base, 'HEAD'),
+        captureBytes(anchor, 'HEAD'),
+      )?.toString('utf8') ?? null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('new mode 100755');
     expect(narrowed).toContain('+T4-EDIT');
@@ -258,10 +354,10 @@ describe('narrowToDelta on real-git captures', () => {
     git('commit', '-qm', 'pure-rename round 2', '--no-verify');
 
     const full = capture(base, 'HEAD');
-    const delta = capture(anchor, 'HEAD');
-    expect(delta).toContain('rename to new.ts');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    expect(deltaBytes.toString('utf8')).toContain('rename to new.ts');
     const narrowed =
-      narrowToDelta(captureBytes(base, 'HEAD'), delta)?.toString('utf8') ??
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
       null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('rename to new.ts');
@@ -279,25 +375,51 @@ describe('narrowToDelta on real-git captures', () => {
       'c.sh': lines(8, 'C'),
       'other.ts': lines(8, 'T'),
     });
-    chmodSync(join(repo, 'c.sh'), 0o755);
-    const anchor = commit('mode-revert round 1', {
+    const anchor = commitModeChange('mode-revert round 1', 'c.sh', true, {
       'c.sh': lines(8, 'C').replace('C3\n', 'C3-EDIT\n'),
       'other.ts': lines(8, 'T'),
     });
-    chmodSync(join(repo, 'c.sh'), 0o644);
-    commit('mode-revert round 2', {
+    commitModeChange('mode-revert round 2', 'c.sh', false, {
       'c.sh': lines(8, 'C').replace('C3\n', 'C3-EDIT\n'),
       'other.ts': lines(8, 'T').replace('T6\n', 'T6-EDIT\n'),
     });
 
     const full = capture(base, 'HEAD');
-    const delta = capture(anchor, 'HEAD');
     const narrowed =
-      narrowToDelta(captureBytes(base, 'HEAD'), delta)?.toString('utf8') ??
-      null;
+      narrowToDelta(
+        captureBytes(base, 'HEAD'),
+        captureBytes(anchor, 'HEAD'),
+      )?.toString('utf8') ?? null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('c.sh');
     expect(narrowed).toContain('+T6-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries a mode-only full section the delta touches with content hunks', () => {
+    // Mirror of the hunk-less-delta shape: round 1 chmods AND edits m.sh;
+    // round 2 reverts only the content. `base..head` nets to a mode-only
+    // section — no hunks — while the delta carries the content reversion's
+    // hunk. The emission must carry the full section whole; a hunkless full
+    // section must not be skipped because the delta has ranges at the path.
+    const base = commit('mode-net base', { 'mode-net.sh': lines(8, 'M') });
+    const anchor = commitModeChange('mode-net round 1', 'mode-net.sh', true, {
+      'mode-net.sh': lines(8, 'M').replace('M4\n', 'M4-EDIT\n'),
+    });
+    commit('mode-net round 2', { 'mode-net.sh': lines(8, 'M') });
+
+    const full = capture(base, 'HEAD');
+    // The scenario's premise: full nets to mode-only, delta carries hunks.
+    expect(full).toContain('new mode 100755');
+    expect(full).not.toContain('@@');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    expect(deltaBytes.toString('utf8')).toContain('@@');
+
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('new mode 100755');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
@@ -318,10 +440,10 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, 'HEAD');
-    const delta = capture(anchor, 'HEAD');
-    expect(delta).toContain('-X1');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    expect(deltaBytes.toString('utf8')).toContain('-X1');
     expect(full).not.toContain('X1');
-    expect(narrowToDelta(captureBytes(base, 'HEAD'), delta)).toBeNull();
+    expect(narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)).toBeNull();
   });
 
   it('accepts a delta whose deletion the PR diff performs too', () => {
@@ -342,14 +464,51 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, 'HEAD');
-    const delta = capture(anchor, 'HEAD');
-    expect(delta).toContain('-D10');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    expect(deltaBytes.toString('utf8')).toContain('-D10');
     const narrowed =
-      narrowToDelta(captureBytes(base, 'HEAD'), delta)?.toString('utf8') ??
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
       null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('-D10');
     expect(narrowed).not.toContain('e.ts');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('emits a whole-file deletion the delta performs too', () => {
+    // The whole-file-deletion shape rides two implementation choices at
+    // once: parseDiff clamps a `+0,0` hunk to the point range [0, 0], and
+    // `overlaps` is inclusive. An off-by-one in either would silently drop
+    // file deletions from the incremental scope while the PR diff displays
+    // them — the mid-file deletion control above cannot see it, its range
+    // shape is different.
+    const base = commit('rm base', {
+      'f.ts': lines(10, 'F'),
+      'g.ts': lines(10, 'G'),
+    });
+    const anchor = commit('rm round 1', {
+      'f.ts': lines(10, 'F').replace('F2\n', 'F2-EDIT\n'),
+      'g.ts': lines(10, 'G').replace('G2\n', 'G2-EDIT\n'),
+    });
+    git('rm', '-q', 'f.ts');
+    writeFileSync(
+      join(repo, 'g.ts'),
+      lines(10, 'G').replace('G2\n', 'G2-EDIT\n').replace('G7\n', 'G7-EDIT\n'),
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'rm round 2', '--no-verify');
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    expect(deltaBytes.toString('utf8')).toContain('deleted file mode');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('deleted file mode');
+    expect(narrowed).toContain('--- a/f.ts');
+    expect(narrowed).toContain('-F1');
+    expect(narrowed).toContain('+G7-EDIT');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
@@ -370,10 +529,11 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, 'HEAD');
-    const delta = capture(anchor, 'HEAD');
     const narrowed =
-      narrowToDelta(captureBytes(base, 'HEAD'), delta)?.toString('utf8') ??
-      null;
+      narrowToDelta(
+        captureBytes(base, 'HEAD'),
+        captureBytes(anchor, 'HEAD'),
+      )?.toString('utf8') ?? null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain(`+F${N / 2}-EDIT`);
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
@@ -396,10 +556,11 @@ describe('narrowToDelta on real-git captures', () => {
     });
 
     const full = capture(base, head);
-    const delta = capture(anchor, head);
-    const narrowed = narrowToDelta(captureBytes(base, head), delta)!.toString(
-      'utf8',
-    );
+    const deltaBytes = captureBytes(anchor, head);
+    const narrowed = narrowToDelta(
+      captureBytes(base, head),
+      deltaBytes,
+    )!.toString('utf8');
     expect(narrowed).not.toBeNull();
 
     // It is still a well-formed diff: git itself accepts it.
@@ -408,5 +569,10 @@ describe('narrowToDelta on real-git captures', () => {
       git('apply', '--check', '--reverse', 'narrowed.patch'),
     ).not.toThrow();
     expect(everyLineIsDisplayed(narrowed, full)).toBe(true);
+    // EVERY matching hunk survives, not just the first: p2.ts carries two
+    // post-anchor edit regions, and a first-match-only emission would drop
+    // the second from the scope while every check above stayed green.
+    expect(narrowed).toContain('+R10-EDIT');
+    expect(narrowed).toContain('+R40-EDIT');
   });
 });

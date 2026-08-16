@@ -187,12 +187,17 @@ type FetchPrResult = PlanReport & {
    * merge base that would scope WIDER than the PR's diff
    * (`behind-merge-base`), a merge base too stale to rule the clamp on
    * (`base-untrusted`), a capture that threw (`capture-failed`), a
-   * partitioner that refused to tile (`partition-failed`), or a PR diff with
-   * nothing left in the changed range (`nothing-to-narrow`). That last one
+   * partitioner that refused to tile (`partition-failed`), or a narrowing
+   * that found nothing it could publish (`nothing-to-narrow`). That last one
    * exists because the scope is BUILT from the PR's own diff rather than
-   * checked against it: when the commits since the anchor put lines back the
-   * way the base had them, the PR no longer displays that region and there is
-   * nothing there to narrow to.
+   * checked against it, and it covers every shape the build can refuse,
+   * deliberately alike: an "undo per feedback" round whose commits put lines
+   * back the way the base had them, so the PR no longer displays the region;
+   * a capture on either side whose bytes do not survive UTF-8; a delta the
+   * parser cannot read; and the fail-closed refusal — the two captures key
+   * the same change differently (a path or a rename git resolves differently
+   * across the two ranges), so narrowing would drop a change the PR's diff
+   * displays. Every shape keeps the full range: wider, never wrong.
    *
    * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
    * means this round has no diff to review, whatever refused the anchor. A
@@ -683,13 +688,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // the round keeps the full range, which on a base-free PR is itself
       // nothing — the same state such a round reaches without `--since`.
       demote('capture-failed');
-    } else if ((narrowed = narrowToDelta(fullBytes, delta)) === null) {
-      // The PR's own diff has no hunk in the range that changed since the
-      // anchor. The ordinary cause is an "undo per feedback" round: the
-      // commits since the anchor put lines back the way the base had them, so
-      // that region is absent from `base..head` entirely and there is nothing
-      // there left to re-review. Keeping the full range costs a wider review
-      // and never a wrong one.
+    } else if ((narrowed = narrowToDelta(fullBytes, deltaBytes)) === null) {
+      // The narrowing found nothing it could publish — four shapes, one
+      // reason, all safe, because keeping the full range costs a wider
+      // review and never a wrong one: the "undo per feedback" round (the
+      // commits since the anchor put lines back the way the base had them,
+      // so the region is absent from `base..head` entirely and there is
+      // nothing there left to re-review); a capture whose bytes do not
+      // survive UTF-8; a delta the parser cannot read; and the fail-closed
+      // refusal — the two captures key the same change differently (a path
+      // or a rename), so narrowing would drop a change the PR's diff
+      // displays.
       demote('nothing-to-narrow');
     } else {
       if (publish(narrowed)) {

@@ -45,17 +45,18 @@ function overlaps(
 /**
  * The PR's own hunks that overlap what changed since the anchor.
  *
- * `fullBytes` is `base..head` — exactly what GitHub renders. `deltaText` is
+ * `fullBytes` is `base..head` — exactly what GitHub renders. `deltaBytes` is
  * `anchor..head`, read for its post-image ranges and nothing else: not one of
  * its bytes reaches the result.
  *
  * Returns null when there is nothing to narrow to — the caller keeps the full
  * range, which is always safe because it is the review the round would have
- * done anyway. Null covers, deliberately treated alike: a capture that did
- * not decode, a delta carrying a path the full capture keys differently (git's
- * rename detection resolved differently across the two ranges, so the change
- * would drop from the scope under the key mismatch), a delta touching no path
- * the PR's diff carries, and a delta whose ranges miss every hunk of it. The
+ * done anyway. Null covers, deliberately treated alike: a capture on EITHER
+ * side that did not decode, a delta carrying a path the full capture keys
+ * differently (git's rename detection resolved differently across the two
+ * ranges, so the change would drop from the scope under the key mismatch), a
+ * delta touching no path the PR's diff carries, and a delta whose ranges miss
+ * every hunk of it. The
  * last is the "undo per feedback" round, where the commits since the anchor
  * put lines back the way the base had them: the PR's diff no longer shows
  * that region at all, so there is genuinely nothing there to re-review, and
@@ -63,24 +64,31 @@ function overlaps(
  */
 export function narrowToDelta(
   fullBytes: Buffer,
-  deltaText: string,
+  deltaBytes: Buffer,
 ): Buffer | null {
   // Bytes in, bytes out. The selection below runs on decoded text, because
   // that is what `parseDiff` reads — so a capture that does not survive UTF-8
   // cannot be reassembled faithfully: re-encoding would write bytes git never
   // produced and give `diffSha256` a value naming a file nobody captured. A
   // fatal decode rejects exactly those bytes, without materializing a
-  // re-encoded full-size copy just to compare. Such a round keeps the full
-  // range, which is the original bytes untouched.
-  let fullText: string;
-  try {
-    fullText = new TextDecoder('utf-8', {
-      fatal: true,
-      ignoreBOM: true,
-    }).decode(fullBytes);
-  } catch {
-    return null;
-  }
+  // re-encoded full-size copy just to compare, and it runs on BOTH captures:
+  // a lossily pre-decoded delta folds an invalid path byte onto U+FFFD, which
+  // can collide with a legitimate U+FFFD path the full capture carries and
+  // select hunks of a file that never changed since the anchor. Such a round
+  // keeps the full range, which is the original bytes untouched.
+  const decode = (bytes: Buffer): string | null => {
+    try {
+      return new TextDecoder('utf-8', {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes);
+    } catch {
+      return null;
+    }
+  };
+  const fullText = decode(fullBytes);
+  const deltaText = decode(deltaBytes);
+  if (fullText === null || deltaText === null) return null;
   if (fullText.trim() === '' || deltaText.trim() === '') return null;
   const full = parseDiff(fullText);
   const delta = parseDiff(deltaText);
@@ -98,15 +106,34 @@ export function narrowToDelta(
     touched.set(f.path, ranges);
   }
 
-  // The two captures can key the same change under different paths whenever
-  // git's rename detection resolves differently across the two ranges —
-  // `base..head` is a two-tree diff with no intermediate tree. A delta path
-  // that does not cross is a change the PR's diff displays that would
-  // silently drop from the published scope, so refuse to narrow instead: the
-  // round keeps the full range, which still displays it.
+  // The two captures can key the same change differently whenever git's
+  // rename detection resolves differently across the two ranges —
+  // `base..head` is a two-tree diff with no intermediate tree. Either shape
+  // of divergence is a change the PR's diff displays that would silently drop
+  // from the published scope, so refuse to narrow instead: the round keeps
+  // the full range, which still displays it.
+  //
+  // Shape one: a delta path the full capture does not carry at all.
   const fullPaths = new Set(full.files.map((f) => f.path));
   for (const p of touched.keys()) {
     if (!fullPaths.has(p)) return null;
+  }
+  // Shape two: a rename the full capture does not key as the SAME rename.
+  // The path guard cannot see it — the delta keys the rename under the NEW
+  // path, which the full capture also carries (as a plain addition), while
+  // the rename's deletion half sits under the OLD path, keyed only in the
+  // full capture.
+  const fullRenames = new Map<string, string>();
+  for (const f of full.files) {
+    if (f.renameFrom !== undefined) fullRenames.set(f.path, f.renameFrom);
+  }
+  for (const f of delta.files) {
+    if (
+      f.renameFrom !== undefined &&
+      fullRenames.get(f.path) !== f.renameFrom
+    ) {
+      return null;
+    }
   }
 
   // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
