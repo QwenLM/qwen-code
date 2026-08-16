@@ -6755,12 +6755,14 @@ exit 1
     expect(divBlock).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'autofix-diverge-'));
     // Markers carry round= (informational) and run= (GITHUB_RUN_ID) — deduped
-    // and ordered on run=, the per-workflow-run id: a retry re-posts one run's
-    // marker (same run → collapses) while distinct address runs have distinct,
-    // increasing run ids. round=/eval-watermark are NOT a safe identity — a
-    // state-triggered lane freezes both — so two distinct runs can share
-    // round= yet must still count twice. Each row also carries an author +
-    // created_at (the read filters to the bot and to post-base-update markers).
+    // on run= and ordered on measured= (the prepare-time instant; created_at
+    // fallback for legacy markers), the per-workflow-run id: a retry or a
+    // failed job's re-run re-posts one run's marker (same run → collapses to
+    // its latest measurement) while distinct address runs have distinct run
+    // ids. round=/eval-watermark are NOT a safe identity — a state-triggered
+    // lane freezes both — so two distinct runs can share round= yet must still
+    // count twice. Each row also carries an author + created_at (the read
+    // filters to the bot and to markers measured after the cutoff).
     const marker = (
       src,
       test,
@@ -6769,15 +6771,21 @@ exit 1
       key = 'W1',
       {
         login = 'qwen-code-dev-bot',
-        at = '2026-01-01T00:00:00Z',
-        // Default run advances with the round so sort_by(.run) is
-        // deterministic; distinct runs that share round= override it.
+        // measured= (the prepare-time measurement instant) is the dedup/order
+        // key; default advances with the round so sort_by/max_by are
+        // deterministic. A re-run's distinct attempts override it explicitly.
+        measured = `2026-01-01T00:${String(round).padStart(2, '0')}:00Z`,
+        // Default run advances with the round; distinct runs that share round=
+        // override it.
         run = 1000 + round,
       } = {},
     ) => ({
       user: { login },
-      created_at: at,
-      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} key=${key} -->`,
+      // Deliberately DIFFERENT from measured=: the report posts the comment
+      // long after prepare measured, and the read must key on measured=. A
+      // fixture that tied them together could not tell the two apart.
+      created_at: '2026-06-01T00:00:00Z',
+      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} measured=${measured} key=${key} -->`,
     });
     const diverge = ({
       src,
@@ -6785,7 +6793,9 @@ exit 1
       criticalOnlyGrowth = 'true',
       history,
       div = 2,
-      baseUpdAt = '',
+      // The comparability cutoff (base update OR external head move); markers
+      // measured at/before it are dropped as incomparable.
+      cutoff = '',
       // Distinct from every default fixture run id (1000+round), so existing
       // cases see no self-exclusion; a case can set a fixture marker's run to
       // this to prove the current run's own attempt is excluded.
@@ -6800,7 +6810,7 @@ exit 1
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nLIVE_REARM_KEY=W1\nWORKDIR=${dir}\n` +
             `NET_MEASURED=true\nCRITICAL_ONLY_GROWTH=${criticalOnlyGrowth}\n` +
-            `BASE_UPD_AT='${baseUpdAt}'\nGITHUB_RUN_ID=${currentRun}\n` +
+            `GROWTH_NOW_CUTOFF='${cutoff}'\nGITHUB_RUN_ID=${currentRun}\n` +
             `GROWTH_SRC=${src}\nGROWTH_TEST=${test}\nGROWTH_DIVERGENCE_ROUNDS=${div}\n` +
             `${divBlock}\nprintf '\\n%s %s' "$GROWTH_DIVERGED" "$OVER_ROUNDS_PRIOR"`,
         ],
@@ -6875,7 +6885,7 @@ exit 1
       }),
     ).toBe('false 1');
     // When a run was re-run and posted two markers with DIFFERENT sums, the
-    // LATEST attempt (by created_at) wins, not jq's stale first: run 1002's
+    // LATEST attempt (by measured=) wins, not jq's stale first: run 1002's
     // fresh attempt (sum 300 @ T2) is PREV_SUM, so current 400 >= 300 →
     // diverged. Keeping the stale first (sum 900) would read 400 >= 900 → not.
     expect(
@@ -6886,11 +6896,32 @@ exit 1
           marker(300, 200, 'true', 1, 'W1', { run: 1001 }),
           marker(600, 300, 'true', 2, 'W1', {
             run: 1002,
-            at: '2026-01-01T00:01:00Z',
+            measured: '2026-01-01T00:01:00Z',
           }),
           marker(150, 150, 'true', 2, 'W1', {
             run: 1002,
-            at: '2026-01-01T00:02:00Z',
+            measured: '2026-01-01T00:02:00Z',
+          }),
+        ],
+      }),
+    ).toBe('true 2');
+    // measured= order inverts run order across DISTINCT runs — a failed
+    // job's re-run keeps its OLD run id but stamps a NEWER measured=:
+    // PREV_SUM must follow measured=, so the current 150 >= 100 runaway
+    // escalates. Reverting to run-id ordering would read run 1002's stale
+    // 900 as PREV_SUM and suppress it (#9192 R2-4).
+    expect(
+      diverge({
+        src: 100,
+        test: 50,
+        history: [
+          marker(60, 40, 'true', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+          marker(500, 400, 'true', 2, 'W1', {
+            run: 1002,
+            measured: '2026-01-01T00:02:00Z',
           }),
         ],
       }),
@@ -6953,17 +6984,181 @@ exit 1
         history: climbing.map((m) => ({ ...m, user: { login: 'attacker' } })),
       }),
     ).toBe('false 0');
-    // Markers BEFORE a mid-window base update are excluded (re-anchoring makes
-    // pre-update sums incomparable) — only the post-update round remains.
+    // Markers measured at/before the comparability cutoff (a base update OR an
+    // external head move) are excluded — re-anchoring makes pre-cutoff sums
+    // incomparable; only the post-cutoff round remains.
     expect(
       diverge({
         src: 999,
         test: 999,
-        baseUpdAt: '2026-01-01T12:00:00Z',
+        cutoff: '2026-01-01T12:00:00Z',
         history: [
-          marker(500, 300, 'true', 1, 'W1', { at: '2026-01-01T06:00:00Z' }),
-          marker(600, 400, 'true', 2, 'W1', { at: '2026-01-01T06:30:00Z' }),
-          marker(200, 100, 'true', 3, 'W1', { at: '2026-01-01T18:00:00Z' }),
+          marker(500, 300, 'true', 1, 'W1', {
+            measured: '2026-01-01T06:00:00Z',
+          }),
+          marker(600, 400, 'true', 2, 'W1', {
+            measured: '2026-01-01T06:30:00Z',
+          }),
+          marker(200, 100, 'true', 3, 'W1', {
+            measured: '2026-01-01T18:00:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 1');
+    // …and the boundary is STRICT: a marker measured exactly AT the cutoff
+    // is dropped as incomparable (at second granularity a same-second stamp
+    // and base-update comment can collide) — a `>` → `>=` flip ships green
+    // without this pin (#9192 R4-7).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          marker(500, 300, 'true', 1, 'W1', {
+            measured: '2026-01-01T12:00:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 0');
+    // A re-run whose FRESH attempt came back under budget must not be
+    // represented by its own stale over=true attempt: the per-run collapse
+    // happens BEFORE the over-filter, so the run drops out entirely.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(300, 150, 'true', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:01:00Z',
+          }),
+          marker(80, 40, 'false', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 0');
+    // Mirror of that case for the FAILURE path's inert marker: a re-run
+    // attempt that crashed BEFORE prepare posts over=false with NO measured=
+    // (MEASURED_AT empty), so its fallback is the comment's created_at —
+    // post-run, hence newer than the same run's prepare-time measured= from
+    // its earlier attempt. The collapse must prefer an explicit measured=
+    // over that fallback, or the inert marker erases the run's real
+    // over-budget count (#9192 R3-1).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 measured=2026-01-01T00:01:00Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
+    // Same defect at the handoff threshold: two real over-budget priors, the
+    // second erased by the inert marker — without the explicit-measured
+    // preference the count drops to 1 and the divergence handoff (div=2) is
+    // suppressed while the diff keeps climbing.
+    expect(
+      diverge({
+        src: 500,
+        test: 300,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T01:30:00Z',
+            body: '<!-- autofix-growth-now src=300 test=200 over=true round=1 run=1001 measured=2026-01-01T00:00:30Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=400 test=250 over=true round=2 run=1002 measured=2026-01-01T00:01:00Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=2 run=1002 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('true 2');
+    // …and two LEGACY markers for the same run (neither carries measured=)
+    // still collapse on the created_at fallback: the explicit-measured
+    // preference must not disturb fallback-vs-fallback ordering.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=300 test=150 over=true round=1 run=1001 key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=80 test=40 over=false round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 0');
+    // Backward compatibility: a marker posted BEFORE measured= existed still
+    // counts, falling back to its comment's created_at — deploying the
+    // measured= switch must not blank the census of an in-flight window.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:01:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
+    // …and a legacy marker is still subject to the cutoff, via that fallback.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:01:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 0');
+    // …and the created_at fallback ITSELF is pinned: a legacy marker whose
+    // created_at sits AFTER the cutoff still counts. Dropping the fallback
+    // (measured= absent → "") would exclude every post-update legacy marker
+    // and under-count the census (#9192 R2-3).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T18:00:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
         ],
       }),
     ).toBe('false 1');
@@ -6999,7 +7194,7 @@ exit 1
     // of silently inerting the feature. Every writer path is covered, not just
     // the push path (a drift in only the no-op or failure suffix would
     // otherwise survive green).
-    const roundTrip = (roundVar) => {
+    const roundTrip = (roundVar, { omitMeasuredAt = false } = {}) => {
       const line = workflow.match(
         new RegExp(
           `echo "<!-- autofix-growth-now src=\\$\\{GROWTH_SRC:-0\\}[^\\n]*round=\\$\\{${roundVar}\\}[^\\n]*-->"`,
@@ -7011,7 +7206,9 @@ exit 1
         [
           '-c',
           `GROWTH_SRC=500\nGROWTH_TEST=300\nCRITICAL_ONLY_GROWTH=true\n` +
-            `${roundVar}=2\nGITHUB_RUN_ID=1002\nGROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
+            `${roundVar}=2\nGITHUB_RUN_ID=1002\n` +
+            (omitMeasuredAt ? '' : 'MEASURED_AT=2026-01-01T00:05:00Z\n') +
+            `GROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
         ],
         { encoding: 'utf8' },
       ).trim();
@@ -7032,6 +7229,13 @@ exit 1
     expect(roundTrip('NEXT_ROUND')).toBe('false 1'); // push path
     expect(roundTrip('ROUND')).toBe('false 1'); // no-op path
     expect(roundTrip('MARK_ROUND')).toBe('false 1'); // failure/handoff path
+    // …and it still round-trips when MEASURED_AT is empty — prepare never
+    // ran (#9192 R2-1) or the round could not measure (#9192 R4-3): measured=
+    // omits itself rather than emit an empty value no scan can match, so the
+    // marker survives on the created_at fallback instead of silently dropping.
+    expect(roundTrip('NEXT_ROUND', { omitMeasuredAt: true })).toBe('false 1');
+    expect(roundTrip('ROUND', { omitMeasuredAt: true })).toBe('false 1');
+    expect(roundTrip('MARK_ROUND', { omitMeasuredAt: true })).toBe('false 1');
     rmSync(dir, { recursive: true, force: true });
 
     // The report writes the per-round growth-now marker on ALL THREE report
@@ -7043,7 +7247,7 @@ exit 1
       workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
     ).toHaveLength(3);
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // The failure/handoff report step binds the three growth outputs so its
     // marker is not inert-by-omission.
@@ -7073,10 +7277,58 @@ exit 1
       expect(pushAndReportStep).toContain(bind);
     }
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
+    );
+    // Both report STEPS bind MEASURED_AT (push+no-op share one env block, the
+    // failure/handoff report has its own), so all three marker writers can
+    // stamp the prepare-time instant (not the post-agent comment created_at).
+    expect(
+      workflow.match(
+        /MEASURED_AT: '\$\{\{ steps\.prepare\.outputs\.measured_at \}\}'/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(workflow).toContain('echo "measured_at=${MEASURED_AT}"');
+    // The measurement instant is taken in PREPARE, next to the net it stamps —
+    // not at report time, which is what the whole switch is about.
+    const prepMeasured = prepareBranchAndFeedbackStep.indexOf(
+      'MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+    );
+    expect(prepMeasured).toBeGreaterThan(-1);
+    expect(prepMeasured).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf('echo "measured_at=${MEASURED_AT}"'),
+    );
+    // …and the stamp is emitted ONLY when the round actually measured: an
+    // unmeasured re-run attempt must not gain an explicit measured= that the
+    // per-run collapse would prefer over the same run's real measurement
+    // (#9192 R4-3). Behavioral: execute the gated stamp both ways.
+    const stampGate = prepareBranchAndFeedbackStep.match(
+      /\[\[ "\$\{NET_MEASURED\}" == 'true' \]\] && echo "measured_at=\$\{MEASURED_AT\}" >> "\$\{GITHUB_OUTPUT\}"/,
+    )?.[0];
+    expect(stampGate).toBeTruthy();
+    const stampedFor = (netMeasured) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\nout="$(mktemp)"\nNET_MEASURED=${netMeasured}\n` +
+            `MEASURED_AT=2026-01-01T00:05:00Z\nGITHUB_OUTPUT="$out"\n` +
+            `${stampGate} || true\ncat "$out"\nrm -f "$out"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    expect(stampedFor('true')).toBe('measured_at=2026-01-01T00:05:00Z\n');
+    expect(stampedFor('false')).toBe('');
+    // The head-move re-anchor is deliberately NOT in this change (see #9114):
+    // the redcheck head is the pre-push judged head, so comparing against it
+    // would re-anchor on the bot's own pushes and zero the census.
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'GROWTH_NOW_CUTOFF="${MEASURED_AT}"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"',
     );
     // growth_diverged is NOT emitted as a step output — the handoff is
     // enforced by the feedback.md text, so a dangling dead output would only
