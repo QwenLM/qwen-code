@@ -31,6 +31,7 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
@@ -168,6 +169,34 @@ function samePath(p: string): string {
 }
 
 /**
+ * The residue probe's build-artifact exclusion, enforced by the PIPELINE
+ * rather than borrowed from the commit: `core.excludesFile` applies whether
+ * or not the HEAD `.gitignore` covers these names (see worktreeResidue).
+ * Writing the repository's own `info/exclude` is not an option: from a linked
+ * worktree it resolves to the user's COMMON repository.
+ */
+let pipelineExcludesFile: string | null = null;
+function pipelineExcludeArgs(): string[] {
+  if (pipelineExcludesFile === null) {
+    try {
+      // Forward slashes: git's config parser reads backslashes as escapes.
+      const file = join(tmpdir(), 'qwen-review-residue-excludes')
+        .split(sep)
+        .join('/');
+      writeFileSync(file, 'node_modules/\ndist/\n');
+      pipelineExcludesFile = file;
+    } catch {
+      // No tmp file: fall back to the commit's own ignore rules, which cover
+      // the ordinary repo.
+      pipelineExcludesFile = '';
+    }
+  }
+  return pipelineExcludesFile === ''
+    ? []
+    : ['-c', `core.excludesFile=${pipelineExcludesFile}`];
+}
+
+/**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
  *
@@ -202,7 +231,19 @@ function samePath(p: string): string {
  *   returning no stdout — which this function would have read as "clean". The
  *   overload case is the one where the tree is dirtiest.
  *
- * Ignored files are excluded (`node_modules`, `dist`: every review builds).
+ * Ignored files are excluded, and the pipeline's own build artifacts
+ * (`node_modules`, `dist`) are excluded even when the COMMIT under review
+ * does not ignore them: the review builds in this tree, and a PR whose
+ * `.gitignore` does not cover its install used to turn that install into
+ * residue — every verifier's first act aimed at deleting the very tree its
+ * farm borrows from.
+ *
+ * The tree's identity is checked before its state: git's repository discovery
+ * walks UP, so a directory whose `.git` file is gone answers `git status`
+ * with the enclosing user checkout's dirty state — the wrong tree, measured
+ * silently, and the restore recipe this probe triggers aimed at the user's
+ * own files. That shape fails closed instead.
+ *
  * Empty on any git failure: this is a diagnostic, and a diagnostic that throws
  * would fail the build it is only commenting on.
  *
@@ -212,9 +253,42 @@ function samePath(p: string): string {
  * — so the name is disclosed as git rendered it rather than silently dropped.
  */
 export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
+  // git's discovery WALKS UP: with the `.git` file gone — a crash mid-`worktree
+  // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
+  // enclosing user checkout: the wrong tree's dirty state answered as this
+  // one's. Fail closed the way a loud git failure below does.
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd,
+    encoding: 'utf8',
+  });
+  let isWorktree = false;
+  try {
+    isWorktree =
+      !top.error &&
+      top.status === 0 &&
+      typeof top.stdout === 'string' &&
+      realpathSync(top.stdout.trim()) === realpathSync(cwd);
+  } catch {
+    // A cwd that no longer resolves is not a tree this probe can measure.
+  }
+  if (!isWorktree) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the path is not a git worktree (repository discovery walks up into ' +
+        'the enclosing checkout)',
+    };
+  }
   const r = spawnSync(
     'git',
-    ['status', '--porcelain', '--untracked-files=all', '-z'],
+    [
+      ...pipelineExcludeArgs(),
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '-z',
+    ],
     { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
@@ -446,14 +520,15 @@ function marksOurFarm(target: string, sourceDir: string): boolean {
 /**
  * One directory's `node_modules`, mirrored entry by entry.
  *
- * A directory that already has one is left alone — the reuse path of a scratch
- * tree calls this again, and re-linking a farm that is already there would be
- * pure cost. That case is RECORDED rather than merely skipped: `{linked: 0,
- * failed: 0}` otherwise reads the same whether the farm was already standing or
- * the source had nothing to link (a killed `npm install` leaves a
- * `node_modules` holding one lockfile), and the two want opposite things said
- * to the verifier — "your harness is ready" versus "no harness will start
- * here".
+ * A directory that already has one is left alone only for callers that do NOT
+ * pass `rebuild` — and that case is RECORDED rather than merely skipped:
+ * `{linked: 0, failed: 0}` otherwise reads the same whether the farm was
+ * already standing or the source had nothing to link (a killed `npm install`
+ * leaves a `node_modules` holding one lockfile), and the two want opposite
+ * things said to the verifier — "your harness is ready" versus "no harness
+ * will start here". The production callers — scratch-tree's reuse path and
+ * the probe suite — all pass `rebuild`, so a standing farm is wiped and
+ * re-linked every time; the reuse branch is reachable only from tests.
  */
 function farmNodeModules(
   sourceDir: string,
@@ -494,7 +569,19 @@ function farmNodeModules(
     done.failed++;
     return;
   }
-  if (existsSync(target)) {
+  // `lstatSync`, not `existsSync`: the latter follows links, so a DANGLING
+  // symlink at the target reads as absent, the wipe below is skipped, and
+  // `mkdirSync` dies EEXIST on every attempt. A PR can commit `node_modules`
+  // as exactly that — force-add defeats gitignore — and `checkout --force` /
+  // `clean -ffdx` both spare a TRACKED symlink, so every reset recreates the
+  // shape. Same hazard, and same fix, as the no-source branch above.
+  let targetPresent = true;
+  try {
+    lstatSync(target);
+  } catch {
+    targetPresent = false;
+  }
+  if (targetPresent) {
     // A standing farm counts only if THIS code built it: the marker is the
     // difference between "the packages I linked last time" and "whatever a
     // probe left in the one directory it is allowed to install into". Anything

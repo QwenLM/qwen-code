@@ -167,6 +167,49 @@ describe('worktreeResidue', () => {
     // distinguishable at the renderers.
     expect(worktreeResidue(repo).unmeasured).toBeUndefined();
   });
+
+  it('fails closed for a degraded dir nested in a checkout — discovery walks up', () => {
+    // The production shape the tmpdir fixture above cannot pin: review
+    // worktrees sit INSIDE the user's checkout, so a directory whose `.git`
+    // is gone does not fail `git status` — discovery walks up and exits 0
+    // against the user's tree, answering with the user's own dirt.
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    const degraded = join(repo, 'nested', 'degraded');
+    mkdirSync(degraded, { recursive: true });
+
+    const got = worktreeResidue(degraded);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('not a git worktree');
+
+    // And a healthy NESTED worktree still measures — the guard must not read
+    // the production shape itself as degraded.
+    const nested = join(repo, 'nested', 'wt');
+    git('worktree', 'add', '--detach', '-q', nested, 'HEAD');
+    writeFileSync(join(nested, '__probe__.test.ts'), 'x');
+    const healthy = worktreeResidue(nested);
+    expect(healthy.unmeasured).toBeUndefined();
+    expect(healthy.paths).toEqual(['__probe__.test.ts']);
+  });
+
+  it('excludes the pipeline’s install even when the COMMIT does not ignore it', () => {
+    // The exclusion is the pipeline's invariant, not the commit's: a PR whose
+    // `.gitignore` does not cover `node_modules` used to turn the review's
+    // own install into residue, and every verifier's first act then pointed
+    // at deleting the very tree its farm borrows from. Real residue beside
+    // the install stays named.
+    writeFileSync(join(repo, '.gitignore'), 'dist\n');
+    git('add', '.gitignore');
+    git('commit', '-qm', 'loosen');
+    mkdirSync(join(repo, 'node_modules', 'pkg-0'), { recursive: true });
+    writeFileSync(join(repo, 'node_modules', 'pkg-0', 'index.js'), '1\n');
+    writeFileSync(join(repo, '__probe__.test.ts'), 'x');
+
+    const got = worktreeResidue(repo);
+
+    expect(got.paths).toEqual(['__probe__.test.ts']);
+    expect(got.total).toBe(1);
+  });
 });
 
 describe('exposeDependencies', () => {
@@ -391,6 +434,29 @@ describe('exposeDependencies', () => {
     expect(
       existsSync(join(probe, 'packages', 'cli', 'node_modules', 'planted.js')),
     ).toBe(false);
+  });
+
+  it('wipes a DANGLING symlink at the target instead of failing EEXIST forever', () => {
+    // A PR can commit `node_modules` as a dangling symlink — force-add
+    // defeats gitignore — and `checkout --force` / `clean -ffdx` both spare
+    // the TRACKED link, so every reset recreates the shape. `existsSync`
+    // read it as absent, skipped the wipe, and `mkdirSync` threw EEXIST on
+    // every attempt: a permanently broken harness for every shard.
+    const root = tmp('expose-dangling-root-');
+    const probe = tmp('expose-dangling-probe-');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    symlinkSync(join(root, 'nowhere'), join(probe, 'node_modules'));
+
+    const got = exposeDependencies(probe, root, { rebuild: true });
+
+    expect(got).toEqual({
+      linked: 1,
+      failed: 0,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
+    expect(lstatSync(join(probe, 'node_modules')).isDirectory()).toBe(true);
+    expect(existsSync(join(probe, 'node_modules', 'plain-pkg'))).toBe(true);
   });
 
   it('skips a stray file under a scope directory, as it does at top level', () => {

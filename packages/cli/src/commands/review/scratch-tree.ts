@@ -160,11 +160,11 @@ function git(cwd: string, ...args: string[]): void {
  * probe left" — a mutant surviving into the next finding's probe is a wrong
  * verdict with a deterministic source tag on it, which is the worst failure
  * this command could have. `checkout --force` reverts the tracked edits and
- * `clean -ffd` removes the probe files, nested repositories a probe cloned or
- * `git init`-ed included, and `-x` so the IGNORED state goes too — a probe's
- * own `node_modules` at any depth, its build caches, a `dist/` it rebuilt;
- * because that is where the dependency farm lives and rebuilding it every call
- * is the whole cost this reuse path exists to avoid.
+ * `clean -ffdx` removes the probe files — nested repositories a probe cloned
+ * or `git init`-ed included — and the IGNORED state too: a probe's own
+ * `node_modules` at any depth, its build caches, a `dist/` it rebuilt. The
+ * dependency farm lives in that ignored state, so the caller re-links it
+ * afterwards; sparing it to save the second would sell the guarantee.
  */
 function resetScratchTree(
   tree: string,
@@ -188,6 +188,14 @@ function resetScratchTree(
   // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
   try {
     if (!lstatSync(tree).isDirectory()) return false;
+    // A genuine linked worktree carries its `.git` as a FILE naming its admin
+    // entry, and its gitdir is `<common>/worktrees/<name>`. A tree claiming
+    // to be the MAIN checkout — gitdir === commondir, reached by a `.git`
+    // symlinked or hand-edited to name the common dir — passed every other
+    // check here (measured live: `--show-toplevel` names this directory, the
+    // common dirs compare equal) while `checkout --force` detached the user's
+    // MAIN HEAD onto the PR sha and rewrote the main index. The reset below
+    // must never land there.
     if (
       realpathSync(gitOut(tree, 'rev-parse', '--show-toplevel')) !==
       realpathSync(tree)
@@ -204,6 +212,10 @@ function resetScratchTree(
         gitOut(dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
       );
     if (commonOf(tree) !== commonOf(worktree)) return false;
+    const gitdir = realpathSync(
+      gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
+    );
+    if (gitdir === commonOf(worktree)) return false;
   } catch {
     return false;
   }
@@ -279,6 +291,31 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         'flattened for a path: it is what gives each verifier shard its own ' +
         'tree, and shards of one round run concurrently. Pass the record key ' +
         'from your launch block.',
+    );
+  }
+
+  // The directory alone is not identity enough for what follows: with the
+  // `.git` file gone — a crash mid-`worktree add`, a cleanup whose `rmSync`
+  // failed — every git call walks UP into the user's checkout: HEAD resolves
+  // to the user's branch, the residue probe names the user's own dirty paths,
+  // and the restore recipe is aimed at them. The reuse gate cannot catch it —
+  // both sides of its common-dir comparison resolve to the user's repo, so
+  // the equality holds over the WRONG repository. The same `--show-toplevel`
+  // comparison the reset applies to the scratch tree, applied to the trusted
+  // argument side.
+  try {
+    if (
+      realpathSync(gitOut(worktree, 'rev-parse', '--show-toplevel')) !==
+      realpathSync(worktree)
+    ) {
+      return unavailable(
+        `the review worktree ${worktree} is not a git worktree — repository ` +
+          'discovery walks up into the enclosing checkout; check its .git file',
+      );
+    }
+  } catch (err) {
+    return unavailable(
+      `cannot read HEAD in ${worktree}: ${(err as Error).message}`,
     );
   }
 

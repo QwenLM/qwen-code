@@ -59,9 +59,9 @@ describe('runScratchTree', () => {
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-    // Every JS repo a review runs in ignores its dependency directory, and the
-    // reuse path's `git clean` spares ignored paths on purpose — that is what
-    // lets a reused tree keep its farm instead of re-linking it every call.
+    // Every JS repo a review runs in ignores its dependency directory; the
+    // fixture follows. (The reuse reset itself deletes ignored paths —
+    // `clean -ffdx` — and re-links the farm afterwards.)
     writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
     git(repo, 'add', '-A');
     git(repo, 'commit', '-qm', 'head');
@@ -239,9 +239,10 @@ describe('runScratchTree', () => {
   });
 
   it('replaces a node_modules it did not build rather than trusting it', () => {
-    // `clean -ffd` spares ignored paths to keep the farm — which equally spares
-    // whatever a probe installed or planted there. Certifying that as the farm
-    // makes every later probe in the shard resolve imports through it.
+    // The reuse reset deletes ignored paths and re-links the farm afterwards,
+    // so anything a probe installed or planted in `node_modules` goes with
+    // them rather than resolving as a dependency for every later probe in
+    // the shard.
     mkdirSync(join(worktree, 'node_modules', 'vitest'), { recursive: true });
     const first = run();
     expect(first.dependencies).toMatchObject({ linked: 1 });
@@ -328,6 +329,68 @@ describe('runScratchTree', () => {
       }).trim(),
     ).toBe('main');
     expect(existsSync(join(other, 'o.txt'))).toBe(true);
+  });
+
+  it('rebuilds over a .git SYMLINK at the scratch path — never resets the main checkout', () => {
+    // A genuine linked worktree carries `.git` as a FILE; a symlink at that
+    // path naming the repo's own gitdir passed every identity check —
+    // measured live: `--show-toplevel` named the scratch dir and the common
+    // dirs compared equal — while `checkout --force --detach` detached the
+    // USER's HEAD onto the PR sha and rewrote the main index.
+    const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+    mkdirSync(tree, { recursive: true });
+    symlinkSync(join(repo, '.git'), join(tree, '.git'));
+    writeFileSync(join(repo, 'a.ts'), 'LOCAL UNCOMMITTED WORK\n');
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.reused).toBe(false); // rebuilt, not reset
+    expect(git(tree, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
+    expect(readFileSync(join(repo, 'a.ts'), 'utf8')).toBe(
+      'LOCAL UNCOMMITTED WORK\n',
+    );
+  });
+
+  it('rebuilds when the scratch .git FILE names the common dir', () => {
+    // The same main-checkout shape without a symlink: a `.git` file whose
+    // `gitdir:` line names the common dir itself. A linked tree's gitdir is
+    // `<common>/worktrees/<name>`; equality means the tree claims to be the
+    // main checkout, where the reset must never land.
+    const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    writeFileSync(join(repo, 'a.ts'), 'LOCAL UNCOMMITTED WORK\n');
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.reused).toBe(false);
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
+    expect(readFileSync(join(repo, 'a.ts'), 'utf8')).toBe(
+      'LOCAL UNCOMMITTED WORK\n',
+    );
+  });
+
+  it('is unavailable when the worktree’s .git file is gone — never walked up', () => {
+    // With the `.git` file missing — a crash mid-`worktree add`, a cleanup
+    // whose rmSync failed — git's discovery walks UP into the user's
+    // checkout: HEAD resolves to the user's branch, the residue probe names
+    // the user's own dirty paths, and the note's restore recipe is aimed at
+    // them. Measured live before this check: `available: true` at the USER's
+    // head sha, the scratch tree registered in the user's repo.
+    writeFileSync(join(repo, 'a.ts'), 'LOCAL UNCOMMITTED WORK\n');
+    rmSync(join(worktree, '.git'));
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('not a git worktree');
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
+    expect(readFileSync(join(repo, 'a.ts'), 'utf8')).toBe(
+      'LOCAL UNCOMMITTED WORK\n',
+    );
   });
 
   it('rebuilds when a submodule was initialized in the tree', () => {
