@@ -736,6 +736,37 @@ export function clearRoundStamps(planPath: string): void {
 }
 
 /**
+ * Whether the admission stamps corroborate a round-cap stop: every round
+ * 1..cap was stamped as admitted.
+ *
+ * A round-cap marker is attempt-1-writable like everything beside the prompt
+ * records, and a planted one is relayed as genuine — compose-review posts a
+ * false "did not converge within the round cap" disclosure and caps the
+ * verdict, and the round builder refuses further rounds once ANY stop marker
+ * stands. The attacker pays only the cap a genuine stop would also impose,
+ * and buys the silence of exactly the audit rounds that would have found the
+ * malicious hunk. The stamps are the admission evidence only the builder
+ * writes — one per round — so a cap with no stamp for every round it claims
+ * is a plant. Callers that clear the stamps (the resume hygiene) must check
+ * BEFORE clearing, or this reads false for a genuine stop too.
+ */
+export function stampsCorroborateRoundCap(
+  planPath: string,
+  cap: number | undefined,
+): boolean {
+  if (typeof cap !== 'number' || !Number.isInteger(cap) || cap < 1) {
+    return false;
+  }
+  const stamped = new Set<number | null>(
+    readRoundStamps(planPath).map((s) => s.round),
+  );
+  for (let round = 1; round <= cap; round++) {
+    if (!stamped.has(round)) return false;
+  }
+  return true;
+}
+
+/**
  * The refusal, spelled as the termination rule it is. Printed to stderr by
  * `agent-prompt` alongside exit code 4; the disclosure sentence matches the
  * `budget-stop.json` marker byte for byte, so both channels cap the verdict

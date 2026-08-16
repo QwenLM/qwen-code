@@ -14,6 +14,17 @@
 // exactly that drift, so it lives here.
 
 /**
+ * The name git accepts for "the empty side" of a diff.
+ *
+ * `git diff --no-index -- <null> <file>` is how a file git does not track gets
+ * rendered as a new file without writing to the index. Git special-cases both
+ * spellings in `diff-no-index.c`'s `get_mode()` rather than stat-ing them, but
+ * only `nul` is special-cased on native Windows — so pick by platform instead of
+ * betting the Windows CI leg on which branch of that function is compiled in.
+ */
+export const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
+/**
  * Config overrides that have no command-line equivalent.
  *
  * `diff.suppressBlankEmpty`: with it set, git prints a blank context line as a
@@ -35,6 +46,21 @@ export const PINNED_DIFF_CONFIG: readonly string[] = [
   'diff.suppressBlankEmpty=false',
   '-c',
   'core.quotePath=false',
+  // `core.fsmonitor` names a COMMAND git executes on index refresh — config
+  // that runs code. The resume ruling's probes run in a process holding the
+  // session env after attempt 1 (the reviewed PR's own code) has written the
+  // config, so an unpinned probe is a code-execution entrance, not a
+  // rendering knob.
+  '-c',
+  'core.fsmonitor=false',
+  // Attributes shape the derived bytes — a planted `-diff` rule collapses
+  // hunks to `Binary files differ` — and the lookup reads the git dirs'
+  // `info/attributes` plus the user's configured file, all attempt-1-
+  // writable. Point the lookup at the null device; per-tree `.gitattributes`
+  // (part of the diff itself) still applies. The per-dir `info/attributes`
+  // files are separately probed by the resume ruling and refuse it.
+  '-c',
+  `core.attributesFile=${NULL_DEVICE}`,
 ];
 
 /**
@@ -62,17 +88,6 @@ export const PINNED_DIFF_FLAGS: readonly string[] = [
   '--ignore-submodules=none',
   '--submodule=short',
 ];
-
-/**
- * The name git accepts for "the empty side" of a diff.
- *
- * `git diff --no-index -- <null> <file>` is how a file git does not track gets
- * rendered as a new file without writing to the index. Git special-cases both
- * spellings in `diff-no-index.c`'s `get_mode()` rather than stat-ing them, but
- * only `nul` is special-cased on native Windows — so pick by platform instead of
- * betting the Windows CI leg on which branch of that function is compiled in.
- */
-export const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 /**
  * Read every pathspec as a plain name.

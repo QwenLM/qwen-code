@@ -63,7 +63,15 @@ export interface RecoverFindingsResult {
   recoveredKeys: string[];
   /** Keys the CLI built a prompt for with no certifiable transcript. */
   missingKeys: string[];
-  /** Every `.findings.md` in the record dir — the model-state snapshots. */
+  /**
+   * Every `.findings.md` in the record dir whose path a CERTIFIED
+   * transcript's recorded prompt points at — the model-state snapshots.
+   * The record dir is attempt-1-writable, and a planted list the mtime
+   * fence admits would otherwise be relayed as the interrupted attempt's
+   * own cumulative state; the pointer a certified agent was launched with
+   * is the authorship corroboration, and a file it names nowhere is not
+   * enumerated.
+   */
   findingsFiles: FindingsFileEntry[];
   /** Highest round among certified reverse-audit agents, null if none. */
   latestReverseAuditRound: number | null;
@@ -250,6 +258,17 @@ export function recoverFindings(
     .filter((k) => built.get(k)?.trim() !== '' && !recovered.has(k))
     .sort();
 
+  // The findings lists a CERTIFIED agent was actually pointed at: the
+  // pointer each recovered key's recorded prompt carries. The enumeration
+  // below admits only these — the record dir is attempt-1-writable, and a
+  // planted `.findings.md` the mtime fence admits is exactly the foreign
+  // state this corroboration keeps out.
+  const corroboratedFindings = new Set<string>();
+  for (const key of recoveredKeys) {
+    const pointer = findingsPointerOf(built.get(key) ?? '');
+    if (pointer !== null) corroboratedFindings.add(resolve(pointer));
+  }
+
   // The findings lists earlier rounds wrote — the on-disk snapshots of the
   // orchestrator's cumulative state. Enumerated from the record dir the CLI
   // owns; names decode back to keys exactly (they were percent-encoded).
@@ -287,6 +306,7 @@ export function recoverFindings(
     } catch {
       continue;
     }
+    if (!corroboratedFindings.has(resolve(path))) continue;
     const m = ROUND_IN_KEY_RE.exec(key);
     findingsFiles.push({
       key,

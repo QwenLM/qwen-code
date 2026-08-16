@@ -33,7 +33,17 @@ const GIT_TIMEOUT_MS = 120_000;
 function gitOpts() {
   return {
     timeout: GIT_TIMEOUT_MS,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      // Replace refs rewrite object resolution for diff / merge-base /
+      // status while `rev-parse HEAD` stays honest, so a planted
+      // `refs/replace/<headSha>` serves sanitized objects to every probe
+      // the resume ruling runs. The review commands never create or consult
+      // replace refs of their own; pinning them out for every wrapper is
+      // strictly subtractive.
+      GIT_NO_REPLACE_OBJECTS: '1',
+    },
   };
 }
 

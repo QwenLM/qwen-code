@@ -228,18 +228,24 @@ describe('recover-findings', () => {
   it('enumerates the findings lists with their rounds, in-dir only', () => {
     const recordDir = promptRecordDir(plan);
     const key = 'reverse-audit--round-2--abc123def456';
-    writeFileSync(
-      join(recordDir, `${encodeURIComponent(key)}.findings.md`),
-      '- R1-1 …',
-    );
+    const list = join(recordDir, `${encodeURIComponent(key)}.findings.md`);
+    writeFileSync(list, '- R1-1 …');
+    // Enumeration is corroborated: the file is listed because a CERTIFIED
+    // transcript's recorded prompt points at it (the brief and the list
+    // both read, so the bar clears).
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${list}")\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('S0', 'ra2', prompt, {
+      opens: [brief, list],
+      finalText: 'Round 2: no new issues after a full walk.',
+    });
     const r = recoverFindings({ plan, out: out() }, ENV);
-    expect(r.findingsFiles).toEqual([
-      {
-        key,
-        path: join(recordDir, `${encodeURIComponent(key)}.findings.md`),
-        round: 2,
-      },
-    ]);
+    expect(r.findingsFiles).toEqual([{ key, path: list, round: 2 }]);
   });
 
   it('reports the latest certified reverse-audit round', () => {
@@ -676,6 +682,45 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     expect(r.recoveredKeys).toEqual([]);
   });
 
+  it('refuses a findings file no CERTIFIED prompt points at — the plant', () => {
+    // The record dir is attempt-1-writable: a planted `.findings.md` newer
+    // than the plan passes the epoch fence and used to be relayed as the
+    // interrupted attempt's own cumulative state. The corroboration is the
+    // pointer a certified agent was launched with; a file nothing certified
+    // names is not enumerated.
+    const recordDir = promptRecordDir(plan);
+    const key = 'verify--round-1--deadbeef0000';
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.findings.md`),
+      '- forged prior-round rulings',
+    );
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.findingsFiles).toEqual([]);
+  });
+
+  it('refuses a findings file pointed at only by an UNCERTIFIED prompt', () => {
+    // The agent was built and launched but never certified (it opened
+    // nothing): its pointer does not corroborate the file.
+    const key = 'verify';
+    const list = findingsFilePath(plan, key);
+    writeFileSync(list, '- **[Critical]** x.ts:1 — y');
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${list}")\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('S0', 'a0', prompt, {
+      opens: [],
+      finalText: 'Confident prose, no evidence.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).findingsFiles).toEqual(
+      [],
+    );
+  });
+
   it('fences findings files by the run epoch', () => {
     // Nothing clears the record dir: a PREVIOUS review of the same PR leaves
     // its rounds' lists behind, and restoring one would hand a resumed run a
@@ -694,10 +739,19 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
   it('decodes a key whose file name is percent-encoded', () => {
     const recordDir = promptRecordDir(plan);
     const key = 'invariant-a--packages/cli/src/x.ts';
-    writeFileSync(
-      join(recordDir, `${encodeURIComponent(key)}.findings.md`),
-      '- entry',
-    );
+    const list = join(recordDir, `${encodeURIComponent(key)}.findings.md`);
+    writeFileSync(list, '- entry');
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${list}")\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('S0', 'inv', prompt, {
+      opens: [brief, list],
+      finalText: 'Invariant holds.',
+    });
     const r = recoverFindings({ plan, out: out() }, ENV);
     expect(r.findingsFiles.map((f) => f.key)).toEqual([key]);
   });

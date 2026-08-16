@@ -11,7 +11,11 @@
 // asserted where they are declared.
 
 import { describe, it, expect } from 'vitest';
-import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './diff-flags.js';
+import {
+  PINNED_DIFF_CONFIG,
+  PINNED_DIFF_FLAGS,
+  NULL_DEVICE,
+} from './diff-flags.js';
 
 describe('the pinned diff config', () => {
   const config = PINNED_DIFF_CONFIG.join(' ');
@@ -30,6 +34,20 @@ describe('the pinned diff config', () => {
     // With it set, git prints a blank context line as an empty record and
     // the parser's new-side cursor cannot tell context from structure.
     expect(config).toContain('diff.suppressBlankEmpty=false');
+  });
+
+  it('pins core.fsmonitor off — the probe config that runs code', () => {
+    // `core.fsmonitor` names a command git executes on index refresh; the
+    // resume ruling's probes run where attempt 1 wrote the config, so an
+    // unpinned probe is a code-execution entrance.
+    expect(config).toContain('core.fsmonitor=false');
+  });
+
+  it('points core.attributesFile at the null device — planted rules shape bytes', () => {
+    // A `-diff` attribute collapses hunks to `Binary files differ` in the
+    // derived bytes; the lookup is pinned away, and per-dir info/attributes
+    // files are refused by the resume ruling's own probes.
+    expect(config).toContain(`core.attributesFile=${NULL_DEVICE}`);
   });
 
   it('passes every pin as a -c pair, so none can be read as a path', () => {

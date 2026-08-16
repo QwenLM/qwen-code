@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -19,7 +19,8 @@ import {
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { buildRoleBrief } from './agent-prompt.js';
-import { PARSE_ARGS_REPORT } from './lib/paths.js';
+import { PARSE_ARGS_REPORT, tmpFile } from './lib/paths.js';
+import { NULL_DEVICE } from './lib/diff-flags.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -334,6 +335,7 @@ vi.mock('./lib/deadline.js', () => ({
   clearBudgetStop: vi.fn(),
   clearRoundStamps: vi.fn(),
   hasReviewDeadline: vi.fn(() => false),
+  stampsCorroborateRoundCap: vi.fn(() => true),
 }));
 vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/diff-plan.js')>();
@@ -3125,12 +3127,18 @@ describe('fetch-pr --resume', () => {
   function prevReport(over: Record<string, unknown> = {}): string {
     return JSON.stringify({
       prNumber: '42',
+      ownerRepo: 'acme/widgets',
+      host: null,
       fetchedSha: 'f00df00df00d',
       diffSha256: createHash('sha256')
         .update(Buffer.from(DIFF_BYTES))
         .digest('hex'),
       worktreePath: '.qwen/tmp/review-pr-42',
+      diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
+      mergeBaseSha: 'baseb45eb45e',
+      auditSince: '2026-08-12T00:00:00.000Z',
       fetchedAt: '2026-08-13T00:00:00.000Z',
+      chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
       ...over,
     });
   }
@@ -3163,10 +3171,17 @@ describe('fetch-pr --resume', () => {
       }),
     );
     const { gitOpt, gitRaw } = await import('./lib/git.js');
-    // rev-parse → the fetched SHA; `status --porcelain` → clean.
-    vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
-      args.includes('status') ? '' : 'f00df00df00d',
-    );
+    // `status --porcelain` → clean; `ls-files -v` → ordinary tags; the
+    // identity probes agree on ONE repository; rev-parse → the fetched SHA.
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
     // The re-derivation terms: a resolvable merge-base and a `git diff`
     // whose bytes match the recorded capture.
     const { resolveMergeBase } = await import('./lib/merge-base.js');
@@ -3493,9 +3508,15 @@ describe('fetch-pr --resume', () => {
     // and build/test agents mutate worktrees, and a death between an apply
     // and its revert leaves exactly this.
     const { gitOpt } = await import('./lib/git.js');
-    vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
-      args.includes('status') ? ' M packages/cli/src/x.ts' : 'f00df00df00d',
-    );
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('status')) return ' M packages/cli/src/x.ts';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
     await run();
     expect(reportWritten()).toBe(true);
     const lines = await stdoutJsonLines();
@@ -3518,15 +3539,292 @@ describe('fetch-pr --resume', () => {
 
   it('falls through when the worktree is not at the fetched SHA', async () => {
     const { gitOpt } = await import('./lib/git.js');
-    vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
-      args.includes('status') ? '' : 'someothersha',
-    );
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'someothersha';
+    });
     await run();
     expect(reportWritten()).toBe(true);
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([
       { resumed: false, resumeRefused: 'worktree-sha-mismatch' },
     ]);
+  });
+
+  // -- The report is attempt-1-writable: every field the resumed pipeline
+  // -- consumes is compared against a fact this run derives itself. Each
+  // -- test forges ONE field and expects the refusal that names it.
+
+  it('refuses a forged ownerRepo — the audit tripwire must query the real repo', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ ownerRepo: 'evil/repo' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'owner-repo-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged host', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ host: 'evil.example.com' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'owner-repo-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged diffPathAbsolute — every diff read routes through it', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({ diffPathAbsolute: '/tmp/evil-diff.txt' });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'diff-path-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged mergeBaseSha — the revert/A-B base is consumed downstream', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({ mergeBaseSha: 'deadbeef'.repeat(5) });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'merge-base-mismatch' },
+    ]);
+  });
+
+  it('refuses forged-future audit-window fields — they would blind the audit', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({
+          auditSince: '2099-01-01T00:00:00.000Z',
+          fetchedAt: '2099-01-01T00:00:00.000Z',
+        });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'window-corrupt' },
+    ]);
+  });
+
+  it('refuses chunks thinned to drop a hunk from the obligation universe', async () => {
+    // The re-derived diff has 5 lines; the forged chunks cover only 3 — a
+    // hole where a malicious hunk would sit, neither dispatched nor owed.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({
+          chunks: [{ id: 1, startLine: 1, endLine: 3, lines: 3, chars: 6 }],
+        });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'chunks-mismatch' },
+    ]);
+  });
+
+  it('refuses a recorded effort no writer emits', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ effort: 'turbo' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'effort-corrupt' },
+    ]);
+  });
+
+  it('refuses when the base fetch failed — the left side is attempt-1-writable', async () => {
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockImplementation(() => ({
+      sha: 'baseb45eb45e',
+      baseFetchFailed: true,
+    }));
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'diff-underivable' },
+    ]);
+  });
+
+  it('refuses on a planted info/grafts — the merge-base redirect', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      if (String(path).endsWith(join('.git', 'info', 'grafts'))) {
+        return 'aaa bbb';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'grafts-present' },
+    ]);
+  });
+
+  it('refuses on a planted info/attributes — the re-derivation is untrusted', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      if (String(path).endsWith(join('.git', 'info', 'attributes'))) {
+        return '*.ts -diff';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'diff-underivable' },
+    ]);
+  });
+
+  it('refuses a relinked worktree — its answers address another repository', async () => {
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) {
+        // The worktree's common dir disagrees with this repo's.
+        return args.includes('-C') ? '/attacker/.git' : '/repo/.git';
+      }
+      if (args.includes('--git-dir')) {
+        return '/attacker/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'worktree-identity-mismatch' },
+    ]);
+  });
+
+  it('treats skip-worktree bits as dirty — status cannot see a tampered file', async () => {
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'S src/tampered.ts';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'worktree-dirty' },
+    ]);
+  });
+
+  it('treats a planted exclude rule as dirty — residue hidden from status', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      if (String(path).endsWith(join('.git', 'info', 'exclude'))) {
+        return 'planted-residue.txt';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'worktree-dirty' },
+    ]);
+  });
+
+  it('pins the cleanliness probes against config that hides or executes', async () => {
+    await run();
+    const { gitOpt } = await import('./lib/git.js');
+    const statusCall = vi
+      .mocked(gitOpt)
+      .mock.calls.find((c) => c.includes('status'));
+    expect(statusCall).toContain('core.fsmonitor=false');
+    expect(statusCall).toContain(`core.excludesFile=${NULL_DEVICE}`);
+    expect(statusCall).toContain('--ignore-submodules=none');
+  });
+
+  it('pins the re-derivation diff against fsmonitor and attribute lookup', async () => {
+    await run();
+    const { gitRaw } = await import('./lib/git.js');
+    const diffCall = vi
+      .mocked(gitRaw)
+      .mock.calls.find((c) => c.includes('diff'));
+    expect(diffCall).toContain('core.fsmonitor=false');
+    expect(diffCall).toContain(`core.attributesFile=${NULL_DEVICE}`);
+  });
+
+  it('clears an UNCORROBORATED round-cap stop before wiping the stamps', async () => {
+    // A planted round-cap marker buys the silence of the audit rounds it
+    // claims ran; the stamps are the admission evidence, and the check must
+    // precede clearRoundStamps, which destroys it.
+    const { readBudgetStop, clearBudgetStop, stampsCorroborateRoundCap } =
+      await import('./lib/deadline.js');
+    vi.mocked(readBudgetStop).mockReturnValue({
+      cause: 'round-cap',
+      cap: 5,
+      entry: 'round cap',
+      entryZh: '轮数上限',
+      round: 5,
+      remainingSeconds: 0,
+      reserveSeconds: 0,
+      atMs: Date.now(),
+    });
+    vi.mocked(stampsCorroborateRoundCap).mockReturnValue(false);
+    await run();
+    expect(vi.mocked(stampsCorroborateRoundCap)).toHaveBeenCalledWith(OUT, 5);
+    expect(vi.mocked(clearBudgetStop)).toHaveBeenCalledWith(OUT);
+    const { clearRoundStamps } = await import('./lib/deadline.js');
+    const clearOrder = vi.mocked(clearBudgetStop).mock.invocationCallOrder[0];
+    const stampsOrder = vi.mocked(clearRoundStamps).mock.invocationCallOrder[0];
+    expect(clearOrder).toBeLessThan(stampsOrder);
   });
 });
 
@@ -3537,12 +3835,18 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
   function prevReport(over: Record<string, unknown> = {}): string {
     return JSON.stringify({
       prNumber: '42',
+      ownerRepo: 'acme/widgets',
+      host: null,
       fetchedSha: 'f00df00df00d',
       diffSha256: createHash('sha256')
         .update(Buffer.from(DIFF_BYTES))
         .digest('hex'),
       worktreePath: '.qwen/tmp/review-pr-42',
+      diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
+      mergeBaseSha: 'baseb45eb45e',
+      auditSince: '2026-08-12T00:00:00.000Z',
       fetchedAt: '2026-08-13T00:00:00.000Z',
+      chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
       ...over,
     });
   }
@@ -3572,10 +3876,17 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       }),
     );
     const { gitOpt } = await import('./lib/git.js');
-    // rev-parse → the fetched SHA; status --porcelain → clean.
-    vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
-      args.includes('status') ? '' : 'f00df00df00d',
-    );
+    // `status --porcelain` → clean; `ls-files -v` → ordinary tags; the
+    // identity probes agree on ONE repository; rev-parse → the fetched SHA.
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
     const { priorSessionIds, readResumeMarker, sessionEntryCount } =
       await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
@@ -3695,10 +4006,11 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     expect(vi.mocked(clearBudgetStop)).toHaveBeenCalledWith(OUT);
   });
 
-  it('keeps a round-cap stop across the resume', async () => {
-    const { clearBudgetStop, readBudgetStop } = await import(
-      './lib/deadline.js'
-    );
+  it('keeps a round-cap stop across the resume WHEN ITS STAMPS CORROBORATE', async () => {
+    // A round-cap marker is attempt-1-writable; it survives the resume only
+    // if the admission stamps name every round it claims ran.
+    const { clearBudgetStop, readBudgetStop, stampsCorroborateRoundCap } =
+      await import('./lib/deadline.js');
     vi.mocked(readBudgetStop).mockReturnValue({
       cause: 'round-cap',
       cap: 5,
@@ -3709,7 +4021,9 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       reserveSeconds: 1200,
       atMs: Date.now(),
     });
+    vi.mocked(stampsCorroborateRoundCap).mockReturnValue(true);
     await run();
+    expect(vi.mocked(stampsCorroborateRoundCap)).toHaveBeenCalledWith(OUT, 5);
     expect(vi.mocked(clearBudgetStop)).not.toHaveBeenCalled();
   });
 });

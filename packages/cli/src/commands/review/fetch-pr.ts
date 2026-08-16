@@ -29,7 +29,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
@@ -42,7 +42,11 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
-import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
+import {
+  PINNED_DIFF_CONFIG,
+  PINNED_DIFF_FLAGS,
+  NULL_DEVICE,
+} from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
   reviewBranch,
@@ -53,8 +57,10 @@ import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
   parseDiff,
+  chunksCoverDiff,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
+  type DiffChunk,
 } from './lib/diff-plan.js';
 import {
   buildPlanReport,
@@ -83,6 +89,7 @@ import {
   readBudgetStop,
   clearBudgetStop,
   clearRoundStamps,
+  stampsCorroborateRoundCap,
 } from './lib/deadline.js';
 
 interface PrMetadata {
@@ -624,6 +631,59 @@ type ResumeOutcome =
   | { resumed: false; reason: ResumeRefusal; priorFetchedSha: string | null };
 
 /**
+ * A planted-file probe. TRUE when the file is present with non-comment,
+ * non-blank content, or when the question cannot be answered: `null` names
+ * an underivable path and a read error short of ENOENT names an occupant
+ * this run cannot clear, and a file that cannot be cleared cannot be ruled
+ * absent — the probe it shapes fails closed instead.
+ */
+function plantedFileActive(path: string | null): boolean {
+  if (path === null) return true;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+  return text.split('\n').some((line) => {
+    const t = line.trim();
+    return t !== '' && !t.startsWith('#');
+  });
+}
+
+/**
+ * Do the report's `chunks` tile the re-derived diff — well-formed ranges
+ * covering every line exactly? The chunks are the dispatch AND obligation
+ * universes, the tiling guarantee runs at plan time only, and the plan sits
+ * on attempt-1-writable disk: deleting the chunk that covers a malicious
+ * hunk leaves it neither dispatched nor owed unless the ruling re-checks
+ * the cover against bytes it derived itself.
+ */
+function reportChunksTile(chunks: unknown, diffText: string): boolean {
+  if (!Array.isArray(chunks)) return false;
+  const ranges: DiffChunk[] = [];
+  for (const entry of chunks) {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const { startLine, endLine } = entry as {
+      startLine?: unknown;
+      endLine?: unknown;
+    };
+    if (
+      typeof startLine !== 'number' ||
+      typeof endLine !== 'number' ||
+      !Number.isSafeInteger(startLine) ||
+      !Number.isSafeInteger(endLine) ||
+      startLine < 1 ||
+      endLine < startLine
+    ) {
+      return false;
+    }
+    ranges.push(entry as DiffChunk);
+  }
+  return chunksCoverDiff(ranges, parseDiff(diffText).diffLines);
+}
+
+/**
  * The `--resume` fast path: rule on the interrupted attempt's state and, when
  * it holds, continue it — every probe is a fact this command gathers itself
  * (git, gh, file hashes, the CLI-written marker), never the orchestrator's
@@ -667,12 +727,52 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     liveHeadSha = null;
     liveBaseRefName = null;
   }
+  // Worktree identity BEFORE any worktree answer is trusted: the `.git`
+  // pointer file lives inside the attempt-1-writable tree, and a relinked
+  // worktree — an attacker clone checked out at the recorded head — answers
+  // rev-parse, status and ls-files from the attacker's repository while the
+  // probes believe they address the real one. The common dirs must agree.
+  const wtCommonDirRaw = gitOpt('-C', wt, 'rev-parse', '--git-common-dir');
+  const ownCommonDirRaw = gitOpt('rev-parse', '--git-common-dir');
+  const worktreeIdentityMatches =
+    wtCommonDirRaw !== null &&
+    ownCommonDirRaw !== null &&
+    resolve(wt, wtCommonDirRaw) === resolve(process.cwd(), ownCommonDirRaw);
+  const commonDir = worktreeIdentityMatches
+    ? resolve(process.cwd(), ownCommonDirRaw as string)
+    : null;
+  const wtGitDirRaw = gitOpt('-C', wt, 'rev-parse', '--git-dir');
+  const wtGitDir =
+    worktreeIdentityMatches && wtGitDirRaw !== null
+      ? resolve(wt, wtGitDirRaw)
+      : null;
+  // A planted `info/grafts` redirects the merge-base the re-derivation diffs
+  // against (to the head itself: an empty diff matching a forged empty
+  // pair). Replace refs are pinned out of every git wrapper; grafts have no
+  // flag, so a present file refuses the resume outright.
+  const graftsAbsent = !plantedFileActive(
+    commonDir !== null ? join(commonDir, 'info', 'grafts') : null,
+  );
+  // A planted `info/attributes` shapes the bytes git derives (a `-diff` rule
+  // collapses hunks to `Binary files differ`) and no pinned flag covers
+  // attribute lookup, so a present file makes the re-derivation untrusted —
+  // it stays null and the ruling refuses `diff-underivable`.
+  const attributesPlanted =
+    plantedFileActive(
+      commonDir !== null ? join(commonDir, 'info', 'attributes') : null,
+    ) ||
+    plantedFileActive(
+      wtGitDir !== null ? join(wtGitDir, 'info', 'attributes') : null,
+    );
   // Re-derive the diff from git objects, keyed on the RECORDED head and the
   // recomputed merge-base against the FORGE's base ref — never the report's
   // own mergeBaseSha, which sits on the same attacker-writable disk as the
   // hash it would be asked to corroborate. Underivable stays null and the
   // ruling refuses: a resume that cannot prove its input authentic from a
-  // source outside the attempt-1 blast radius does not happen.
+  // source outside the attempt-1 blast radius does not happen. A FAILED base
+  // fetch is underivable too: the left side then resolves from attempt-1-
+  // writable local refs, which an `update-ref` plus a sabotaged remote bends
+  // to re-derive an empty diff matching a forged empty pair.
   const recordedSha =
     prev !== null &&
     typeof prev.fetchedSha === 'string' &&
@@ -681,26 +781,31 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
       : null;
   let diffSha256Rederived: string | null = null;
   let rederivedDiffEmpty: boolean | null = null;
-  if (recordedSha !== null && liveBaseRefName !== null) {
+  let rederivedText: string | null = null;
+  let rederivedMergeBase: string | null = null;
+  if (!attributesPlanted && recordedSha !== null && liveBaseRefName !== null) {
     const mb = resolveMergeBase(
       args.remote,
       liveBaseRefName,
       recordedSha,
       gitProbe,
-    ).sha;
-    if (mb !== null) {
+    );
+    if (!mb.baseFetchFailed && mb.sha !== null) {
+      rederivedMergeBase = mb.sha;
       try {
         const buf = gitRaw(
           ...PINNED_DIFF_CONFIG,
           'diff',
           ...PINNED_DIFF_FLAGS,
-          `${mb}..${recordedSha}`,
+          `${mb.sha}..${recordedSha}`,
         );
         diffSha256Rederived = createHash('sha256').update(buf).digest('hex');
         rederivedDiffEmpty = buf.length === 0;
+        rederivedText = buf.toString('utf8');
       } catch {
         diffSha256Rederived = null;
         rederivedDiffEmpty = null;
+        rederivedText = null;
       }
     }
   }
@@ -743,22 +848,73 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // common large-repo tuning) hides untracked files from a bare
   // `--porcelain`, and untracked residue is exactly the dirty state no other
   // probe can see — resuming there reviews files that are not in the PR.
+  // `--ignore-submodules=none` for the same reason the diff capture pins it:
+  // `diff.ignoreSubmodules=all` in the config hides a tampered submodule.
+  // `core.fsmonitor` is pinned off because it names a COMMAND git executes
+  // on the index refresh this probe triggers, and `core.excludesFile` is
+  // pointed at the null device because an exclude pattern hides untracked
+  // residue from this very listing.
   const status = gitOpt(
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    `core.excludesFile=${NULL_DEVICE}`,
     '-C',
     wt,
     'status',
     '--porcelain',
     '--untracked-files=normal',
+    '--ignore-submodules=none',
   );
+  // Two more hiders of the same state, invisible to `--porcelain`:
+  // skip-worktree and assume-unchanged index bits mask a tampered tracked
+  // file (`ls-files -v` tags them `S` and lowercase), and a planted exclude
+  // rule masks untracked residue. Either reads as dirty — resuming there
+  // reviews content that is not in the PR.
+  const lsFiles = gitOpt(
+    '-c',
+    'core.fsmonitor=false',
+    '-C',
+    wt,
+    'ls-files',
+    '-v',
+  );
+  const indexHidesFiles =
+    lsFiles === null ||
+    lsFiles.split('\n').some((line) => {
+      const tag = line.charAt(0);
+      return tag === 'S' || (tag >= 'a' && tag <= 'z');
+    });
+  const excludesPlanted =
+    plantedFileActive(
+      commonDir !== null ? join(commonDir, 'info', 'exclude') : null,
+    ) ||
+    plantedFileActive(
+      wtGitDir !== null ? join(wtGitDir, 'info', 'exclude') : null,
+    );
   const ruling = assessResume(prev, {
     prNumber,
+    ownerRepo,
+    host: args.host?.trim() || null,
     worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
-    worktreeClean: status === null ? null : status.trim() === '',
+    worktreeIdentityMatches,
+    worktreeClean:
+      status === null
+        ? null
+        : status.trim() === '' && !indexHidesFiles && !excludesPlanted,
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     diffSha256Rederived,
     rederivedDiffEmpty,
     worktreePath: wt,
+    diffPathAbsolute: resolve(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     liveHeadSha,
+    mergeBaseSha: rederivedMergeBase,
+    chunksTile:
+      rederivedText !== null
+        ? reportChunksTile(prev?.chunks, rederivedText)
+        : null,
+    nowMs: Date.now(),
+    graftsAbsent,
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
   });
@@ -775,11 +931,19 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
 
   // Budget hygiene: the continuation runs under a fresh deadline, so a
   // time-budget stop is the dead attempt's, not this run's — a round-cap
-  // stop is about rounds, not time, and stands. The admission stamps span
-  // the death gap and would price a round at hours; without them the gate
-  // falls back to its conservative constant.
+  // stop is about rounds, not time, and stands WHEN CORROBORATED: the
+  // marker is attempt-1-writable, and a planted one buys the silence of the
+  // audit rounds it claims ran, so it stands only if the admission stamps
+  // name every round 1..cap. The check precedes `clearRoundStamps` — the
+  // stamps are the corroboration, and clearing them first destroys it. The
+  // admission stamps span the death gap and would price a round at hours;
+  // without them the gate falls back to its conservative constant.
   const stop = readBudgetStop(out);
-  if (stop !== null && stop.cause !== 'round-cap') clearBudgetStop(out);
+  if (stop !== null && stop.cause !== 'round-cap') {
+    clearBudgetStop(out);
+  } else if (stop !== null && !stampsCorroborateRoundCap(out, stop.cap)) {
+    clearBudgetStop(out);
+  }
   clearRoundStamps(out);
   appendRunSession(out);
   recordResume(out);

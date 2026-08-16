@@ -17,22 +17,40 @@ const DIFF_SHA = 'a'.repeat(64);
 
 const WT = '.qwen/tmp/review-pr-42';
 
+const MERGE_BASE = 'baseb45eb45e';
+const DIFF_PATH = '.qwen/tmp/qwen-review-pr-42-diff.txt';
+
 const prev = () => ({
   prNumber: '42',
   fetchedSha: SHA,
   diffSha256: DIFF_SHA,
   worktreePath: WT,
+  ownerRepo: 'acme/widgets',
+  host: null,
+  diffPathAbsolute: DIFF_PATH,
+  mergeBaseSha: MERGE_BASE,
+  auditSince: '2026-01-01T00:00:00.000Z',
+  fetchedAt: '2026-01-01T00:00:00.000Z',
+  chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
 });
 
 const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   prNumber: '42',
+  ownerRepo: 'acme/widgets',
+  host: null,
   worktreeHeadSha: SHA,
+  worktreeIdentityMatches: true,
   worktreeClean: true,
   diffSha256OnDisk: DIFF_SHA,
   diffSha256Rederived: DIFF_SHA,
   rederivedDiffEmpty: false,
   worktreePath: WT,
+  diffPathAbsolute: DIFF_PATH,
   liveHeadSha: SHA,
+  mergeBaseSha: MERGE_BASE,
+  chunksTile: true,
+  nowMs: Date.now(),
+  graftsAbsent: true,
   resumeCount: 0,
   requestedEffort: null,
   ...over,
@@ -311,5 +329,122 @@ describe('assessResume — resume state is untrusted where the reviewed code ran
         probes({ rederivedDiffEmpty: true }),
       ),
     ).toEqual({ ok: true });
+  });
+});
+
+describe('assessResume — every report field the pipeline consumes is compared', () => {
+  // The report sits on a disk attempt 1 could write; a field the ruling
+  // does not compare is a field the attacker chooses. Each test forges ONE
+  // field and expects the refusal that names it.
+
+  it('refuses a forged ownerRepo', () => {
+    expect(
+      assessResume({ ...prev(), ownerRepo: 'evil/repo' }, probes()),
+    ).toEqual({ ok: false, reason: 'owner-repo-mismatch' });
+  });
+
+  it('refuses a forged host', () => {
+    expect(
+      assessResume({ ...prev(), host: 'evil.example.com' }, probes()),
+    ).toEqual({ ok: false, reason: 'owner-repo-mismatch' });
+  });
+
+  it('refuses a report whose host disagrees with the invocation host', () => {
+    expect(assessResume(prev(), probes({ host: 'ghe.example.com' }))).toEqual({
+      ok: false,
+      reason: 'owner-repo-mismatch',
+    });
+  });
+
+  it('reads an absent recorded host as github.com', () => {
+    const { host: _dropped, ...rest } = prev();
+    expect(assessResume(rest, probes())).toEqual({ ok: true });
+  });
+
+  it('refuses a recorded effort no writer emits', () => {
+    expect(assessResume({ ...prev(), effort: 'turbo' }, probes())).toEqual({
+      ok: false,
+      reason: 'effort-corrupt',
+    });
+  });
+
+  it('refuses a relinked worktree BEFORE trusting any of its answers', () => {
+    // Broken identity AND a moved head: identity names the first fact,
+    // because the sha answer came from wherever the pointer was relinked.
+    expect(
+      assessResume(
+        prev(),
+        probes({ worktreeIdentityMatches: false, worktreeHeadSha: 'other' }),
+      ),
+    ).toEqual({ ok: false, reason: 'worktree-identity-mismatch' });
+  });
+
+  it('refuses when grafts could redirect the re-derivation', () => {
+    expect(assessResume(prev(), probes({ graftsAbsent: false }))).toEqual({
+      ok: false,
+      reason: 'grafts-present',
+    });
+  });
+
+  it('refuses a forged mergeBaseSha', () => {
+    expect(
+      assessResume({ ...prev(), mergeBaseSha: 'deadbeef'.repeat(5) }, probes()),
+    ).toEqual({ ok: false, reason: 'merge-base-mismatch' });
+  });
+
+  it('refuses a report with no recorded mergeBaseSha', () => {
+    const { mergeBaseSha: _dropped, ...rest } = prev();
+    expect(assessResume(rest, probes())).toEqual({
+      ok: false,
+      reason: 'merge-base-mismatch',
+    });
+  });
+
+  it('refuses a forged diffPathAbsolute', () => {
+    expect(
+      assessResume(
+        { ...prev(), diffPathAbsolute: '/tmp/evil-diff.txt' },
+        probes(),
+      ),
+    ).toEqual({ ok: false, reason: 'diff-path-mismatch' });
+  });
+
+  it('refuses chunks that do not tile the re-derived diff', () => {
+    expect(assessResume(prev(), probes({ chunksTile: false }))).toEqual({
+      ok: false,
+      reason: 'chunks-mismatch',
+    });
+  });
+
+  it('refuses while the diff is underivable and the tiling unknown', () => {
+    expect(
+      assessResume(
+        prev(),
+        probes({ diffSha256Rederived: null, chunksTile: null }),
+      ),
+    ).toEqual({ ok: false, reason: 'diff-underivable' });
+  });
+
+  it('refuses a forged-future audit window', () => {
+    expect(
+      assessResume(
+        { ...prev(), auditSince: '2099-01-01T00:00:00.000Z' },
+        probes(),
+      ),
+    ).toEqual({ ok: false, reason: 'window-corrupt' });
+  });
+
+  it('refuses an unparsable fetchedAt', () => {
+    expect(
+      assessResume({ ...prev(), fetchedAt: 'not-a-date' }, probes()),
+    ).toEqual({ ok: false, reason: 'window-corrupt' });
+  });
+
+  it('refuses a report missing its audit-window fields', () => {
+    const { auditSince: _a, fetchedAt: _f, ...rest } = prev();
+    expect(assessResume(rest, probes())).toEqual({
+      ok: false,
+      reason: 'window-corrupt',
+    });
   });
 });

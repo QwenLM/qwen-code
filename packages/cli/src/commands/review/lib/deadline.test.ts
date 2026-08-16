@@ -40,6 +40,7 @@ import {
   roundCapStopDisclosure,
   roundCapStopEntry,
   roundCapStopEntryZh,
+  stampsCorroborateRoundCap,
   writeRoundCapStop,
   stampRound,
   verifyBudgetExhausted,
@@ -912,5 +913,58 @@ describe('clearRoundStamps — the resume hygiene', () => {
 
   it('is silent when there is nothing to remove', () => {
     expect(() => clearRoundStamps(plan())).not.toThrow();
+  });
+});
+
+describe('stampsCorroborateRoundCap — the round-cap marker is not self-proving', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function plan(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-cap-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, '{}');
+    backdatePlan(p);
+    return p;
+  }
+
+  it('holds when every round 1..cap was stamped as admitted', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 3_000_000);
+    stampRound(p, 2, NOW_MS - 2_000_000);
+    stampRound(p, 3, NOW_MS - 1_000_000);
+    expect(stampsCorroborateRoundCap(p, 3)).toBe(true);
+  });
+
+  it('fails when a claimed round has no stamp', () => {
+    // The plant shape: a round-cap marker claiming five rounds ran, with
+    // stamps for two of them. The silence of the missing rounds is exactly
+    // what the marker buys.
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 3_000_000);
+    stampRound(p, 2, NOW_MS - 2_000_000);
+    expect(stampsCorroborateRoundCap(p, 5)).toBe(false);
+  });
+
+  it('fails with no stamps at all', () => {
+    expect(stampsCorroborateRoundCap(plan(), 5)).toBe(false);
+  });
+
+  it('fails on a cap that is not a positive integer', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 100);
+    expect(stampsCorroborateRoundCap(p, undefined)).toBe(false);
+    expect(stampsCorroborateRoundCap(p, 0)).toBe(false);
+    expect(stampsCorroborateRoundCap(p, 2.5)).toBe(false);
+  });
+
+  it('reads stamps through the run-epoch fence like every other reader', () => {
+    // A PREVIOUS run's stamps must not corroborate THIS run's cap: the
+    // fence drops them, and the cap fails.
+    const p = plan();
+    stampRound(p, 1, PLAN_CAPTURED_MS - 28_800_000);
+    expect(stampsCorroborateRoundCap(p, 1)).toBe(false);
   });
 });
