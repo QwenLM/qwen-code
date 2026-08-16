@@ -139,6 +139,21 @@ describe('TeamManager plan approval requests', () => {
     });
   });
 
+  it('tells normal teammates their final answer is delivered automatically', async () => {
+    const h = await createHarness();
+    await h.teamManager.spawnTeammate({
+      name: 'worker',
+      cwd: h.tmpDir,
+    });
+
+    const member = h.teamManager.getTeamFile().members[0]!;
+    const initialTask = h.backend.getSpawnConfig(member.agentId)?.inProcess
+      ?.initialTask;
+
+    expect(initialTask).toContain('material interim findings');
+    expect(initialTask).toContain('forwarded to the leader automatically');
+  });
+
   it('delivers plan approval requests outside the teammate agent context', async () => {
     const h = await createHarness();
     await h.teamManager.spawnTeammate({

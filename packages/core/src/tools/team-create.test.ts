@@ -59,6 +59,14 @@ describe('TeamCreateTool', () => {
     expect(tool.name).toBe('team_create');
   });
 
+  it('does not promise peer DMs appear in leader idle notifications', () => {
+    const tool = new TeamCreateTool(makeConfig());
+
+    expect(tool.description).not.toContain(
+      'a brief summary is included in their idle notification',
+    );
+  });
+
   it('creates a team and sets manager on config', async () => {
     const config = makeConfig();
     const tool = new TeamCreateTool(config);
