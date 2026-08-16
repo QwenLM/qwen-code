@@ -968,6 +968,17 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
+  it('loadArtifacts failure dispatches no notice', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.artifacts.mockRejectedValueOnce(new Error('Failed to fetch'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.loadArtifacts()).rejects.toThrow('Failed to fetch');
+
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -1452,6 +1463,13 @@ function createMockSession(
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
     },
+    artifacts: vi.fn(async () => ({
+      v: 1 as const,
+      sessionId,
+      artifacts: [],
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      limits: { maxArtifacts: 100 },
+    })),
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
