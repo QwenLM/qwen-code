@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -2605,6 +2606,457 @@ describe('review_requested burst coalescing (#8945)', () => {
     expect(cond).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );
+  });
+});
+
+describe('checkout self-heal', () => {
+  // The reused self-hosted pool fails checkout in two observed shapes: a
+  // transient network drop mid-fetch, and a corrupt persisted workspace
+  // whose refs claim objects missing from its object store — then EVERY
+  // later fetch dies in negotiation with "remote did not send all necessary
+  // objects" (ecs-qwen-runner-64c-23, 2026-08-13..15: seven review jobs
+  // dead on the same missing SHAs). The workspace cannot heal itself, so
+  // the workflow must: survive the first failure, wipe, and re-clone.
+  const steps = parse(workflow).jobs['review-pr'].steps;
+  const FIRST = 'Checkout base branch';
+  const WIPE = 'Reset workspace after failed checkout';
+  const RETRY = 'Checkout base branch (retry)';
+  const nameIndex = (name) => steps.findIndex((s) => s.name === name);
+  const first = steps[nameIndex(FIRST)];
+  const wipe = steps[nameIndex(WIPE)];
+  const retry = steps[nameIndex(RETRY)];
+  // Runs the real wipe script under the runner's shell flags: GitHub Actions
+  // executes `run:` blocks with `-eo pipefail`, and that implicit errexit is
+  // what kills a heal step ending on a nonzero status in production, so the
+  // exec tests must reproduce it instead of hiding it behind bare `bash -c`.
+  const runWipe = (env, options = {}) =>
+    execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+      ...options,
+    });
+
+  // `realpath -m` (the script's canonicalization line) is a GNU coreutils
+  // extension: a BSD userland — macOS ships FreeBSD's `realpath [-q] [path
+  // ...]` — exits 1 on it, so the script's `|| printf` fallback keeps the
+  // path raw and no canonicalization happens at all. The review pool is
+  // Linux-only (`runs-on: [self-hosted, linux, x64, ecs-qwen]` /
+  // ubuntu-latest), so the production script is unaffected; this suite is
+  // not — vitest.config.ts excludes it on win32 only, so it also runs on the
+  // merge-queue macOS lane, where an assertion about GNU behavior is red for
+  // a defect that cannot exist there. Probe the host, not the platform: a Mac
+  // with GNU coreutils fronting PATH keeps the coverage.
+  const hasGnuRealpath =
+    spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+
+  it('makes the first checkout failure survivable and addressable', () => {
+    // Without continue-on-error the job dies on the first failure and the
+    // heal chain never runs; without the id the chain cannot gate on the
+    // outcome at all.
+    expect(first.id).toBe('checkout');
+    expect(first['continue-on-error']).toBe(true);
+    // Symmetric half of the invariant: a double checkout failure must stay
+    // red so the job never proceeds into review without code.
+    expect(retry['continue-on-error']).toBeUndefined();
+    // The wipe step must fail loud the same way: its path guard's exit 1 is
+    // the chain's only refusal, and continue-on-error would demote it to a
+    // log annotation — the retry checkout would then wipe the refused path.
+    expect(wipe['continue-on-error']).toBeUndefined();
+  });
+
+  it('wipes and retries exactly when the first checkout fails', () => {
+    expect(wipe).toBeDefined();
+    expect(retry).toBeDefined();
+    const gate = "steps.checkout.outcome == 'failure'";
+    expect(wipe.if).toBe(gate);
+    expect(retry.if).toBe(gate);
+    expect(nameIndex(FIRST)).toBeLessThan(nameIndex(WIPE));
+    expect(nameIndex(WIPE)).toBeLessThan(nameIndex(RETRY));
+  });
+
+  it('retries with the identical checkout', () => {
+    // A drift here silently changes what the review runs against — dropping
+    // fetch-depth on the retry would hand the review a shallow clone. The
+    // equality checks alone cannot catch a coordinated drift of BOTH steps,
+    // so the first checkout is pinned to its required absolute values too.
+    expect(retry.uses).toBe(first.uses);
+    expect(retry.with).toEqual(first.with);
+    expect(first.uses).toBe(
+      'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+    );
+    expect(first.with.ref).toBe(
+      '${{ github.event.repository.default_branch }}',
+    );
+    expect(first.with['fetch-depth']).toBe(0);
+  });
+
+  it('wipes the whole workspace, hidden entries included', () => {
+    // Executes the REAL wipe script against a disposable workspace: it must
+    // remove the directory contents (not just .git — a hostile tree must not
+    // trip the re-clone) and leave the directory itself behind for the
+    // retry. Hidden entries are the regression case: a glob-shaped wipe
+    // skips dotfiles and would leave exactly the .git this heal exists to
+    // remove.
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-'));
+    try {
+      mkdirSync(join(dir, 'leftover-dir'));
+      writeFileSync(join(dir, 'leftover'), 'x');
+      mkdirSync(join(dir, '.git'));
+      writeFileSync(join(dir, '.git', 'HEAD'), 'x');
+      runWipe({ GITHUB_WORKSPACE: dir, RUNNER_WORKSPACE: tmpdir() });
+      expect(existsSync(dir)).toBe(true);
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Fronts PATH with a `sudo` stub so the sudo leg behaves identically on
+  // every lane: the real pool splits between members WITH passwordless sudo
+  // (the leg runs as root) and members without it (the leg dies with "a
+  // password is required"), so a test leaning on the real sudo silently
+  // covers a different branch on each machine.
+  const stubSudo = (exitCode, markerPath) => {
+    const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
+    const body = markerPath
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" >> '${markerPath}'\nexit ${exitCode}\n`
+      : `#!/bin/sh\nexit ${exitCode}\n`;
+    writeFileSync(join(bin, 'sudo'), body);
+    chmodSync(join(bin, 'sudo'), 0o755);
+    return bin;
+  };
+
+  // A workspace whose entries the owning user cannot unlink: find -exec rm
+  // exits nonzero, so the user-mode wipe leg fails deterministically. Root
+  // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
+  // skip there, and win32 has no POSIX permission bits to honor.
+  const lockFixture = () => {
+    // The wipe script canonicalizes $WS via realpath before the sudo leg,
+    // so the recorded argv carries the resolved path; on a host whose
+    // tmpdir is a symlink (macOS /var -> /private/var) the raw mkdtemp
+    // spelling fails the exact-entry assertion.
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
+    );
+    const dir = join(parent, 'workspace');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'leftover'), 'x');
+    chmodSync(dir, 0o500);
+    // Both halves of the allowlist comparison must be spelled the same way.
+    // The script only reconciles a resolved $WS with a raw $RUNNER_WORKSPACE
+    // where `realpath -m` exists (see hasGnuRealpath above); on a BSD
+    // userland with a symlinked tmpdir the resolved workspace
+    // (/private/var/...) sits outside the raw allowlist root (/var/...), the
+    // guard refuses, and runWipe throws before any assertion in these tests
+    // runs. Canonicalizing the root here keeps the pair consistent on every
+    // host instead of leaning on a GNU-only flag.
+    return { parent, dir, rws: realpathSync(tmpdir()) };
+  };
+  const unlock = ({ parent, dir }) => {
+    chmodSync(dir, 0o755);
+    rmSync(parent, { recursive: true, force: true });
+  };
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'exits 0 and keeps survivors when BOTH wipe legs fail',
+    () => {
+      // The wipe step has no continue-on-error, so its own never-fail exit
+      // contract is what keeps the heal chain alive: a permission-blocked
+      // wipe must warn and exit 0 so the retry checkout still runs, with
+      // the survivors left in place — the retry runs against them, and a
+      // double checkout failure is what turns the job red. The stubbed sudo
+      // makes the else branch reachable even on lanes with passwordless
+      // sudo.
+      const fixture = lockFixture();
+      const bin = stubSudo(1);
+      try {
+        const out = runWipe({
+          GITHUB_WORKSPACE: fixture.dir,
+          RUNNER_WORKSPACE: fixture.rws,
+          PATH: `${bin}:${process.env.PATH}`,
+        }); // must not throw
+        expect(readdirSync(fixture.dir)).toContain('leftover');
+        // The retry must not run blind: survivors get an oncall-visible
+        // annotation naming them, not just the generic wipe-failed warning.
+        expect(out).toContain('survived the workspace wipe');
+        expect(out).toContain('leftover');
+      } finally {
+        unlock(fixture);
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'escalates to the sudo leg when the user-mode wipe fails',
+    () => {
+      // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
+      // turn this red: the marker only appears when the sudo leg actually
+      // runs, and its recorded argv must target the workspace — a refactor
+      // drifting the leg's path shipped green before the argv was pinned.
+      // The stub exits 0 without removing anything, so the then-branch is
+      // pinned without depending on any real sudo.
+      const fixture = lockFixture();
+      const marker = join(fixture.parent, 'sudo-called');
+      const bin = stubSudo(0, marker);
+      try {
+        runWipe({
+          GITHUB_WORKSPACE: fixture.dir,
+          RUNNER_WORKSPACE: fixture.rws,
+          PATH: `${bin}:${process.env.PATH}`,
+        });
+        expect(existsSync(marker)).toBe(true);
+        // Exact argv entry, not substring: a drifted target like
+        // "$WS/does-not-exist" still CONTAINS the workspace path.
+        expect(readFileSync(marker, 'utf8').split('\n')).toContain(fixture.dir);
+      } finally {
+        unlock(fixture);
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The guard must be exercised with the REAL dangerous paths, but pointing
+  // a live `rm -rf` at them detonates the moment the guard regresses — the
+  // exact moment the test must protect (the triage suite's guard-mutation
+  // run spent six minutes trying to delete `/` before it was killed). So
+  // `rm` is a PATH-fronted recorder: with the guard gone, the call log
+  // shows the attempted delete and the test fails having deleted nothing.
+  // The trailing-slash variants pin the strip loop for the realpath-absent
+  // case: the case arms are exact matches, so `/home/` would otherwise slip
+  // past the guard. The dot-component and double-slash variants are the
+  // kernel-resolvable spellings of the guarded roots (`/home/.` -> /home,
+  // `//usr` -> /usr); they sit outside the allowlist root, so the allowlist
+  // refuses them whether canonicalization runs or not — the escape test
+  // below is what pins the realpath line itself. `/tmp` and `/opt` stand in
+  // for every root the denylist does not enumerate — only the
+  // runner-workspace allowlist refuses them.
+  it('refuses suspicious workspace paths without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: bad,
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        // Non-zero, not exactly 1: the case guard exits 1 for a named path,
+        // while an empty one never reaches it because
+        // `${GITHUB_WORKSPACE:?}` aborts the shell first.
+        expect(res.status, `path ${bad || '<empty>'} was not refused`).not.toBe(
+          0,
+        );
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasGnuRealpath)(
+    'refuses an allowlist-escaping .. path via canonicalization',
+    () => {
+      // The bad paths above all sit outside the recorder dir, so the allowlist
+      // refuses them identically whether canonicalization runs or not — they
+      // cannot pin the realpath line. This one string-matches "$RWS"/* but
+      // canonicalizes out of it, so only `realpath -m` can refuse it: with the
+      // line deleted, the raw path passes the allowlist and reaches rm
+      // (executed mutant: exit 0, canary in the call log).
+      const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+      const outside = mkdtempSync(join(tmpdir(), 'checkout-heal-outside-'));
+      mkdirSync(join(dir, 'sub'));
+      writeFileSync(join(outside, 'canary'), 'x');
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              // Keep the '..' spelling raw — resolving it here would
+              // canonicalize the fixture away before the script sees it.
+              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        expect(res.status).not.toBe(0);
+        expect(readFileSync(calls, 'utf8')).toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Fronts PATH with a failing realpath so the script's `|| printf`
+  // fallback engages — the realpath-absent case the strip loops' comments
+  // justify themselves by.
+  const stubRealpath = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
+    writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'realpath'), 0o755);
+    return bin;
+  };
+
+  it('wipes a legitimate workspace despite a trailing-slash RUNNER_WORKSPACE when realpath is absent', () => {
+    // Without the RWS strip loop the allowlist pattern becomes "$RWS//*"
+    // and refuses the real workspace — the heal would degrade to a
+    // retry-without-wipe on exactly the runner this step exists for.
+    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-rws-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    const bin = stubRealpath();
+    try {
+      runWipe({
+        GITHUB_WORKSPACE: ws,
+        RUNNER_WORKSPACE: `${parent}/`,
+        PATH: `${bin}:${process.env.PATH}`,
+      }); // must not throw
+      expect(readdirSync(ws)).toEqual([]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing-slash GITHUB_WORKSPACE when realpath is absent', () => {
+    // The trailing-slash denylist variants above run with the REAL
+    // realpath, which strips the slash before the WS strip loop executes,
+    // so they pin the case arms, not the loop. With realpath absent,
+    // `/home/` misses every exact-match arm and the allowlist "$RWS"/*
+    // matches it (`*` matches empty), so dropping the loop hands /home's
+    // contents to rm (executed mutant: exit 0, rm invoked). The recorder
+    // fronts PATH, so the call log is the proof and nothing is deleted.
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    const bin = stubRealpath();
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      writeFileSync(calls, '');
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${bin}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: '/home/',
+          RUNNER_WORKSPACE: '/home',
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when RUNNER_WORKSPACE resolves to /', () => {
+    // "/" strips to empty, and an empty RWS would degenerate the allowlist
+    // pattern to the match-all "/*" — so the strip loop refuses its own
+    // pathological input instead of weakening the guard.
+    const ws = mkdtempSync(join(tmpdir(), 'checkout-heal-root-rws-'));
+    try {
+      expect(() =>
+        runWipe(
+          { GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: '/' },
+          { stdio: 'pipe' },
+        ),
+      ).toThrow();
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when RUNNER_WORKSPACE is unset or empty', () => {
+    // The allowlist's own `:?` layer: an empty RWS would degenerate the
+    // pattern to the match-all "/*". Later layers also catch the degenerate
+    // expansion (realpath resolves '' to the cwd, and the strip loop refuses
+    // an empty result), so only the error text pins WHICH layer aborts — a
+    // dropped `:?` dies in the strip loop's refusal, which does not name the
+    // variable. The realpath stub engages the fallback axis, and the
+    // GITHUB_WORKSPACE test below aborts at the first `:?` before RWS is
+    // read, so this layer needs its own probe.
+    const ws = mkdtempSync(join(tmpdir(), 'checkout-heal-rws-empty-'));
+    const bin = stubRealpath();
+    try {
+      let stderr = '';
+      try {
+        runWipe(
+          {
+            GITHUB_WORKSPACE: ws,
+            RUNNER_WORKSPACE: '',
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          { stdio: 'pipe' },
+        );
+      } catch (err) {
+        stderr = String(err.stderr);
+      }
+      expect(stderr).toContain('RUNNER_WORKSPACE');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when GITHUB_WORKSPACE is unset or empty', () => {
+    // The `:?` guard is what keeps this from ever running rm against a
+    // surprise expansion; a dropped GITHUB_WORKSPACE must fail loudly.
+    expect(() =>
+      runWipe({ GITHUB_WORKSPACE: '' }, { stdio: 'pipe' }),
+    ).toThrow();
   });
 });
 
