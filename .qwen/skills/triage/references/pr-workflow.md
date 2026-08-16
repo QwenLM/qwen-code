@@ -310,7 +310,12 @@ gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
 
    Fail closed, in this order: post the marker FIRST. If the upsert fails
    (retries exhausted), stop — do not apply the label and do not post the
-   triage-only outcome. The review-lane gate requires the label AND a pin
+   triage-only outcome. If the label application fails AFTER the pin
+   posted, stop the same way — do not post the outcome: an orphaned pin
+   alone cannot skip (the gate requires the label too), and a re-run of
+   the triage upserts the same pin in place and retries the label; but an
+   outcome posted without the label would promise a skip the gate does
+   not grant. The review-lane gate requires the label AND a pin
    matching the live head (a label without the pin runs the review lane),
    so the harm of a partial state is not a silent skip — it is the inverse:
    the outcome comment promises that no review verdict will post
