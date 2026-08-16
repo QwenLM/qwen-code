@@ -307,9 +307,9 @@ BASE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseR
 [ -n "$BASE_SHA" ] || { echo 'empty base SHA — fail closed'; exit 1; }
 MARKER_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-on-hold-marker.XXXXXX")"
 printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > "$MARKER_FILE"
-.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' "$MARKER_FILE"
+.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' "$MARKER_FILE" || { echo 'marker upsert failed — fail closed'; exit 1; }
 rm -f "$MARKER_FILE"
-gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f labels[]='status/on-hold'
+gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f labels[]='status/on-hold' || { echo 'label apply failed — fail closed'; exit 1; }
 ```
 
 Fail closed, in this order: post the marker FIRST. If the upsert fails
