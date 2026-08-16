@@ -301,7 +301,7 @@ async function assertLockShapeIfPresent(lockPath: string): Promise<void> {
     stat = await fs.lstat(lockPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw new LiveDiscoveryStateError(error);
+    throw error;
   }
   if (
     !stat.isDirectory() ||

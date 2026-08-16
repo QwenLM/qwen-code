@@ -7464,10 +7464,19 @@ async function runQwenServeImpl(
                   try {
                     await cleanupLiveDiscovery();
                   } catch (cleanupError) {
-                    finalErr ??=
+                    const normalizedCleanupError =
                       cleanupError instanceof Error
                         ? cleanupError
                         : new Error(String(cleanupError));
+                    if (finalErr) {
+                      writeDaemonLifecycleBestEffort(() => {
+                        daemonLog.error(
+                          'Live Host discovery cleanup failed during shutdown',
+                          normalizedCleanupError,
+                        );
+                      });
+                    }
+                    finalErr ??= normalizedCleanupError;
                   }
                   if (loggerPublished || loggerSignalOwned) {
                     writeDaemonLifecycleBestEffort(() => {

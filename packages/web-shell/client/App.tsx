@@ -2158,8 +2158,7 @@ export function App({
     ? ordinaryWorkspaces.map((entry) => ({
         id: entry.id,
         cwd: entry.cwd,
-        label:
-          entry.kind === 'live' ? t('sidebar.live') : workspaceLabel(entry),
+        label: workspaceLabel(entry),
         primary: entry.primary,
         trusted: entry.trusted,
       }))

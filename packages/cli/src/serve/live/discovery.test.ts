@@ -130,13 +130,13 @@ describe('Live discovery file', () => {
         pid: current.pid,
         instanceNonce: 'daemon_instance_nonce_old0',
       }),
-    ).rejects.toBeInstanceOf(Error);
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
     await expect(
       removeLiveDiscoveryFile(runtime, {
         pid: current.pid + 1,
         instanceNonce: current.instanceNonce,
       }),
-    ).rejects.toBeInstanceOf(Error);
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
     await expect(
       fs.readFile(getLiveDiscoveryPath(runtime), 'utf8'),
     ).resolves.toContain(current.instanceNonce);

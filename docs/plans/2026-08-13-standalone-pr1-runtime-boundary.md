@@ -349,9 +349,12 @@ Ownership只记录上述四态与terminal compromise：若foreign/compromised的
 - Modify: `packages/cli/src/serve/workspace-registry.test.ts`
 - Modify: `packages/cli/src/serve/workspace-route-runtime.ts`
 - Modify: `packages/cli/src/serve/workspace-route-runtime.test.ts`
+- Modify: `packages/cli/src/serve/routes/session-runtime.ts`
+- Modify: `packages/cli/src/serve/routes/session-runtime.test.ts`
 - Modify: `packages/cli/src/serve/routes/session.ts`
-- Modify: `packages/cli/src/serve/conversations/session-source.test.ts`
 - Modify: `packages/cli/src/serve/multi-workspace-sessions.test.ts`
+- Modify: `packages/cli/src/serve/live/live-task-service.ts`
+- Modify: `packages/cli/src/serve/live/live-task-service.test.ts`
 
 - [ ] 对 entry、active runtime、managed runtime 的 ID/cwd/canonical/lexical selector 写 RED matrix，internal一律 mismatch，普通 primary/secondary行为不变。
 - [ ] `activateReplacement`拒绝 user/internal scope变化；transitioning、draining和blocked entry仍按固化scope过滤，removed entry按registry现有删除契约不可再选择。
@@ -369,8 +372,6 @@ Ownership只记录上述四态与terminal compromise：若foreign/compromised的
 
 - Modify: `packages/cli/src/serve/acp-http/index.ts`
 - Modify: `packages/cli/src/serve/acp-http/workspace-qualified-acp.test.ts`
-- Modify: `packages/cli/src/serve/conversations/conversation-workspace.ts`
-- Modify: `packages/cli/src/serve/conversations/conversation-workspace.test.ts`
 - Modify: `packages/cli/src/serve/routes/workspace-qualified-voice.test.ts`
 - Modify: `packages/cli/src/serve/routes/workspace-management.ts`
 - Modify: `packages/cli/src/serve/routes/workspace-management.test.ts`
@@ -387,14 +388,25 @@ Ownership只记录上述四态与terminal compromise：若foreign/compromised的
 
 **Files:**
 
-- Modify: `packages/cli/src/serve/workspace-qualified-rest.test.ts`
-- Modify相关 route focused tests。
 - Modify: `packages/cli/src/serve/routes/workspace-extensions.ts`
-- Modify: `packages/cli/src/serve/channel-worker-group.ts`
+- Modify: `packages/cli/src/serve/routes/workspace-qualified-extensions.test.ts`
+- Modify: `packages/cli/src/serve/routes/workspace-channel-management.ts`
+- Modify: `packages/cli/src/serve/routes/workspace-channel-management.test.ts`
+- Modify: `packages/cli/src/serve/routes/workspace-channel-observed-contacts.ts`
+- Modify: `packages/cli/src/serve/routes/workspace-channel-observed-contacts.test.ts`
+- Modify: `packages/cli/src/serve/routes/scheduled-tasks.ts`
+- Modify: `packages/cli/src/serve/routes/scheduled-tasks.test.ts`
+- Modify: `packages/cli/src/serve/routes/channel-notify.test.ts`
+- Modify: `packages/cli/src/serve/routes/workspace-trust.test.ts`
+- Modify: `packages/cli/src/serve/routes/capabilities.ts`
+- Modify: `packages/cli/src/serve/routes/health.ts`
 - Modify: `packages/cli/src/serve/server.ts`
 - Modify: `packages/cli/src/serve/server/telemetry.ts`
+- Modify: `packages/cli/src/serve/server/telemetry.test.ts`
 - Modify: `packages/cli/src/serve/daemon-status.ts`
-- Modify对应 tests。
+- Modify: `packages/cli/src/serve/daemon-status.test.ts`
+- Modify: `packages/cli/src/serve/workspace-trust-reconciler.ts`
+- Modify: `packages/cli/src/serve/workspace-trust-reconciler.test.ts`
 
 - [ ] 建立一个 internal runtime route harness，按 Direct-consumer classification 对每个 generic route family至少测试 ID/cwd一种选择，并对高风险 mutation同时测两种。
 - [ ] 每个断言不仅检查 response，还检查 internal bridge/workspace service/fs/extension manager/channel worker没有调用。
@@ -449,36 +461,31 @@ cd packages/cli
 npx vitest run src/serve/conversations/conversation-runtime-ownership.test.ts
 npx vitest run src/serve/conversations/conversation-runtime-activity.test.ts
 npx vitest run src/serve/conversations/conversation-runtime-manager.test.ts
-npx vitest run src/serve/conversations/conversation-workspace.test.ts
 npx vitest run src/serve/live/discovery.test.ts
-npx vitest run src/serve/live/live-session-coordinator.test.ts
 npx vitest run src/serve/live/live-task-service.test.ts
 npx vitest run src/serve/live/realtime-startup-context.test.ts
+npx vitest run src/serve/live/run-qwen-serve-live.test.ts
 npx vitest run src/serve/routes/live.test.ts
 npx vitest run src/serve/workspace-registry.test.ts
 npx vitest run src/serve/workspace-route-runtime.test.ts
-npx vitest run src/serve/conversations/session-source.test.ts
 npx vitest run src/serve/acp-http/workspace-qualified-acp.test.ts
-npx vitest run src/serve/workspace-qualified-rest.test.ts
 npx vitest run src/serve/routes/workspace-qualified-voice.test.ts
 npx vitest run src/serve/routes/workspace-qualified-extensions.test.ts
 npx vitest run src/serve/routes/workspace-management.test.ts
 npx vitest run src/serve/multi-workspace-sessions.test.ts
-npx vitest run src/serve/channel-worker-group.test.ts
-npx vitest run src/serve/scheduled-task-keepalive.test.ts
+npx vitest run src/serve/routes/channel-notify.test.ts
 npx vitest run src/serve/routes/workspace-channel-management.test.ts
 npx vitest run src/serve/routes/workspace-channel-observed-contacts.test.ts
 npx vitest run src/serve/routes/scheduled-tasks.test.ts
-npx vitest run src/serve/routes/health.test.ts
-npx vitest run src/serve/routes/a2ui-action.test.ts
-npx vitest run src/serve/routes/goals.test.ts
-npx vitest run src/serve/routes/workspace-models.test.ts
-npx vitest run src/serve/routes/workspace-setup-github.test.ts
+npx vitest run src/serve/routes/session-runtime.test.ts
+npx vitest run src/serve/routes/workspace-trust.test.ts
 npx vitest run src/serve/server/telemetry.test.ts
 npx vitest run src/serve/server/session-archive.test.ts
 npx vitest run src/serve/daemon-status.test.ts
+npx vitest run src/serve/serve-app-lifecycle.test.ts
 npx vitest run src/serve/server.test.ts
 npx vitest run src/serve/run-qwen-serve.test.ts
+npx vitest run src/serve/workspace-trust-reconciler.test.ts
 
 cd ../web-shell
 npx vitest run --config vitest.config.ts App.test.tsx

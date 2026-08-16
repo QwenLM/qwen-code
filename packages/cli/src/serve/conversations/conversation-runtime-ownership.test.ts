@@ -568,28 +568,32 @@ try {
     expect((await fs.stat(ownerDirectory)).mode & 0o777).toBe(0o755);
   });
 
-  it('treats transient directory inspection failures as retryable', async () => {
-    if (process.platform === 'win32') return;
-    const stableBaseDir = await temporaryStableBase();
-    const parent = path.dirname(stableBaseDir);
-    const ownership = createConversationRuntimeOwnership({
-      stableBaseDir,
-      pid: process.pid,
-      instanceNonce: currentNonce,
-    });
-
-    await fs.chmod(parent, 0o000);
-    try {
-      await expect(ownership.acquire()).rejects.toMatchObject({
-        code: 'conversation_runtime_unavailable',
-        retryable: true,
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'treats transient directory inspection failures as retryable',
+    async () => {
+      const stableBaseDir = await temporaryStableBase();
+      const parent = path.dirname(stableBaseDir);
+      const ownership = createConversationRuntimeOwnership({
+        stableBaseDir,
+        pid: process.pid,
+        instanceNonce: currentNonce,
       });
-    } finally {
-      await fs.chmod(parent, 0o700);
-    }
 
-    await expect(ownership.acquire()).resolves.toEqual({ reclaimed: false });
-  });
+      await fs.chmod(parent, 0o000);
+      try {
+        await expect(ownership.acquire()).rejects.toMatchObject({
+          code: 'conversation_runtime_unavailable',
+          retryable: true,
+        });
+      } finally {
+        await fs.chmod(parent, 0o700);
+      }
+
+      await expect(ownership.acquire()).resolves.toEqual({
+        reclaimed: false,
+      });
+    },
+  );
 
   it('rejects an unsafe ownership lock shape without replacing it', async () => {
     const stableBaseDir = await temporaryStableBase();

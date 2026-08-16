@@ -4212,6 +4212,7 @@ describe('WebShellSidebar Live group', () => {
     expect(channelCatalog.workspaceChannelTypes).not.toHaveBeenCalled();
     expect(channelCatalog.workspaceChannels).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('Other channels');
+    expect(container.textContent).toContain('Voice check');
   });
 });
 

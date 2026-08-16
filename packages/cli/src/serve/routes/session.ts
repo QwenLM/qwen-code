@@ -725,6 +725,21 @@ export function registerSessionRoutes(
         return resolved;
       }
     };
+    const canonicalizeExistingAncestor = (candidate: string): string => {
+      let ancestor = path.resolve(candidate);
+      const missingTail: string[] = [];
+      while (true) {
+        try {
+          return path.join(fs.realpathSync.native(ancestor), ...missingTail);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          const parent = path.dirname(ancestor);
+          if (parent === ancestor) throw error;
+          missingTail.unshift(path.basename(ancestor));
+          ancestor = parent;
+        }
+      }
+    };
     const rejectReservedConversationRoot = (): undefined => {
       res.status(400).json({
         error:
@@ -744,8 +759,11 @@ export function registerSessionRoutes(
       return rejectReservedConversationRoot();
     }
     let key: string;
+    let reservedCheckKey: string;
     try {
       key = canonicalizeWorkspace(cwd);
+      reservedCheckKey =
+        'cwd' in body ? canonicalizeExistingAncestor(key) : key;
     } catch (err) {
       if (workspaceRegistry.listEntries().length > 1 && 'cwd' in body) {
         logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
@@ -771,7 +789,7 @@ export function registerSessionRoutes(
     ];
     if (
       'cwd' in body &&
-      liveRoots.some((root) => isWithinConversationRoot(root, key))
+      liveRoots.some((root) => isWithinConversationRoot(root, reservedCheckKey))
     ) {
       return rejectReservedConversationRoot();
     }

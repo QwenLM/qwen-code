@@ -135,7 +135,9 @@ describe('ConversationRuntimeManager', () => {
     expect(workspace.revalidate).not.toHaveBeenCalled();
     expect(workspace.assertExactRoot).not.toHaveBeenCalled();
     expect(publishRuntime).not.toHaveBeenCalled();
-    expect(registry.getByWorkspaceCwd(root.canonicalRoot)).toBeUndefined();
+    expect(
+      registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot),
+    ).toBeUndefined();
   });
 
   it('one-flights publication and revalidates cached reuse without preheating or binding Live', async () => {

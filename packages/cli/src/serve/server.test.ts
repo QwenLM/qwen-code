@@ -30451,6 +30451,7 @@ describe('Live conversation runtime lifecycle', () => {
     );
     const realHome = path.join(tmp, 'real-home');
     const linkedHome = path.join(tmp, 'linked-home');
+    const alternateRootAlias = path.join(tmp, 'alternate-root-alias');
     const relativeRoot = path.join('Documents', 'Qwen Code', 'Conversations');
     const realRoot = path.join(realHome, relativeRoot);
     const realChild = path.join(realRoot, 'conversation-probe');
@@ -30458,6 +30459,11 @@ describe('Live conversation runtime lifecycle', () => {
     await fsp.symlink(
       realHome,
       linkedHome,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await fsp.symlink(
+      realRoot,
+      alternateRootAlias,
       process.platform === 'win32' ? 'junction' : 'dir',
     );
     const setup = setupLiveRuntime(
@@ -30468,7 +30474,11 @@ describe('Live conversation runtime lifecycle', () => {
       },
     );
     try {
-      for (const cwd of [realpathSync(realRoot), realpathSync(realChild)]) {
+      for (const cwd of [
+        realpathSync(realRoot),
+        realpathSync(realChild),
+        path.join(alternateRootAlias, 'new-conversation'),
+      ]) {
         const response = await request(setup.app)
           .post('/session')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
