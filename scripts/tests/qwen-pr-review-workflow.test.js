@@ -2647,6 +2647,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.ghCalls).toContain('issues/4242/labels?per_page=100 --paginate');
     expect(r.ghCalls).toContain('pulls/4242');
     expect(r.ghCalls).toContain('issues/4242/comments?per_page=100 --paginate');
+    expect(r.ghCalls).not.toContain('-X DELETE');
     // Pin the filter EXPRESSION, not just its substring: the stub does its
     // own author filtering, so a mutated jq that merely contains
     // '.user.login' (e.g. select(.user.login != "")) would otherwise pass
