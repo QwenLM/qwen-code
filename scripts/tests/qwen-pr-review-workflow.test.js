@@ -2636,6 +2636,19 @@ describe('checkout self-heal', () => {
       ...options,
     });
 
+  // `realpath -m` (the script's canonicalization line) is a GNU coreutils
+  // extension: a BSD userland — macOS ships FreeBSD's `realpath [-q] [path
+  // ...]` — exits 1 on it, so the script's `|| printf` fallback keeps the
+  // path raw and no canonicalization happens at all. The review pool is
+  // Linux-only (`runs-on: [self-hosted, linux, x64, ecs-qwen]` /
+  // ubuntu-latest), so the production script is unaffected; this suite is
+  // not — vitest.config.ts excludes it on win32 only, so it also runs on the
+  // merge-queue macOS lane, where an assertion about GNU behavior is red for
+  // a defect that cannot exist there. Probe the host, not the platform: a Mac
+  // with GNU coreutils fronting PATH keeps the coverage.
+  const hasGnuRealpath =
+    spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+
   it('makes the first checkout failure survivable and addressable', () => {
     // Without continue-on-error the job dies on the first failure and the
     // heal chain never runs; without the id the chain cannot gate on the
@@ -2729,7 +2742,15 @@ describe('checkout self-heal', () => {
     mkdirSync(dir);
     writeFileSync(join(dir, 'leftover'), 'x');
     chmodSync(dir, 0o500);
-    return { parent, dir };
+    // Both halves of the allowlist comparison must be spelled the same way.
+    // The script only reconciles a resolved $WS with a raw $RUNNER_WORKSPACE
+    // where `realpath -m` exists (see hasGnuRealpath above); on a BSD
+    // userland with a symlinked tmpdir the resolved workspace
+    // (/private/var/...) sits outside the raw allowlist root (/var/...), the
+    // guard refuses, and runWipe throws before any assertion in these tests
+    // runs. Canonicalizing the root here keeps the pair consistent on every
+    // host instead of leaning on a GNU-only flag.
+    return { parent, dir, rws: realpathSync(tmpdir()) };
   };
   const unlock = ({ parent, dir }) => {
     chmodSync(dir, 0o755);
@@ -2751,7 +2772,7 @@ describe('checkout self-heal', () => {
       try {
         const out = runWipe({
           GITHUB_WORKSPACE: fixture.dir,
-          RUNNER_WORKSPACE: tmpdir(),
+          RUNNER_WORKSPACE: fixture.rws,
           PATH: `${bin}:${process.env.PATH}`,
         }); // must not throw
         expect(readdirSync(fixture.dir)).toContain('leftover');
@@ -2781,7 +2802,7 @@ describe('checkout self-heal', () => {
       try {
         runWipe({
           GITHUB_WORKSPACE: fixture.dir,
-          RUNNER_WORKSPACE: tmpdir(),
+          RUNNER_WORKSPACE: fixture.rws,
           PATH: `${bin}:${process.env.PATH}`,
         });
         expect(existsSync(marker)).toBe(true);
@@ -2869,43 +2890,50 @@ describe('checkout self-heal', () => {
     }
   });
 
-  it('refuses an allowlist-escaping .. path via canonicalization', () => {
-    // The bad paths above all sit outside the recorder dir, so the allowlist
-    // refuses them identically whether canonicalization runs or not — they
-    // cannot pin the realpath line. This one string-matches "$RWS"/* but
-    // canonicalizes out of it, so only `realpath -m` can refuse it: with the
-    // line deleted, the raw path passes the allowlist and reaches rm
-    // (executed mutant: exit 0, canary in the call log).
-    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
-    const outside = mkdtempSync(join(tmpdir(), 'checkout-heal-outside-'));
-    mkdirSync(join(dir, 'sub'));
-    writeFileSync(join(outside, 'canary'), 'x');
-    try {
-      const calls = join(dir, 'rm-calls');
-      writeFileSync(
-        join(dir, 'rm'),
-        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      writeFileSync(calls, '');
-      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${dir}:${process.env.PATH}`,
-          // Keep the '..' spelling raw — resolving it here would
-          // canonicalize the fixture away before the script sees it.
-          GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
-          RUNNER_WORKSPACE: dir,
-        },
-      });
-      expect(res.status).not.toBe(0);
-      expect(readFileSync(calls, 'utf8')).toBe('');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-      rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(!hasGnuRealpath)(
+    'refuses an allowlist-escaping .. path via canonicalization',
+    () => {
+      // The bad paths above all sit outside the recorder dir, so the allowlist
+      // refuses them identically whether canonicalization runs or not — they
+      // cannot pin the realpath line. This one string-matches "$RWS"/* but
+      // canonicalizes out of it, so only `realpath -m` can refuse it: with the
+      // line deleted, the raw path passes the allowlist and reaches rm
+      // (executed mutant: exit 0, canary in the call log).
+      const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+      const outside = mkdtempSync(join(tmpdir(), 'checkout-heal-outside-'));
+      mkdirSync(join(dir, 'sub'));
+      writeFileSync(join(outside, 'canary'), 'x');
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              // Keep the '..' spelling raw — resolving it here would
+              // canonicalize the fixture away before the script sees it.
+              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        expect(res.status).not.toBe(0);
+        expect(readFileSync(calls, 'utf8')).toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
   // Fronts PATH with a failing realpath so the script's `|| printf`
   // fallback engages — the realpath-absent case the strip loops' comments

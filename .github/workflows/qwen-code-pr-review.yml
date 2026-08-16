@@ -506,6 +506,11 @@ jobs:
           # Canonicalize before matching: the kernel resolves non-canonical
           # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
           # /usr), so a raw string match lets them slip past the case arms.
+          # `-m` is GNU-only — a BSD realpath exits 1 on it and the fallback
+          # silently keeps the raw spelling. Safe here (this pool is
+          # Linux-only), and off-GNU the strip loop and the allowlist below
+          # are what still hold; the suite gates its GNU-only assertion on a
+          # host probe rather than assuming this line ran.
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           # Trailing slashes slip past the exact-match case arms below
           # (`/home/` would pass the guard and reach the rm); realpath strips
