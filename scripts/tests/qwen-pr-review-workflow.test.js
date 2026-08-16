@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -2717,7 +2718,13 @@ describe('checkout self-heal', () => {
   // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
   // skip there, and win32 has no POSIX permission bits to honor.
   const lockFixture = () => {
-    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-lock-'));
+    // The wipe script canonicalizes $WS via realpath before the sudo leg,
+    // so the recorded argv carries the resolved path; on a host whose
+    // tmpdir is a symlink (macOS /var -> /private/var) the raw mkdtemp
+    // spelling fails the exact-entry assertion.
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
+    );
     const dir = join(parent, 'workspace');
     mkdirSync(dir);
     writeFileSync(join(dir, 'leftover'), 'x');
@@ -2928,6 +2935,41 @@ describe('checkout self-heal', () => {
       expect(readdirSync(ws)).toEqual([]);
     } finally {
       rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing-slash GITHUB_WORKSPACE when realpath is absent', () => {
+    // The trailing-slash denylist variants above run with the REAL
+    // realpath, which strips the slash before the WS strip loop executes,
+    // so they pin the case arms, not the loop. With realpath absent,
+    // `/home/` misses every exact-match arm and the allowlist "$RWS"/*
+    // matches it (`*` matches empty), so dropping the loop hands /home's
+    // contents to rm (executed mutant: exit 0, rm invoked). The recorder
+    // fronts PATH, so the call log is the proof and nothing is deleted.
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    const bin = stubRealpath();
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      writeFileSync(calls, '');
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${bin}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: '/home/',
+          RUNNER_WORKSPACE: '/home',
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
     }
   });
