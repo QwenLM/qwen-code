@@ -7714,7 +7714,7 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
-  it('forwards the checkpoint and loads the persisted branch separately', async () => {
+  it('branches by name and loads the persisted branch separately', async () => {
     window.sessionStorage.clear();
     const sourceSession = createMockSession({
       sessionId: 'session-a',
@@ -7742,10 +7742,7 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.MockDaemonSessionClient.load.mockClear();
 
-    const branch = requireActions(actions).branchSession(
-      'Branch 1',
-      'checkpoint-1',
-    );
+    const branch = requireActions(actions).branchSession('Branch 1');
     await act(async () => {
       await wait(5);
       await flushPromises();
@@ -7753,12 +7750,11 @@ describe('DaemonSessionProvider', () => {
     await expect(branch).resolves.toEqual({
       sessionId: 'session-b',
       displayName: 'Branch 1',
-      switchStarted: true,
     });
 
     expect(sdkMocks.branchSession).toHaveBeenCalledWith(
       'session-a',
-      { name: 'Branch 1', atRecordId: 'checkpoint-1' },
+      { name: 'Branch 1' },
       'client-a',
     );
     const loadCalls = sdkMocks.MockDaemonSessionClient.load.mock.calls;
@@ -7807,7 +7803,6 @@ describe('DaemonSessionProvider', () => {
     let first!: Promise<{
       sessionId: string;
       displayName: string;
-      switchStarted: boolean;
     }>;
     let second!: Promise<unknown>;
     await act(async () => {
@@ -7823,7 +7818,6 @@ describe('DaemonSessionProvider', () => {
       | {
           sessionId: string;
           displayName: string;
-          switchStarted: boolean;
         }
       | undefined;
     await act(async () => {
@@ -7838,7 +7832,6 @@ describe('DaemonSessionProvider', () => {
     expect(firstResult).toEqual({
       sessionId: 'session-b',
       displayName: 'First',
-      switchStarted: true,
     });
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
     expect(sdkMocks.MockDaemonSessionClient.load.mock.calls[0]?.[1]).toBe(

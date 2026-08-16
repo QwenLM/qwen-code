@@ -203,6 +203,7 @@ export function createDaemonSessionActions({
   let reasoningActionToken = 0;
   let appliedReasoningActionToken = 0;
   let modelMutationGeneration = 0;
+  let branchInFlight = false;
 
   function trackSessionConfigMutation<T>(
     session: DaemonSessionClient,
@@ -1626,12 +1627,19 @@ export function createDaemonSessionActions({
     },
 
     async branchSession(name?: string) {
+      if (branchInFlight) {
+        throw new DOMException(
+          'A branch request is already in progress',
+          'InvalidStateError',
+        );
+      }
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Branch session failed',
         'branch_session',
       );
+      branchInFlight = true;
       try {
         const result = await withActionTimeout(
           session.client.branchSession(
@@ -1667,6 +1675,8 @@ export function createDaemonSessionActions({
           error,
           'branch_session',
         );
+      } finally {
+        branchInFlight = false;
       }
     },
 
