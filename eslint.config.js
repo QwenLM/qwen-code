@@ -49,17 +49,6 @@ const restrictedStringThrow = {
     'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
 };
 
-// The three guarded trees (runtime/, utils/, acp-integration/) share one
-// no-restricted-syntax shape. Flat config replaces rule options wholesale,
-// so the array is built in one place — a future selector added here reaches
-// every guarded tree instead of needing hand-replication in each block.
-const serveGuardSyntaxRules = (message) => [
-  'error',
-  restrictedRequire,
-  restrictedStringThrow,
-  ...restrictedServeDynamicImports(message),
-];
-
 export default tseslint.config(
   {
     // Global ignores
