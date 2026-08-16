@@ -190,18 +190,18 @@ describe('runScratchTree', () => {
     // never touches tracked files, so the mutant survives with `git status`
     // reading empty and the sha still matching. The reset has to notice and
     // hand the caller the rebuild path instead.
-    const first = run();
-    execFileSync('git', ['update-index', '--skip-worktree', 'a.ts'], {
-      cwd: first.path!,
-    });
-    writeFileSync(join(first.path!, 'a.ts'), 'MUTANT\n');
+    for (const bit of ['--skip-worktree', '--assume-unchanged']) {
+      const first = run();
+      execFileSync('git', ['update-index', bit, 'a.ts'], { cwd: first.path! });
+      writeFileSync(join(first.path!, 'a.ts'), `MUTANT ${bit}\n`);
 
-    const second = run();
-    expect(second.available).toBe(true);
-    expect(second.reused).toBe(false); // rebuilt, not "reset"
-    expect(readFileSync(join(second.path!, 'a.ts'), 'utf8')).toBe(
-      'export const x = 1;\n',
-    );
+      const second = run();
+      expect(second.available).toBe(true);
+      expect(second.reused).toBe(false); // rebuilt, not "reset"
+      expect(readFileSync(join(second.path!, 'a.ts'), 'utf8')).toBe(
+        'export const x = 1;\n',
+      );
+    }
   });
 
   it('rebuilds when the leftover has a .git that git cannot use', () => {
@@ -390,14 +390,28 @@ describe('runScratchTree', () => {
   });
 
   it('names every residue shape its own recovery, including the staged ones', () => {
-    // `git checkout -- <path>` restores from the INDEX, so it leaves staged
-    // residue in place; and for a path staged as NEW it cannot match at all.
-    // Both shapes are ones `worktreeResidue` reports.
+    // Built from the real shapes, not from prose: a staged rename is reported
+    // under BOTH names, and they take opposite commands — `git rm --cached` on
+    // the original would stage a deletion rather than clear one.
     writeFileSync(join(worktree, 'a.ts'), 'export const x = 2;\n');
+    writeFileSync(join(worktree, 'staged-new.ts'), 'x\n');
+    execFileSync('git', ['add', 'staged-new.ts'], { cwd: worktree });
+    execFileSync('git', ['mv', '.gitignore', 'ignore-rules'], {
+      cwd: worktree,
+    });
+
     const r = run();
+    expect(r.sharedTreeResidue.sort()).toEqual([
+      '.gitignore',
+      'a.ts',
+      'ignore-rules',
+      'staged-new.ts',
+    ]);
     expect(r.note).toContain('git checkout HEAD -- <path>');
     expect(r.note).toContain('git rm --cached <path>');
     expect(r.note).toContain('rm -rf <path>');
+    // The rename's ORIGINAL name comes back with checkout, not with rm --cached.
+    expect(r.note).toContain('git checkout HEAD -- <original>');
   });
 
   it('says nothing about residue when the shared worktree is clean', () => {

@@ -37,7 +37,7 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -94,6 +94,13 @@ export interface ScratchTreeReport {
    * leaving the rest in the tree the next round reads.
    */
   sharedTreeResidueTotal: number;
+  /**
+   * Set when the residue check could not run at all. An empty
+   * `sharedTreeResidue` means "clean" only while this is absent — a `git status`
+   * that died on a tree too dirty for its buffer answers with the same empty
+   * list a pristine tree does.
+   */
+  sharedTreeUnmeasured?: string;
   /** What happened, in one line. Rendered to the verifier verbatim. */
   note: string;
 }
@@ -119,7 +126,15 @@ export interface ScratchTreeArgs {
 const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', [...NO_HOOKS, ...args], { cwd, encoding: 'utf8' });
+  // `ls-files -v` prints a line per tracked file and `clean` a line per removal;
+  // both pass the default 1 MiB buffer on a large repo, and `spawnSync` answers
+  // that by killing the child — which this function reads as a git failure and
+  // the reset reads as "rebuild", permanently, for every call.
+  const r = spawnSync('git', [...NO_HOOKS, ...args], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
@@ -246,8 +261,12 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         'from the INDEX, so it leaves STAGED residue in place); `rm -rf <path>` for anything ' +
         'untracked, including a directory entry (git reports an untracked directory that ' +
         'holds its own `.git` as one `dir/` entry it will not recurse into); and for a path ' +
-        'STAGED as new (`A` in `git status`) or a staged rename, `git checkout HEAD --` ' +
-        'cannot match it at all — `git rm --cached <path>` first, then delete it.'
+        'STAGED as new (`A` in `git status`), `git checkout HEAD --` cannot match it at ' +
+        'all — `git rm --cached <path>` first, then delete it. A staged RENAME is listed ' +
+        'under both of its names and they take opposite commands: the new name is the ' +
+        'staged-new case above, while the original is tracked in HEAD and comes back with ' +
+        '`git checkout HEAD -- <original>` (`git rm --cached` on it would stage a deletion ' +
+        'instead of clearing one).'
       : '';
 
   const tree = scratchWorktreePath(worktree, label);
@@ -259,22 +278,21 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // every later probe in this shard, which is a wrong verdict carrying a
     // deterministic source tag. Re-linking costs a second; trusting it costs a
     // verdict.
-    try {
-      rmSync(resolve(tree, 'node_modules'), { recursive: true, force: true });
-    } catch {
-      // Could not clear it: `farmDependencies` then reports what it finds, and
-      // the marker check keeps a farm this code did not build from being
-      // certified as one.
-    }
-    const dependencies = farmDependencies(tree, worktree);
+    // `rebuild` rather than deleting the root farm here: this tree also carries
+    // a farm per workspace member, and those are ignored paths too — wiping
+    // only the root left `<tree>/packages/<member>/node_modules` standing and
+    // certified, which is the same hole one level down (Node resolves a
+    // member's imports from the member's own `node_modules` first).
+    const dependencies = farmDependencies(tree, worktree, { rebuild: true });
     return {
       available: true,
       path: tree,
       headSha,
       reused: true,
-      dependencies: dependencies.farm,
+      dependencies,
       sharedTreeResidue,
       sharedTreeResidueTotal: residue.total,
+      sharedTreeUnmeasured: residue.unmeasured,
       note:
         `your scratch tree is at ${shellQuotePath(tree)}, restored to ${headSha.slice(0, 9)} ` +
         '(reusing the one an earlier call created — every tracked file is back at ' +
@@ -302,6 +320,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       dependencies: null,
       sharedTreeResidue,
       sharedTreeResidueTotal: residue.total,
+      sharedTreeUnmeasured: residue.unmeasured,
       note:
         `${worktreeCreateFailureDetail('scratch', e, String(sweep?.stderr ?? ''))}. ` +
         'Do NOT fall back to probing in the review worktree — other agents are ' +
@@ -317,9 +336,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     path: tree,
     headSha,
     reused: false,
-    dependencies: dependencies.farm,
+    dependencies,
     sharedTreeResidue,
     sharedTreeResidueTotal: residue.total,
+    sharedTreeUnmeasured: residue.unmeasured,
     note:
       `your scratch tree is at ${shellQuotePath(tree)}, checked out at ${headSha.slice(0, 9)}. ` +
       'Write your probe there, mutate there, apply the candidate fix there; the ' +
@@ -350,35 +370,17 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 function farmDependencies(
   tree: string,
   worktree: string,
-): { farm: DependencyFarm | null; failure: string | null } {
-  if (!existsSync(resolve(worktree, 'node_modules'))) {
-    return { farm: null, failure: null };
-  }
-  try {
-    return { farm: exposeDependencies(tree, worktree), failure: null };
-  } catch (err) {
-    // Best effort, exactly as it is for the probe: a farm that could not be
-    // built costs the verifier a runnable harness, never a wrong verdict. But
-    // the REASON is carried out — folding a link failure into the same `null`
-    // the absent case uses made the note say "the review worktree has no
-    // node_modules" about a worktree that has one, sending the verifier to
-    // install a tree that only needed a retry.
-    return { farm: null, failure: (err as Error).message };
-  }
+  opts: { rebuild?: boolean } = {},
+): DependencyFarm | null {
+  if (!existsSync(resolve(worktree, 'node_modules'))) return null;
+  // No try/catch: `exposeDependencies` guards every fs call it makes and counts
+  // what failed, so a link failure arrives as `{linked: 0, failed: N}` — which
+  // is the honest note — rather than as a throw this would have to translate.
+  // A catch here would be unreachable code pretending to be a safety net.
+  return exposeDependencies(tree, worktree, opts);
 }
 
-function dependencyNote(dependencies: {
-  farm: DependencyFarm | null;
-  failure: string | null;
-}): string {
-  const { farm, failure } = dependencies;
-  if (failure !== null) {
-    return (
-      ` Linking the review worktree's dependencies in failed (${failure}), so a ` +
-      'JS unit harness may not start here. That is an environment gap, never a ' +
-      'finding — and never a reason to probe in the review worktree instead.'
-    );
-  }
+function dependencyNote(farm: DependencyFarm | null): string {
   if (farm === null) {
     return (
       ' The review worktree has no `node_modules`, so nothing was linked in and ' +

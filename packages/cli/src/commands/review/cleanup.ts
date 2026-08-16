@@ -391,7 +391,10 @@ function auditPrWrites(target: string, prNumber: string): void {
  * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
  * string that matches a glob.
  */
-function scratchWorktreesOf(worktree: string): string[] {
+function scratchWorktreesOf(worktree: string): {
+  paths: string[];
+  failed: boolean;
+} {
   const prefix = scratchWorktreePrefix(worktree);
   const parent = dirname(resolve(worktree));
   let entries: string[];
@@ -407,13 +410,19 @@ function scratchWorktreesOf(worktree: string): string[] {
       writeStderrLine(
         `Failed to read ${parent} for scratch worktrees: ${(err as Error).message}`,
       );
+      // Not merely disclosed: the caller must not go on to announce "Nothing to
+      // clean" and clear the lease while N full checkouts stand unswept.
+      return { paths: [], failed: true };
     }
-    return [];
+    return { paths: [], failed: false };
   }
-  return entries
-    .map((name) => join(parent, name))
-    .filter((path) => path.startsWith(prefix))
-    .sort();
+  return {
+    paths: entries
+      .map((name) => join(parent, name))
+      .filter((path) => path.startsWith(prefix))
+      .sort(),
+    failed: false,
+  };
 }
 
 export function runCleanup(target: string): void {
@@ -474,23 +483,36 @@ export function runCleanup(target: string): void {
     // `<wt>-scratch-*` is matched against real entries, never expanded into a
     // path that does not exist, and nothing outside the review's own temp dir
     // can match the prefix.
-    for (const path of scratchWorktreesOf(wt)) {
+    const scratch = scratchWorktreesOf(wt);
+    if (scratch.failed) failedAny = true;
+    for (const path of scratch.paths) {
       // A dangling symlink at a family path is invisible to `releaseWorktree`
       // (its `existsSync` follows the link, so it reports "never existed" and
       // its `rmSync` never runs) — and it would still block the next review's
       // `git worktree add` with `already exists`. `lstatSync` sees the link
       // itself, and `rmSync` unlinks it rather than following it, which is the
       // same reasoning `discardWorktree` documents for its own leftovers.
+      let dangling = false;
       try {
-        if (!existsSync(path) && lstatSync(path).isSymbolicLink()) {
-          rmSync(path, { force: true });
-          writeStdoutLine(`Removed scratch worktree link: ${path}`);
-          removedAny = true;
-          continue;
-        }
+        dangling = !existsSync(path) && lstatSync(path).isSymbolicLink();
       } catch {
         // Not a symlink, or gone between the two calls: fall through to the
         // ordinary release below.
+      }
+      if (dangling) {
+        try {
+          rmSync(path, { force: true });
+          writeStdoutLine(`Removed scratch worktree link: ${path}`);
+          removedAny = true;
+        } catch (err) {
+          // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
+          // family path still wedges the next review's `worktree add`.
+          writeStderrLine(
+            `Failed to remove scratch worktree link ${path}: ${(err as Error).message}`,
+          );
+          failedAny = true;
+        }
+        continue;
       }
       report('scratch worktree', path);
     }

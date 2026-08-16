@@ -19,6 +19,7 @@ import {
   mkdtempSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -102,16 +103,27 @@ describe('worktreeResidue', () => {
 
   it('hands back names that survive being turned into commands', () => {
     // The paths become `git show HEAD:<path>` and `git checkout HEAD -- <path>`
-    // for an agent to run. Porcelain's RENDERED form quotes a path with a space
-    // or a non-ASCII byte and writes a rename as `orig -> new`, so a file named
-    // `a -> b.ts` used to parse to `b.ts"` — a name matching nothing on disk.
-    writeFileSync(join(repo, 'a -> b.ts'), 'x\n');
+    // for an agent to run, and porcelain's RENDERED form quotes a non-ASCII
+    // name (`"caf\\303\\251.ts"`), which resolves to nothing on disk.
     writeFileSync(join(repo, 'café.ts'), 'x\n');
-    const got = worktreeResidue(repo).paths.sort();
-    expect(got).toEqual(['a -> b.ts', 'café.ts']);
-    // The real test of "usable": every name still resolves on disk.
+    const got = worktreeResidue(repo).paths;
+    expect(got).toEqual(['café.ts']);
+    // The real test of "usable": the name still resolves on disk.
     for (const p of got) expect(existsSync(join(repo, p))).toBe(true);
   });
+
+  // `>` is in NTFS's reserved set, so the fixture cannot be created on Windows
+  // — and the shape it pins (a filename containing porcelain's rename
+  // separator) cannot exist there either, so skipping loses no coverage.
+  it.skipIf(process.platform === 'win32')(
+    'does not mistake a filename containing ` -> ` for a rename record',
+    () => {
+      writeFileSync(join(repo, 'a -> b.ts'), 'x\n');
+      const got = worktreeResidue(repo).paths;
+      expect(got).toEqual(['a -> b.ts']);
+      expect(existsSync(join(repo, got[0]))).toBe(true);
+    },
+  );
 
   it('lists the files inside a new directory, not the directory', () => {
     // The contamination shape this exists to catch — an agent dropping probe
@@ -269,6 +281,103 @@ describe('exposeDependencies', () => {
       false,
     );
     expect(existsSync(join(planted, 'node_modules', 'plain-pkg'))).toBe(true);
+  });
+
+  it('refuses a workspace member that escapes the tree', () => {
+    // The member list comes from the ROOT MANIFEST OF THE CODE UNDER REVIEW,
+    // and this loop deletes at the paths it names: `workspaces: [".."]`
+    // resolved to a directory outside both trees — the same one for source and
+    // target, since a scratch tree is a sibling — and the farm's opening wipe
+    // took that directory's `node_modules`.
+    const outer = tmp('expose-escape-');
+    const root = join(outer, 'repo');
+    const probe = join(outer, 'probe');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    mkdirSync(join(probe, 'node_modules'), { recursive: true });
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ workspaces: ['..'] }),
+    );
+    writeFileSync(join(outer, 'package.json'), JSON.stringify({ name: 'x' }));
+    mkdirSync(join(outer, 'node_modules', 'victim'), { recursive: true });
+
+    const got = exposeDependencies(probe, root);
+
+    expect(existsSync(join(outer, 'node_modules', 'victim'))).toBe(true);
+    expect(got.failed).toBeGreaterThan(0);
+  });
+
+  it('refuses a workspace member that is a symlink out of the tree', () => {
+    // A committed symlink at a member path is fully contained as a STRING, and
+    // `readWorkspacePackages` follows it deliberately because npm does — so the
+    // wipe lands at the link's target unless the containment check resolves.
+    const outer = tmp('expose-symlink-');
+    const root = join(outer, 'repo');
+    const probe = join(outer, 'probe');
+    const victim = join(outer, 'victim');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    mkdirSync(join(probe, 'packages'), { recursive: true });
+    mkdirSync(join(root, 'packages'), { recursive: true });
+    mkdirSync(join(victim, 'node_modules', 'real-dep'), { recursive: true });
+    writeFileSync(join(victim, 'package.json'), JSON.stringify({ name: 'v' }));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    symlinkSync(victim, join(root, 'packages', 'evil'), 'dir');
+    symlinkSync(victim, join(probe, 'packages', 'evil'), 'dir');
+
+    exposeDependencies(probe, root);
+
+    expect(existsSync(join(victim, 'node_modules', 'real-dep'))).toBe(true);
+  });
+
+  it('never farms a tree into itself', () => {
+    // The one guard between `exposeDependencies(x, x)` and deleting x's own
+    // `node_modules` — both production callers pass distinct paths today, and
+    // nothing pinned that they must.
+    const root = tmp('expose-self-');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    expect(exposeDependencies(root, root)).toEqual({
+      linked: 0,
+      failed: 0,
+      alreadyPresent: false,
+    });
+    expect(existsSync(join(root, 'node_modules', 'plain-pkg'))).toBe(true);
+  });
+
+  it('rebuilds a marked farm when the caller asks it to', () => {
+    // The reuse path of a scratch tree cannot know what ran in that tree, so it
+    // distrusts even a farm this code built — root AND per-member.
+    const root = tmp('expose-rebuild-root-');
+    const probe = tmp('expose-rebuild-probe-');
+    mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'packages', 'cli', 'node_modules', 'nested'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(root, 'packages', 'cli', 'package.json'),
+      JSON.stringify({ name: '@x/cli' }),
+    );
+    mkdirSync(join(probe, 'packages', 'cli'), { recursive: true });
+
+    expect(exposeDependencies(probe, root)).toMatchObject({ linked: 2 });
+    writeFileSync(
+      join(probe, 'packages', 'cli', 'node_modules', 'planted.js'),
+      'x',
+    );
+
+    expect(exposeDependencies(probe, root, { rebuild: true })).toMatchObject({
+      linked: 2,
+      alreadyPresent: false,
+    });
+    expect(
+      existsSync(join(probe, 'packages', 'cli', 'node_modules', 'planted.js')),
+    ).toBe(false);
   });
 
   it('does not call an EMPTY farm dir a standing farm', () => {

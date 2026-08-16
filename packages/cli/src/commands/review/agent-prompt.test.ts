@@ -1334,6 +1334,9 @@ describe('--roster — every prompt the plan requires, in one call', () => {
   }
 
   it('reads the worktree once and tells every brief what is dirty in it', () => {
+    // `toHaveBeenCalledWith` matches ANY accumulated call, and only
+    // writeStdoutLine is cleared by the enclosing beforeEach.
+    (writeStderrLine as unknown as Mock).mockClear();
     // The tripwire (#9207). Every wave of agents — this roster, each verify
     // shard, each reverse-audit round — is built by this command right before it
     // is launched, which makes this the one place the pipeline can notice that
@@ -2549,6 +2552,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(dirty).toContain('And right now it is not clean');
     expect(dirty).toContain('`compose-review.ts`, `__probe__.test.ts`');
     expect(dirty).not.toContain('more not listed');
+
+    // "Could not measure" is a third state, and it must not render as clean:
+    // the overload case is the one where the tree is dirtiest.
+    const unknown = buildRoleBrief(PR_PLAN, '1a', {
+      residue: { paths: [], total: 0, unmeasured: 'ENOBUFS' },
+    });
+    expect(unknown).toContain('could not be measured');
+    expect(unknown).not.toContain('And right now it is not clean');
 
     // A capped list presented as the complete one is a reader who distrusts
     // twelve paths and trusts the thirteenth.

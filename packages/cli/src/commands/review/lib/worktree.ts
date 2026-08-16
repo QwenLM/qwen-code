@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
+  realpathSync,
   mkdirSync,
   readdirSync,
   rmSync,
@@ -29,7 +30,7 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -56,10 +57,24 @@ export type SweepResult = ReturnType<typeof spawnSync>;
  * but not EPERM/EBUSY) — callers decide what that means.
  */
 export function discardWorktree(cwd: string, tree: string): SweepResult {
-  const sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
+  let sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
     cwd,
     encoding: 'utf8',
   });
+  if (sweep.status !== 0) {
+    // A LOCKED admin entry is the one leftover neither `remove --force` nor
+    // `prune` can clear, and probe code has a shell inside these trees: one
+    // `touch` in the admin dir the tree's own gitfile names is enough. Every
+    // later `worktree add` at that path then fatals "missing but locked", for
+    // every disposable tree of that review, until a human intervenes. `unlock`
+    // + the second `--force` is what git documents for exactly this.
+    spawnSync('git', ['worktree', 'unlock', tree], { cwd, encoding: 'utf8' });
+    sweep = spawnSync(
+      'git',
+      ['worktree', 'remove', '--force', '--force', tree],
+      { cwd, encoding: 'utf8' },
+    );
+  }
   rmSync(tree, { recursive: true, force: true });
   // And clear the ADMIN entry the two steps above can leave behind. A tree
   // whose `.git` gitfile is broken makes `worktree remove` fail; `rmSync` then
@@ -206,40 +221,94 @@ export interface DependencyFarm {
  * the probe, that would re-class every mutant `inconclusive`). What could not
  * be linked is counted and disclosed by the caller, never silently dropped.
  *
+ * **The links are read-write, and they point OUT of the disposable tree.** A
+ * probe that writes through one — `writeFileSync(require.resolve('dep/x.js'))`,
+ * an `npm rebuild`, a package that writes into its own directory at runtime —
+ * lands in the dependency root's copy, which is the shared review worktree, and
+ * `node_modules` is gitignored so the residue probe cannot see it. Copying the
+ * farm instead would cost the minutes the farm exists to save, so the contract
+ * is stated rather than enforced: the tree's own files are yours, its
+ * dependencies are borrowed, and a probe that needs to modify a dependency must
+ * replace the LINK with a copy rather than write through it. The verifier's
+ * brief says the same in the words it acts on.
+ *
  * Shared by `test-efficacy`'s `-probe` tree and `scratch-tree`'s per-verifier
  * tree, which is why it sits here rather than in either of them.
  */
 export function exposeDependencies(
   probeTree: string,
   dependencyRoot: string,
+  opts: { rebuild?: boolean } = {},
 ): DependencyFarm {
   const done: DependencyFarm = { linked: 0, failed: 0, alreadyPresent: false };
   if (probeTree === dependencyRoot) return done;
-  farmNodeModules(dependencyRoot, probeTree, done);
+  farmNodeModules(dependencyRoot, probeTree, done, opts.rebuild === true);
   let members: string[] = [];
   try {
-    members = readWorkspacePackages(dependencyRoot).packages.map((p) => p.dir);
+    const graph = readWorkspacePackages(dependencyRoot);
+    // `skipped` members are real directories npm links; the graph just cannot
+    // model their ownership. Farming them costs one directory read each and
+    // spares a probe an unresolvable import in a package that does exist.
+    members = [...graph.packages.map((p) => p.dir), ...graph.skipped];
   } catch {
     // The workspace graph is an optimization on top of the root farm: a
     // manifest that will not read costs the tree its nested packages, never
     // the farm it already has.
   }
   for (const dir of members) {
+    // The member list comes from the ROOT MANIFEST OF THE CODE UNDER REVIEW, and
+    // this loop both deletes and creates at the paths it names — so it is
+    // treated as the untrusted input it is. `workspaces: ["../.."]` resolves to
+    // a directory outside both trees (a scratch tree is a sibling, so the same
+    // one for source and target), and the farm's opening `rmSync` would take
+    // that directory's `node_modules` — the reviewer's own, in the layout this
+    // pipeline builds. `realpathSync` rather than string arithmetic because a
+    // COMMITTED SYMLINK at a workspace path is fully contained as a string and
+    // still lands the same delete outside the tree; `readWorkspacePackages`
+    // deliberately follows such links, because npm does.
+    const source = containedIn(dependencyRoot, dir);
+    const target = containedIn(probeTree, dir);
+    if (!source || !target) {
+      // Only count it when the member exists at all — a workspace glob that
+      // matches nothing is ordinary, an escape is not.
+      if (existsSync(join(dependencyRoot, dir))) done.failed++;
+      continue;
+    }
     // Only for a member the disposable tree holds. A workspace the tree does
     // not contain has nothing to resolve FROM, and creating its directory just
     // to hang a `node_modules` off it would put a path in the tree that its
     // commit does not have.
-    if (!existsSync(join(probeTree, dir))) continue;
+    if (!existsSync(target)) continue;
     // Per member, not around the loop: one unreadable member used to abort the
     // walk, so every alphabetically later member silently went unfarmed while
     // `failed` stayed 0 and the caller reported success.
     try {
-      farmNodeModules(join(dependencyRoot, dir), join(probeTree, dir), done);
+      farmNodeModules(source, target, done, opts.rebuild === true);
     } catch {
       done.failed++;
     }
   }
   return done;
+}
+
+/**
+ * `<root>/<dir>` when it really is inside `<root>`, and null when it is not.
+ *
+ * Both halves are resolved through symlinks before the comparison, so neither a
+ * `..` in the manifest's own string nor a committed symlink at the member path
+ * can point the caller's `rmSync` outside the tree it was given. A directory
+ * that does not exist yet resolves through its nearest existing ancestor, which
+ * is the case a fresh probe tree hits for every member it does not contain.
+ */
+function containedIn(root: string, dir: string): string | null {
+  try {
+    const base = realpathSync(resolve(root));
+    const full = resolve(base, dir);
+    const real = existsSync(full) ? realpathSync(full) : full;
+    return real === base || real.startsWith(base + sep) ? real : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -270,6 +339,7 @@ function farmNodeModules(
   sourceDir: string,
   targetDir: string,
   done: DependencyFarm,
+  rebuild = false,
 ): void {
   const source = join(sourceDir, 'node_modules');
   const target = join(targetDir, 'node_modules');
@@ -280,8 +350,10 @@ function farmNodeModules(
     // probe left in the one directory it is allowed to install into". Anything
     // else at that path is cleared and re-linked, because a probe's leftover
     // module resolving as a dependency is a wrong verdict with a deterministic
-    // source tag on it.
-    if (existsSync(join(target, FARM_MARKER))) {
+    // source tag on it. `rebuild` goes further and distrusts even a marked
+    // farm — the caller that reuses a tree ACROSS probe runs cannot know what
+    // ran in it, and re-linking costs a second where trusting costs a verdict.
+    if (!rebuild && existsSync(join(target, FARM_MARKER))) {
       done.alreadyPresent = true;
       return;
     }
@@ -348,8 +420,18 @@ function farmNodeModules(
         continue;
       }
       for (const pkg of pkgs) {
+        const scopedSource = join(sourceEntry, pkg);
+        // Same skip the top-level branch applies: a stray FILE under a scope
+        // directory is not a package, and linking it as one is a link the
+        // resolver will follow to something that cannot be imported.
         try {
-          symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
+          if (!statSync(scopedSource).isDirectory()) continue;
+        } catch {
+          done.failed++;
+          continue;
+        }
+        try {
+          symlinkSync(scopedSource, join(targetEntry, pkg), linkType);
           done.linked++;
         } catch {
           done.failed++;

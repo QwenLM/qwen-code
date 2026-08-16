@@ -1128,12 +1128,18 @@ function worktreeEvidenceBlock(
         'cause included. Take your evidence for them from `git show HEAD:<path>`, ' +
         'not from the file on disk; where that command answers that the path is not ' +
         'in HEAD, it was written into the tree after the commit, which settles it. ' +
-        'Say in your return that you saw them, so the orchestrator can have the ' +
-        'tree cleared — by shape: `git checkout HEAD -- <path>` for a tracked ' +
+        'The names above are flattened for display (a filename can carry control ' +
+        'or invisible characters); `git status --porcelain --untracked-files=all` ' +
+        'in that worktree has the exact bytes if one does not match. Say in your ' +
+        'return that you saw them, so the orchestrator can have the tree cleared ' +
+        '— by shape: `git checkout HEAD -- <path>` for a tracked ' +
         'file, `rm -rf <path>` for anything untracked, and `git rm --cached ' +
-        '<path>` first for a path STAGED as new or a staged rename, which ' +
-        '`git checkout HEAD --` cannot match at all (a staged rename is listed ' +
-        'under both of its names, and both need clearing).',
+        '<path>` first for a path STAGED as new, which `git checkout HEAD --` ' +
+        'cannot match at all. A staged RENAME is listed under both of its ' +
+        'names and they take opposite commands — the new name is the ' +
+        'staged-new case, the original is in HEAD and comes back with ' +
+        '`git checkout HEAD -- <original>`. (A dirty submodule is restored ' +
+        'inside the submodule, not from here.)',
     );
   }
   return parts;
@@ -1335,10 +1341,13 @@ export function buildRoleBrief(
   // run it owns, and a `[build]`/`[test]` finding is pre-confirmed downstream,
   // so a stray probe file would arrive as a merge-blocking Critical nothing
   // verifies.
+  // Every role that JUDGES code gets the rule — which is every role except
+  // Agent 7, whose job is running commands: `reviewsCode` was the wrong gate
+  // (it exists to scope the path-rule checklists), and it left Agent 0 and the
+  // test matrix reading worktree source with no rule about what they were
+  // reading.
   parts.push(
-    ...worktreeEvidenceBlock(report, opts.residue, {
-      rule: !!brief.reviewsCode,
-    }),
+    ...worktreeEvidenceBlock(report, opts.residue, { rule: role !== '7' }),
   );
 
   // The verifier is the last writing step without a tree of its own (Agent 7's
@@ -1389,6 +1398,15 @@ export function buildRoleBrief(
           '`git checkout --` restores from the index and leaves STAGED residue in ' +
           'place — and delete anything untracked) before you go on, and say so in ' +
           'your report.',
+        '',
+        '**The farm is borrowed, not copied.** Its `node_modules` entries are ' +
+          "symlinks into the review worktree's, so writing THROUGH one — an " +
+          '`npm rebuild`, a `writeFileSync(require.resolve(…))`, a package that ' +
+          'writes into its own directory — lands in the shared tree, where the ' +
+          'residue check cannot see it (`node_modules` is gitignored) and every ' +
+          'other shard would inherit it. Installing INTO your scratch tree is ' +
+          'fine (the next call re-links it); if a probe needs to MODIFY a ' +
+          'dependency, replace the link with a copy first.',
         '',
         '**One limit of the scratch tree, so you do not spend a run rediscovering ' +
           'it:** its `node_modules` is linked from the review worktree, and in a ' +
@@ -2781,9 +2799,13 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           : '') +
         '. Every brief built by this call names those paths and says a defect confined to them ' +
         'is not a finding; the code-reading ones also carry the rule that evidence comes from ' +
-        '`git show HEAD:<path>`. Restore them BEFORE launching this wave rather than after it — ' +
-        "a probe left in the shared tree reads to an auditor as the PR's own code, and to " +
-        "Agent 7's build and test run as the PR's own failure.",
+        '`git show HEAD:<path>`. Restore them BEFORE launching this wave — a probe left in the ' +
+        "shared tree reads to an auditor as the PR's own code, and to Agent 7's build and test " +
+        "run as the PR's own failure — and then RE-RUN this same command so the wave is rebuilt: " +
+        'the suppression above is baked into the blocks it printed, so launching them after a ' +
+        'restore tells every agent to drop findings in a file that is by then exactly the ' +
+        "PR's code. (The prompt records are overwritten, so a rebuild is what the delivery " +
+        'check compares against.)',
     );
   }
 
