@@ -238,6 +238,7 @@ export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
  */
 export type AuthType =
   | 'openai'
+  | 'openai-responses'
   | 'anthropic'
   | 'qwen-oauth'
   | 'gemini'
