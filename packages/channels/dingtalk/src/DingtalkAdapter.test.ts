@@ -4588,6 +4588,74 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(markdown[1]).not.toContain('draft and');
   });
 
+  it('delivers a nested image without exposing its file-wrapper path', async () => {
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `[FILE: [IMAGE: ${image.path}] /Users/ben/private/report.pdf]`,
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(0);
+      const markdown = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdown.markdown.text).toContain('![image](');
+      expect(markdown.markdown.text).not.toContain('/Users/ben/private');
+      expect(markdown.markdown.text).not.toContain('report.pdf');
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('hides escaped marker paths without uploading them', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const { markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+    await channel.sendMessage(
+      'cid123',
+      String.raw`Here: \[FILE: /Users/ben/private/report.pdf] done`,
+    );
+
+    expect(uploadCalls()).toHaveLength(0);
+    const markdown = JSON.parse(
+      String((markdownCalls()[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(markdown.markdown.text).not.toContain('/Users/ben/private');
+  });
+
+  it('still delivers prepared files after a later text chunk fails', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        markdownHandler: (call) => {
+          if (call === 1) throw new Error('chunk unavailable');
+          return new Response(JSON.stringify({ errcode: 0 }), { status: 200 });
+        },
+      });
+
+      await expect(
+        channel.sendMessage(
+          'cid123',
+          `[FILE: ${file.path}]\n${'x'.repeat(50_000)}`,
+        ),
+      ).rejects.toThrow('chunk unavailable');
+
+      expect(markdownCalls().length).toBeGreaterThan(1);
+      expect(fileCalls()).toHaveLength(1);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ['IMAGE', '[Image pending]'],
     ['FILE', ''],
@@ -4677,6 +4745,40 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(closeOutput).toHaveBeenCalledOnce();
       expect(uploadCalls()).toHaveLength(1);
       expect(markdownCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still delivers a prepared file when status-card finalization fails', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockRejectedValue(new Error('card failed'));
+      (
+        channel as unknown as {
+          interactionPresenter: { closeOutput: typeof closeOutput };
+        }
+      ).interactionPresenter = { closeOutput };
+
+      await expect(
+        getCompleteHook(channel)('cid-1', `[FILE: ${file.path}]`, 'session-1', {
+          channelName: 'dingtalk',
+          sessionId: 'session-1',
+          runId: 'run-1',
+          segmentId: 'segment-1',
+          owner: { kind: 'channel_user', id: 'owner-1' },
+          target: {
+            channelName: 'dingtalk',
+            chatId: 'cid-1',
+            senderId: 'owner-1',
+            isGroup: true,
+          },
+        }),
+      ).rejects.toThrow('card failed');
       expect(fileCalls()).toHaveLength(1);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });

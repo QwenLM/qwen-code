@@ -52,6 +52,16 @@ describe('outbound media markers', () => {
     expect(
       findTrailingPartialOutboundMediaMarker('The format is `[IMAGE: '),
     ).toBeUndefined();
+    expect(
+      findTrailingPartialOutboundMediaMarker(
+        'Use `first line\n[FILE: /tmp/report.txt]` here',
+      ),
+    ).toBeUndefined();
+    expect(
+      findTrailingPartialOutboundMediaMarker(
+        'Use `first line\n[FILE: /tmp/report.txt]',
+      ),
+    ).toEqual({ start: 4, markerName: 'FILE', complete: true });
   });
 
   it('parks a trailing bare bracket without assigning a marker type', () => {
@@ -185,6 +195,16 @@ describe('outbound media markers', () => {
     expect(
       unwrapFileMarkersAroundImages('```\n[FILE: [IMAGE: /tmp/a.png]]\n```'),
     ).toBe('```\n[IMAGE: /tmp/a.png]\n```');
+    expect(
+      unwrapFileMarkersAroundImages(
+        '[FILE: [IMAGE: /tmp/a.png] docs/report.pdf]',
+      ),
+    ).toBe('[IMAGE: /tmp/a.png]');
+    expect(
+      unwrapFileMarkersAroundImages(
+        '[FILE: [IMAGE: /tmp/a.png] /Users/ben/private/report.pdf',
+      ),
+    ).toBe('[IMAGE: /tmp/a.png]');
   });
 
   it('treats escaped marker syntax as literal text', () => {
@@ -195,6 +215,16 @@ describe('outbound media markers', () => {
       stripPartialOutboundMediaMarker(partial, 'FILE', '[File pending]'),
     ).toBe(partial);
     expect(findTrailingPartialOutboundMediaMarker(partial)).toBeUndefined();
+    expect(sanitizeOutboundMediaMarkers(complete, 'IMAGE', '[pending]')).toBe(
+      String.raw`\[pending]`,
+    );
+    expect(
+      sanitizeOutboundMediaMarkers(
+        String.raw`\[FILE: /Users/ben/private/report.pdf]`,
+        'FILE',
+        '',
+      ),
+    ).not.toContain('/Users/ben/private');
   });
 
   it('keeps truncation boundaries outside partial markers', () => {
@@ -223,6 +253,24 @@ describe('outbound media markers', () => {
         20_000,
         '[Earlier output truncated]\n',
       ),
-    ).toContain('B');
+    ).not.toContain('B');
+    expect(
+      truncateOutboundMediaText(
+        `${'A'.repeat(80)}[FILE: [IMAGE: /tmp/a.png] /Users/ben/private/report.pdf]`,
+        40,
+        truncationMarker,
+      ),
+    ).not.toContain('private');
+  });
+
+  it('parks the earliest pending marker across nested openings and brackets', () => {
+    expect(
+      findTrailingPartialOutboundMediaMarker(
+        '[FILE: [IMAGE: /tmp/a.png] /tmp/report.pdf',
+      ),
+    ).toEqual({ start: 0, markerName: 'FILE' });
+    expect(
+      findTrailingPartialOutboundMediaMarker('[FILE: /tmp/report ['),
+    ).toEqual({ start: 0, markerName: 'FILE' });
   });
 });

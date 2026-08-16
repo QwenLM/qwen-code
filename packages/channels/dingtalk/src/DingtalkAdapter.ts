@@ -41,6 +41,7 @@ import {
 import {
   findTrailingPartialOutboundMediaMarker,
   replaceOutboundMediaMarkers,
+  unwrapFileMarkersAroundImages,
 } from './outbound-markers.js';
 import {
   DingtalkConnectionManager,
@@ -812,7 +813,7 @@ export class DingtalkChannel extends ChannelBase {
   private async prepareOutgoingContent(
     text: string,
   ): Promise<PreparedDingTalkOutput> {
-    let markerText = text;
+    let markerText = unwrapFileMarkersAroundImages(text);
     while (true) {
       const next = stripPartialImageMarker(stripPartialFileMarker(markerText));
       if (next === markerText) break;
@@ -853,6 +854,25 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     return { text: result, files };
+  }
+
+  private async sendPreparedReplyWithFiles(
+    chatId: string,
+    prepared: PreparedDingTalkOutput,
+    atUserId?: string,
+  ): Promise<void> {
+    let replyFailed = false;
+    let replyError: unknown;
+    try {
+      if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId))) {
+        return;
+      }
+    } catch (error) {
+      replyFailed = true;
+      replyError = error;
+    }
+    await this.sendReplyFiles(chatId, prepared.files);
+    if (replyFailed) throw replyError;
   }
 
   private async sendPreparedReply(
@@ -931,9 +951,7 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     const prepared = await this.prepareOutgoingContent(text);
-    if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId)))
-      return;
-    await this.sendReplyFiles(chatId, prepared.files);
+    await this.sendPreparedReplyWithFiles(chatId, prepared, atUserId);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -1871,9 +1889,7 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId)))
-      return;
-    await this.sendReplyFiles(chatId, prepared.files);
+    await this.sendPreparedReplyWithFiles(chatId, prepared, atUserId);
   }
 
   private async sendFallbackReply(
@@ -1902,15 +1918,23 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (segment && this.interactionPresenter) {
       const prepared = await this.prepareOutgoingContent(text);
-      if (
-        await this.interactionPresenter.closeOutput(
+      let closeFailed = false;
+      let closeError: unknown;
+      let closed = false;
+      try {
+        closed = await this.interactionPresenter.closeOutput(
           segment.segmentId,
           prepared.text,
           'completed',
           segment,
-        )
-      ) {
+        );
+      } catch (error) {
+        closeFailed = true;
+        closeError = error;
+      }
+      if (closed || closeFailed) {
         await this.sendReplyFiles(chatId, prepared.files);
+        if (closeFailed) throw closeError;
         return;
       }
       await this.sendPreparedResponse(chatId, prepared, sessionId);

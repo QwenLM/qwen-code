@@ -190,6 +190,33 @@ describe('StatusCardController', () => {
     expect(streamContents.at(-1)).toBe('before  after');
   });
 
+  it.each(['IMAGE', 'FILE'] as const)(
+    'hides escaped %s paths from streaming and terminal cards',
+    async (markerName) => {
+      vi.useFakeTimers();
+      const { client, controller } = createHarness();
+
+      controller.replace(
+        segment(),
+        target,
+        String.raw`before \[${markerName}: /Users/ben/private/value.dat] after`,
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      controller.cancelRun('run-1', 'cancel_command');
+      await vi.runAllTimersAsync();
+
+      expect(
+        JSON.stringify(vi.mocked(client.createAndDeliver).mock.calls),
+      ).not.toContain('/Users/ben/private');
+      expect(
+        JSON.stringify(vi.mocked(client.openOrUpdateStream).mock.calls),
+      ).not.toContain('/Users/ben/private');
+      expect(
+        JSON.stringify(vi.mocked(client.updateInstance).mock.calls),
+      ).not.toContain('/Users/ben/private');
+    },
+  );
+
   it.each([
     ['plain text', 'before [FILE: [IMAGE: /tmp/a.png]] after'],
     ['Markdown code', '```\n[FILE: [IMAGE: /tmp/a.png]]\n```'],

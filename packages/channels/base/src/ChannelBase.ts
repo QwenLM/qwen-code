@@ -5680,7 +5680,9 @@ export abstract class ChannelBase {
             envelope.chatId,
             sessionId,
             segment,
-            'response_boundary',
+            promptState.cancelled || promptState.cancellationEmitted
+              ? 'cancelled'
+              : 'response_boundary',
           );
         })();
       };
@@ -5730,15 +5732,16 @@ export abstract class ChannelBase {
           await this.settleCancelRequested(promptState);
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
-          const segment = this.closeOutputSegment(sessionId, promptState);
           await streamer?.flush();
           if (promptState.cancelled || promptState.cancellationEmitted) return;
+          const segment = this.closeOutputSegment(sessionId, promptState);
           await this.notifyOutputSegmentEnd(
             envelope.chatId,
             sessionId,
             segment,
             'completed',
           );
+          if (promptState.cancelled || promptState.cancellationEmitted) return;
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5758,25 +5761,27 @@ export abstract class ChannelBase {
         const cancelledBeforeFailure = promptState.cancelled;
         if (!cancelledBeforeFailure) {
           releaseHeldChunks();
-          const segment = this.closeOutputSegment(sessionId, promptState);
           await streamer?.flush();
           if (!promptState.cancelled && !promptState.cancellationEmitted) {
+            const segment = this.closeOutputSegment(sessionId, promptState);
             await this.notifyOutputSegmentEnd(
               envelope.chatId,
               sessionId,
               segment,
               'failed',
             );
-            this.emitTaskLifecycle({
-              ...this.lifecycleBase(
-                envelope.chatId,
-                sessionId,
-                envelope.messageId,
-              ),
-              type: 'failed',
-              error: this.lifecycleError(err),
-              phase: promptState.deliveryStarted ? 'delivery' : 'agent',
-            });
+            if (!promptState.cancelled && !promptState.cancellationEmitted) {
+              this.emitTaskLifecycle({
+                ...this.lifecycleBase(
+                  envelope.chatId,
+                  sessionId,
+                  envelope.messageId,
+                ),
+                type: 'failed',
+                error: this.lifecycleError(err),
+                phase: promptState.deliveryStarted ? 'delivery' : 'agent',
+              });
+            }
           }
         } else {
           const channel = sanitizeLogText(this.name, 64);

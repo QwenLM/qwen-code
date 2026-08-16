@@ -950,7 +950,7 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
-  it('keeps trailing text from an unclosed file wrapper around an image', async () => {
+  it('drops ambiguous trailing text from an unclosed file wrapper', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
     const presenter = new DingtalkInteractionPresenter({ sendFallback });
     presenter.registerRun('run-1', 'owner-1', target);
@@ -963,7 +963,7 @@ describe('DingtalkInteractionPresenter', () => {
 
     expect(sendFallback).toHaveBeenCalledWith(
       'cid-1',
-      'Report [IMAGE: /tmp/chart.png] summary',
+      'Report [IMAGE: /tmp/chart.png]',
       'session-1',
     );
   });

@@ -13711,6 +13711,191 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('ends a segment as cancelled when steer races the final flush', async () => {
+      let releaseFirstSend!: () => void;
+      const firstSend = new Promise<void>((resolve) => {
+        releaseFirstSend = resolve;
+      });
+      const reasons: ChannelOutputSegmentEndReason[] = [];
+      let sendCount = 0;
+      class FinalFlushRaceChannel extends TestChannel {
+        protected override async sendResponseMessage(): Promise<void> {
+          if (sendCount++ === 0) await firstSend;
+        }
+
+        protected override onOutputSegmentEnd(
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ): void {
+          reasons.push(reason);
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce((sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first\n\n',
+          );
+          return Promise.resolve('first');
+        })
+        .mockResolvedValueOnce('second');
+      const ch = new FinalFlushRaceChannel(
+        'test-chan',
+        defaultConfig({
+          dispatchMode: 'steer',
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ messageId: 'first' }));
+      await vi.waitFor(() => expect(sendCount).toBe(1));
+      const second = ch.handleInbound(envelope({ text: 'replacement' }));
+      await vi.waitFor(() => expect(bridge.cancelSession).toHaveBeenCalled());
+      releaseFirstSend();
+      await first;
+      await second;
+
+      expect(reasons).toEqual(['cancelled']);
+      expect(
+        ch.taskEvents
+          .filter(
+            (event) =>
+              event.messageId === 'first' &&
+              (event.type === 'cancelled' || event.type === 'completed'),
+          )
+          .map((event) => event.type),
+      ).toEqual(['cancelled']);
+    });
+
+    it('marks a drained response boundary as cancelled after steer', async () => {
+      let releaseSend!: () => void;
+      let resolveFirst!: (value: string) => void;
+      const pendingSend = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const reasons: ChannelOutputSegmentEndReason[] = [];
+      class BoundaryCancelRaceChannel extends TestChannel {
+        protected override async sendResponseMessage(): Promise<void> {
+          await pendingSend;
+        }
+
+        protected override onOutputSegmentEnd(
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ): void {
+          reasons.push(reason);
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce((sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first\n\n',
+          );
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          return firstPrompt;
+        })
+        .mockResolvedValueOnce('second');
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          resolveFirst('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = new BoundaryCancelRaceChannel(
+        'test-chan',
+        defaultConfig({
+          dispatchMode: 'steer',
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ messageId: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      const second = ch.handleInbound(envelope({ text: 'replacement' }));
+      releaseSend();
+      await first;
+      await second;
+
+      expect(reasons[0]).toBe('cancelled');
+      expect(reasons).not.toContain('response_boundary');
+    });
+
+    it('does not complete after steer settles during segment notification', async () => {
+      let releaseNotification!: () => void;
+      const notification = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      let notificationStarted = false;
+      class TerminalNotifyRaceChannel extends TestChannel {
+        protected override async onOutputSegmentEnd(
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ): Promise<void> {
+          if (reason === 'completed' && !notificationStarted) {
+            notificationStarted = true;
+            await notification;
+          }
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce((sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'first');
+          return Promise.resolve('first');
+        })
+        .mockResolvedValueOnce('second');
+      const ch = new TerminalNotifyRaceChannel(
+        'test-chan',
+        defaultConfig({
+          dispatchMode: 'steer',
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ messageId: 'first' }));
+      await vi.waitFor(() => expect(notificationStarted).toBe(true));
+      const second = ch.handleInbound(envelope({ text: 'replacement' }));
+      await vi.waitFor(() =>
+        expect(
+          ch.taskEvents.some(
+            (event) =>
+              event.type === 'cancelled' && event.messageId === 'first',
+          ),
+        ).toBe(true),
+      );
+      releaseNotification();
+      await first;
+      await second;
+
+      expect(
+        ch.taskEvents.filter(
+          (event) =>
+            event.messageId === 'first' &&
+            (event.type === 'cancelled' || event.type === 'completed'),
+        ),
+      ).toEqual([expect.objectContaining({ type: 'cancelled' })]);
+    });
+
     it('flushes idle-buffered block text before a failed segment and prompt end', async () => {
       let releaseSend!: () => void;
       const pendingSend = new Promise<void>((resolve) => {
