@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   rmSync,
   writeFileSync,
+  readFileSync,
   existsSync,
   realpathSync,
 } from 'node:fs';
@@ -86,12 +87,21 @@ const DIFF_A = Buffer.from(
   'utf8',
 );
 
-function run(): void {
+function run(extra: Record<string, unknown> = {}): void {
   (captureLocalCommand.handler as (argv: unknown) => void)({
     out: join(repo, 'plan.json'),
     target: 'local',
     untracked: true,
+    ...extra,
   });
+}
+
+/** Read the plan report `run()` just wrote. */
+function report(): { incremental?: unknown; diffPath: string } {
+  return JSON.parse(readFileSync(join(repo, 'plan.json'), 'utf8')) as {
+    incremental?: unknown;
+    diffPath: string;
+  };
 }
 
 describe('capture-local — TOCTOU candidate withholding', () => {
@@ -109,6 +119,46 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     expect(stderrLines.join('\n')).toContain(
       'working tree changed while the capture was being hashed',
     );
+  });
+
+  it('a moved tree refuses THIS round\u2019s scoping too, not just the candidate', () => {
+    // Withholding only the candidate protects the NEXT round and leaves this
+    // one wrong: the scoping compares the very hashes the guard just proved
+    // may not describe the capture under review. A file edited during the
+    // hash pass and reverted before it is hashed reads as unchanged,
+    // `changedSince` reports nothing, and its diff section is sliced out —
+    // the round then says "nothing to re-review" over a capture no agent
+    // read. Promote a real candidate first, so the anchor is otherwise
+    // valid and the refusal can only come from the guard.
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    run({ model: 'model-a' });
+    const cachePath = join(repo, 'cache.json');
+    const promoted = JSON.parse(
+      readFileSync(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    writeFileSync(
+      cachePath,
+      JSON.stringify({ ...promoted, lastModelId: 'model-a' }),
+    );
+
+    // Round 2: same anchor, but the tree moves under the hash pass.
+    stderrLines.length = 0;
+    captures.push(
+      { diff: DIFF_A },
+      { diff: Buffer.from('changed mid-hash\n') },
+    );
+    run({ model: 'model-a', cache: cachePath });
+
+    expect(report().incremental).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain(
+      'Incremental anchor not used — the working tree changed while the ' +
+        'capture was being hashed',
+    );
+    // The full capture is what the plan reviews.
+    expect(readFileSync(report().diffPath).equals(DIFF_A)).toBe(true);
   });
 
   it('a tree that held still writes the candidate and no warning', () => {

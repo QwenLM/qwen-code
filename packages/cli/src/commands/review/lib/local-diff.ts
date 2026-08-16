@@ -24,8 +24,9 @@
 // diff is a concatenation of per-file sections; the result parses exactly like
 // any other.
 
-import { lstatSync, statSync, type Stats, realpathSync } from 'node:fs';
-import { join, relative, resolve, isAbsolute, sep } from 'node:path';
+import { lstatSync, statSync, type Stats } from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
+import { repoRelativeOf } from './paths.js';
 import {
   LITERAL_PATHSPECS,
   NULL_DEVICE,
@@ -192,21 +193,11 @@ function toRepoPathspec(repoRoot: string, file: string): string {
   // throws on a path that does not exist yet, which a `--file` may legitimately
   // be (a brand-new untracked file is exactly this feature's subject), so fall
   // back to the non-canonical form rather than failing the review.
-  let abs = resolve(process.cwd(), file);
-  try {
-    abs = realpathSync(abs);
-  } catch {
-    // Not on disk yet — resolve() is the best we have, and the check below still
-    // holds for it.
-  }
-  const rel = relative(repoRoot, abs);
-  // `rel.startsWith('..')` is not the containment check it looks like: a file
-  // called `..foo.ts` at the repository root relativises to `..foo.ts`, and the
-  // scoped review would refuse to look at a perfectly ordinary file on the
-  // grounds that it had escaped. What escapes is `..` itself, or a path whose
-  // FIRST SEGMENT is `..`.
-  const escapes =
-    rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+  // Canonicalisation and the segment-aware escape check live in
+  // `repoRelativeOf` because `qwen review run` pins the artifact name it polls
+  // for from the same answer; a second derivation here is how the two spellings
+  // drifted before.
+  const { rel, abs, escapes } = repoRelativeOf(repoRoot, file);
   if (escapes) {
     throw new Error(
       `--file ${file} resolves to ${abs}, which is outside the repository ` +

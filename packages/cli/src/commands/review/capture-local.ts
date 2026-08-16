@@ -103,7 +103,20 @@ function anchorRefusalReason(
   headSha: string | null,
   target: string,
   skippedCount: number,
+  treeHeldStill: boolean,
 ): string | null {
+  if (!treeHeldStill) {
+    // The hashes this scoping would compare against were computed over a tree
+    // that moved while they were being taken — the same uncertainty that
+    // withholds the cache candidate. Withholding only the candidate protects
+    // the NEXT round and leaves THIS one wrong: a file whose bytes changed
+    // during the hash pass hashes equal to the cached round, `changedSince`
+    // reports nothing, and its diff section is sliced out of scope — so the
+    // round says "nothing to re-review" over a capture no agent read. The
+    // guard's own promise is that no round certifies bytes it never
+    // reviewed; that promise is this one's too.
+    return 'the working tree changed while the capture was being hashed';
+  }
   if (skippedCount > 0) {
     // Skipped content is in NO diff and NO hash: with it present, "zero
     // delta" cannot mean "nothing changed", and an incremental round would
@@ -175,8 +188,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // and an editor save landing in that window makes the candidate certify
   // bytes THIS round never reviewed — the one uncertainty in this module
   // that failed OPEN. Re-capture and compare: differing bytes withhold the
-  // candidate (the plan still reviews the FIRST capture), which only costs
-  // the next round its incremental scoping. Endpoint comparison, so a
+  // candidate (the plan still reviews the FIRST capture) AND refuse this
+  // round's own incremental scoping, which reads the very same hashes —
+  // see `anchorRefusalReason`'s first clause. The cost is a full-range
+  // review now and no anchor for the next round. Endpoint comparison, so a
   // write-then-revert entirely inside the window is invisible to it — that
   // shape leaves the reviewed bytes and the hashed bytes equal anyway, so
   // the certificate stays true; what it cannot catch is a revert that
@@ -217,6 +232,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       headSha,
       target,
       capture.skipped.length,
+      treeHeldStill,
     );
     if (refusal !== null) {
       writeStderrLine(

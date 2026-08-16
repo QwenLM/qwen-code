@@ -28,12 +28,17 @@
 import type { CommandModule } from 'yargs';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, normalize, relative, resolve } from 'node:path';
+import { dirname, join, normalize, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR, REVIEWS_DIR, safeTarget } from './lib/paths.js';
+import {
+  REVIEW_TMP_DIR,
+  REVIEWS_DIR,
+  repoRelativeOf,
+  safeTarget,
+} from './lib/paths.js';
 import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
@@ -115,10 +120,14 @@ function repoRelative(target: string): string {
   const normalised = normalize(target).replace(/^\.\//, '');
   const root = gitOpt('rev-parse', '--show-toplevel');
   if (root === null) return normalised;
-  const rel = relative(root, resolve(normalised));
-  // A path outside the repo has no repo-relative spelling; leave it as the
-  // user typed it rather than pinning on a `..` walk.
-  return rel === '' || rel.startsWith('..') ? normalised : rel;
+  // Shared with `capture-local`'s own pathspec derivation (`repoRelativeOf`
+  // in lib/paths.ts) so the pin and the artifact it waits for cannot spell
+  // one file two ways — see that function for the two corners, a symlinked
+  // root prefix and a root-level `..foo.ts`, that a re-derivation here got
+  // wrong. A path genuinely outside the repo has no repo-relative spelling;
+  // leave it as the user typed it rather than pinning on a `..` walk.
+  const { rel, escapes } = repoRelativeOf(root, normalised);
+  return escapes ? normalised : rel;
 }
 
 export function classifyRunTarget(target?: string): RunTargetClass {
