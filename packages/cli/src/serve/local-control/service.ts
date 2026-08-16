@@ -39,6 +39,13 @@ export interface LocalControlStatus {
    * the pairing secret stays client-side after the scan.
    */
   url?: string;
+  /**
+   * True while active when the pairing `url` was withheld from THIS response
+   * because the caller did not present credentials (#9106). The URL is
+   * printed to the daemon terminal instead; UIs should point the operator
+   * there rather than render an empty pairing block.
+   */
+  urlRedacted?: boolean;
   interfaceName?: string;
   address?: string;
   port?: number;

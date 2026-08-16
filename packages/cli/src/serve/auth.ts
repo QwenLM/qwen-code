@@ -444,9 +444,16 @@ export function bearerAuth(
   };
 }
 
-const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
+export const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
 
-function requestWasAuthenticated(req: Request): boolean {
+/**
+ * Whether the request presented credentials that `bearerAuth` verified.
+ * NOTE: "open" loopback requests on a no-token daemon pass `bearerAuth`
+ * without being authenticated — this helper tells the two apart, which is
+ * what the Local Control routes use to decide whether a response may carry
+ * the pairing secret (#9106).
+ */
+export function requestWasAuthenticated(req: Request): boolean {
   return (
     (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
       AUTHENTICATED_REQUEST
@@ -498,16 +505,17 @@ export interface MutationGateOptions {
    * Defaults to false so existing routes can adopt the helper without
    * behavior change.
    *
-   * Caveat (#9106 round-7 review, open design decision): on a no-token
-   * daemon the pairing credential itself can be minted by any loopback
-   * caller through the Local Control enable/status routes (non-strict and
-   * loopback-open by design), so once Local Control is active such a caller
-   * can present the credential on the LAN listener and pass this gate. The
-   * strict surface on a no-token daemon therefore inherits the loopback
-   * trust boundary while Local Control is active. Closing that requires a
-   * design decision: strict-gate the Local Control routes and give the
-   * Settings card an authenticated path, stop returning the pairing URL to
-   * unauthenticated callers, or require a token for LAN exposure.
+   * Resolved caveat (#9106): the pairing credential used to be minted and
+   * read back by any unauthenticated loopback caller through the Local
+   * Control enable/status routes, letting a local process present the
+   * credential on the LAN listener and pass this gate. The Local Control
+   * routes no longer return the pairing URL or QR to unauthenticated
+   * callers (`requestWasAuthenticated` gate in
+   * `routes/workspace-local-control.ts`); on a no-token daemon the pairing
+   * URL is printed to the daemon's own terminal instead. Obtaining the
+   * credential therefore requires the daemon token (or terminal access),
+   * so the strict surface no longer inherits the loopback trust boundary
+   * through these routes.
    */
   strict?: boolean;
 }

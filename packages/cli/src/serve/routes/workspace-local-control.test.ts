@@ -7,14 +7,31 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
+import type { RequestHandler } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { AUTHENTICATED_REQUEST } from '../auth.js';
 import { tagListener } from '../local-control/listener-identity.js';
 import {
   InvalidLocalControlTargetError,
   type LocalControlService,
 } from '../local-control/service.js';
 import { registerWorkspaceLocalControlRoutes } from './workspace-local-control.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/stdioHelpers.js')>();
+  return { ...actual, writeStdoutLine: vi.fn() };
+});
+
+/** Marks the request bearer-authenticated the way `bearerAuth` does after
+ *  verifying a token — the routes key the pairing-secret redaction on it
+ *  (#9106). */
+const asAuthenticated: RequestHandler = (req, _res, next) => {
+  (req as unknown as Record<symbol, true>)[AUTHENTICATED_REQUEST] = true;
+  next();
+};
 
 describe('Local Control routes', () => {
   it('flushes a LAN disable response before closing its connection', async () => {
@@ -156,6 +173,7 @@ describe('Local Control routes', () => {
     // disable).
     const oversizedUrl = `http://192.168.1.10:4170/?t=${'a'.repeat(2000)}`;
     const app = express();
+    app.use(asAuthenticated);
     registerWorkspaceLocalControlRoutes(app, {
       service: {
         status: vi.fn(() => ({ active: true, url: oversizedUrl })),
@@ -178,6 +196,7 @@ describe('Local Control routes', () => {
     // (encoder upgrade, refactor) should not ship with green tests.
     const url = 'http://192.168.1.10:4170/#token=abc123';
     const app = express();
+    app.use(asAuthenticated);
     registerWorkspaceLocalControlRoutes(app, {
       service: {
         status: vi.fn(() => ({ active: true, url })),
@@ -191,5 +210,74 @@ describe('Local Control routes', () => {
     expect(response.status).toBe(200);
     expect(typeof response.body.qrText).toBe('string');
     expect(response.body.qrText.length).toBeGreaterThan(0);
+    expect(response.body.urlRedacted).toBeUndefined();
+  });
+
+  it('withholds the pairing secret from unauthenticated status callers (#9106)', async () => {
+    // On a no-token daemon any local process reaches this route
+    // unauthenticated; the pairing token (in `url`'s fragment, encoded in
+    // `qrText`) must not be served to it — that let a local process mint a
+    // LAN credential and pass the strict mutation surface.
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).get('/workspace/local-control');
+
+    expect(response.status).toBe(200);
+    expect(response.body.active).toBe(true);
+    expect(response.body.url).toBeUndefined();
+    expect(response.body.qrText).toBeUndefined();
+    expect(response.body.urlRedacted).toBe(true);
+  });
+
+  it('still returns the full pairing payload to authenticated callers (#9106)', async () => {
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    app.use(asAuthenticated);
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).get('/workspace/local-control');
+
+    expect(response.status).toBe(200);
+    expect(response.body.url).toBe(url);
+    expect(response.body.urlRedacted).toBeUndefined();
+  });
+
+  it('redacts an unauthenticated enable response and prints the URL to the daemon terminal (#9106)', async () => {
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable: vi.fn(async () => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      primaryBindHostname: '127.0.0.1',
+    });
+    vi.mocked(writeStdoutLine).mockClear();
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(200);
+    expect(response.body.active).toBe(true);
+    expect(response.body.url).toBeUndefined();
+    expect(response.body.qrText).toBeUndefined();
+    expect(response.body.urlRedacted).toBe(true);
+    // The operator still needs the URL to pair; the daemon terminal is the one
+    // channel a local attacker cannot read over HTTP.
+    expect(writeStdoutLine).toHaveBeenCalledWith(expect.stringContaining(url));
   });
 });

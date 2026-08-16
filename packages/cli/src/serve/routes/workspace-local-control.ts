@@ -18,7 +18,8 @@ import {
   type LocalControlService,
   type LocalControlStatus,
 } from '../local-control/service.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { requestWasAuthenticated } from '../auth.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 export interface RegisterWorkspaceLocalControlRoutesDeps {
   service: LocalControlService;
@@ -55,6 +56,26 @@ async function withUiData(status: LocalControlStatus) {
 }
 
 /**
+ * The pairing secret must never reach a caller that did not present
+ * credentials. `url` carries the token in the fragment and `qrText` encodes
+ * it; on a no-token daemon "open loopback" passes `bearerAuth` WITHOUT being
+ * authenticated, and any local process is such a caller — handing it the
+ * secret lets it present the pairing credential on the LAN listener and
+ * reach the strict mutation surface (#9106). Authenticated callers (daemon
+ * token) get the full payload. Everyone else gets the status with the secret
+ * removed and `urlRedacted` set while active, so the UI can point at the
+ * daemon terminal, where the URL is printed on enable instead.
+ */
+function presentStatus(
+  req: Request,
+  ui: Awaited<ReturnType<typeof withUiData>>,
+) {
+  if (requestWasAuthenticated(req)) return ui;
+  const { url: _url, qrText: _qrText, ...rest } = ui;
+  return { ...rest, urlRedacted: ui.url !== undefined };
+}
+
+/**
  * Enabling is restricted to the primary (loopback) listener.
  *
  * The asymmetry is the point. A page already reached over the LAN must not be
@@ -82,8 +103,10 @@ export function registerWorkspaceLocalControlRoutes(
   app: Application,
   deps: RegisterWorkspaceLocalControlRoutesDeps,
 ): void {
-  app.get('/workspace/local-control', async (_req, res) => {
-    res.status(200).json(await withUiData(deps.service.status()));
+  app.get('/workspace/local-control', async (req, res) => {
+    res
+      .status(200)
+      .json(presentStatus(req, await withUiData(deps.service.status())));
   });
 
   app.post(
@@ -126,15 +149,21 @@ export function registerWorkspaceLocalControlRoutes(
         target?: unknown;
       };
       try {
-        res.status(200).json(
-          await withUiData(
-            await deps.service.enable({
-              address:
-                typeof body.address === 'string' ? body.address : undefined,
-              target: typeof body.target === 'string' ? body.target : undefined,
-            }),
-          ),
+        const ui = await withUiData(
+          await deps.service.enable({
+            address:
+              typeof body.address === 'string' ? body.address : undefined,
+            target: typeof body.target === 'string' ? body.target : undefined,
+          }),
         );
+        if (!requestWasAuthenticated(req) && ui.url) {
+          // The response below has the secret removed; the operator still
+          // needs it to pair. The daemon's own terminal is the one channel a
+          // local attacker process cannot read over HTTP, so surface the URL
+          // there (#9106).
+          writeStdoutLine(`qwen serve: Local Control pairing URL: ${ui.url}`);
+        }
+        res.status(200).json(presentStatus(req, ui));
       } catch (error) {
         sendEnableError(res, error);
       }
@@ -156,7 +185,11 @@ export function registerWorkspaceLocalControlRoutes(
         res.status(200).json({ active: false });
         return;
       }
-      res.status(200).json(await withUiData(await deps.service.disable()));
+      res
+        .status(200)
+        .json(
+          presentStatus(req, await withUiData(await deps.service.disable())),
+        );
     },
   );
 }

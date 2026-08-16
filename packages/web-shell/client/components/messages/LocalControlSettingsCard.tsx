@@ -21,6 +21,12 @@ interface LanCandidate {
 interface LocalControlStatus {
   active: boolean;
   url?: string;
+  /**
+   * Set when the daemon withheld the pairing URL from this response because
+   * the request carried no credentials (#9106); the URL is printed to the
+   * daemon terminal instead.
+   */
+  urlRedacted?: boolean;
   qrText?: string;
   interfaceName?: string;
   address?: string;
@@ -169,9 +175,7 @@ export function LocalControlSettingsCard() {
           ? failure.payload?.interfaces
           : undefined;
       if (recovered) {
-        setStatus((prev) =>
-          prev ? { ...prev, interfaces: recovered } : prev,
-        );
+        setStatus((prev) => (prev ? { ...prev, interfaces: recovered } : prev));
         setSelectedAddress((current) => reconcileSelection(recovered, current));
       }
     } finally {
@@ -258,6 +262,12 @@ export function LocalControlSettingsCard() {
             </p>
           </div>
         </div>
+      )}
+
+      {status?.active && !status.url && status.urlRedacted && (
+        <p className="max-w-3xl text-sm text-muted-foreground">
+          {t('settings.localControl.urlRedacted')}
+        </p>
       )}
 
       {error && (
