@@ -54,6 +54,8 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -430,7 +432,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    }),
     ...planEffortField(args.effort),
   };
 
