@@ -619,3 +619,114 @@ describe('readRunTranscripts — containment and fault handling', () => {
     ).toThrow(TranscriptsUnavailableError);
   });
 });
+
+describe('the incomplete-transcript shapes the resume path reads', () => {
+  const user = (text: string) =>
+    JSON.stringify({
+      agentId: 'a1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+      type: 'user',
+      message: { role: 'user', parts: [{ text }] },
+    });
+  const assistant = (parts: unknown[]) =>
+    JSON.stringify({
+      agentId: 'a1',
+      sessionId: 'S1',
+      type: 'assistant',
+      message: { role: 'assistant', parts },
+    });
+
+  it('a non-terminal sidecar status makes the last text progress, not a return', () => {
+    // The harness appends ROUND_TEXT before the round's tool calls and
+    // writes NO terminal transcript record on completion, so an agent
+    // killed after a text flush ends IDENTICALLY to a completed one. The
+    // sidecar is the authoritative lifecycle record: a killed agent's
+    // persisted status stays 'running'.
+    file(
+      'agent-a1.jsonl',
+      [user('go'), assistant([{ text: 'Verdict: clean.' }])].join('\n') + '\n',
+    );
+    file(
+      'agent-a1.meta.json',
+      JSON.stringify({ agentId: 'a1', status: 'running' }),
+    );
+    const recs = readTranscripts(undefined, ENV);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].finalText).toBe('Verdict: clean.');
+    expect(recs[0].returned).toBe(false);
+  });
+
+  it('a completed sidecar (or none) leaves content inference standing', () => {
+    file(
+      'agent-a1.jsonl',
+      [user('go'), assistant([{ text: 'Verdict: clean.' }])].join('\n') + '\n',
+    );
+    file(
+      'agent-a1.meta.json',
+      JSON.stringify({ agentId: 'a1', status: 'completed' }),
+    );
+    expect(readTranscripts(undefined, ENV)[0].returned).toBe(true);
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a1.meta.json'));
+    expect(readTranscripts(undefined, ENV)[0].returned).toBe(true);
+  });
+
+  it('a thought-only final record is not a return and never final text', () => {
+    // Thinking mode emits {text, thought: true} parts in ROUND_TEXT before
+    // the round's tool calls land as records — a kill between the two
+    // leaves a complete thought-only last record, and counting thoughts
+    // handed the agent's INTERNAL REASONING downstream as its verdict.
+    file(
+      'agent-a1.jsonl',
+      [
+        user('go'),
+        assistant([{ text: 'Real return.' }]),
+        assistant([
+          {
+            text: 'Let me consider whether UNCOVERABLE applies…',
+            thought: true,
+          },
+        ]),
+      ].join('\n') + '\n',
+    );
+    const recs = readTranscripts(undefined, ENV);
+    expect(recs[0].finalText).toBe('Real return.');
+    expect(recs[0].returned).toBe(true);
+  });
+
+  it('rejects a transcript whose records carry two different sessions', () => {
+    // A GRAFT: a forged head stamped with the directory's session (the
+    // launch prompt is deterministic per plan) spliced onto another
+    // session's genuine records. The ownership check keys on the first
+    // stamp, so per-line consistency has to be what rejects the file.
+    file(
+      'agent-a1.jsonl',
+      [
+        user('go'),
+        JSON.stringify({
+          agentId: 'a1',
+          sessionId: 'S0',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'grafted return' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    expect(readTranscripts(undefined, ENV)).toEqual([]);
+  });
+
+  it('keeps accepting unstamped lines beside stamped ones', () => {
+    // Older harness writes stamp nothing; absence is not a conflict.
+    file(
+      'agent-a1.jsonl',
+      [
+        user('go'),
+        JSON.stringify({
+          agentId: 'a1',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'ok' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    expect(readTranscripts(undefined, ENV)).toHaveLength(1);
+  });
+});

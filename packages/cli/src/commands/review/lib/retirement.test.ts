@@ -1605,6 +1605,162 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.due).toEqual([13]);
   });
 
+  /** A transcript whose FINAL text is followed by more tool traffic — the
+   *  died-mid-flight shape: `returned: false`, narration only. */
+  function deadTranscript(launchPrompt: string, narration: string): void {
+    const id = `aud-dead-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const call = JSON.stringify({
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'read_file',
+              args: { file_path: diff, offset: 0, limit: 100 },
+            },
+          },
+        ],
+      },
+    });
+    const result = JSON.stringify({
+      ...base,
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'diff bytes' },
+            },
+          },
+        ],
+      },
+    });
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launchPrompt }] },
+        }),
+        call,
+        result,
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: narration }] },
+        }),
+        // The traffic AFTER the text is what makes it narration: the agent
+        // went on working and the process died mid-walk.
+        call,
+        result,
+      ].join('\n') + '\n',
+    );
+  }
+
+  it('a died-mid-flight narration carrying a receipt shape classifies nothing', () => {
+    // `finalText` keeps the last non-empty assistant text, narration
+    // included — an auditor that printed a receipt-shaped progress line and
+    // was killed mid-walk must not read `dry`. Two such corpses would
+    // retire the chunk on an audit that never finished.
+    deadTranscript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    deadTranscript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a filed YIELD survives a skipped findings read — the bar gates dry only', () => {
+    // The findings-read bar exists so a no-issues receipt cannot certify a
+    // comparison nobody made. Applied BEFORE classification it also
+    // suppressed filed findings: round 2's yielder skipped the list read,
+    // its yield vanished, the compliant dry sibling carried the round, and
+    // the chunk retired WITH a live finding on it.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    const findingsFile = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--yield7',
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+        '- **Severity:** Suggestion\n',
+    );
+    const built = record(
+      2,
+      13,
+      `chunk 13 round 2 territory walk\n` +
+        `read_file(file_path="${findingsFile}")`,
+    );
+    // The yielder, by hand: territory read, NO findings read, a new finding.
+    const id = `aud-yielder-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: built }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: diff, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: YIELD }] },
+        }),
+      ].join('\n') + '\n',
+    );
+    // The compliant dry sibling for the same record (the helper models the
+    // findings read automatically).
+    transcript(built, DRY);
+
+    const r3 = schedule(3, [13]);
+    // yielded outranks dry: round 2 is hot and the chunk stays due.
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
   it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {
     // Since #8597 the cumulative list rides a digest-named `.findings.md`
     // file the launch prompt points at, not the prompt itself. The echo

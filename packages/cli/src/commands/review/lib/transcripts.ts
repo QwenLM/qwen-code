@@ -185,6 +185,24 @@ export function textOf(rec: Record<string, unknown>): string {
 }
 
 /**
+ * The record's RETURN text: text parts minus thinking. The runtime emits
+ * ROUND_TEXT carrying `{text, thought: true}` parts BEFORE the round's tool
+ * calls, so a thinking-mode agent killed between the two leaves a complete
+ * thought-only record as its last line — and counting thoughts made that
+ * internal reasoning the agent's `finalText` with `returned: true`. The
+ * runtime's own final-text extraction excludes thoughts; this mirrors it.
+ */
+function returnTextOf(rec: Record<string, unknown>): string {
+  const msg = rec['message'] as { parts?: unknown } | undefined;
+  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+  return parts
+    .filter((p) => (p as { thought?: unknown }).thought !== true)
+    .map((p) => (p as { text?: unknown }).text)
+    .filter((t): t is string => typeof t === 'string')
+    .join('');
+}
+
+/**
  * Did this tool result come back as an error?
  *
  * The whiff bar is a *successful* call, not any call. The agent runtime writes a
@@ -253,6 +271,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   let agentId = '';
   let agentName = '';
   let recordedSession = '';
+  let sessionConflict = false;
   let launchPrompt = '';
   let finalText = '';
   let toolTrafficAfterText = true;
@@ -288,8 +307,19 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     if (!agentName && typeof rec['agentName'] === 'string') {
       agentName = rec['agentName'];
     }
-    if (!recordedSession && typeof rec['sessionId'] === 'string') {
-      recordedSession = rec['sessionId'];
+    if (typeof rec['sessionId'] === 'string' && rec['sessionId'] !== '') {
+      if (!recordedSession) {
+        recordedSession = rec['sessionId'];
+      } else if (rec['sessionId'] !== recordedSession) {
+        // A transcript whose head is stamped with one session and whose tail
+        // carries another is a GRAFT: a forged head (the launch prompt is
+        // deterministic per plan) spliced onto another session's genuine
+        // records would otherwise pass the ownership check, which keys on
+        // the first stamp. One file, one session — a conflict rejects the
+        // whole record. Unstamped lines stay accepted for older harness
+        // writes.
+        sessionConflict = true;
+      }
     }
 
     const type = rec['type'];
@@ -354,7 +384,9 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     }
 
     if (type === 'assistant') {
-      const t = textOf(rec);
+      // Thoughts excluded: a thought-only round is not a return, and its
+      // reasoning must never be handed downstream as the agent's verdict.
+      const t = returnTextOf(rec);
       if (t) {
         finalText = t;
         toolTrafficAfterText = false;
@@ -373,6 +405,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   }
 
   if (!agentId) return null;
+  if (sessionConflict) return null;
 
   let mtimeMs = 0;
   try {
@@ -392,9 +425,36 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     successfulCallArgs,
     successfulReadFileArgs,
     finalText,
-    returned: finalText.trim() !== '' && !toolTrafficAfterText,
+    returned:
+      finalText.trim() !== '' && !toolTrafficAfterText && !diedPerSidecar(file),
     mtimeMs,
   };
+}
+
+/**
+ * Does the harness's own lifecycle record say this agent never finished?
+ *
+ * The transcript alone cannot: the harness appends ROUND_TEXT before the
+ * round's tool calls and writes NO terminal record on completion, so an
+ * agent killed after a text flush and before its next record ends
+ * IDENTICALLY to a completed one. The `agent-<id>.meta.json` sidecar is the
+ * authoritative signal — a killed agent's persisted status stays 'running'.
+ * Any persisted status other than 'completed' (running, paused, failed,
+ * cancelled) means the final text is where the agent WAS, not what it
+ * concluded. A missing or unreadable sidecar proves nothing and changes
+ * nothing: content inference stands, so older harness writes and fixtures
+ * without sidecars keep their meaning.
+ */
+function diedPerSidecar(transcriptFile: string): boolean {
+  const metaPath = transcriptFile.replace(/\.jsonl$/, '.meta.json');
+  try {
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as {
+      status?: unknown;
+    };
+    return typeof meta.status === 'string' && meta.status !== 'completed';
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -7,12 +7,19 @@
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   utimesSync,
+  writeSync,
+  type Stats,
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -443,17 +450,9 @@ export function runRepoContext(
     planUnchanged = false;
   }
   if (!planUnchanged) {
-    atomicWriteFileSync(planPath, serialized);
-    // Seconds as a FLOAT, not the `Date` objects: a `Date` carries integer
-    // milliseconds, while APFS and ext4 keep nanoseconds — so restoring from
-    // `planStat.mtime` truncates the sub-millisecond remainder and lands
-    // close to the original rather than on it. The run ledger's plan fence
-    // now tolerates 1ms (`PLAN_MTIME_TOLERANCE_MS`), so a truncated restore
-    // would no longer empty it — the float restore is kept because it is
-    // strictly more faithful, and because the strict `since` readers
-    // (prompt records, transcripts) have no tolerance at all.
-    utimesSync(planPath, planStat.atimeMs / 1000, planStat.mtimeMs / 1000);
-    // The rename commits a new mtime before the restore lands. Verify it:
+    commitPlanPreservingEpoch(planPath, serialized, planStat);
+    // The temp file was stamped BEFORE the rename, so the commit should
+    // land exactly on the anchor. Verify it anyway:
     // an unrestored epoch fences out this run's own evidence, and a silent
     // one is worse than a loud one. Compared with a millisecond of tolerance
     // rather than exact float equality — `mtimeMs` is a float derived from a
@@ -476,6 +475,57 @@ export function runRepoContext(
       ? `Wrote null repository context to ${outPath}`
       : `Wrote repository context (${context.provider}) to ${outPath}`,
   );
+}
+
+/**
+ * Commit the enriched plan without ever exposing an advanced run epoch.
+ *
+ * The plain write-then-restore pair had two windows, both found by audit.
+ * (R2-11) the atomic rename commits the temp file's FRESH mtime, and the
+ * separate `utimesSync` restore lands a syscall later — a kill between the
+ * two leaves the plan enriched with an advanced epoch, and the
+ * skip-when-identical guard above then makes the damage permanent: a retry
+ * sees identical bytes, never rewrites, and nothing ever restores the
+ * epoch. So the TEMP file is stamped with the anchor's times BEFORE the
+ * rename: at every instant the plan path exists, it carries the epoch this
+ * run's evidence is fenced on. (R8-49) the compare-and-refuse upstream ran
+ * a full read+compare+write before its rename, and a concurrent capture
+ * landing in that window was silently overwritten with stale contents
+ * under the OTHER run's epoch — so identity is re-checked against the
+ * anchor immediately before the rename, leaving only the two adjacent
+ * syscalls no userspace sequence can close.
+ *
+ * Exported for its probes.
+ */
+export function commitPlanPreservingEpoch(
+  planPath: string,
+  serialized: string,
+  anchor: Stats,
+): void {
+  const tmp = `${planPath}.${process.pid}.enrich-tmp`;
+  rmSync(tmp, { force: true });
+  const fd = openSync(tmp, 'wx', 0o644);
+  try {
+    writeSync(fd, serialized);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    utimesSync(tmp, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
+    const now = statSync(planPath);
+    if (Math.abs(now.mtimeMs - anchor.mtimeMs) > 1 || now.ino !== anchor.ino) {
+      throw new Error(
+        `repo-context: the plan at ${planPath} changed while repository ` +
+          'context was being committed (another run captured it); aborting ' +
+          'rather than overwriting its capture with stale contents.',
+      );
+    }
+    renameSync(tmp, planPath);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 export const repoContextCommand: CommandModule = {

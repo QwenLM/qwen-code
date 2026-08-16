@@ -73,12 +73,14 @@ export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
 export type CertificationFailure =
   | 'no matching transcript'
   | 'launch matched multiple records'
+  | 'auditor never returned'
   | 'no successful tool calls'
   | 'no read of the diff'
   | 'territory read missing'
   | 'receipt not matched'
   | 'receipt not alone'
-  | 'receipt clause not substantive';
+  | 'receipt clause not substantive'
+  | 'findings list unread';
 
 /** One transcript's classified return, with the failed bar when not dry. */
 interface Classification {
@@ -512,7 +514,15 @@ function classifyReturn(
   rec: AgentRecord,
   territory: Array<[number, number]>,
   findingsList: string,
+  findingsRead: boolean,
 ): Classification {
+  // RETURNED, before anything else — the yield branch included: `finalText`
+  // keeps the last non-empty assistant text, narration included, so a
+  // died-mid-flight auditor's flushed narration can carry a receipt shape
+  // or a quoted finding; neither is a return.
+  if (!rec.returned) {
+    return { outcome: 'unknown', failure: 'auditor never returned' };
+  }
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
@@ -597,6 +607,14 @@ function classifyReturn(
     return unknown('receipt clause not substantive');
   if (!substantiveClause(judgedClause))
     return unknown('receipt clause not substantive');
+  // The DRY bar only, and last: the brief's whole method is the comparison
+  // against the cumulative findings list, and a no-issues receipt from an
+  // auditor that never opened the list certifies a comparison nobody made.
+  // A filed YIELD (above) needs no such gate — the finding proves the
+  // territory hot whatever else was skipped, and gating it before
+  // classification flipped a round from yielded to dry and retired a chunk
+  // with a live finding.
+  if (!findingsRead) return unknown('findings list unread');
   return { outcome: 'dry', failure: null };
 }
 
@@ -776,19 +794,18 @@ export function scheduleReverseAuditRound(
   const failuresByRecord: CertificationFailure[][] = [];
   matchesByRecord.forEach((matches, i) => {
     const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
-    // The auditor must have READ the cumulative findings list its prompt
-    // points at before its receipt can classify at all. The brief's whole
-    // method is the comparison against known findings; an auditor that
-    // skipped the read cannot have performed it, and two such receipts
-    // would retire the chunk on a comparison nobody made. A prompt with no
-    // pointer (the pre-#8597 shape, list folded in verbatim) has nothing
-    // to open and keeps the old bar. The POINTER was extracted once from
-    // the RAW prompt by the same call `findingsListFor` uses.
-    const readCompliant = unique.filter((t) =>
-      readTheFindingsPointer(t, records[i].pointer),
-    );
-    const classifications = readCompliant.map((t) =>
-      classifyReturn(t, records[i].territory, records[i].findings),
+    const classifications = unique.map((t) =>
+      // The findings-read fact rides INTO the classification and gates only
+      // the dry branch there: applied out here as a filter it also
+      // suppressed filed YIELDS, flipping a round to dry and retiring a
+      // chunk that had a live finding. The POINTER was extracted once from
+      // the RAW prompt by the same call `findingsListFor` uses.
+      classifyReturn(
+        t,
+        records[i].territory,
+        records[i].findings,
+        readTheFindingsPointer(t, records[i].pointer),
+      ),
     );
     classificationsByRecord.push(classifications);
     if (classifications.some((c) => c.outcome === 'dry')) {

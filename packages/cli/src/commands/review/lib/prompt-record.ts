@@ -88,6 +88,11 @@ export function promptRecordDir(planPath: string): string {
 const fileFor = (key: string) => `${encodeURIComponent(key)}.txt`;
 
 /** Where this agent's brief lives — the file it is told to read first. */
+/** Where `recordPrompt` puts a key's launch prompt — the always-present record. */
+export function recordedPromptPath(planPath: string, key: string): string {
+  return join(promptRecordDir(planPath), fileFor(key));
+}
+
 export function briefPath(planPath: string, key: string): string {
   return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
 }

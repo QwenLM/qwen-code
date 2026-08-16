@@ -1855,6 +1855,12 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+    // A stale generation's record is a round old in production; the record
+    // file now DATES a pointerless key (so a current inlined-fallback
+    // generation survives the window), and an undated fixture would sit
+    // inside the current window by accident of being written just now.
+    const staleAt = new Date(Date.now() - 600_000);
+    utimesSync(join(d, `${encodeURIComponent(key)}.txt`), staleAt, staleAt);
     transcript('vstale', prompt, { calls: 2, opens: [brief] });
     // The CURRENT digest: dated (findings file on disk), launched, its list
     // unread — the floor must come back owed.
@@ -1877,6 +1883,61 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: true }, ENV);
     expect(r.ok).toBe(true);
     expect(r.unverifiedFindings).toBe(false);
+  });
+
+  it('an undatable CURRENT digest cannot be vouched for by the previous round', () => {
+    // The mirror of the stale-pointerless drop: when the CURRENT digest's
+    // findings writes fail (the documented inline fallback), its keys have
+    // no findings file. Dropped, the window kept the PREVIOUS round's dated
+    // cluster and the floor passed `ok` on an earlier list's verifier —
+    // certifying a verification that never happened. The prompt record now
+    // dates every built key, so the current generation stays in the window.
+    const p = plan();
+    step45(p, 'reverse-audit');
+    // Round 1: digest A, dated, fully compliant — and a round old.
+    step45(p, 'verify--oldA1111111', { findings: true });
+    const old = new Date(Date.now() - 600_000);
+    utimesSync(findingsFilePath(p, 'verify--oldA1111111'), old, old);
+    utimesSync(
+      join(
+        promptRecordDir(p),
+        `${encodeURIComponent('verify--oldA1111111')}.txt`,
+      ),
+      old,
+      old,
+    );
+    // Round 2: digest B, findings write failed (no file, no pointer), its
+    // verify shard never launched — the failure the floor exists to catch.
+    step45(p, 'verify--newB2222222', { launch: false });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.unverifiedFindings).toBe(true);
+  });
+
+  it('the reverse-audit floor is narrowed to the current digest too', () => {
+    // Reverse keys accumulate per round/digest exactly like verify keys;
+    // ranging over all of them let a round-1 auditor's delivered receipt
+    // satisfy the floor after the findings list changed and the current
+    // round's audit was never delivered.
+    const p = plan();
+    // Round 1: compliant, delivered — and a round old.
+    step45(p, 'reverse-audit--chunk-1--round-1--aaa1');
+    const old = new Date(Date.now() - 600_000);
+    utimesSync(
+      join(
+        promptRecordDir(p),
+        `${encodeURIComponent('reverse-audit--chunk-1--round-1--aaa1')}.txt`,
+      ),
+      old,
+      old,
+    );
+    // Round 3: built, never launched.
+    step45(p, 'reverse-audit--chunk-1--round-3--ccc3', { launch: false });
+
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.remediation.some((m) => m.startsWith('reverse audit:'))).toBe(
+      true,
+    );
   });
 
   it('passes when both verify and reverse audit ran on a review with findings', () => {
@@ -2513,6 +2574,30 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(true);
     // ...and the declaring record is not announced as recovered work.
     expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('two honest returned declarers do not annihilate each other', () => {
+    // Both clear `chunkSatisfied`'s bar (returned, verbatim launch, diff
+    // read), so each superseded the other: both declarations vanished, no
+    // record covered the chunk, and it landed in `missingChunks` — whose
+    // remediation relaunches an agent that re-declares, reproducing the
+    // identical report forever. Supersession now excludes records that
+    // themselves declare the same chunk.
+    const p = plan();
+    transcript('a1', good(1), {
+      calls: 2,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('a1b', good(1), {
+      calls: 2,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([2]);
   });
 
   it('an unsuperseded declaration still caps, resumed or not', () => {

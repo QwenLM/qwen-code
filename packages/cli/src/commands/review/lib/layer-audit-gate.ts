@@ -121,30 +121,42 @@ function readReverseAuditReturns(
     // direction of a dropped corroboration is withhold, never release.
     const built = readRecordedPrompts(planPath, since);
     const delivered = (t: (typeof auditors)[number]): boolean => {
+      // Only reverse-audit records can deliver a reverse-audit receipt:
+      // `wasDeliveredVerbatim` allows additions, so a CONCATENATED launch
+      // (this role's block plus a sibling role's) verbatim-matches the
+      // sibling's record too — and the brief bar was then satisfiable by
+      // the sibling's brief, never this role's instructions. The SAME
+      // concatenation axis exists within the role: a launch carrying two
+      // reverse-audit blocks matches both records, and the territory check
+      // below ranges over the launch-wide UNION of baked ranges — so a walk
+      // of one chunk's territory corroborated both chunks' layers. A
+      // transcript matching more than one record names no territory
+      // specifically and delivers none (retirement's injectivity rule).
+      let matched: string | null = null;
       for (const [key, prompt] of built) {
-        // Only reverse-audit records can deliver a reverse-audit receipt:
-        // `wasDeliveredVerbatim` allows additions, so a CONCATENATED launch
-        // (this role's block plus a sibling role's) verbatim-matches the
-        // sibling's record too — and the brief bar was then satisfiable by
-        // the sibling's brief, never this role's instructions.
         if (!key.startsWith('reverse-audit')) continue;
         if (prompt.trim() === '') continue;
         if (!wasDeliveredVerbatim(t.launchPrompt, prompt)) continue;
-        const needle = JSON.stringify(briefPath(planPath, key));
-        // READ, not named: `successfulCallArgs` covers every successful
-        // tool, so a grep or listing whose args merely CONTAIN the brief
-        // path cleared this — an auditor that never opened its instructions
-        // supplied a receipt. Only a successful `read_file` of the exact
-        // brief is opening it.
-        if (t.successfulReadFileArgs.some((a) => a.includes(needle))) {
-          return true;
-        }
+        if (matched !== null) return false;
+        matched = key;
       }
-      return false;
+      if (matched === null) return false;
+      const needle = JSON.stringify(briefPath(planPath, matched));
+      // READ, not named: `successfulCallArgs` covers every successful
+      // tool, so a grep or listing whose args merely CONTAIN the brief
+      // path cleared this — an auditor that never opened its instructions
+      // supplied a receipt. Only a successful `read_file` of the exact
+      // brief is opening it.
+      return t.successfulReadFileArgs.some((a) => a.includes(needle));
     };
     const corroborated = auditors
       .filter(
         (t) =>
+          // RETURNED, like every certification consumer: a died-mid-flight
+          // auditor's narration can carry receipt forms followed by tool
+          // traffic, and corroborating layers from it is the RELEASE
+          // direction — the one direction this gate's header rules out.
+          t.returned &&
           t.diffToolCalls > 0 &&
           delivered(t) &&
           openedTheTerritory(
@@ -152,7 +164,7 @@ function readReverseAuditReturns(
             bakedRanges(t.launchPrompt, diffPath),
           ),
       )
-      .map((t) => t.finalText ?? '');
+      .map((t) => t.finalText);
     return { corroborated, identityMatched: auditors.length };
   } catch {
     // Could not MEASURE — a missing transcript dir (readTranscripts throws

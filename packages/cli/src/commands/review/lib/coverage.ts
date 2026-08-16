@@ -65,6 +65,7 @@ import {
   briefPath,
   findingsPointerOf,
   findingsFilePath,
+  recordedPromptPath,
 } from './prompt-record.js';
 import {
   requiredAgents,
@@ -794,7 +795,20 @@ export function coverageFromTranscripts(
       // below (`for (const id of uncoverable) covered.delete(id)` is
       // post-loop and order-independent), so no compliant relaunch can ever
       // clear it and the verdict caps on lines this run demonstrably read.
-      if (!superseded(rec, chunk)) uncoverable.add(chunk);
+      //
+      // Narrowed to records that do not THEMSELVES declare this chunk: a
+      // returned declarer clears `chunkSatisfied`'s bar (verbatim launch,
+      // diff read), so two honest declarations otherwise annihilate each
+      // other — the chunk lands in `missingChunks`, whose remediation
+      // relaunches an agent that re-declares, forever. `gapsSuperseded`
+      // below excludes same-shape records for exactly this reason.
+      const redeclares = (r: AgentRecord): boolean => {
+        const ru = UNCOVERABLE_RE.exec(r.finalText);
+        return ru !== null && Number(ru[1]) === chunk;
+      };
+      if (!chunkSatisfied(chunk, rec, (r) => !redeclares(r))) {
+        uncoverable.add(chunk);
+      }
       continue;
     }
 
@@ -1477,12 +1491,16 @@ export interface VerificationReport {
  * different thing entirely: an agent still running, which the idle checks own.
  *
  * Every CERTIFYING gate goes through here — coverage and the Step 4/5
- * floor. Two run-scoped readers deliberately do not: the layer-audit
- * corroboration and the retirement scheduler consume receipts, where an
- * empty return already contributes nothing (`parseLayerReceipts('')` is
- * empty and `classifyReturn('')` is `unknown`), so for them the filter would
- * be a second copy of a refusal they already make — and both fail SAFE
- * without it, over-owing rather than releasing.
+ * floor. Two run-scoped readers do not call this helper but enforce the
+ * same `returned` requirement at their own sites: the layer-audit
+ * corroboration filter and the retirement scheduler's classify pipeline.
+ * The earlier premise for exempting them — "an empty return already
+ * contributes nothing" — was true only of EMPTY returns: `returned ===
+ * false` also covers non-empty narration followed by tool traffic, and a
+ * died-mid-flight auditor's receipt-shaped narration corroborated layers
+ * and retired chunks through both readers. Their filters are pinned in
+ * their own suites; this note exists so the next reader does not
+ * reintroduce the exemption on the old premise.
  */
 function liveRecords(all: AgentRecord[]): AgentRecord[] {
   // `returned`, not merely non-empty: `finalText` keeps the last non-empty
@@ -1623,6 +1641,16 @@ export function verificationGaps(
    * verdict stricter.
    */
   const currentDigestKeys = (planPath: string, keys: string[]): string[] => {
+    // A key with no findings file is dated by its PROMPT RECORD instead —
+    // the `<key>.txt` the builder always writes. Dropping undatable keys
+    // whenever any dated key existed failed in the mirror direction: when
+    // the CURRENT digest's findings write failed (the documented
+    // `writeFindingsFile` → inline fallback), its keys were the undatable
+    // ones, the window kept the PREVIOUS round's dated cluster, and the
+    // floor passed `ok` on an earlier list's verifier — certifying a
+    // verification that never happened. The record file dates every built
+    // key, so the current generation stays in the window and a genuinely
+    // stale pointerless generation still falls out of it.
     const dated: Array<{ key: string; mtimeMs: number }> = [];
     const undatable: string[] = [];
     for (const key of keys) {
@@ -1632,19 +1660,18 @@ export function verificationGaps(
           mtimeMs: statSync(findingsFilePath(planPath, key)).mtimeMs,
         });
       } catch {
-        undatable.push(key);
+        try {
+          dated.push({
+            key,
+            mtimeMs: statSync(recordedPromptPath(planPath, key)).mtimeMs,
+          });
+        } catch {
+          undatable.push(key);
+        }
       }
     }
     if (dated.length === 0) return keys;
     const newest = Math.max(...dated.map((d) => d.mtimeMs));
-    // Undatable keys are DROPPED once any dated key exists. The earlier
-    // premise — "they cannot reach ok, so they only make the verdict
-    // stricter" — is false for the write-failure fallback: a key whose list
-    // was inlined has no findings file and no pointer, the findings-read
-    // floor is vacuously satisfied, and a stale digest's pointerless
-    // verifier could vouch for a list no verifier opened. With no dated key
-    // at all (every round inlined), the undatable set is the only evidence
-    // there is and stays.
     return dated
       .filter((d) => d.mtimeMs >= newest - DIGEST_WINDOW_MS)
       .map((d) => d.key);
@@ -1677,7 +1704,13 @@ export function verificationGaps(
   const reverseKeys = [...built.keys()].filter(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
-  const reverse = bestDelivery(reverseKeys);
+  // Narrowed to the current digest exactly like the verify floor below:
+  // reverse keys accumulate per round/digest the same way, and ranging over
+  // all of them let a round-1 auditor's delivered receipt satisfy the floor
+  // after the findings list changed and the current round's audit was never
+  // delivered — with the prior-session widening making that stale auditor
+  // reachable across attempts too.
+  const reverse = bestDelivery(currentDigestKeys(planPath, reverseKeys));
   // A TIME-budget stop marker means the round builder refused the reverse
   // audit on the run's time budget. Exactly ONE gap shape is then by design:
   // `not-built` — the refusal writes no record, so an audit with no records

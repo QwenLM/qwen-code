@@ -842,3 +842,77 @@ describe('the properties the threat model rests on', () => {
     ]);
   });
 });
+
+describe('plant shapes — heal what cannot be legitimate, preserve what can', () => {
+  // The boundary the occupant classifier draws: a symlink, FIFO, directory
+  // or oversize regular file CANNOT be legitimate ledger state (this module
+  // never writes one), so preserving it hands a planted shape a permanent
+  // freeze of all recording — while a plausible regular file that merely
+  // failed to read may hold every recorded entry, and must be preserved.
+
+  it('heals an OVERSIZE regular-file plant instead of freezing the ledger', () => {
+    // >256 KiB can never be legitimate (≤64 capped entries ≈ a few KB).
+    // Treated as a transient fault it froze every future append: nothing
+    // ever removed the file, so the ledger was dead for the life of the
+    // plan — the resume cap's backstop read 0 permanently.
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    writeFileSync(runSessionsPath(plan), 'x'.repeat(262 * 1024));
+    appendRunSession(plan, envOf('S1'));
+    expect(sessionEntryCount(plan)).toBe(1);
+    expect(statSync(runSessionsPath(plan)).size).toBeLessThan(10_240);
+    expect(currentSessionEntry(plan, envOf('S1'))?.sessionId).toBe('S1');
+  });
+
+  it('heals a DIRECTORY plant instead of dying on the rename forever', () => {
+    // A directory passes an is-regular-file guard in the negative direction
+    // and then fails the noFollow rename with EISDIR on every attempt —
+    // swallowed, so nothing was ever recorded and nothing ever self-healed.
+    mkdirSync(runSessionsPath(plan), { recursive: true });
+    appendRunSession(plan, envOf('S1'));
+    expect(lstatSync(runSessionsPath(plan)).isFile()).toBe(true);
+    expect(sessionEntryCount(plan)).toBe(1);
+  });
+
+  it('heals both plant shapes at the resume marker too', () => {
+    mkdirSync(resumeMarkerPath(plan), { recursive: true });
+    recordResume(plan, envOf('S1'));
+    expect(lstatSync(resumeMarkerPath(plan)).isFile()).toBe(true);
+    expect(readResumeMarker(plan).resumes.map((r) => r.sessionId)).toEqual([
+      'S1',
+    ]);
+    writeFileSync(resumeMarkerPath(plan), 'x'.repeat(262 * 1024));
+    recordRestart(plan, 'head-moved');
+    expect(readResumeMarker(plan).restarts.map((r) => r.reason)).toEqual([
+      'head-moved',
+    ]);
+    expect(statSync(resumeMarkerPath(plan)).size).toBeLessThan(10_240);
+  });
+
+  it('a backdated flood of 65 distinct plants cannot evict the genuine entry', () => {
+    // The cap keeps the NEWEST end. Keeping the oldest handed a flood of
+    // distinct backdated ids the whole cap: they sorted ahead, truncation
+    // evicted the genuine newest entries — the running session's own entry
+    // included, so its cost floor silently vanished — and the next append
+    // rewrote the file from the filtered list, laundering the eviction.
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
+    const mtime = statSync(plan).mtimeMs;
+    const base = Math.floor(mtime);
+    const flood = Array.from({ length: 65 }, (_, i) => ({
+      sessionId: `P${i}`,
+      atMs: base + i,
+      planMtimeMs: mtime,
+    }));
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    writeFileSync(runSessionsPath(plan), JSON.stringify(flood));
+    appendRunSession(plan, envOf('S-genuine'), base + 100_000);
+    expect(currentSessionEntry(plan, envOf('S-genuine'))?.sessionId).toBe(
+      'S-genuine',
+    );
+    expect(sessionEntryCount(plan)).toBe(64);
+  });
+});

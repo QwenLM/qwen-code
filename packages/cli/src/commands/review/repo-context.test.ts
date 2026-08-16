@@ -7,6 +7,7 @@
 import {
   chmodSync,
   linkSync,
+  readdirSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -26,7 +27,11 @@ import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
 } from './lib/repository-context.js';
-import { repoContextCommand, runRepoContext } from './repo-context.js';
+import {
+  commitPlanPreservingEpoch,
+  repoContextCommand,
+  runRepoContext,
+} from './repo-context.js';
 import { stringifyPlanReport } from './lib/report.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
@@ -1228,5 +1233,64 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       err.mockRestore();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('commitPlanPreservingEpoch — the epoch never advances, even torn', () => {
+  let root: string;
+  let plan: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'commit-epoch-')));
+    plan = join(root, 'plan.json');
+    writeFileSync(plan, '{"old":true}');
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('the committed file carries the anchor epoch, atomically', () => {
+    // The temp file is stamped BEFORE the rename: there is no instant at
+    // which the plan path exists with an advanced mtime, so a kill at any
+    // point leaves either the old plan under the old epoch or the new plan
+    // under the old epoch — never the new plan under a new one. The
+    // separate write-then-restore pair had exactly that instant, and the
+    // skip-when-identical retry guard made it permanent.
+    const anchor = statSync(plan);
+    commitPlanPreservingEpoch(plan, '{"new":true}', anchor);
+    expect(readFileSync(plan, 'utf8')).toBe('{"new":true}');
+    expect(
+      Math.abs(statSync(plan).mtimeMs - anchor.mtimeMs),
+    ).toBeLessThanOrEqual(1);
+    expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
+      [],
+    );
+  });
+
+  it('refuses to overwrite a capture that landed after the anchor', () => {
+    // The compare-and-refuse upstream leaves a read+compare+write window; a
+    // concurrent capture landing inside it was silently overwritten with
+    // stale derived contents under the OTHER run's epoch. Identity is
+    // re-checked against the anchor immediately before the rename.
+    const anchor = statSync(plan);
+    writeFileSync(plan, '{"captured":"by-another-run"}');
+    expect(() =>
+      commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
+    ).toThrow(/changed while repository context was being committed/);
+    expect(readFileSync(plan, 'utf8')).toBe('{"captured":"by-another-run"}');
+    expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
+      [],
+    );
+  });
+
+  it('refuses when the inode moved even if the mtime was forged back', () => {
+    const anchor = statSync(plan);
+    rmSync(plan);
+    writeFileSync(plan, '{"captured":"by-another-run"}');
+    // Forge the anchor's mtime onto the imposter: the inode still differs.
+    utimesSync(plan, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
+    expect(() =>
+      commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
+    ).toThrow(/changed while repository context was being committed/);
   });
 });

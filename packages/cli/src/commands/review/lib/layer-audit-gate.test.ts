@@ -5,6 +5,7 @@
  */
 
 import {
+  appendFileSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -380,6 +381,64 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
           JSON.stringify(briefPath(plan, 'reverse-audit')) +
           '}}',
       ),
+    );
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(6);
+  });
+
+  it('refuses receipts from an auditor that never RETURNED', () => {
+    // A died-mid-flight auditor's narration can carry every receipt form —
+    // the harness flushes text before the round's tool calls — and
+    // corroborating layers from it is the RELEASE direction, the one the
+    // gate's header rules out. Tool traffic after the receipts text is the
+    // died shape: `returned: false`.
+    ledger('S1');
+    auditorTranscript('S1', LAYERS);
+    const f = join(dir, 'subagents', 'S1', 'agent-ra-S1.jsonl');
+    const base = {
+      agentId: 'ra-S1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    appendFileSync(
+      f,
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: diff, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }) + '\n',
+    );
+    const past = new Date(Date.now() - 9_000);
+    utimesSync(f, past, past);
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(6);
+  });
+
+  it('a transcript matching TWO reverse-audit records delivers neither', () => {
+    // `wasDeliveredVerbatim` allows additions, so a launch CONCATENATING
+    // two reverse-audit blocks matches both records — and the territory
+    // check ranges over the launch-wide UNION of baked ranges, so a walk of
+    // one block's territory corroborated everything the other block owed.
+    // A transcript matching more than one record names no territory
+    // specifically and delivers none (retirement's injectivity rule).
+    ledger('S1');
+    auditorTranscript('S1', LAYERS);
+    // A second reverse-audit record whose lines the SAME launch already
+    // verbatim-contains — the minimal concatenation shape.
+    recordPrompt(
+      plan,
+      'reverse-audit--chunk-9',
+      `read_file(file_path="${diff}", offset=0, limit=100)`,
     );
     const out = layerAuditGate(plan, ENV()).unreviewed;
     expect(out).toHaveLength(6);

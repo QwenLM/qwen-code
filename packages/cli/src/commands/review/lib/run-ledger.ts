@@ -30,7 +30,7 @@
 // skill used to hold only in transcript memory: how many times this review has
 // resumed, and whether it already restarted once for head movement.
 
-import { lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   atomicWriteFileSync,
@@ -117,9 +117,18 @@ const PLAN_MTIME_TOLERANCE_MS = 1;
  * `utimesSync` round trip on every content-changing enrichment, and that round
  * trip costs a unit in the last place. See that constant.
  */
+/**
+ * The one indirection the fault-injection probes need. `node:fs` arrives as
+ * a sealed ESM namespace under the test runner, so a transient EMFILE/EPERM
+ * — the fault class the single-read design exists to survive — cannot be
+ * injected by mocking the module. Same idea as `contained-read`'s injectable
+ * read seam; production code never reassigns these.
+ */
+export const ledgerIoForTests = { readFileSync, statSync };
+
 function planMtimeMs(planPath: string): number | null {
   try {
-    return statSync(planPath).mtimeMs;
+    return ledgerIoForTests.statSync(planPath).mtimeMs;
   } catch {
     return null;
   }
@@ -153,35 +162,71 @@ const MAX_LEDGER_BYTES = 256 * 1024;
 const MAX_LEDGER_ENTRIES = 64;
 
 /**
- * Is there a REGULAR file at `path` that `readLedgerFile` refused? The
- * clobber guard keys on this, not on bare existence: a planted symlink or
- * FIFO is not previous state to preserve — the `noFollow` atomic write
- * self-heals over it, and that behaviour is pinned — while a real file that
- * failed to read (EMFILE, an AV scanner's EPERM) holds every previously
- * recorded entry, and rewriting from the empty fallback would erase them.
+ * What occupies a ledger path, classified in ONE pass so a writer can make
+ * its whole decision from a single read. The clobber guard used to ask two
+ * separate questions ("did the read fail?" then "is a regular file there?"),
+ * and a transient fault that cleared between them defeated the guard: the
+ * first read failed, the second succeeded, and the append rewrote the whole
+ * file from the empty fallback — erasing every recorded session.
+ *
+ * - `ok`      — a bounded regular file whose bytes are in hand.
+ * - `absent`  — nothing there; an empty ledger is the ordinary first-write
+ *               state.
+ * - `plant`   — an occupant that CANNOT be legitimate state: a symlink or
+ *               FIFO (this module never writes one), a directory (ditto —
+ *               and the noFollow rename would fail EISDIR on it forever,
+ *               silently killing every future append), or a regular file
+ *               over `MAX_LEDGER_BYTES` (a legitimate ledger is ≤64 capped
+ *               entries, a few KB; refusing to touch an oversize plant
+ *               would freeze the ledger for the life of the plan). Writers
+ *               heal these; readers see no entries.
+ * - `refused` — a present, plausible regular file whose read failed
+ *               (EMFILE, an AV scanner's EPERM). It holds every previously
+ *               recorded entry, so writers must preserve it: skipping one
+ *               append loses one entry, a rewrite loses them all.
  */
-function unreadableRegularLedger(path: string): boolean {
+type LedgerOccupant =
+  | { kind: 'ok'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'plant'; shape: 'directory' | 'special' | 'oversize' }
+  | { kind: 'refused' };
+
+function ledgerOccupant(path: string): LedgerOccupant {
+  let st;
   try {
-    return lstatSync(path).isFile();
+    st = lstatSync(path);
   } catch {
-    return false;
+    return { kind: 'absent' };
+  }
+  if (st.isDirectory()) return { kind: 'plant', shape: 'directory' };
+  // A symlink would redirect the read and a FIFO would block it forever — a
+  // hang, not an error, in a command a review waits on.
+  if (!st.isFile()) return { kind: 'plant', shape: 'special' };
+  // Bounded before the read: these files are bookkeeping (a handful of
+  // small entries), and a planted multi-gigabyte one would otherwise stall
+  // or exhaust every command that touches them.
+  if (st.size > MAX_LEDGER_BYTES) return { kind: 'plant', shape: 'oversize' };
+  try {
+    return { kind: 'ok', text: ledgerIoForTests.readFileSync(path, 'utf8') };
+  } catch {
+    return { kind: 'refused' };
+  }
+}
+
+/**
+ * Clear a planted occupant so the atomic write can land. The noFollow
+ * rename already replaces a symlink, FIFO or regular file; only a DIRECTORY
+ * survives it (EISDIR on every attempt), so only a directory needs removing.
+ */
+function healPlant(path: string, occ: LedgerOccupant): void {
+  if (occ.kind === 'plant' && occ.shape === 'directory') {
+    rmSync(path, { recursive: true, force: true });
   }
 }
 
 function readLedgerFile(path: string): string | null {
-  try {
-    const st = lstatSync(path);
-    // Not a regular file: a symlink would redirect the read and a FIFO would
-    // block it forever — a hang, not an error, in a command a review waits on.
-    if (!st.isFile()) return null;
-    // Bounded before the read: these files are bookkeeping (a handful of
-    // small entries), and a planted multi-gigabyte one would otherwise stall
-    // or exhaust every command that touches them.
-    if (st.size > MAX_LEDGER_BYTES) return null;
-    return readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
+  const occ = ledgerOccupant(path);
+  return occ.kind === 'ok' ? occ.text : null;
 }
 
 /**
@@ -190,14 +235,31 @@ function readLedgerFile(path: string): string | null {
  * by requiring the work again — never the reverse.
  */
 function readSessions(planPath: string): SessionEntry[] {
+  return parseSessions(
+    readLedgerFile(runSessionsPath(planPath)),
+    planPath,
+    planMtimeMs(planPath),
+  );
+}
+
+/**
+ * Parse and fence ledger text that has already been read. The plan mtime is
+ * an ARGUMENT, not a fresh stat: the writers pass the same value they stamp
+ * into the new entry, so a transient stat fault cannot make the fence drop
+ * every existing entry while the writer's own stat succeeds — which would
+ * hand the append an empty list to rewrite the intact file from.
+ */
+function parseSessions(
+  raw: string | null,
+  planPath: string,
+  planMtime: number | null,
+): SessionEntry[] {
   try {
-    const raw = readLedgerFile(runSessionsPath(planPath));
     if (raw === null) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     const epoch = runEpochMs(planPath);
     const ceiling = runCeilingMs();
-    const planMtime = planMtimeMs(planPath);
     // Validate FIRST, cap the survivors: sliced raw, 64 malformed entries at
     // the front consume the whole cap and hide every real one behind them —
     // `sessionEntryCount` then reads 0 and the resume cap resets, which is
@@ -248,14 +310,22 @@ function readSessions(planPath: string): SessionEntry[] {
     // everything outside [A-Za-z0-9_-] to '_'. Folding on the raw id left
     // every one of those aliases open as a second identity.
     const seen = new Set<string>();
-    return capped
-      .slice()
-      .sort((x, y) => x.atMs - y.atMs)
-      .filter((e) => {
-        const k = sessionPathKey(e.sessionId);
-        return seen.has(k) ? false : (seen.add(k), true);
-      })
-      .slice(0, MAX_LEDGER_ENTRIES);
+    return (
+      capped
+        .slice()
+        .sort((x, y) => x.atMs - y.atMs)
+        .filter((e) => {
+          const k = sessionPathKey(e.sessionId);
+          return seen.has(k) ? false : (seen.add(k), true);
+        })
+        // Keep the NEWEST end. Keeping the oldest handed a flood of distinct
+        // BACKDATED plants the whole cap: they sorted ahead of the genuine
+        // entries, the truncation evicted the genuine newest end — the running
+        // session's own entry included — and the next append rewrote the file
+        // from the filtered list, laundering the eviction permanently. A
+        // backdated flood now truncates itself.
+        .slice(-MAX_LEDGER_ENTRIES)
+    );
   } catch {
     return [];
   }
@@ -275,12 +345,6 @@ export function appendRunSession(
   try {
     const id = env['QWEN_CODE_SESSION_ID']?.trim();
     if (!id || !SESSION_ID_RE.test(id)) return;
-    const entries = readSessions(planPath);
-    // Same equivalence as the read side: a pre-planted case- or alias-variant
-    // otherwise passes this check, and first-write-wins hands it the
-    // session's identity.
-    if (entries.some((e) => sessionPathKey(e.sessionId) === sessionPathKey(id)))
-      return;
     const mtime = planMtimeMs(planPath);
     // No plan mtime, no entry. `readSessions` hard-requires the field — an
     // entry that cannot say which plan it saw is dropped on every read, and
@@ -289,22 +353,33 @@ export function appendRunSession(
     // that silently loses the id. Refusing up front is honest and identical
     // in effect, minus the false success.
     if (mtime === null) return;
-    // A ledger that EXISTS but could not be read is not an empty ledger:
-    // this append rewrites the whole file from what it read, so proceeding
-    // on a transient fault (EMFILE, an AV scanner's EPERM) would clobber
-    // every previously recorded entry — erasing attempt 1's address exactly
-    // when a resume needs it. Skipping the append loses one entry; the
-    // clobber loses them all.
-    if (
-      readLedgerFile(runSessionsPath(planPath)) === null &&
-      unreadableRegularLedger(runSessionsPath(planPath))
-    ) {
+    const path = runSessionsPath(planPath);
+    // ONE read decides everything below. This append rewrites the whole file
+    // from what it read, so a ledger that EXISTS but could not be read must
+    // refuse the append: proceeding on a transient fault (EMFILE, an AV
+    // scanner's EPERM) would clobber every previously recorded entry —
+    // erasing attempt 1's address exactly when a resume needs it. Skipping
+    // the append loses one entry; the clobber loses them all. Deciding from
+    // a SECOND read opened a race: a fault clearing between the two reads
+    // made the guard see a healthy file while `entries` held the empty
+    // fallback.
+    const occ = ledgerOccupant(path);
+    if (occ.kind === 'refused') return;
+    const entries = parseSessions(
+      occ.kind === 'ok' ? occ.text : null,
+      planPath,
+      mtime,
+    );
+    // Same equivalence as the read side: a pre-planted case- or alias-variant
+    // otherwise passes this check, and first-write-wins hands it the
+    // session's identity.
+    if (entries.some((e) => sessionPathKey(e.sessionId) === sessionPathKey(id)))
       return;
-    }
+    healPlant(path, occ);
     entries.push({ sessionId: id, atMs: nowMs, planMtimeMs: mtime });
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
-    atomicWriteFileSync(runSessionsPath(planPath), JSON.stringify(entries), {
+    atomicWriteFileSync(path, JSON.stringify(entries), {
       noFollow: true,
     });
   } catch {
@@ -487,8 +562,26 @@ export function resumeMarkerPath(planPath: string): string {
  * abuse is the session ledger's entry count and the workflow's MAX_ATTEMPTS).
  */
 export function readResumeMarker(planPath: string): ResumeMarker {
+  return parseMarker(
+    readLedgerFile(resumeMarkerPath(planPath)),
+    planPath,
+    planMtimeMs(planPath),
+  );
+}
+
+/**
+ * Parse and fence marker text that has already been read. Like
+ * `parseSessions`, the plan mtime is an argument: the writers pass the value
+ * they stamp into the new entry, so one stat serves the fence and the entry
+ * both, and a transient stat fault inside a second stat cannot fence-drop
+ * every recorded resume while the writer proceeds to rewrite the file.
+ */
+function parseMarker(
+  text: string | null,
+  planPath: string,
+  planMtime: number | null,
+): ResumeMarker {
   try {
-    const text = readLedgerFile(resumeMarkerPath(planPath));
     if (text === null) return emptyMarker();
     const parsed = JSON.parse(text) as unknown;
     if (
@@ -500,7 +593,6 @@ export function readResumeMarker(planPath: string): ResumeMarker {
     }
     const epoch = runEpochMs(planPath);
     const ceiling = runCeilingMs();
-    const planMtime = planMtimeMs(planPath);
     const raw = parsed as ResumeMarker;
     const seenResume = new Set<string>();
     const seenRestart = new Set<string>();
@@ -591,21 +683,26 @@ export function recordResume(
   // Same refusal as the session ledger: an entry that cannot say which plan
   // it saw is dropped on every read, so writing it would be a dead write.
   if (mtime === null) return;
-  if (
-    readLedgerFile(resumeMarkerPath(planPath)) === null &&
-    unreadableRegularLedger(resumeMarkerPath(planPath))
-  ) {
-    // Same clobber guard as the session ledger: an unreadable-but-present
-    // marker must not be rewritten from the empty default.
-    return;
-  }
-  const marker = readResumeMarker(planPath);
+  // Same single-read decision as `appendRunSession`: the guard and the
+  // parse consume ONE read, so a transient fault clearing between two reads
+  // cannot make the guard see a healthy marker while the parse holds the
+  // empty fallback — which `writeMarker` would then commit, erasing every
+  // recorded resume and restart.
+  const markerPath = resumeMarkerPath(planPath);
+  const occ = ledgerOccupant(markerPath);
+  if (occ.kind === 'refused') return;
+  const marker = parseMarker(
+    occ.kind === 'ok' ? occ.text : null,
+    planPath,
+    mtime,
+  );
   if (
     marker.resumes.some(
       (r) => sessionPathKey(r.sessionId) === sessionPathKey(id),
     )
   )
     return;
+  healPlant(markerPath, occ);
   marker.resumes.push({ sessionId: id, atMs: nowMs, planMtimeMs: mtime });
   writeMarker(planPath, marker);
 }
@@ -622,14 +719,17 @@ export function recordRestart(
 ): void {
   const mtime = planMtimeMs(planPath);
   if (mtime === null) return;
-  if (
-    readLedgerFile(resumeMarkerPath(planPath)) === null &&
-    unreadableRegularLedger(resumeMarkerPath(planPath))
-  ) {
-    return;
-  }
-  const marker = readResumeMarker(planPath);
+  // Single-read decision; see `recordResume`.
+  const markerPath = resumeMarkerPath(planPath);
+  const occ = ledgerOccupant(markerPath);
+  if (occ.kind === 'refused') return;
+  const marker = parseMarker(
+    occ.kind === 'ok' ? occ.text : null,
+    planPath,
+    mtime,
+  );
   if (marker.restarts.some((r) => r.reason === reason)) return;
+  healPlant(markerPath, occ);
   marker.restarts.push({ atMs: nowMs, reason, planMtimeMs: mtime });
   writeMarker(planPath, marker);
 }
