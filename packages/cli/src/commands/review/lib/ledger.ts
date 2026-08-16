@@ -142,8 +142,9 @@ export const LEDGER_MAX_FILE = 200;
  * not at all: a truncated id is a prefix, and a prefix can equal a DIFFERENT
  * model's full id, which the same-model gate would then accept past code it
  * never reviewed. An id over this cap takes the whole anchor pair with it,
- * degrading recovery to the full diff — the fail-safe direction. Real model
- * ids run short (`qwen3.7-max`); the cap bounds the marker, not them.
+ * degrading recovery to the full diff — the fail-safe direction. Real ids run
+ * short even qualified by their provider (`qwen3.7-max@1a2b3c4d` — the model,
+ * `@`, and eight hex); the cap bounds the marker, not them.
  */
 export const LEDGER_MAX_MODEL = 64;
 

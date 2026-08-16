@@ -178,8 +178,14 @@ type FetchPrResult = PlanReport & {
    * comments" — then certified A's range as B, and the next round under B
    * scoped `sha..HEAD` past code B never reviewed. A stamp taken when the
    * diff was captured is the one value that cannot drift out from under the
-   * work it describes. Absent on a report written before this field, which
-   * compose reads as "unknown" rather than as agreement.
+   * work it describes.
+   *
+   * Absent on a report written before this field. Compose keeps its previous
+   * behaviour there rather than withholding every anchor: a report is written
+   * at the start of the round and read at its end, so a missing stamp means
+   * the CLI was upgraded between the two — and on a runtime that publishes no
+   * model id at all, the runtime side of the comparison is empty too, so the
+   * pair is certified by the same declared fallback as before this field.
    */
   reviewModelId?: string;
   /**
