@@ -39,7 +39,7 @@ describe('wire headers per path', () => {
       `${COPILOT_SENTINEL_BASE_URL}/models`,
       { headers: {} },
     );
-    expect(h['X-GitHub-Api-Version']).toBe('2022-11-28');
+    expect(h['X-GitHub-Api-Version']).toBe('2026-06-01');
   });
 
   it('/v1/messages does NOT get X-GitHub-Api-Version', async () => {

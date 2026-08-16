@@ -86,7 +86,7 @@ export function wrapFetchWithCopilotAuth(
         headers['anthropic-beta'] = 'prompt-caching-2024-07-31';
       }
       if (isModelsPath(rewrittenUrl)) {
-        headers['X-GitHub-Api-Version'] = '2022-11-28';
+        headers['X-GitHub-Api-Version'] = '2026-06-01';
       }
       if (hasImageInBody(body)) {
         headers['Copilot-Vision-Request'] = 'true';
