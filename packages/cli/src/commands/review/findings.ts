@@ -1013,6 +1013,28 @@ export const findingsCommand: CommandModule = {
     const { input, out, outcomes, print, testDelta, toAnchors } =
       argv as unknown as FindingsArgs;
 
+    // The resolver input must not share a path with any file this command
+    // reads or writes: a --to-anchors that resolves onto one of them destroys
+    // its counterpart while stderr reports every write as successful, and
+    // Step 7 joins the pair by id — a silently destroyed member poisons the
+    // join.
+    if (toAnchors !== undefined) {
+      const anchorTarget = resolve(toAnchors);
+      const others: Array<[string, string | undefined]> = [
+        ['--input', input],
+        ['--out', out],
+        ['--outcomes', outcomes],
+        ['--test-delta', testDelta],
+      ];
+      for (const [flag, p] of others) {
+        if (p !== undefined && resolve(p) === anchorTarget) {
+          throw new Error(
+            `findings: --to-anchors points at the same file as ${flag} (${p}); the resolver input would overwrite it`,
+          );
+        }
+      }
+    }
+
     let findings = validateFindings(readJson(input, 'findings'));
     if (outcomes !== undefined) {
       findings = applyOutcomes(

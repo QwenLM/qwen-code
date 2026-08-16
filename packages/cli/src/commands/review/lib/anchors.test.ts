@@ -609,6 +609,11 @@ describe('resolveAnchor — the substring fallback (KB-long lines)', () => {
     const absent = resolveAnchor(hay(), 'quoted from some other file entirely');
     expect(absent.status).toBe('unmatched');
     expect(absent.reason).toContain('does not appear in any hunk');
+    // …and names the fragment tier it now covers. The pre-PR wording lacked
+    // this clause, so a revert to it stays green on the assertion above
+    // alone — pin the distinguishing part, or a reason that never mentions
+    // the fragment shape misdirects Step 7's recovery back to re-attribution.
+    expect(absent.reason).toContain('nor as a fragment inside one');
   });
 
   it('does not fall back for a multi-line snippet', () => {

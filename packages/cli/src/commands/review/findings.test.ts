@@ -5,6 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Argv } from 'yargs';
+import yargs from 'yargs';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1230,6 +1232,67 @@ describe('findings (command boundary)', () => {
         print: false,
       }),
     ).toThrow(/is not valid JSON/);
+  });
+
+  it('refuses a --to-anchors that is the same file as another path argument', () => {
+    // The pair Step 7 joins by id must stay distinct files: a resolver input
+    // that resolves onto any of them destroys its counterpart while stderr
+    // reports every write as successful. All four siblings are checked.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    for (const flag of ['input', 'out', 'outcomes', 'testDelta']) {
+      const argv: Record<string, unknown> = {
+        input,
+        out: join(dir, 'findings.json'),
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: undefined,
+      };
+      argv[flag] = join(dir, 'shared.json');
+      argv['toAnchors'] = join(dir, 'shared.json');
+      expect(() =>
+        (findingsCommand.handler as (a: unknown) => void)(argv),
+      ).toThrow(/--to-anchors points at the same file/);
+    }
+  });
+
+  it('parses --to-anchors into the field the handler actually reads', () => {
+    // Every boundary test above builds its args by hand with the camelCase
+    // key — the same shape that let a flag-name bug into `test-plan`: yargs
+    // camel-cases the flag, a field named for the flag reads `undefined` on
+    // every real invocation, and the suite stays green because nothing went
+    // through yargs. This one does: the parsed object goes straight into the
+    // handler, and the anchors file is written only if `toAnchors` actually
+    // arrived from the flag.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      // `probe` is witness-exempt: a default `review` Critical without a
+      // witness is held to low confidence by the handler and never projects.
+      JSON.stringify([{ ...base, source: 'probe', anchor: 'charge(amt);' }]),
+    );
+    const parsed = (findingsCommand.builder as (y: Argv) => Argv)(
+      yargs([]),
+    ).parseSync([
+      '--input',
+      input,
+      '--out',
+      out,
+      '--to-anchors',
+      anchors,
+    ]) as unknown as Record<string, unknown>;
+    expect(parsed['toAnchors']).toBe(anchors);
+    (findingsCommand.handler as (a: unknown) => void)({
+      ...parsed,
+      print: false,
+    });
+    const requests = JSON.parse(readFileSync(anchors, 'utf8'));
+    expect(requests).toEqual([
+      { id: 'f1', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
   });
 });
 
