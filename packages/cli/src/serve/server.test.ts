@@ -11950,28 +11950,35 @@ describe('createServeApp', () => {
         .send({});
 
       expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ sessionId: 'persisted-replay' });
       const replay = res.body.compactedReplay as Array<{
         data: { update: Record<string, unknown> };
       }>;
-      const update = replay[0]!.data.update;
-      expect(update['sessionUpdate']).toBe('available_commands_update');
-      expect(update['availableCommands']).toEqual([
-        { name: 'help', description: 'Help' },
-      ]);
-      const meta = update['_meta'] as Record<string, unknown>;
-      expect(meta['availableSkills']).toEqual(['bugfix']);
-      expect(meta).not.toHaveProperty('availableSkillDetails');
+      // Pin the full envelope (id/v/type/data.sessionId) so envelope-level
+      // regressions in the reshape cannot ship green (review R3-2).
+      expect(replay[0]).toEqual({
+        ...commandsEvent,
+        data: {
+          ...commandsEvent.data,
+          update: {
+            ...commandsEvent.data.update,
+            _meta: { availableSkills: ['bugfix'] },
+          },
+        },
+      });
       const journal = res.body.liveJournal as Array<{
         data: { update: Record<string, unknown> };
       }>;
-      const journalUpdate = journal[0]!.data.update;
-      expect(journalUpdate['sessionUpdate']).toBe('available_commands_update');
-      expect(journalUpdate['availableCommands']).toEqual([
-        { name: 'help', description: 'Help' },
-      ]);
-      const journalMeta = journalUpdate['_meta'] as Record<string, unknown>;
-      expect(journalMeta['availableSkills']).toEqual(['bugfix']);
-      expect(journalMeta).not.toHaveProperty('availableSkillDetails');
+      expect(journal[0]).toEqual({
+        ...journalCommandsEvent,
+        data: {
+          ...journalCommandsEvent.data,
+          update: {
+            ...journalCommandsEvent.data.update,
+            _meta: { availableSkills: ['bugfix'] },
+          },
+        },
+      });
       expect(journal[1]).toEqual(textEvent);
       expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
       expect(JSON.stringify(res.body)).not.toContain('y'.repeat(64));
@@ -11982,6 +11989,54 @@ describe('createServeApp', () => {
           'availableSkillDetails'
         ],
       ).toBeDefined();
+    });
+
+    it('redacts flat persisted-transcript frames in replay arrays (#9234)', async () => {
+      // Persisted-transcript frames carry the ACP update flat under `data`
+      // (no `update` wrapper); the redactor must handle both shapes.
+      const flatCommandsEvent = {
+        id: 7,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'help', description: 'Help' }],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: [
+              { name: 'bugfix', body: 'LEAK-CANARY-SKILL-BODY'.repeat(100) },
+            ],
+          },
+        },
+      } satisfies BridgeEvent;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-load',
+          state: {},
+          compactedReplay: [flatCommandsEvent],
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-flat/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      const replay = res.body.compactedReplay as Array<{
+        data: Record<string, unknown>;
+      }>;
+      expect(replay[0]).toEqual({
+        ...flatCommandsEvent,
+        data: {
+          ...flatCommandsEvent.data,
+          _meta: { availableSkills: ['bugfix'] },
+        },
+      });
+      expect(JSON.stringify(res.body)).not.toContain('LEAK-CANARY-SKILL-BODY');
     });
 
     it('passes client identity headers through to load/resume bridge calls', async () => {
@@ -25850,6 +25905,14 @@ describe('GET /session/:id/events (SSE)', () => {
         } => payload !== undefined,
       );
     expect(payloads).toHaveLength(2);
+    // Pin the envelope the reshape must preserve (SSE id line, schema
+    // version, session attribution) — review R3-2 mutant M1.
+    expect(payloads[0]).toMatchObject({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: { sessionId: 'sess-A' },
+    });
     const commandsUpdate = payloads[0]!.data!.update!;
     expect(commandsUpdate['sessionUpdate']).toBe('available_commands_update');
     expect(commandsUpdate['availableCommands']).toEqual([

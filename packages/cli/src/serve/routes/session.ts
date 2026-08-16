@@ -2600,17 +2600,14 @@ export function registerSessionRoutes(
         }
         if (!res.writable) return;
         // Branch/side-task responses carry the same replay snapshot shape as
-        // load; apply the same redaction (#9234). Checkpoint branches
-        // (`atRecordId` set) return no replay arrays, so only the restored
-        // variant needs shaping.
+        // load; apply the same redaction (#9234). The helper returns its
+        // input unchanged when no replay arrays are present (checkpoint
+        // branches), so apply it unconditionally rather than re-deriving the
+        // bridge's variant discrimination here.
         res
           .status(201)
           .json(
-            atRecordId === undefined
-              ? omitSkillDetailsFromReplayArrays(
-                  result as BridgeBranchedSession,
-                )
-              : result,
+            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
           );
       },
     ),

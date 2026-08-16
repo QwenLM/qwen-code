@@ -24,23 +24,32 @@ export function omitSkillDetailsForSdkSurface<
   if (event.type !== 'session_update') return event;
   const data = asRecord(event.data);
   if (!data) return event;
-  const update = asRecord(data['update']);
-  if (!update || update['sessionUpdate'] !== 'available_commands_update') {
+  // Two documented frame shapes: eventBus-wrapped (`data.update.*`) and
+  // persisted-transcript flat (`data.*`); the bridge's
+  // `transcriptEventRecordId` accepts both, so the redactor must too.
+  const wrapped = asRecord(data['update']);
+  const flat = !wrapped && data['sessionUpdate'] !== undefined;
+  const candidate = flat ? data : wrapped;
+  if (
+    !candidate ||
+    candidate['sessionUpdate'] !== 'available_commands_update'
+  ) {
     return event;
   }
-  const meta = asRecord(update['_meta']);
+  const meta = asRecord(candidate['_meta']);
   if (!meta || !('availableSkillDetails' in meta)) return event;
   const trimmedMeta: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(meta)) {
     if (key !== 'availableSkillDetails') trimmedMeta[key] = value;
   }
-  const nextUpdate: Record<string, unknown> = { ...update };
+  const nextCandidate: Record<string, unknown> = { ...candidate };
   if (Object.keys(trimmedMeta).length > 0) {
-    nextUpdate['_meta'] = trimmedMeta;
+    nextCandidate['_meta'] = trimmedMeta;
   } else {
-    delete nextUpdate['_meta'];
+    delete nextCandidate['_meta'];
   }
-  return { ...event, data: { ...data, update: nextUpdate } };
+  if (flat) return { ...event, data: nextCandidate };
+  return { ...event, data: { ...data, update: nextCandidate } };
 }
 
 /**
