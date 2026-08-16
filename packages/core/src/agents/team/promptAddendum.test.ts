@@ -36,14 +36,11 @@ describe('buildTeammatePromptAddendum', () => {
     );
   });
 
-  // The runtime forwards an unreported final answer to the leader when a
-  // teammate goes idle (TeamManager's IDLE transition reports it unless
-  // the teammate already sent an explicit message). The prompts must
-  // describe that instead of contradicting it (#9283): saying an explicit
-  // send_message is the ONLY delivery path pushes teammates into redundant
-  // structured reports. Prose assertions flatten whitespace first — the
-  // addendum is line-wrapped source text, and the pin is on the wording,
-  // not the wrap points.
+  // TeamManager forwards final round text when a teammate goes idle. Round
+  // text after an explicit send_message is forwarded too, so the prompts must
+  // not describe automatic delivery as only a fallback (#9283). Prose
+  // assertions flatten whitespace first — the addendum is line-wrapped source
+  // text, and the pin is on the wording, not the wrap points.
   const flatten = (prompt: string) => prompt.replace(/\s+/g, ' ');
 
   it('tells ordinary teammates their final answer is delivered automatically', () => {
@@ -54,10 +51,11 @@ describe('buildTeammatePromptAddendum', () => {
     expect(prompt).toContain(
       'the runtime forwards your final answer to the leader automatically',
     );
-    // Explicit reporting stays the recommended path — the fix describes a
-    // fallback, it does not demote send_message.
+    // Explicit reporting still arrives sooner; it does not suppress
+    // final-answer forwarding.
     expect(prompt).toContain('call send_message(to: "leader"');
     expect(prompt.toLowerCase()).not.toContain('only way');
+    expect(prompt).not.toContain('without an explicit report');
   });
 
   it('tells plan-required teammates their final answer is delivered automatically', () => {
@@ -71,15 +69,18 @@ describe('buildTeammatePromptAddendum', () => {
       'the runtime forwards your final answer to the leader automatically',
     );
     expect(prompt).toContain('call send_message(to: "leader"');
+    expect(prompt).not.toContain('without an explicit report');
   });
 
   // Control: the read-only prompt already states automatic delivery and
   // passed before the fix — pin it so the alignment reference itself
   // cannot regress unnoticed.
   it('keeps the read-only prompt stating automatic delivery', () => {
-    const prompt = buildTeammatePromptAddendum('reader', 'team', 'leader', {
-      readOnly: true,
-    });
+    const prompt = flatten(
+      buildTeammatePromptAddendum('reader', 'team', 'leader', {
+        readOnly: true,
+      }),
+    );
 
     expect(prompt).toContain('forwards it to the leader automatically');
   });
