@@ -216,6 +216,8 @@ export type {
   UseDaemonFollowupSuggestionReturn,
   /** Image attachment (base64 data + MIME type) for prompt submission. */
   DaemonPromptImage,
+  /** Text file attachment (name + text content) for prompt submission. */
+  DaemonPromptFile,
   /** Permission approval level: `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'`. */
   DaemonApprovalMode,
   DaemonAuthProviderBaseUrlOption,
