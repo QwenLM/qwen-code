@@ -301,6 +301,23 @@ export interface ReplayedTranscriptPage {
   replayError?: string;
 }
 
+function readTranscriptSourceRecordIds(
+  update: SessionUpdate,
+): string[] | undefined {
+  const value = update as unknown as Record<string, unknown>;
+  const meta =
+    value['_meta'] && typeof value['_meta'] === 'object'
+      ? (value['_meta'] as Record<string, unknown>)
+      : undefined;
+  const transcript =
+    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const sourceRecordIds = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(sourceRecordIds)) return undefined;
+  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
+}
+
 export async function replayTranscriptRecordPage({
   sessionId,
   page,
@@ -343,6 +360,51 @@ export async function replayTranscriptRecordPage({
     );
     replayState = replayer.getReplayState();
     replayError = 'Replay conversion failed for this page';
+  }
+
+  if (page.branchPointsByAssistantUuid) {
+    const branchPoints = page.branchPointsByAssistantUuid;
+    // A checkpoint marks the END of its source record, which can replay as
+    // several chunks (text/thought/text). Only the LAST visible assistant
+    // chunk of the record may expose the branch point: an earlier chunk
+    // would restore the record's later content when branched from, and an
+    // empty-text usage chunk normalizes to `assistant.usage`, which drops
+    // the metadata.
+    const lastChunkIndexByRecordId = new Map<string, number>();
+    updates.forEach((update, index) => {
+      if (update.sessionUpdate !== 'agent_message_chunk') return;
+      const text = (update as { content?: { text?: unknown } }).content?.text;
+      if (typeof text !== 'string' || text.length === 0) return;
+      for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+        // Own-property check: transcript record uuids are untrusted input,
+        // and names like 'toString' would otherwise pass via the prototype
+        // chain.
+        if (Object.hasOwn(branchPoints, recordId)) {
+          lastChunkIndexByRecordId.set(recordId, index);
+        }
+      }
+    });
+    const decoratedIndexes = new Set<number>();
+    for (const [recordId, index] of lastChunkIndexByRecordId) {
+      if (decoratedIndexes.has(index)) continue;
+      decoratedIndexes.add(index);
+      const value = updates[index] as unknown as Record<string, unknown>;
+      const meta =
+        value['_meta'] && typeof value['_meta'] === 'object'
+          ? (value['_meta'] as Record<string, unknown>)
+          : undefined;
+      const transcript =
+        meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      value['_meta'] = {
+        ...meta,
+        qwenTranscript: {
+          ...transcript,
+          branchRecordId: branchPoints[recordId],
+        },
+      };
+    }
   }
 
   const nextCursor =

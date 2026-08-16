@@ -422,6 +422,69 @@ describe('AssistantMessage streaming markdown', () => {
   });
 });
 
+describe('AssistantMessage branch action', () => {
+  it('disables the selected action while the branch request is pending', async () => {
+    let resolveBranch!: () => void;
+    const onBranchSession = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveBranch = resolve;
+        }),
+    );
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showBranchAction
+        onBranchSession={onBranchSession}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="Branch"]',
+    );
+
+    act(() => button?.click());
+    expect(button?.disabled).toBe(true);
+    expect(onBranchSession).toHaveBeenCalledOnce();
+
+    await act(async () => resolveBranch());
+    expect(button?.disabled).toBe(false);
+  });
+
+  it('does not leak host branch handler rejections', async () => {
+    const onBranchSession = vi
+      .fn()
+      .mockRejectedValue(new Error('host failure'));
+    const unhandled = vi.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    try {
+      const container = render(
+        <AssistantMessage
+          content="answer"
+          showFooterActions
+          showBranchAction
+          onBranchSession={onBranchSession}
+        />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Branch"]',
+      );
+
+      await act(async () => {
+        button?.click();
+      });
+      // Flush microtasks so a leaked rejection would surface.
+      await act(async () => {});
+
+      expect(onBranchSession).toHaveBeenCalledOnce();
+      expect(button?.disabled).toBe(false);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('unhandledrejection', unhandled);
+    }
+  });
+});
+
 describe('AssistantMessage markdown tables', () => {
   const tableMarkdown = [
     '| Team | Score |',
