@@ -16,6 +16,33 @@ export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
 export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
   'The current Goal revision exceeded the checkpoint verifier request limit. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 
+/**
+ * Which bound a `usage_limited` Goal ran into.
+ *
+ * Only the evidence bounds are enumerated: they are the ones a caller has to
+ * branch on, because they are the ones a plain resume cannot clear. Every other
+ * route to `usage_limited` is an operational failure that carries prose in
+ * `lastReason` and nothing to key off.
+ */
+export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+
+export function isGoalLimitKind(value: unknown): value is GoalLimitKind {
+  return value === 'evidence_catalog' || value === 'checkpoint_request';
+}
+
+/** The limit a `usage_limited` reason denotes, for reasons that denote one. */
+export function goalLimitKindForReason(
+  reason: string,
+): GoalLimitKind | undefined {
+  if (reason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON) {
+    return 'evidence_catalog';
+  }
+  if (reason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON) {
+    return 'checkpoint_request';
+  }
+  return undefined;
+}
+
 export const PAUSED_GOAL_SYSTEM_REMINDER =
   '<system-reminder>\nThe Goal is paused. Do not continue its objective unless the user resumes it. Treat this message as ordinary conversation.\n</system-reminder>';
 
@@ -81,6 +108,12 @@ export interface GoalRecord {
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
   lastReason?: string;
+  /**
+   * Set alongside `lastReason` whenever the runtime stops a Goal at one of the
+   * enumerated bounds. `lastReason` stays the human-readable half; this is the
+   * half state transitions are allowed to read.
+   */
+  limitKind?: GoalLimitKind;
 }
 
 export interface GoalSnapshotV2 {
