@@ -550,11 +550,17 @@ function safeStringifyDisplayPayload(payload: unknown): string {
  * shape — everything through one `parallel()` barrier, first answer taken at
  * face value. The prose below is therefore load-bearing, not documentation.
  * `script`'s own description carries the exact authoring contract (error
- * strings, serialization rules). The agent cap and the two env knobs are
- * interpolated from the orchestrator's exported constants
- * (`DEFAULT_MAX_AGENTS_PER_RUN`, `MAX_WORKFLOW_AGENTS_ENV`,
- * `MAX_WORKFLOW_CONCURRENCY_ENV`) in both halves, so raising a cap moves
- * every model-visible copy at once — there is no prose to hand-sync.
+ * strings, serialization rules). Every cap and env knob is interpolated
+ * from exported constants, so raising a cap moves every model-visible copy
+ * at once — there is no prose to hand-sync. In both halves:
+ * `DEFAULT_MAX_AGENTS_PER_RUN`, `MAX_WORKFLOW_AGENTS_ENV`,
+ * `MAX_WORKFLOW_CONCURRENCY_ENV` (orchestrator exports). Runtime half only:
+ * the four subagent-bound constants `DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS`,
+ * `WORKFLOW_SUBAGENT_MAX_TURNS_ENV`,
+ * `DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES`,
+ * `WORKFLOW_SUBAGENT_MAX_MINUTES_ENV` (orchestrator exports). Script half
+ * only: `DEFAULT_STALL_MS`, `MAX_STALL_ATTEMPTS`,
+ * `MAX_WORKFLOW_STALL_MS_ENV` (workflow-stall exports).
  * The wall-clock cap is the one exception: `DEFAULT_MAX_WALL_CLOCK_MS` is
  * private to `workflow-sandbox.ts`, so "30-minute" is still a literal here
  * and has to be edited alongside it. The output-token budget and the

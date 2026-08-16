@@ -19,8 +19,6 @@ import {
   resolveSubagentMaxTimeMinutes,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
-  HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING,
-  HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
@@ -1918,9 +1916,11 @@ describe('createProductionDispatch', () => {
     try {
       const dispatch = createProductionDispatch(fakeConfig());
       await dispatch('hello', { label: 'h1' });
+      // Literal anchors, not the DEFAULT_* constants: an edit of the
+      // constant must fail this assertion, not move it along.
       expect(created[0]!.runConfig).toEqual({
-        max_turns: DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
-        max_time_minutes: DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+        max_turns: 50,
+        max_time_minutes: 10,
       });
     } finally {
       if (prevTurns === undefined)
@@ -2519,16 +2519,18 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
           QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '45',
         }),
       ).toBe(45);
+      // Literal anchors for the hard ceilings — comparing against the
+      // HARD_* constants would assert them against themselves.
       expect(
         resolveSubagentMaxTurns({
           QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '999999',
         }),
-      ).toBe(HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING);
+      ).toBe(500);
       expect(
         resolveSubagentMaxTimeMinutes({
           QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '999999',
         }),
-      ).toBe(HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING);
+      ).toBe(100);
     });
 
     it('per-subagent bounds reject non-decimal-integer overrides', () => {

@@ -320,11 +320,13 @@ export class GitWorktreeService {
     try {
       // `raw` rather than `revparse`: the latter trims the output, silently
       // mutating a path that legitimately carries leading/trailing whitespace
-      // into a different anchor. Strip only the line terminator.
+      // into a different anchor. Strip only the LF terminator — git's stdout
+      // is LF-terminated on every platform, so a trailing CR is path data,
+      // not part of the terminator.
       const out = await (
         await this.getGit()
       ).raw(['rev-parse', '--show-toplevel']);
-      const top = out.replace(/\r?\n$/, '');
+      const top = out.replace(/\n$/, '');
       return top.length > 0 ? top : null;
     } catch (error) {
       // Caller falls back to its cwd via `?? cwd`. Log so a corrupt
@@ -368,10 +370,11 @@ export class GitWorktreeService {
         await this.getGit()
       ).raw(['worktree', 'list', '--porcelain']);
       const lines = out.split('\n');
-      // Strip only the line terminator (a CRLF carriage return included):
       // git preserves a path's leading/trailing whitespace verbatim, and a
-      // trim would silently mutate it into a different, wrong anchor.
-      const firstLine = (lines[0] ?? '').replace(/\r$/, '');
+      // trim would silently mutate it into a different, wrong anchor. A
+      // trailing CR is path data, not a terminator: git's stdout is
+      // LF-terminated on every platform.
+      const firstLine = lines[0] ?? '';
       if (!firstLine.startsWith('worktree ')) return null;
       for (const line of lines.slice(1)) {
         const attr = line.trim();

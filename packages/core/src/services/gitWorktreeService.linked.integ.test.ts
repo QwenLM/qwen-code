@@ -342,4 +342,48 @@ describe('GitWorktreeService.getMainWorktreePath() (real git)', () => {
       expect(await svc.getRepoTopLevel()).toBe(nlRepo);
     },
   );
+
+  // git's command stdout is LF-terminated on all platforms, so a trailing CR
+  // in the `--show-toplevel` / porcelain answer is part of the directory
+  // name, not a line terminator. Stripping it mutates the anchor into the
+  // CR-less sibling path — and when another repository lives there, the pin
+  // gate consults THAT repository's worktree registry and accepts its
+  // worktree. (A trailing CR is not representable on Win32.)
+  it.skipIf(process.platform === 'win32')(
+    'preserves a trailing CR in the repository directory name',
+    async () => {
+      const base = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mainpath-cr-')),
+      );
+      tmpDirs.push(base);
+      const crRepo = path.join(base, 'repo\r');
+      fs.mkdirSync(crRepo);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: crRepo });
+      commitInitial(crRepo);
+      const sibling = path.join(base, 'repo');
+      fs.mkdirSync(sibling);
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: sibling });
+      commitInitial(sibling);
+      const foreignWt = path.join(sibling, 'wt');
+      execFileSync('git', ['worktree', 'add', '-b', 'fbranch', foreignWt], {
+        cwd: sibling,
+      });
+      const ownWt = path.join(crRepo, 'wt');
+      execFileSync('git', ['worktree', 'add', '-b', 'sbranch', ownWt], {
+        cwd: crRepo,
+      });
+
+      const svc = new GitWorktreeService(crRepo);
+      const main = await svc.getMainWorktreePath();
+      const top = await svc.getRepoTopLevel();
+      expect(main).toBe(crRepo);
+      expect(top).toBe(crRepo);
+      // worktree-pin.ts anchors the registry gate at `main ?? top ?? cwd`:
+      // a mutated anchor would read the sibling's registry and accept its
+      // worktree as a pin target of THIS repository.
+      const gate = new GitWorktreeService(main ?? top ?? crRepo);
+      expect(await gate.isRegisteredLinkedWorktree(foreignWt)).toBe(false);
+      expect(await gate.isRegisteredLinkedWorktree(ownWt)).toBe(true);
+    },
+  );
 });

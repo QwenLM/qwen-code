@@ -728,6 +728,19 @@ describe('GitWorktreeService', () => {
 
       await expect(service.getMainWorktreePath()).resolves.toBe('/srv/proj ');
     });
+
+    // git's stdout is LF-terminated on all platforms, so a trailing CR in
+    // the porcelain answer is part of the directory name, not a terminator.
+    it('preserves a trailing CR in the main worktree path', async () => {
+      hoistedMockRaw.mockResolvedValueOnce(
+        'worktree /srv/proj\r\n' + 'HEAD abc123\n' + 'branch refs/heads/main\n',
+      );
+      hoistedMockRaw.mockResolvedValueOnce('.git');
+      hoistedMockRaw.mockResolvedValueOnce('.git');
+      const service = new GitWorktreeService('/srv/proj\r');
+
+      await expect(service.getMainWorktreePath()).resolves.toBe('/srv/proj\r');
+    });
   });
 
   describe('getRepoTopLevel', () => {
@@ -736,6 +749,15 @@ describe('GitWorktreeService', () => {
       const service = new GitWorktreeService('/srv/proj ');
 
       await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj ');
+    });
+
+    // git's stdout is LF-terminated on all platforms, so a trailing CR in
+    // the answer is part of the directory name, not a line terminator.
+    it('preserves a trailing CR in the repository top-level path', async () => {
+      hoistedMockRaw.mockResolvedValueOnce('/srv/proj\r\n');
+      const service = new GitWorktreeService('/srv/proj\r');
+
+      await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj\r');
     });
   });
 });
