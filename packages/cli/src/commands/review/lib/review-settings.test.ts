@@ -53,11 +53,17 @@ describe('operatorReviewSettings', () => {
   });
 
   it('explicit values pass through unchanged', () => {
-    setReview({ attribution: false, comment: true, effort: 'low' });
+    setReview({
+      attribution: false,
+      comment: true,
+      effort: 'low',
+      severityFloor: 'critical',
+    });
     expect(operatorReviewSettings()).toEqual({
       attribution: false,
       comment: true,
       effort: 'low',
+      severityFloor: 'critical',
     });
   });
 
@@ -69,6 +75,13 @@ describe('operatorReviewSettings', () => {
   it('drops a non-string effort instead of leaking it to callers', () => {
     setReview({ effort: 42 });
     expect(operatorReviewSettings().effort).toBeUndefined();
+  });
+
+  it('severityFloor rides the same raw-passthrough contract as effort', () => {
+    setReview({ severityFloor: 'Auto' });
+    expect(operatorReviewSettings().severityFloor).toBe('Auto');
+    setReview({ severityFloor: 42 });
+    expect(operatorReviewSettings().severityFloor).toBeUndefined();
   });
 
   it('a hand-edited non-boolean attribution falls back to the schema default', () => {
@@ -92,7 +105,7 @@ describe('operatorReviewSettings', () => {
 });
 
 describe('review settings in the /settings dialog', () => {
-  it('exposes all three settings for toggling', () => {
+  it('exposes all four settings for toggling', () => {
     // Maintainer A/B verification of this PR caught the description claiming
     // dialog membership while the schema shipped showInDialog: false. Pin the
     // membership so the claim and the schema cannot drift again.
@@ -100,5 +113,6 @@ describe('review settings in the /settings dialog', () => {
     expect(dialogKeys).toContain('review.attribution');
     expect(dialogKeys).toContain('review.effort');
     expect(dialogKeys).toContain('review.comment');
+    expect(dialogKeys).toContain('review.severityFloor');
   });
 });
