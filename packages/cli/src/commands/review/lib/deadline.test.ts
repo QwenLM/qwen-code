@@ -31,6 +31,7 @@ import {
   expectedAdmissionSeconds,
   expectedRoundSeconds,
   readBudgetStop,
+  readBudgetStopUnfenced,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
@@ -527,6 +528,35 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     expect(() => clearBudgetStop(fresh)).not.toThrow();
     writeFileSync(promptRecordDir(fresh), 'a file where the record dir goes');
     expect(() => clearBudgetStop(fresh)).not.toThrow();
+  });
+
+  it('clearBudgetStop keeps a previous run\u2019s marker — convergence clears only its own (#9206)', () => {
+    // Run 1 stops at the cap and is killed before Step 9; its marker is
+    // what the NEXT cleanup keys retention on. Run 2 re-captures the plan
+    // and CONVERGES: refuseConverged's clear must unlink only run 2's own
+    // marker — an unconditional rmSync removed run 1's, and the next
+    // sweep took the certification history with it.
+    const p = stopPlan();
+    writeRoundCapStop(p, 5, 6, PLAN_CAPTURED_MS - 28_800_000); // run 1's stop
+    clearBudgetStop(p);
+    // Still on disk — retention's unfenced read still sees it, while the
+    // fenced reader this run's verdict reads through still does not.
+    expect(readBudgetStopUnfenced(p)?.cause).toBe('round-cap');
+    expect(readBudgetStop(p)).toBeNull();
+    // And this run's own marker still clears.
+    writeRoundCapStop(p, 5, 6, NOW_MS);
+    clearBudgetStop(p);
+    expect(readBudgetStopUnfenced(p)).toBeNull();
+  });
+
+  it('readBudgetStopUnfenced reads a valid marker from ANY run — and nothing else', () => {
+    const p = stopPlan();
+    expect(readBudgetStopUnfenced(p)).toBeNull();
+    writeRoundCapStop(p, 5, 6, PLAN_CAPTURED_MS - 28_800_000);
+    // The fenced reader drops it as a previous run; the unfenced one —
+    // retention's eye — still sees it, shape and all.
+    expect(readBudgetStop(p)).toBeNull();
+    expect(readBudgetStopUnfenced(p)?.cause).toBe('round-cap');
   });
 
   it('the dedup phrase travels with the entry it identifies', () => {
