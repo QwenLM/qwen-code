@@ -14,7 +14,9 @@ import {
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV } from './lib/deadline.js';
+import type { MergeBaseResult } from './lib/merge-base.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
+import { makeDiff } from './lib/test-utils.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -218,6 +220,10 @@ const producerMocks = vi.hoisted(() => ({
   }),
   gh: vi.fn(),
   git: vi.fn(),
+  gitRaw: vi.fn((): Buffer => Buffer.from('')),
+  resolveMergeBase: vi.fn(
+    (): MergeBaseResult => ({ sha: null, baseFetchFailed: false }),
+  ),
   writeStderrLine: vi.fn(),
 }));
 
@@ -268,23 +274,23 @@ vi.mock('./lib/gh.js', () => ({
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
   gitOpt: vi.fn(() => null),
-  gitRaw: vi.fn(() => Buffer.from('')),
+  gitRaw: producerMocks.gitRaw,
   refExists: vi.fn(() => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
 }));
 
 vi.mock('./lib/merge-base.js', () => ({
-  resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
+  resolveMergeBase: producerMocks.resolveMergeBase,
 }));
 
 describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // clearAllMocks resets call history but NOT implementations, so a
-    // mockReturnValue a prior test set on readFileSync would leak into a test
-    // that relies on the default. Re-assert the default (no prior report →
-    // ENOENT) here so every test starts from a known state regardless of
-    // order.
+    // mockReturnValue a prior test set would leak into a test that relies on
+    // the default. Re-assert the defaults (no prior report → ENOENT, no
+    // merge base → no diff) here so every test starts from a known state
+    // regardless of order.
     producerMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -303,6 +309,11 @@ describe('fetch-pr report assembly', () => {
         body: '',
       }),
     );
+    producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
   });
 
   async function reportFor(extraArgs: Record<string, unknown>) {
@@ -346,12 +357,13 @@ describe('fetch-pr report assembly', () => {
     // it into a real diff instead: a resolvable merge base and a raw diff
     // buffer. A handler that forgot the deadline read — or the capture-time
     // tier call — would keep every budget unit test green and this one red.
-    const mergeBase = vi.mocked(
-      (await import('./lib/merge-base.js')).resolveMergeBase,
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'beef0000',
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockReturnValue(
+      Buffer.from(makeDiff('src/huge.ts', 9000)),
     );
-    const gitRawMock = vi.mocked((await import('./lib/git.js')).gitRaw);
-    mergeBase.mockReturnValue({ sha: 'beef0000', baseFetchFailed: false });
-    gitRawMock.mockReturnValue(Buffer.from(makeHugeDiff()));
 
     const before = process.env[DEADLINE_ENV];
     try {
@@ -370,29 +382,6 @@ describe('fetch-pr report assembly', () => {
       else process.env[DEADLINE_ENV] = before;
     }
   });
-
-  // A 9,000-line single-file addition — effective size well past the huge
-  // floor, in the same shape plan-diff's harness uses.
-  function makeHugeDiff(): string {
-    const n = 9000;
-    const body: string[] = [];
-    while (body.length < n) {
-      body.push(`+function f${body.length}() {`);
-      for (let k = 0; k < 8 && body.length < n; k++)
-        body.push(`+  const x = ${k};`);
-      body.push('+}');
-      body.push('+');
-    }
-    body.length = n;
-    return [
-      'diff --git a/src/huge.ts b/src/huge.ts',
-      '--- /dev/null',
-      '+++ b/src/huge.ts',
-      `@@ -0,0 +1,${n} @@`,
-      ...body,
-      '',
-    ].join('\n');
-  }
 
   it('preserves the earliest window opening across drift restarts of the same PR', async () => {
     // A drift restart reruns fetch-pr and overwrites this report; the audit
