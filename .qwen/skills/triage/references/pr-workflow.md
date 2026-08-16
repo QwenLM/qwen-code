@@ -269,16 +269,22 @@ human asked for a review, so give them one.
 
 - Stages 0 and 1a–1e pass without escalation, and 1e matched no high-risk path;
 - the title is not a `fix` type — a fix claims a behaviour change by definition;
-- no core module paths (Stage 0 list), no `.github/workflows/**`, no package
-  manifests or lockfiles, no schema/generated files, no prompts/system
-  instructions or other model-visible text, no user-facing documentation or
-  CLI help strings, no broken-link changes;
+- no core module paths (Stage 0 list), no `.github/workflows/**`, no other
+  YAML (`*.yml`/`*.yaml` anywhere, e.g. `.yamllint.yml`,
+  `.github/dependabot.yml`, `.github/release.yml`), no `Makefile`,
+  `Dockerfile`, or `.github/scripts/**`, no package manifests or lockfiles,
+  no schema/generated files, no prompts/system instructions or other
+  model-visible text, no user-facing documentation or CLI help strings, no
+  broken-link changes;
 - at most 100 production logic lines (Stage 0 size calculation).
 
 **Classification — 100% certainty required.** Every hunk must be exactly one of:
 
 1. a source-comment or JSDoc-only edit;
-2. a whitespace/formatting change with no token-level semantic change;
+2. a whitespace/formatting change with no token-level semantic change — never
+   in files where whitespace IS syntax (YAML indentation, Makefile recipe
+   tabs, shell and Dockerfile line continuations); such edits send the whole
+   PR to the full path;
 3. an internal identifier rename (variable, field, local function) where every
    occurrence is updated consistently within the diff and no external contract
    changes — no exported symbol, CLI flag, config key, serialized field, or

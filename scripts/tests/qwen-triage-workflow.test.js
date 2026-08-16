@@ -6018,6 +6018,10 @@ describe('triage skill non-functional routing (#7411)', () => {
     for (const excluded of [
       'fix',
       '.github/workflows/**',
+      'no other YAML',
+      'Makefile',
+      'Dockerfile',
+      '.github/scripts/**',
       'lockfiles',
       'schema/generated files',
       'model-visible text',
@@ -6028,6 +6032,13 @@ describe('triage skill non-functional routing (#7411)', () => {
       expect(section, excluded).toContain(excluded);
     }
     expect(section).toContain('at most 100 production logic lines');
+    // Whitespace IS syntax in YAML/Makefile/shell/Dockerfile: clause 2 must
+    // carve those files out, otherwise a pure re-indent hunk is certified
+    // behaviour-neutral and skips the review lane — the exact false skip
+    // this section names as dangerous (round-9 critical).
+    expect(section).toContain('whitespace IS syntax');
+    expect(section).toContain('YAML indentation, Makefile recipe');
+    expect(section).toContain('shell and Dockerfile line continuations');
   });
 
   it('reuses the existing on-hold label and stops before Stage 2', () => {
