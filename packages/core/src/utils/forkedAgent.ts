@@ -153,6 +153,10 @@ export function getCacheSafeParams(): CacheSafeParams | null {
   };
 }
 
+export function getCacheSafeParamsSessionId(): string | undefined {
+  return currentCacheSafeParams?.sessionId;
+}
+
 /**
  * Clear cache-safe params (e.g., on session reset).
  */

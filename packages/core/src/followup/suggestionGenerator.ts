@@ -13,6 +13,7 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import {
   getCacheSafeParams,
+  getCacheSafeParamsSessionId,
   runForkedAgent,
   type CacheSafeParams,
 } from '../utils/forkedAgent.js';
@@ -105,7 +106,12 @@ export async function generatePromptSuggestion(
 
   try {
     // Try cache-aware forked query if enabled and params available
-    const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
+    const sessionId = config.getSessionId();
+    const cacheSafeSessionId = options?.enableCacheSharing
+      ? getCacheSafeParamsSessionId()
+      : undefined;
+    const cacheSafe =
+      cacheSafeSessionId === sessionId ? getCacheSafeParams() : null;
     // The cache-safe slot is a process-global: in a multi-session daemon it
     // can hold ANOTHER session's transcript + systemInstruction. Only use it
     // when it belongs to THIS session; otherwise fall back to the
@@ -115,8 +121,13 @@ export async function generatePromptSuggestion(
         ? cacheSafe
         : null;
     const modelOverride = options?.model;
+    const cacheSharingState = sessionCacheSafe
+      ? 'true'
+      : cacheSafeSessionId
+        ? 'session_mismatch'
+        : 'false';
     debugLogger.debug(
-      `Generating suggestion: cacheSharing=${!!sessionCacheSafe}, model=${modelOverride || '(default)'}`,
+      `Generating suggestion: cacheSharing=${cacheSharingState}, model=${modelOverride || '(default)'}`,
     );
     const raw = sessionCacheSafe
       ? await generateViaForkedQuery(

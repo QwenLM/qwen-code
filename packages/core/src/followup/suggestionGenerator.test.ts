@@ -8,12 +8,17 @@ import type { Content } from '@google/genai';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 
-const { mockGetCacheSafeParams, mockRunForkedAgent, mockRunSideQuery } =
-  vi.hoisted(() => ({
-    mockGetCacheSafeParams: vi.fn(),
-    mockRunForkedAgent: vi.fn(),
-    mockRunSideQuery: vi.fn(),
-  }));
+const {
+  mockGetCacheSafeParams,
+  mockGetCacheSafeParamsSessionId,
+  mockRunForkedAgent,
+  mockRunSideQuery,
+} = vi.hoisted(() => ({
+  mockGetCacheSafeParams: vi.fn(),
+  mockGetCacheSafeParamsSessionId: vi.fn(),
+  mockRunForkedAgent: vi.fn(),
+  mockRunSideQuery: vi.fn(),
+}));
 
 vi.mock('../utils/sideQuery.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/sideQuery.js')>();
@@ -29,6 +34,7 @@ vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
   return {
     ...actual,
     getCacheSafeParams: mockGetCacheSafeParams,
+    getCacheSafeParamsSessionId: mockGetCacheSafeParamsSessionId,
     runForkedAgent: mockRunForkedAgent,
   };
 });
@@ -49,6 +55,8 @@ const conversationHistory: Content[] = [
 describe('generatePromptSuggestion', () => {
   beforeEach(() => {
     mockGetCacheSafeParams.mockReset();
+    mockGetCacheSafeParamsSessionId.mockReset();
+    mockGetCacheSafeParamsSessionId.mockReturnValue('test-session');
     mockRunForkedAgent.mockReset();
     mockRunSideQuery.mockReset();
   });
@@ -149,13 +157,7 @@ describe('generatePromptSuggestion', () => {
     // suggestion must NOT fork from a foreign session's params (cross-session
     // content leak) — it falls back to the session-safe base-LLM path
     // (#9233).
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'session-B', // another session saved these params
-    });
+    mockGetCacheSafeParamsSessionId.mockReturnValue('session-B');
     mockRunSideQuery.mockResolvedValue({
       text: '{"suggestion":"from base llm"}',
       usage: { inputTokens: 1, outputTokens: 1 },
@@ -173,6 +175,8 @@ describe('generatePromptSuggestion', () => {
       { enableCacheSharing: true },
     );
 
+    // The foreign slot is rejected before cloning the full cached payload.
+    expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
     // The fork must NOT be used for a foreign session's params.
     expect(mockRunForkedAgent).not.toHaveBeenCalled();
     // The session-safe base-LLM path is used instead.
