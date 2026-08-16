@@ -557,6 +557,16 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     // retention's eye — still sees it, shape and all.
     expect(readBudgetStop(p)).toBeNull();
     expect(readBudgetStopUnfenced(p)?.cause).toBe('round-cap');
+    // "Nothing else" includes the shape gate (#9259 — it was pinned only
+    // by absence): an object without a string `entry` or a numeric
+    // `atMs` cannot prove it is a stop marker and reads as none.
+    const stopFile = join(promptRecordDir(p), 'budget-stop.json');
+    writeFileSync(stopFile, JSON.stringify({ cause: 'round-cap', entry: 'x' }));
+    expect(readBudgetStopUnfenced(p)).toBeNull();
+    writeFileSync(stopFile, JSON.stringify({ cause: 'round-cap', atMs: 42 }));
+    expect(readBudgetStopUnfenced(p)).toBeNull();
+    writeFileSync(stopFile, 'not json');
+    expect(readBudgetStopUnfenced(p)).toBeNull();
   });
 
   it('the dedup phrase travels with the entry it identifies', () => {

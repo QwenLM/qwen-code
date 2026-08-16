@@ -49,6 +49,7 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
+  appendFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,7 +59,11 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
   writeStderrLineSafe: vi.fn(),
 }));
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import { agentPromptCommand } from './agent-prompt.js';
 import { promptRecordDir, readRecordedPrompts } from './lib/prompt-record.js';
 import { readBudgetStop, writeRoundCapStop } from './lib/deadline.js';
@@ -152,11 +157,24 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
     utimesSync(plan, old, old);
     findings = join(dir, 'findings.md');
     writeFileSync(findings, '');
-    for (const k of ['QWEN_CODE_PROJECT_DIR', 'QWEN_CODE_SESSION_ID']) {
+    for (const k of [
+      'QWEN_CODE_PROJECT_DIR',
+      'QWEN_CODE_SESSION_ID',
+      // The budget gate reads these three straight from process.env on
+      // every round admission (#9259): an ambient deadline inherited from
+      // a concurrent review makes round admission environment-dependent
+      // and fails this suite for reasons that have nothing to do with it.
+      'QWEN_REVIEW_DEADLINE_EPOCH',
+      'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS',
+      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
+    ]) {
       SAVED[k] = process.env[k];
     }
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    delete process.env['QWEN_REVIEW_DEADLINE_EPOCH'];
+    delete process.env['QWEN_REVIEW_DEADLINE_RESERVE_SECONDS'];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
 
@@ -173,6 +191,10 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
   function runRound(round: number): string {
     (writeStdoutLine as unknown as Mock).mockClear();
     (writeStderrLine as unknown as Mock).mockClear();
+    // The Safe writer carries the certification diagnostics (#9259) —
+    // leaving it out of the round's text makes every `chunk N —` failure
+    // line invisible to the assertions below.
+    (writeStderrLineSafe as unknown as Mock).mockClear();
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,
       role: 'reverse-audit',
@@ -186,7 +208,10 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
     const err = (writeStderrLine as unknown as Mock).mock.calls
       .map((c) => String(c[0]))
       .join('\n');
-    return `${out}\n${err}`;
+    const safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    return `${out}\n${err}\n${safe}`;
   }
 
   /** The recorded launch prompt for one (round, chunk). */
@@ -276,16 +301,30 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
     );
   }
 
+  /**
+   * Chunk 15's finding, fresh each round (#9259): a fixed `**File:**` line
+   * lands on the baked findings list from round 3 on, the return's only
+   * FILE_LINE_RE match reads as a quotation of the list, and the "yields
+   * every round" control classifies `unknown` instead — emitting the very
+   * diagnostic noise this suite exists to catch. Varying the line number
+   * keeps every round's finding off the list the round was launched with.
+   */
+  function yieldFor(round: number): string {
+    return YIELD.replace('part3.ts:12', `part3.ts:${round}2`);
+  }
+
   /** Rounds 1-2 with the given receipt for the two cold chunks; 15 yields. */
   function twiceDry(receipt: string): void {
     for (const round of [1, 2]) {
       runRound(round);
       auditorTranscript(recordOf(round, 13), receipt, 13);
       auditorTranscript(recordOf(round, 14), receipt, 14);
-      auditorTranscript(recordOf(round, 15), YIELD, 15);
+      auditorTranscript(recordOf(round, 15), yieldFor(round), 15);
+      // The loop found something every round — grow the list like the real
+      // run, so a later round's list holds exactly the earlier rounds'
+      // findings and no more.
+      appendFileSync(findings, yieldFor(round));
     }
-    // The loop found something every round — grow the list like the real run.
-    writeFileSync(findings, YIELD);
   }
 
   it('wiring control: the canonical receipt retires its chunk at round 3', () => {
@@ -309,47 +348,76 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
       // The reported symptom: rounds 3-5 each built auditors for EVERY chunk,
       // no retirement note ever appeared, and nothing anywhere said which
       // certification condition rejected the receipts. Either outcome the
-      // issue expects must show up in the builder's output:
-      const retired = /retirement:[\s\S]*chunk 1[34]/.test(r3);
-      const diagnosed =
-        // A diagnostic naming the chunk and the failed condition (no matching
-        // transcript / receipt not matched / territory read missing).
-        /chunk 1[34][^\n]*(?:certif|receipt|territory|transcript)/i.test(r3) ||
-        /(?:certif|receipt|territory|transcript)[^\n]*chunk 1[34]/i.test(r3);
+      // issue expects must show up in the builder's output — PER CHUNK
+      // (#9259): a pair-wide existential match lets one chunk's retirement
+      // cover the other's silent re-audit, the asymmetric shape real runs
+      // show (#9206 hit 4 of 12 chunks, not all).
+      for (const id of [13, 14]) {
+        const retired = new RegExp(`chunk ${id} — retired`).test(r3);
+        const diagnosed =
+          // A diagnostic naming the chunk and the failed condition (no
+          // matching transcript / receipt not matched / territory read
+          // missing).
+          new RegExp(
+            `chunk ${id}[^\\n]*(?:certif|receipt|territory|transcript)`,
+            'i',
+          ).test(r3) ||
+          new RegExp(
+            `(?:certif|receipt|territory|transcript)[^\\n]*chunk ${id}\\b`,
+            'i',
+          ).test(r3);
 
-      // A twice-dry chunk may stay under audit, but never silently: the
-      // round-3 output must carry EITHER a retirement note naming it OR a
-      // certification-failure diagnostic. Today it carries neither.
-      expect(retired || diagnosed).toBe(true);
+        // A twice-dry chunk may stay under audit, but never silently: the
+        // round-3 output must carry EITHER a retirement note naming it OR a
+        // certification-failure diagnostic. Today it carries neither.
+        expect(retired || diagnosed).toBe(true);
+      }
     },
   );
 
   it('the silence is not one round: across rounds 3-5 the twice-dry chunks are retired or diagnosed at least once', () => {
     twiceDry(DRY_EN_PERIOD);
-    const mentions = (out: string): boolean =>
-      /retirement:[\s\S]*chunk 1[34]/.test(out) ||
-      /chunk 1[34][^\n]*(?:certif|receipt|territory|transcript)/i.test(out) ||
-      /(?:certif|receipt|territory|transcript)[^\n]*chunk 1[34]/i.test(out);
-    let anyWord = '';
+    const mentions = (out: string, id: number): boolean =>
+      new RegExp(`chunk ${id} — retired`).test(out) ||
+      new RegExp(
+        `chunk ${id}[^\\n]*(?:certif|receipt|territory|transcript)`,
+        'i',
+      ).test(out) ||
+      new RegExp(
+        `(?:certif|receipt|territory|transcript)[^\\n]*chunk ${id}\\b`,
+        'i',
+      ).test(out);
+    const mentioned = new Set<number>();
     for (const round of [3, 4, 5]) {
       const out = runRound(round);
       // Today every one of these reads `3 auditors required this round`.
-      if (mentions(out)) anyWord = out;
+      for (const id of [13, 14]) {
+        if (mentions(out, id)) mentioned.add(id);
+      }
+      // The hot control stays honest (#9259): chunk 15's finding is fresh
+      // each round, so it classifies yielded and never produces the
+      // certifiable-but-never-retiring diagnostic this suite exists to
+      // catch — a `chunk 15 —` failure line here is the harness misreading
+      // its own control, not production speaking.
+      expect(out).not.toContain('chunk 15 —');
       // Answer whatever chunks the round actually built, so the next round's
       // schedule reads a complete history — the loop shape of the real run.
       for (const m of out.matchAll(/— chunk (\d+)(?: \(cold check\))? ─/g)) {
         const chunkId = Number(m[1]);
         auditorTranscript(
           recordOf(round, chunkId),
-          chunkId <= 14 ? DRY_EN_PERIOD : YIELD,
+          chunkId <= 14 ? DRY_EN_PERIOD : yieldFor(round),
           chunkId,
         );
       }
+      // Grow the list with this round's finding, like the real loop.
+      appendFileSync(findings, yieldFor(round));
     }
     // Observed today (and on the installed CLI end to end): rounds 3, 4 and 5
     // each built every chunk (`3 auditors required this round` three times)
-    // and never said a word about the twice-dry ones.
-    expect(anyWord).not.toBe('');
+    // and never said a word about the twice-dry ones. Per chunk (#9259): one
+    // chunk's word must not cover the other's silence.
+    expect([...mentioned].sort()).toEqual([13, 14]);
   });
 });
 

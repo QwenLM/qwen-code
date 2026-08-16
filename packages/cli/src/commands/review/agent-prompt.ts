@@ -2108,6 +2108,15 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
 }
 
 /**
+ * Rounds whose retirement-degradation NOTE this process already printed,
+ * keyed `plan::round` (#9259): the per-chunk builds of a round share one
+ * schedule failure, and the note earns its place exactly once per round —
+ * keyed on the PRINT, never on the admission stamp, which lands whether
+ * or not that build's schedule read failed.
+ */
+const retirementDegradeNotesPrinted = new Set<string>();
+
+/**
  * Topology anomaly note (#9242): the plan's own size fields decide the
  * topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
  * reverse-audit round-cap tier is priced against that decision — but the
@@ -2162,6 +2171,11 @@ function runAllChunks(
   // three yielded in most: the loop earns its keep in the hot territories,
   // and the cold ones were a third of its bill.
   let schedule: RoundSchedule | null = null;
+  // The catch NOTE is deferred until the round is ADMITTED (#9259): a
+  // note printed before the budget/round-cap gate promises `auditing
+  // every chunk.` on a round the gate then refuses — a false continuation
+  // claim on the diagnostic channel this exists to keep truthful.
+  let scheduleNote: string | null = null;
   // Retirement needs two consecutive dry audits, so nothing retires before
   // round 3 (the scheduler's own guard says the same).
   const retirementReadsFrom = 3;
@@ -2188,10 +2202,9 @@ function runAllChunks(
       // (#9206): a schedule that dies here retires nothing for the rest of
       // the run, and the round's own output is where the reader can see it.
       schedule = null;
-      writeStderrLineSafe(
+      scheduleNote =
         `NOTE: reverse-audit retirement unavailable this round — ` +
-          `${(err as Error).message ?? String(err)} — auditing every chunk.`,
-      );
+        `${(err as Error).message ?? String(err)} — auditing every chunk.`;
     }
   }
 
@@ -2229,6 +2242,11 @@ function runAllChunks(
     )
   ) {
     return;
+  }
+  // The admission succeeded, so the round IS being built — now the
+  // deferred catch NOTE tells the truth (#9259).
+  if (scheduleNote !== null) {
+    writeStderrLineSafe(scheduleNote);
   }
 
   const dueSet = schedule === null ? null : new Set(schedule.due);
@@ -2707,6 +2725,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     )
       .map((c) => c?.id)
       .filter((id): id is number => typeof id === 'number');
+    // The catch NOTE is deferred past the admission gate (#9259 — a note
+    // printed before it promises an audit the gate can then refuse) and
+    // keyed on having been PRINTED this process, not on the stamp: the
+    // stamp lands on the admission build whether or not that build's
+    // schedule read failed, so a stamp-keyed suppression silenced a round
+    // whose admission build read cleanly and whose LATER builds began to
+    // throw — the never-retire shape with no word (#9259). The set is
+    // per-process, so a retried headless run re-prints — the safe side.
+    let scheduleNote: string | null = null;
     if (args.round !== undefined) {
       let schedule: RoundSchedule | null = null;
       try {
@@ -2722,17 +2749,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       } catch (err) {
         // Same degradation as the round builder: an unreadable history must
         // fall back to building the auditor, never to refusing it — named,
-        // as the round builder names it (#9206). Named only on the builds
-        // that are NOT repairs: the round's admission build (its first
-        // chunk build, or the round builder itself) already spoke for it,
-        // and a repair stays the clean rebuild its exemption promises.
+        // as the round builder names it (#9206).
         schedule = null;
-        if (!roundAdmitted) {
-          writeStderrLineSafe(
-            `NOTE: reverse-audit retirement unavailable this round — ` +
-              `${(err as Error).message ?? String(err)} — auditing the chunk.`,
-          );
-        }
+        scheduleNote =
+          `NOTE: reverse-audit retirement unavailable this round — ` +
+          `${(err as Error).message ?? String(err)} — auditing the chunk.`;
       }
       if (!roundAdmitted && schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
@@ -2760,6 +2781,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       )
     )
       return;
+    // Admitted (or a stamped repair): the audit IS happening, so the
+    // deferred NOTE tells the truth now (#9259) — once per round per
+    // process, repair builds included.
+    if (scheduleNote !== null) {
+      const noteKey = `${args.plan}::${args.round}`;
+      if (!retirementDegradeNotesPrinted.has(noteKey)) {
+        retirementDegradeNotesPrinted.add(noteKey);
+        writeStderrLineSafe(scheduleNote);
+      }
+    }
     // The note belongs to the round's ADMISSION — a stamped rebuild
     // was ruled on when the round was admitted, so it stays silent.
     if (!roundAdmitted) {

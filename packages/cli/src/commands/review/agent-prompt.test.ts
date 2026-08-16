@@ -3649,6 +3649,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   beforeEach(() => {
     (writeStdoutLine as unknown as Mock).mockClear();
     (writeStderrLine as unknown as Mock).mockClear();
+    // Cleared beside its throwing siblings (#9259): uncleared, every
+    // assertion below read the ACCUMULATED output of earlier tests — an
+    // order-dependent oracle that passed on residue alone.
+    (writeStderrLineSafe as unknown as Mock).mockClear();
     dir = mkdtempSync(join(tmpdir(), 'ap-retire-'));
     dirs.push(dir);
     plan = join(dir, 'plan.json');
@@ -4707,6 +4711,12 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(err).toContain(
       'chunk 13 \u2014 round 1: no matching transcript; round 2: no matching transcript',
     );
+    // The narrowing's absence half (#9259): chunk 14's failures exist in
+    // the same schedule but must NOT ride chunk 13's build — an
+    // unfiltered `schedule.diagnostics` here prints every chunk's note on
+    // every build, and the count lies about the coverage.
+    expect(err).not.toContain('chunk 14 \u2014');
+    expect(err).toContain('1 twice-audited chunk(s)');
     // The first build admitted the round — its stamp is what used to gate
     // the second build's diagnostic out.
     expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
@@ -4838,6 +4848,128 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     } finally {
       (writeStderrLine as unknown as Mock).mockReset();
     }
+  });
+
+  it('a refused round prints no audit NOTE — the round builder defers the catch note past the gate (#9259)', () => {
+    // Cap-3 plan, rounds 1-3 non-converging, transcripts unreadable: the
+    // schedule read dies AND round 4 is refused. The stderr must carry
+    // the ROUND CAP refusal only — a `auditing every chunk.` NOTE here
+    // promises an audit that never happens.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+
+    const out = runRound(4);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(4)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    const safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).not.toContain('reverse-audit retirement unavailable');
+  });
+
+  it('a refused per-chunk build prints no audit NOTE either (#9259)', () => {
+    // The --chunk twin of the gate-side truthfulness: an unadmitted round
+    // 4 at cap 3 with an unreadable history is refused, and the refusal
+    // is the only thing stderr says about the round.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 4,
+    });
+
+    expect(process.exitCode).toBe(4);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    const safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).not.toContain('reverse-audit retirement unavailable');
+  });
+
+  it('a repair build whose schedule begins to throw still names the degradation — once per round (#9259)', () => {
+    // Round 3's admission build (chunk 13) reads cleanly: stamp lands,
+    // nothing said. Then the history dies, and chunk 14's repair build
+    // must still print the NOTE — the stamp-keyed suppression this
+    // replaces silenced exactly this shape. Chunk 15's build repeats the
+    // failure and stays silent: the note earns its place once per round
+    // per process.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+    expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
+    expect(
+      (writeStderrLineSafe as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).not.toContain('reverse-audit retirement unavailable');
+
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 14,
+      round: 3,
+    });
+    let safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).toContain('reverse-audit retirement unavailable');
+    expect(safe).toContain('auditing the chunk');
+
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 15,
+      round: 3,
+    });
+    safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).not.toContain('reverse-audit retirement unavailable');
+    // Every repair still builds its chunk — the safe direction stands.
+    expect(keysOf(3)).toHaveLength(3);
   });
 
   it('the #9242 note stays below the convergence gate — a converged round notes nothing', () => {

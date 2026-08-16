@@ -5,11 +5,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
-  existsSync: vi.fn(() => false),
+  existsSync: vi.fn((_path: string): boolean => false),
   // The return type is declared so `mockReturnValue` can take string arrays —
   // the sweep-retention tests hand it the tmp-dir listing.
-  readdirSync: vi.fn((): string[] => []),
+  readdirSync: vi.fn((_path: string): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
+  // statSync drives retention's mtime signal (runEpochMs + the per-entry
+  // comparison); unmocked it hit the REAL filesystem and the signal could
+  // only ever fail open here (#9259). The default is the same fail-open
+  // throw readFileSync carries.
+  statSync: vi.fn((_path: string): { mtimeMs: number } => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
   rmSync: vi.fn(),
@@ -48,11 +55,13 @@ vi.mock('node:fs', async (importOriginal) => {
       existsSync: mocks.existsSync,
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
+      statSync: mocks.statSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
+    statSync: mocks.statSync,
     rmSync: mocks.rmSync,
   };
 });
@@ -101,6 +110,11 @@ describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.existsSync.mockReturnValue(false);
+    // Implementations survive clearAllMocks — restore the fail-open throw
+    // so one retention test's mtimes cannot leak into the next test.
+    mocks.statSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -206,6 +220,110 @@ describe('runCleanup', () => {
     expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-diff.txt');
     expect(removed).not.toContain(
       '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+  });
+
+  it('keeps the record directory whose records predate the plan — a killed loop leaves no marker (#9206)', () => {
+    // Signal 2: a loop KILLED mid-round stops without converging and
+    // writes no marker; its records predate the retry's fresh plan
+    // capture. The mtime comparison is what keeps that history — pinned
+    // here against an inverted `<` or a slack/sign slip (#9259).
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockImplementation((p: string): string[] =>
+      p === '/repo/.qwen/tmp'
+        ? ['qwen-review-pr-123-fetch.json', 'qwen-review-pr-123-fetch-prompts']
+        : ['reverse-audit--chunk-13--round-1--abc.txt'],
+    );
+    // No marker — the readFileSync default throws for budget-stop.json.
+    const planNow = Date.now();
+    mocks.statSync.mockImplementation((p: string) => ({
+      mtimeMs: p.endsWith('.json') ? planNow : Date.parse('2020-01-01'),
+    }));
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      expect.anything(),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+  });
+
+  it('keeps the record directory whose plan is already gone — a second cleanup keeps what the first kept (#9213)', () => {
+    // Signal 3: the first cleanup preserved the directory and swept the
+    // plan beside it, so no marker read and no mtime comparison can run.
+    // The directory that survived on that evidence must survive again —
+    // and "Nothing to clean" must NOT print while something was kept.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation((p: string) => p === '/repo/.qwen/tmp');
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-fetch-prompts']);
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      expect.anything(),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Nothing to clean'),
+    );
+  });
+
+  it('keeps the record directory on a PREVIOUS run’s marker — retention reads unfenced (#9213)', () => {
+    // The fence drops a marker older than the plan capture — exactly the
+    // marker a killed run left behind. Retention reading through the
+    // fenced `readBudgetStop` would sweep the evidence #9206 reports;
+    // this pins the unfenced read against that swap.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockImplementation((p: string): string[] =>
+      p === '/repo/.qwen/tmp'
+        ? ['qwen-review-pr-123-fetch.json', 'qwen-review-pr-123-fetch-prompts']
+        : [],
+    );
+    const planNow = Date.now();
+    mocks.statSync.mockImplementation((p: string) => {
+      if (p.endsWith('.json')) return { mtimeMs: planNow };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.readFileSync.mockImplementation((path: string): string => {
+      if (path.endsWith('budget-stop.json')) {
+        // A stop from HOURS before the plan capture — the fenced reader
+        // (deadline.ts's own tests pin this) returns null for it.
+        return JSON.stringify({
+          cause: 'round-cap',
+          cap: 5,
+          entry: 'reverse audit — did not converge within the 5-round cap',
+          entryZh: '反向审计——在 5 轮的反审轮数上限内未收敛',
+          round: 6,
+          remainingSeconds: 0,
+          reserveSeconds: 0,
+          atMs: Date.parse('2020-01-01'),
+        });
+      }
+      return JSON.stringify({});
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      expect.anything(),
     );
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(

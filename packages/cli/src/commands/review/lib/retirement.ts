@@ -78,7 +78,10 @@ export type CertificationFailure =
   | 'territory read missing'
   | 'receipt not matched'
   | 'receipt not alone'
-  | 'receipt clause not substantive';
+  | 'receipt lead contradicts the phrase'
+  | 'receipt clause contradicts the phrase'
+  | 'receipt clause names no walk'
+  | 'receipt clause too thin';
 
 /** One transcript's classified return, with the failed bar when not dry. */
 interface Classification {
@@ -300,15 +303,23 @@ const EXAMPLE_RECEIPT_CLAUSE_LC = EXAMPLE_RECEIPT_CLAUSE.toLowerCase();
  * names the marker families the executed leak probes carried — incapacity
  * (`unable`), omission (`failed`, `skipped`, `unchecked`, `untested`), a
  * shallow walk (`skimmed`), zh bare-不 (`打不开`) and 跳过 — with 不过
- * exempted as the pinned innocuous connective. The list has no last word,
- * and the residue is stated rather than papered over: a marker it misses
- * still fails toward RETIREMENT when the clause ALSO names a walk; what
- * closes that class is the form itself — the brief tells an auditor that
- * did not walk its scope to return prose, not the receipt, and prose is
- * not the form.
+ * exempted as the pinned innocuous connective.
+ *
+ * The bare tokens also carry their witnessed ABSENCE-OF-PROBLEMS
+ * exceptions (#9259): `no regressions` / `no issues` / `no problems`,
+ * 没有回归 / 没有缺陷, 未来, and hyphenated `fail-open` jargon are honest
+ * audit prose, not admissions — an admission of not-walking cannot be
+ * phrased as `no` + a problem noun, and the walk gate stands behind
+ * whatever slips. What is NOT excepted fails toward audit, the module's
+ * own direction: bare `n't` (`it wasn't flaky`) still reads `unknown`.
+ * The list has no last word, and the residue is stated rather than
+ * papered over: a marker it misses still fails toward RETIREMENT when the
+ * clause ALSO names a walk; what closes that class is the form itself —
+ * the brief tells an auditor that did not walk its scope to return
+ * prose, not the receipt, and prose is not the form.
  */
 const NEGATION_MARKER_RE =
-  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened)\b|未|没|无法|跳过|不(?!过)/i;
+  /\bnot\b|n['’]t\b|\bnever\b|\bno\b(?![\s-]*(?:regressions?|issues?|findings?|gaps?|problems?|defects?|bugs?))|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b(?!-)|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened)\b|没(?!有?(?:回归|问题|缺陷|异常|bug))|未(?!来|有?(?:回归|问题|缺陷|异常|bug))|无法|跳过|不(?!过)/i;
 
 /**
  * The brief's own all-clear vocabulary — the exact shapes
@@ -572,12 +583,20 @@ function classifyReturn(
   // (`…found but only skimmed.`) contradicts the claim exactly as one
   // inside the clause, and the phrase itself is core-stripped out of it.
   const receiptLead = receipt[0].slice(0, receipt[0].length - clause.length);
-  if (contradictsThePhrase(receiptLead + judgedClause))
-    return unknown('receipt clause not substantive');
+  // Each bar names ITSELF (#9259 — the #9206 diagnostic exists so a
+  // silent never-retire can be told apart; one collapsed name hid which
+  // bar a return fell at). No token spans the lead/clause boundary (the
+  // separator's trailing `[ \t]*` sits between them), so testing the lead
+  // and the clause separately classifies identically to the combined
+  // domain this replaces.
+  if (contradictsThePhrase(receiptLead))
+    return unknown('receipt lead contradicts the phrase');
+  if (contradictsThePhrase(judgedClause))
+    return unknown('receipt clause contradicts the phrase');
   if (!namesTheWalk(judgedClause))
-    return unknown('receipt clause not substantive');
+    return unknown('receipt clause names no walk');
   if (!substantiveClause(judgedClause))
-    return unknown('receipt clause not substantive');
+    return unknown('receipt clause too thin');
   return { outcome: 'dry', failure: null };
 }
 
