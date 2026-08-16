@@ -89,6 +89,7 @@ import {
   type RepositoryContext,
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
+import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
@@ -146,6 +147,7 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
+  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
@@ -1526,7 +1528,40 @@ export function buildRoleBrief(
           `\`${wt}\`. Do not \`cd\` elsewhere and do not build the user's main checkout.`,
       );
     }
-    const base = report.mergeBaseSha;
+    // On a delta-scoped incremental round the probe's range must match the
+    // round's scope: test-efficacy recomputes its own diff as base..HEAD, and
+    // handed the merge base it would reverse hunks and delete mutants from
+    // commits an earlier round already reviewed — spending the probe budget
+    // out of scope and reporting survivors this round's diff never contains.
+    const inc = report.incremental as
+      | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
+      | undefined;
+    // Shape-checked, not merely non-empty. This value is interpolated
+    // UNQUOTED into the fenced bash block below, which the agent runs with a
+    // 600s budget, so `typeof === 'string'` is not the guard it looks like:
+    // `abc123; touch /tmp/pwned` is a non-empty string and passed every
+    // conjunct. `SHA_RE` is the same predicate the anchor itself must satisfy,
+    // and it subsumes the emptiness check.
+    //
+    // This falls back where the sibling `host` guard above throws, and the
+    // difference is that a fallback exists here: the merge base is what every
+    // non-incremental round already welds, so a plan whose `diffBase` is not a
+    // sha costs a wider probe scope rather than the round. `host` has no such
+    // second-best — a wrong hostname reroutes the evidence fetch — so it
+    // refuses instead.
+    //
+    // BOTH sources, not just the anchor. `mergeBaseSha` reaches the same
+    // unquoted interpolation on every non-incremental round — the common case
+    // — and the plan is `JSON.parse`d with no field validation on this path,
+    // so shape-checking one source and not the other leaves the wider door
+    // open. A base that is not a sha emits no probe block at all, which is
+    // already what a report with no merge base does.
+    const shaOrNull = (v: unknown): string | null =>
+      typeof v === 'string' && SHA_RE.test(v) ? v : null;
+    const base =
+      inc?.effective === true && inc.upToDate !== true
+        ? (shaOrNull(inc.diffBase) ?? shaOrNull(report.mergeBaseSha))
+        : shaOrNull(report.mergeBaseSha);
     const pr = report.prNumber;
 
     // The tree build-test builds in. A PR review has a worktree; a **local** review

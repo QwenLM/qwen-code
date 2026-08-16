@@ -9,15 +9,23 @@
   },
   "scripts": {
     "clean": "node -e \"const fs=require('node:fs'); fs.rmSync('dist',{recursive:true,force:true}); fs.rmSync('tsconfig.tsbuildinfo',{force:true})\"",
-    "build": "npm run clean && tsc --build",
+    "build": "npm run clean && tsc --build && npm --prefix examples/provider-extension-local run build",
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint src"
+    "typecheck": "tsc --noEmit && npm --prefix examples/provider-extension-local run typecheck",
+    "lint": "eslint src examples/provider-extension-local/src"
   },
   "files": [
+    "contracts",
     "dist",
-    "examples",
+    "examples/*.json",
+    "examples/provider-extension-local/README.md",
+    "examples/provider-extension-local/dist/main.js",
+    "examples/provider-extension-local/package.json",
+    "examples/provider-extension-local/qwen-extension.json",
+    "examples/provider-extension-local/src",
+    "examples/provider-extension-local/tsconfig.json",
+    "examples/provider-extension-remote",
     "qwen-extension.json",
     "README.md"
   ],
@@ -28,6 +36,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "ajv": "^8.17.1",
     "typescript": "^5.4.5",
     "vitest": "^3.2.4"
   }
