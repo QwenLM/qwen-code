@@ -4553,8 +4553,11 @@ jobs:
           # marker only after the agent's ~120-minute run, so a round in
           # flight when a concurrent base update lands would otherwise pass a
           # created_at filter while carrying pre-update sums (#9114 R2-6).
+          # Emitted ONLY when a measurement happened: an unmeasured attempt
+          # that still stamped would be explicit in the per-run collapse and
+          # displace the same run's real measurement (#9192 R4-3).
           MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
+          [[ "${NET_MEASURED}" == 'true' ]] && echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
           # NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an
           # author push) is deliberately NOT done here. The obvious signal —
           # comparing the checked-out head against the bot's last judged head
@@ -4657,10 +4660,16 @@ jobs:
           # under budget would still be represented by its stale over=true
           # attempt. Within the collapse an explicit measured= beats the
           # created_at fallback: a re-run attempt that crashed BEFORE prepare
-          # posts an inert over=false marker with no measured=, whose fallback
-          # (post-run) timestamp would otherwise outdate and erase the same
-          # run's real prepare-time measurement. Every distinct address run
-          # has a fresh run_id.
+          # — or whose measurement failed — posts an inert over=false marker
+          # with no measured=, whose fallback (post-run) timestamp would
+          # otherwise outdate and erase the same run's real prepare-time
+          # measurement. Every distinct address run has a fresh run_id.
+          # KNOWN RESIDUAL (#9114): during the one-time deploy transition a
+          # run whose FIRST attempt posted a legacy (no measured=) over=true
+          # marker and whose re-run crashes before prepare still collapses
+          # fallback-vs-fallback on created_at — the later inert marker wins
+          # and erases the count. Self-limiting: once deployed, every real
+          # measurement carries measured= and beats any inert marker.
           # round=/eval-watermark are NOT a safe identity — a state-triggered
           # lane (a persistent merge conflict selects the PR every scan with no
           # new evaluable feedback) freezes both NEWEST and ROUND, so distinct
@@ -4668,10 +4677,19 @@ jobs:
           # Filtered on measured= (the prepare-time measurement instant, NOT
           # the comment's post-agent created_at) after GROWTH_NOW_CUTOFF, so a
           # prior sum measured against a pre-base-update tree is dropped rather
-          # than compared to this round's. measured= is OPTIONAL in the scan:
+          # than compared to this round's. KNOWN RESIDUAL (#9114): the tree is
+          # fixed at the branch fetch/checkout while the cutoff comes from
+          # ic.json fetched afterwards, so a base update landing between the
+          # fetch and the measured_at stamp admits a pre-update marker;
+          # self-heals at the next re-arm/base update. measured= is OPTIONAL in
+          # the scan:
           # markers posted before it existed fall back to their comment's
           # created_at, so deploying this does not blank the census of a window
-          # that is already in flight.
+          # that is already in flight. KNOWN RESIDUAL (#9114): during that
+          # transition the sort mixes two clocks — a legacy marker's fallback
+          # is its POST-RUN created_at while a new marker stamps prepare time —
+          # so PREV_SUM can briefly come from an older measurement; the count
+          # is unaffected and it self-heals at the next re-arm/base update.
           # The "not shrinking" test compares against the MOST RECENT prior
           # over-budget run's sum (latest measured=), not the window-wide max: a
           # single transient spike would otherwise raise the bar forever and a
@@ -5908,7 +5926,7 @@ jobs:
               # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
               # job re-run re-posts the same run; measured= orders and picks
               # that run's latest attempt).
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -5941,7 +5959,7 @@ jobs:
               # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
               # job re-run re-posts the same run; measured= orders and picks
               # that run's latest attempt).
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi

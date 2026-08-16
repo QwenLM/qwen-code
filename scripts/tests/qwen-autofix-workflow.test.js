@@ -6486,6 +6486,22 @@ exit 1
         ],
       }),
     ).toBe('false 1');
+    // …and the boundary is STRICT: a marker measured exactly AT the cutoff
+    // is dropped as incomparable (at second granularity a same-second stamp
+    // and base-update comment can collide) — a `>` → `>=` flip ships green
+    // without this pin (#9192 R4-7).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          marker(500, 300, 'true', 1, 'W1', {
+            measured: '2026-01-01T12:00:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 0');
     // A re-run whose FRESH attempt came back under budget must not be
     // represented by its own stale over=true attempt: the per-run collapse
     // happens BEFORE the over-filter, so the run drops out entirely.
@@ -6578,29 +6594,6 @@ exit 1
         ],
       }),
     ).toBe('false 0');
-    // An INERT marker (the failure path posts one with no measured= when
-    // prepare never ran, so it carries src/test 0 and over=false) must not
-    // erase a real over-budget measurement for the SAME run: its created_at
-    // fallback is ~2h later than the prepare-time measured= it would displace,
-    // so the collapse prefers the marker that actually measured something.
-    // Dropping `.explicit` from the collapse key silently loses the count.
-    expect(
-      diverge({
-        src: 999,
-        test: 999,
-        history: [
-          marker(500, 300, 'true', 2, 'W1', {
-            run: 1001,
-            measured: '2026-01-01T00:01:00Z',
-          }),
-          {
-            user: { login: 'qwen-code-dev-bot' },
-            created_at: '2026-01-01T02:00:00Z',
-            body: '<!-- autofix-growth-now src=0 test=0 over=false round=2 run=1001 key=W1 -->',
-          },
-        ],
-      }),
-    ).toBe('false 1');
     // Backward compatibility: a marker posted BEFORE measured= existed still
     // counts, falling back to its comment's created_at — deploying the
     // measured= switch must not blank the census of an in-flight window.
@@ -6717,10 +6710,12 @@ exit 1
     expect(roundTrip('NEXT_ROUND')).toBe('false 1'); // push path
     expect(roundTrip('ROUND')).toBe('false 1'); // no-op path
     expect(roundTrip('MARK_ROUND')).toBe('false 1'); // failure/handoff path
-    // …and it still round-trips when prepare NEVER RAN (MEASURED_AT empty):
-    // measured= omits itself rather than emit an empty value no scan can
-    // match, so the marker survives on the created_at fallback instead of
-    // silently dropping (#9192 R2-1).
+    // …and it still round-trips when MEASURED_AT is empty — prepare never
+    // ran (#9192 R2-1) or the round could not measure (#9192 R4-3): measured=
+    // omits itself rather than emit an empty value no scan can match, so the
+    // marker survives on the created_at fallback instead of silently dropping.
+    expect(roundTrip('NEXT_ROUND', { omitMeasuredAt: true })).toBe('false 1');
+    expect(roundTrip('ROUND', { omitMeasuredAt: true })).toBe('false 1');
     expect(roundTrip('MARK_ROUND', { omitMeasuredAt: true })).toBe('false 1');
     rmSync(dir, { recursive: true, force: true });
 
@@ -6763,10 +6758,10 @@ exit 1
       expect(pushAndReportStep).toContain(bind);
     }
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // Both report STEPS bind MEASURED_AT (push+no-op share one env block, the
     // failure/handoff report has its own), so all three marker writers can
@@ -6786,6 +6781,27 @@ exit 1
     expect(prepMeasured).toBeLessThan(
       prepareBranchAndFeedbackStep.indexOf('echo "measured_at=${MEASURED_AT}"'),
     );
+    // …and the stamp is emitted ONLY when the round actually measured: an
+    // unmeasured re-run attempt must not gain an explicit measured= that the
+    // per-run collapse would prefer over the same run's real measurement
+    // (#9192 R4-3). Behavioral: execute the gated stamp both ways.
+    const stampGate = prepareBranchAndFeedbackStep.match(
+      /\[\[ "\$\{NET_MEASURED\}" == 'true' \]\] && echo "measured_at=\$\{MEASURED_AT\}" >> "\$\{GITHUB_OUTPUT\}"/,
+    )?.[0];
+    expect(stampGate).toBeTruthy();
+    const stampedFor = (netMeasured) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\nout="$(mktemp)"\nNET_MEASURED=${netMeasured}\n` +
+            `MEASURED_AT=2026-01-01T00:05:00Z\nGITHUB_OUTPUT="$out"\n` +
+            `${stampGate} || true\ncat "$out"\nrm -f "$out"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    expect(stampedFor('true')).toBe('measured_at=2026-01-01T00:05:00Z\n');
+    expect(stampedFor('false')).toBe('');
     // The head-move re-anchor is deliberately NOT in this change (see #9114):
     // the redcheck head is the pre-push judged head, so comparing against it
     // would re-anchor on the bot's own pushes and zero the census.
