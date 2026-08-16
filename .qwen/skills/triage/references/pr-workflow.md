@@ -298,53 +298,56 @@ classification evidence — read the diff.
 **Triage-only outcome (terminal — no review submitted):**
 
 1. Apply the existing label (never create one) AND pin the skip to the
-   triaged head SHA with a marker comment — the review lane honours the
-   label only while this pin matches the live head, so a later push
+   triaged head/base SHA pair with a marker comment — the review lane honours the
+   label only while this pin matches the live head and base, so a later push or retarget
    re-enables review automatically (#9193):
 
 ```bash
-printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md
+BASE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseRefOid') || exit 1
+[ -n "$BASE_SHA" ] || { echo 'empty base SHA — fail closed'; exit 1; }
+printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md
 .github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' /tmp/qwen-triage-on-hold-marker.md
-gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
+gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f labels[]='status/on-hold'
 ```
 
-   Fail closed, in this order: post the marker FIRST. If the upsert fails
-   (retries exhausted), stop — do not apply the label and do not post the
-   triage-only outcome. If the label application fails AFTER the pin
-   posted, stop the same way — do not post the outcome: an orphaned pin
-   alone cannot skip (the gate requires the label too), and a re-run of
-   the triage upserts the same pin in place and retries the label; but an
-   outcome posted without the label would promise a skip the gate does
-   not grant. The review-lane gate requires the label AND a pin
-   matching the live head (a label without the pin runs the review lane),
-   so the harm of a partial state is not a silent skip — it is the inverse:
-   the outcome comment promises that no review verdict will post
-   automatically while the unpinned label leaves the automatic lane
-   running on every push, and the label alone reads as "parked" with no
-   pin to explain why. All three — pin, label, outcome — post together or
-   not at all.
+Fail closed, in this order: post the marker FIRST. If the upsert fails
+(retries exhausted), stop — do not apply the label and do not post the
+triage-only outcome. If the label application fails AFTER the pin
+posted, stop the same way — do not post the outcome: an orphaned pin
+alone cannot skip (the gate requires the label too), and a re-run of
+the triage upserts the same pin in place and retries the label; but an
+outcome posted without the label would promise a skip the gate does
+not grant. The review-lane gate requires the label AND a pin
+matching the live head (a label without the pin runs the review lane),
+so the harm of a partial state is not a silent skip — it is the inverse:
+the outcome comment promises that no review verdict will post
+automatically while the unpinned label leaves the automatic lane
+running on every push, and the label alone reads as "parked" with no
+pin to explain why. All three — pin, label, outcome — post together or
+not at all.
 
-   `<HEAD_SHA>` is the head commit you triaged — the same SHA quoted in the
-   Stage 1 "Reviewed at" footer. Post the marker through the author-scoped
-   upsert helper (never a bare `gh pr comment`): a re-run of the same
-   triage then PATCHes the existing marker in place instead of minting a
-   byte-identical duplicate, and a later triage of a new head updates the
-   same comment to the new pin. The lookup marker is the SHA-less prefix
-   so the existing comment is found across heads.
+`<HEAD_SHA>` is the head commit you triaged — the same SHA quoted in the
+Stage 1 "Reviewed at" footer. Post the marker through the author-scoped
+upsert helper (never a bare `gh pr comment`): a re-run of the same
+triage then PATCHes the existing marker in place instead of minting a
+byte-identical duplicate, and a later triage of a new head updates the
+same comment to the new pin. The lookup marker is the SHA-less prefix
+so the existing comment is found across heads.
 
 2. Post the Stage 1 comment using the triage-only variant below.
 3. Stop — no Stage 2, no Stage 3, no approval, no CHANGES_REQUESTED.
 
 The automated review workflow checks the live `status/on-hold` label AND the
 marker pin before invoking the model and skips the automatic lane only while
-the marker's SHA matches the live head (`qwen-code-pr-review.yml`, 'Resolve
-PR context'). Triage does not re-run on `synchronize`, so a push after the
-triage-only outcome invalidates the pin and the new diff receives the full
-review — a benign v1 must not grant later pushes a silent bypass. Maintainers
-pull a full review at any time with `@qwen-code /review` — explicit triggers
-bypass the label check — and removing the label re-enables the automatic lane
-on the next push. A manually applied `status/on-hold` carries no marker and
-never skips. Nothing here blocks merging or closes the PR.
+the marker's SHA pair matches the live head and base (`qwen-code-pr-review.yml`,
+'Resolve PR context'). Triage does not re-run on `synchronize` or base retarget,
+so either change after the triage-only outcome invalidates the pin and the new
+diff receives the full review — a benign v1 must not grant later content or
+base changes a silent bypass. Maintainers pull a full review at any time with
+`@qwen-code /review` — explicit triggers bypass the label check — and removing
+the label re-enables the automatic lane on the next push. A manually applied
+`status/on-hold` carries no marker and never skips. Nothing here blocks merging
+or closes the PR.
 
 ```markdown
 <!-- qwen-triage stage=1 -->

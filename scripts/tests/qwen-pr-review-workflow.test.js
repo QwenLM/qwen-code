@@ -2538,6 +2538,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     markersFail = false,
     triggerBody = '',
     headSha = 'abc123def456',
+    baseSha = 'base777',
     onHoldMarkers = [],
     markerPadBytes = 0,
   }) {
@@ -2583,7 +2584,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             '    if [ "${CONTEXT_MARKERS_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi',
             '    node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author)) console.log(row.body);\'',
             '    if [ "${CONTEXT_MARKER_PAD:-0}" != "0" ]; then head -c "$CONTEXT_MARKER_PAD" /dev/zero | tr "\\\\0" "x"; echo; fi ;;',
-            '  *pulls/*) printf \'%s\\n\' "$CONTEXT_HEAD_SHA" ;;',
+            '  *pulls/*) printf \'%s\\t%s\\n\' "$CONTEXT_HEAD_SHA" "$CONTEXT_BASE_SHA" ;;',
             '  *) ;;',
             'esac',
             '',
@@ -2608,6 +2609,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
         CONTEXT_MARKERS_FAIL: markersFail ? '1' : '0',
         CONTEXT_MARKER_PAD: String(markerPadBytes),
         CONTEXT_HEAD_SHA: headSha,
+        CONTEXT_BASE_SHA: baseSha,
         CONTEXT_GH_CALLS: callsFile,
       },
     });
@@ -2624,7 +2626,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       eventName: 'pull_request_target',
       labels: ['type/bug', 'status/on-hold'],
       headSha: 'abc123def456',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
+      ],
     });
     expect(r.output).toContain('should_run=false');
     expect(r.output).not.toContain('should_run=true');
@@ -2660,7 +2664,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
       headSha: 'abc123def456',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
+      ],
       // The stub emits a further 300 KB bot comment body (the round-3
       // probe size), generated inside the stub so the step's $MARKERS can
       // exceed the env-string limit the harness itself is bound by.
@@ -2676,10 +2682,27 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
       headSha: 'newhead999',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=oldhead111 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=oldhead111 base=base777 -->',
+      ],
     });
     expect(r.output).toContain('should_run=true');
-    expect(r.summary).toContain('not pinned to the live head');
+    expect(r.summary).toContain('not pinned to the live head/base');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('a base retarget after triage invalidates the pin (#9193)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'abc123def456',
+      baseSha: 'newbase888',
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=oldbase111 -->',
+      ],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('not pinned to the live head/base');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2690,7 +2713,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       onHoldMarkers: [],
     });
     expect(r.output).toContain('should_run=true');
-    expect(r.summary).toContain('not pinned to the live head');
+    expect(r.summary).toContain('not pinned to the live head/base');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2702,30 +2725,32 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       onHoldMarkers: [
         {
           author: 'contributor',
-          body: '<!-- qwen-triage on-hold sha=abc123def456 -->',
+          body: '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
         },
       ],
     });
     expect(r.output).toContain('should_run=true');
-    expect(r.summary).toContain('not pinned to the live head');
+    expect(r.summary).toContain('not pinned to the live head/base');
     expect(r.ghCalls).toContain(
       'select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot")',
     );
     rmSync(r.dir, { recursive: true, force: true });
   });
 
-  it('fails open when the live head SHA is unreadable (#9193)', () => {
+  it('fails open when the live head/base SHA is unreadable (#9193)', () => {
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
       headSha: '',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
+      ],
     });
     expect(r.output).toContain('should_run=true');
-    // An unreadable head is reported as such — never as a stale pin, which
+    // An unreadable head/base is reported as such — never as a stale pin, which
     // would assert a mismatch that was never observed (R5-4, #9193 review).
-    expect(r.summary).toContain('live head SHA was unreadable');
-    expect(r.summary).not.toContain('not pinned to the live head');
+    expect(r.summary).toContain('live head/base SHA was unreadable');
+    expect(r.summary).not.toContain('not pinned to the live head/base');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2737,7 +2762,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       eventName: 'pull_request_target',
       labels: ['status/on-hold-extended'],
       headSha: 'abc123def456',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
+      ],
     });
     expect(r.output).toContain('should_run=true');
     rmSync(r.dir, { recursive: true, force: true });
@@ -2751,7 +2778,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       eventName: 'pull_request_target',
       labels: ['type/bug'],
       headSha: 'abc123def456',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
+      ],
     });
     expect(r.output).toContain('should_run=true');
     expect(r.output).toContain('auto_review=true');
@@ -2774,17 +2803,19 @@ describe('qwen pr review triage-only skip (#7411)', () => {
 
   it('fails open: unreadable marker comments never skip and never masquerade as a stale pin (#9193)', () => {
     // Labels read fine but the comments read fails: before R5-4 this
-    // reported "not pinned to the live head" — a mismatch never observed.
+    // reported "not pinned to the live head/base" — a mismatch never observed.
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['status/on-hold'],
       headSha: 'abc123def456',
-      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=base777 -->',
+      ],
       markersFail: true,
     });
     expect(r.output).toContain('should_run=true');
     expect(r.summary).toContain('marker comments were unreadable');
-    expect(r.summary).not.toContain('not pinned to the live head');
+    expect(r.summary).not.toContain('not pinned to the live head/base');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2816,13 +2847,17 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(writerMatch).not.toBeNull();
     const writerPrefix = writerMatch[1];
     // The marker template in the same doc leads with the same prefix.
-    expect(skillDoc).toContain('<!-- ' + writerPrefix + '<HEAD_SHA> -->');
-    // The gate matches that exact prefix, keyed to the live head.
+    expect(skillDoc).toContain(
+      '<!-- ' + writerPrefix + '<HEAD_SHA> base=<BASE_SHA> -->',
+    );
+    // The gate matches that exact prefix, keyed to the live head/base pair.
     const doc = parse(workflow);
     const step = doc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Resolve PR context',
     );
-    expect(step.run).toContain('*"' + writerPrefix + '${HEAD_SHA}"*');
+    expect(step.run).toContain(
+      '*"' + writerPrefix + '${HEAD_SHA} base=${BASE_SHA}"*',
+    );
   });
 
   it('never skips an explicit /review ask, whatever the labels say', () => {

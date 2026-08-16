@@ -6044,7 +6044,7 @@ describe('triage skill non-functional routing (#7411)', () => {
   it('reuses the existing on-hold label and stops before Stage 2', () => {
     const section = stage1f();
     expect(section).toContain(
-      'gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label \'status/on-hold\'',
+      'gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f labels[]=\'status/on-hold\'',
     );
     expect(section).toContain('never create one');
     expect(section).toContain('no Stage 2, no Stage 3, no approval');
@@ -6060,15 +6060,16 @@ describe('triage skill non-functional routing (#7411)', () => {
     // The marker posts through the author-scoped upsert helper (never a bare
     // `gh pr comment`) so a re-run PATCHes the existing pin in place.
     expect(section).toContain(
-      "printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md",
+      "printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md",
     );
     expect(section).toContain(
       '.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" \'qwen-triage on-hold sha=\' /tmp/qwen-triage-on-hold-marker.md',
     );
     expect(section).toContain(
-      "skips the automatic lane only while the marker's SHA matches the live head",
+      "skips the automatic lane only while the marker's SHA pair matches the live head and base",
     );
     expect(section).toContain('Triage does not re-run on `synchronize`');
+    expect(section).toContain('or base retarget');
     expect(section).toContain('carries no marker and never skips');
   });
 

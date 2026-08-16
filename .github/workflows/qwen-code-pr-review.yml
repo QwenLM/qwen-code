@@ -583,20 +583,21 @@ jobs:
             if [ "$LABELS_READ_OK" = false ]; then
               echo "status/on-hold skip gate: label read failed — failing open, running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
             elif grep -Fxq 'status/on-hold' <<< "$LABELS"; then
-              HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+              PR_REFS="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .base.sha] | @tsv' 2>/dev/null || true)"
+              IFS=$'\t' read -r HEAD_SHA BASE_SHA <<< "$PR_REFS"
               MARKERS_READ_OK=true
               MARKERS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot") | .body' 2>/dev/null)" || MARKERS_READ_OK=false
-              if [ -n "$HEAD_SHA" ] && [ "$MARKERS_READ_OK" = true ] && [[ "$MARKERS" == *"qwen-triage on-hold sha=${HEAD_SHA}"* ]]; then
-                echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold pinned to head ${HEAD_SHA} (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
+              if [ -n "$HEAD_SHA" ] && [ -n "$BASE_SHA" ] && [ "$MARKERS_READ_OK" = true ] && [[ "$MARKERS" == *"qwen-triage on-hold sha=${HEAD_SHA} base=${BASE_SHA}"* ]]; then
+                echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold pinned to head ${HEAD_SHA} and base ${BASE_SHA} (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
                 echo "should_run=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
-              if [ -z "$HEAD_SHA" ]; then
-                echo "status/on-hold present but the live head SHA was unreadable — failing open, running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
+              if [ -z "$HEAD_SHA" ] || [ -z "$BASE_SHA" ]; then
+                echo "status/on-hold present but the live head/base SHA was unreadable — failing open, running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
               elif [ "$MARKERS_READ_OK" = false ]; then
                 echo "status/on-hold present but the marker comments were unreadable — failing open, running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
               else
-                echo "status/on-hold present but not pinned to the live head (${HEAD_SHA}) — running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
+                echo "status/on-hold present but not pinned to the live head/base (${HEAD_SHA}/${BASE_SHA}) — running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
           fi
