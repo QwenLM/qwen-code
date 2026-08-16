@@ -3320,6 +3320,65 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
+  it('resolves a shared mediaId once across all drained messages', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionMediaStore();
+    try {
+      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const read = vi.spyOn(media, 'read');
+      const entry = {
+        sessionId: 'sess:shared-media',
+        midTurnMessageQueue: [
+          { messageId: 'mid-a', text: 'a', content: [reference] },
+          { messageId: 'mid-b', text: 'b', content: [reference] },
+          { messageId: 'mid-c', text: 'c', content: [reference] },
+          { messageId: 'mid-d', text: 'd', content: [reference] },
+        ],
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        media,
+      };
+      const client = makeClientWithEntry('sess:shared-media', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:shared-media',
+        }),
+      ).resolves.toMatchObject({
+        items: [
+          {
+            content: [
+              { type: 'text', text: 'a' },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+          },
+          {
+            content: [
+              { type: 'text', text: 'b' },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+          },
+          {
+            content: [
+              { type: 'text', text: 'c' },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+          },
+          {
+            content: [
+              { type: 'text', text: 'd' },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+          },
+        ],
+      });
+      // Every message resolves the block, but the shared blob is read from
+      // disk exactly once for the whole drain.
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      await media.close();
+    }
+  });
   it('claims drained ids before media resolution yields', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

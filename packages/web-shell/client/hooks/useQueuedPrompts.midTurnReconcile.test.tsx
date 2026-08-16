@@ -2211,4 +2211,242 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await harness.dispose();
     }
   });
+
+  it('upgrades a degraded row once a later snapshot hydrates the media', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-degraded',
+          text: 'degraded note',
+          content: [
+            {
+              type: 'text',
+              text: '[Attached media is no longer available]',
+            },
+          ],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      let row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        midTurnMessageId: 'm-degraded',
+        payloadCompleteness: 'summary-only',
+      });
+      expect(row?.images).toBeUndefined();
+
+      // The daemon still holds the media; the next reconciliation hydrates it,
+      // so the provisional degradation must clear and the payload returns.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [
+          {
+            messageId: 'm-degraded',
+            text: 'degraded note',
+            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+          },
+        ],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      });
+      await harness.render({
+        streamingState: 'responding',
+        connected: false,
+      });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        midTurnMessageId: 'm-degraded',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
+      });
+      expect(row?.payloadCompleteness).not.toBe('summary-only');
+
+      // The row is editable again: editing restores text + images.
+      await act(async () => {
+        void harness.result().editQueuedPrompt(row!.id);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.editor.setText).toHaveBeenCalledWith('degraded note');
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('echoes text and images when a promoted media message starts', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      let messageId: string | undefined;
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+        (_message: string, opts?: { messageId?: string }) => {
+          messageId = opts?.messageId;
+          return Promise.resolve({
+            accepted: true,
+            messageId: opts?.messageId,
+          });
+        },
+      );
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('look at this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: messageId,
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: messageId,
+              text: 'look at this',
+            },
+          },
+        ]);
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'look at this',
+        [{ data: 'aW1n', mimeType: 'image/png' }],
+        undefined,
+        undefined,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('echoes an image-only message when its promoted turn starts', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      let messageId: string | undefined;
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+        (_message: string, opts?: { messageId?: string }) => {
+          messageId = opts?.messageId;
+          return Promise.resolve({
+            accepted: true,
+            messageId: opts?.messageId,
+          });
+        },
+      );
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('', [{ data: 'aW1n', media_type: 'image/png' }]);
+      });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: messageId,
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: messageId,
+              text: '',
+            },
+          },
+        ]);
+      });
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        '',
+        [{ data: 'aW1n', mimeType: 'image/png' }],
+        undefined,
+        undefined,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores the draft when the session changes before upload reaches the daemon', async () => {
+    let finishUpload:
+      | ((reference: {
+          type: 'image';
+          mediaId: string;
+          mimeType: string;
+          size: number;
+        }) => void)
+      | undefined;
+    sdkMock.actions.uploadMedia.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ sessionId: 'session-a' });
+      act(() => {
+        harness
+          .result()
+          .enqueuePrompt('keep this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await harness.render({ sessionId: 'session-b' });
+      await act(async () => {
+        finishUpload?.({
+          type: 'image',
+          mediaId: 'media-a',
+          mimeType: 'image/png',
+          size: 3,
+        });
+        await Promise.resolve();
+      });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      // Nothing reached the daemon, so the draft comes back and the stale
+      // admission is dropped instead of leaking into the other session.
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.editor.setText).toHaveBeenCalledWith('keep this');
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
+      expect(harness.reportError).toHaveBeenCalled();
+
+      // Returning to session A must not materialize an unresolvable row.
+      await harness.render({ sessionId: 'session-a' });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
 });

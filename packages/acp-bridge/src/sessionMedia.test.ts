@@ -5,6 +5,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
   SESSION_MEDIA_MAX_ITEM_BYTES,
@@ -70,6 +71,35 @@ describe('SessionMediaStore', () => {
     }
   });
 
+  it('shares reads across resolveContent calls via a caller-supplied memo', async () => {
+    const store = new SessionMediaStore();
+    const readFile = vi.spyOn(fs, 'readFile');
+    try {
+      const reference = await store.put(
+        Uint8Array.from([1, 2, 3]),
+        'image/png',
+      );
+      readFile.mockClear();
+
+      const memo = new Map<string, Promise<ContentBlock>>();
+      const block = {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+      };
+      expect(await store.resolveContent([reference], memo)).toEqual([block]);
+      expect(await store.resolveContent([reference], memo)).toEqual([block]);
+      expect(readFile).toHaveBeenCalledTimes(1);
+
+      // Omitting the memo keeps the per-call default: a fresh map, so the
+      // blob is read again.
+      expect(await store.resolveContent([reference])).toEqual([block]);
+      expect(readFile).toHaveBeenCalledTimes(2);
+    } finally {
+      readFile.mockRestore();
+      await store.close();
+    }
+  });
   it('keeps media for the lifetime of the store', async () => {
     const store = new SessionMediaStore();
     try {

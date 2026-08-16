@@ -160,10 +160,13 @@ export class SessionMediaStore {
 
   async resolveContent(
     content: ReadonlyArray<ContentBlock | SessionMediaReference>,
+    memo?: Map<string, Promise<ContentBlock>>,
   ): Promise<ContentBlock[]> {
     // Resolve each distinct mediaId once: duplicate references share the read
-    // and base64 encode instead of amplifying heap per occurrence.
-    const pendingByMediaId = new Map<string, Promise<ContentBlock>>();
+    // and base64 encode instead of amplifying heap per occurrence. Callers
+    // resolving several messages in one batch can pass a shared `memo` so a
+    // mediaId referenced from different messages is also read only once.
+    const pendingByMediaId = memo ?? new Map<string, Promise<ContentBlock>>();
     return await Promise.all(
       content.map(async (block) => {
         if (!isSessionMediaReference(block)) return block;

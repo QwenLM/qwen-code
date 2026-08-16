@@ -1257,6 +1257,10 @@ export class BridgeClient implements Client {
         );
       }
     }
+    // Shared across every message in this drain: one stored mediaId that
+    // several queued messages reference is read and base64-encoded once
+    // instead of once per message.
+    const mediaMemo = new Map<string, Promise<ContentBlock>>();
     const items: Array<{
       messageId: string;
       displayText: string;
@@ -1275,7 +1279,10 @@ export class BridgeClient implements Client {
               ...(item.text
                 ? [{ type: 'text' as const, text: item.text }]
                 : []),
-              ...(await entry.media.resolveContent(item.content ?? [])),
+              ...(await entry.media.resolveContent(
+                item.content ?? [],
+                mediaMemo,
+              )),
             ],
             ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
           };

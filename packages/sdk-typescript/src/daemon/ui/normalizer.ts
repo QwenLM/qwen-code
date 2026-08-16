@@ -62,6 +62,8 @@ const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
+const MEDIA_UNAVAILABLE_TEXT = '[Attached media is no longer available]';
+
 export function normalizeDaemonEvent(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions = {},
@@ -734,6 +736,24 @@ function parseTimestamp(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/**
+ * True for the session-media reference shape (`mediaId` instead of inline
+ * data/url/source) that replay producers persist for uploaded attachments.
+ * `extractContentPart` cannot render it; see the `user_message_chunk` case
+ * below for how it degrades instead of vanishing.
+ */
+function isMediaReferenceContent(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value['type'] === 'image' &&
+    typeof value['mediaId'] === 'string' &&
+    (value['mediaId'] as string).length > 0 &&
+    value['data'] === undefined &&
+    value['url'] === undefined &&
+    value['source'] === undefined
+  );
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -805,6 +825,19 @@ function normalizeSessionUpdate(
             : [];
         }
         return [];
+      }
+      // Live consumers hydrate reference blocks before normalization; a path
+      // that reaches this point with one (offline record projection, failed
+      // hydrate) keeps the user's message visible via the placeholder.
+      if (isMediaReferenceContent(content)) {
+        return [
+          {
+            ...base,
+            type: 'user.text.delta',
+            text: MEDIA_UNAVAILABLE_TEXT,
+            ...(meta ? { meta } : {}),
+          },
+        ];
       }
       const text = getTextContent(content);
       return text

@@ -6500,6 +6500,46 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  it('normalizes a reference-only image block into the media-unavailable placeholder', () => {
+    // Replay producers persist uploaded attachments as media references
+    // (`mediaId`, no inline bytes). Paths that normalize without hydrating
+    // (offline record projections) must degrade to a visible placeholder
+    // instead of silently dropping the user's message.
+    expect(
+      normalizeDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+            _meta: {
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+              qwenTranscript: { sourceRecordIds: ['record-1'] },
+            },
+          },
+        },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'user.text.delta',
+        text: '[Attached media is no longer available]',
+        sourceRecordIds: ['record-1'],
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+  });
+
   it('normalizes an image-only mid-turn message without dropping its slot', () => {
     const data = {
       sessionId: 's1',

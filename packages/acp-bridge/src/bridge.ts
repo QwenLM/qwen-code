@@ -7152,15 +7152,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return;
       }
     }
-    void result.catch(async (error: unknown) => {
-      if (error instanceof SessionMediaReferenceError) {
-        try {
-          await sendFallback();
-          return;
-        } catch (fallbackError) {
-          error = fallbackError;
-        }
-      }
+    // SessionMediaReferenceError can no longer reject this result
+    // asynchronously: admission-time reference checks throw synchronously
+    // (handled above) and dispatch degrades in place.
+    void result.catch((error: unknown) => {
       writeStderrLine(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );
@@ -7959,9 +7954,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   : {}),
               },
               async () => {
-                const resolvedPrompt = await entry.media.resolveContent(
-                  req.prompt,
-                );
+                // Degrade in place, never by re-admission: a fallback
+                // re-admitted at the FIFO tail would double the terminal
+                // for this promptId, transpose the turn behind later
+                // prompts, and race the deferred close-on-prompt-complete
+                // on a detached session.
+                let dispatchBlocks = req.prompt;
+                let resolvedPrompt: ContentBlock[];
+                try {
+                  resolvedPrompt =
+                    await entry.media.resolveContent(dispatchBlocks);
+                } catch (error) {
+                  if (
+                    !isPromotedMidTurn ||
+                    !(error instanceof SessionMediaReferenceError)
+                  ) {
+                    throw error;
+                  }
+                  const text = extractPromptText(req.prompt);
+                  dispatchBlocks = [
+                    {
+                      type: 'text',
+                      text: text
+                        ? `${text}\n[Attached media is no longer available]`
+                        : '[Attached media is no longer available]',
+                    } as ContentBlock,
+                  ];
+                  resolvedPrompt =
+                    await entry.media.resolveContent(dispatchBlocks);
+                }
                 const normalized: PromptRequest = telemetry.injectPromptContext(
                   {
                     ...req,
@@ -8025,7 +8046,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
                   }
-                  const mediaReferences = req.prompt.filter(
+                  const mediaReferences = dispatchBlocks.filter(
                     isSessionMediaReference,
                   );
                   if (mediaReferences.length > 0) {
@@ -8084,7 +8105,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       entry,
                       {
                         ...promptRequest,
-                        prompt: req.prompt,
+                        prompt: dispatchBlocks,
                       },
                       pendingEntry.promptId,
                       originatorClientId,

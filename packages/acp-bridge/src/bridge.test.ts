@@ -28080,6 +28080,193 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('degrades media removed between admission and dispatch in place, keeping FIFO order and one terminal', async () => {
+    const prompts: unknown[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(req.prompt);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const events: BridgeEvent[] = [];
+    const sub = (async () => {
+      for await (const ev of bridge.subscribeEvents(session.sessionId)) {
+        events.push(ev);
+      }
+    })();
+    sub.catch(() => {});
+
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'p1' }] },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-p1' },
+    );
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    const reference = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(1),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    // Two undrained messages: at settle the first promotes to running and
+    // this one is admitted QUEUED behind it — the window in which its media
+    // can disappear after admission but before dispatch.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'm1',
+        { clientId: session.clientId },
+        'mid-m1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'mid-m1' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'm2',
+        { clientId: session.clientId },
+        'mid-m2',
+        { content: [reference] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'mid-m2' });
+
+    releases[0]!();
+    await first;
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+
+    await bridge.removeSessionMedia(session.sessionId, reference.mediaId, {
+      clientId: session.clientId,
+    });
+    // An ordinary prompt admitted after the media message must stay behind it.
+    const p3 = bridge.sendPrompt(
+      session.sessionId,
+      { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'p3' }] },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-p3' },
+    );
+
+    releases[1]!();
+    // The degraded prompt keeps its FIFO position instead of re-admitting at
+    // the tail behind p3.
+    await vi.waitFor(() => expect(prompts).toHaveLength(3));
+    expect(prompts[2]).toEqual([
+      {
+        type: 'text',
+        text: 'm2\n[Attached media is no longer available]',
+      },
+    ]);
+    releases[2]!();
+    await vi.waitFor(() => expect(prompts).toHaveLength(4));
+    expect(prompts[3]).toEqual([{ type: 'text', text: 'p3' }]);
+    releases[3]!();
+    await p3;
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+
+    // One terminal per promptId, and the degraded turn completes normally —
+    // a re-admitted fallback would publish turn_error then a second terminal.
+    const terminalsFor = (promptId: string) =>
+      events.filter(
+        (e) =>
+          (e.type === 'turn_complete' || e.type === 'turn_error') &&
+          e.promptId === promptId,
+      );
+    await vi.waitFor(() => {
+      for (const promptId of ['prompt-p1', 'mid-m1', 'mid-m2', 'prompt-p3']) {
+        const terms = terminalsFor(promptId);
+        expect(terms).toHaveLength(1);
+        expect(terms[0]?.type).toBe('turn_complete');
+      }
+      // No second admission: exactly one started event for the degraded turn.
+      expect(
+        events.filter(
+          (e) => e.type === 'pending_prompt_started' && e.promptId === 'mid-m2',
+        ),
+      ).toHaveLength(1);
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('degrades in place on a fully detached session instead of racing the deferred close', async () => {
+    const prompts: unknown[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(req.prompt);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'p1' }] },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-p1' },
+    );
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    const reference = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(1),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'm1',
+        { clientId: session.clientId },
+        'detached-m1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'detached-m1' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'm2',
+        { clientId: session.clientId },
+        'detached-m2',
+        { content: [reference] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'detached-m2' });
+
+    // Fully detached from here: no attached clients and no subscribers.
+    await bridge.detachClient(session.sessionId, session.clientId);
+
+    releases[0]!();
+    await first;
+    // m1 promoted to running, m2 admitted queued behind it.
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+
+    // Media disappears between admission and dispatch (async arm).
+    await bridge.removeSessionMedia(session.sessionId, reference.mediaId);
+
+    releases[1]!();
+    // The degraded prompt must still reach the child — a re-admitted
+    // fallback loses the race with the deferred close-on-prompt-complete
+    // on a detached session and is swallowed by `session_closing`.
+    await vi.waitFor(() => expect(prompts).toHaveLength(3));
+    expect(prompts[2]).toEqual([
+      {
+        type: 'text',
+        text: 'm2\n[Attached media is no longer available]',
+      },
+    ]);
+    releases[2]!();
+    await vi.waitFor(() =>
+      expect(() => bridge.getSessionSummary(session.sessionId)).toThrow(
+        SessionNotFoundError,
+      ),
+    );
+    await bridge.shutdown();
+  });
+
   it('promotes every undrained message at settle', async () => {
     const releases: Array<() => void> = [];
     const handle = makeChannel({

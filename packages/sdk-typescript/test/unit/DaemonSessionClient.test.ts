@@ -489,6 +489,102 @@ describe('DaemonSessionClient', () => {
     ).toHaveLength(2);
   });
 
+  it('keeps replay media references retryable after a transient media failure', async () => {
+    let mediaRequests = 0;
+    const reference = {
+      type: 'image',
+      mediaId: 'flaky-media',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          clientId: 'client-1',
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: reference,
+                },
+              },
+            },
+            {
+              id: 2,
+              v: 1,
+              type: 'mid_turn_message_injected',
+              data: {
+                sessionId: 's-1',
+                messages: [''],
+                items: [{ content: [reference] }],
+              },
+            },
+          ],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/media/flaky-media')) {
+        mediaRequests += 1;
+        if (mediaRequests === 1) {
+          return jsonResponse(500, { error: 'boom' });
+        }
+        return new Response(Uint8Array.from([1, 2, 3]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/transcript')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          hasMore: false,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: reference,
+              },
+            },
+          ],
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+
+    // A transient failure must keep the reference (and its mediaId) in the
+    // snapshot so a later hydration pass can retry instead of pinning the
+    // permanent placeholder for the client's lifetime.
+    expect(session.replaySnapshot.compactedReplay[0]?.data).toEqual({
+      update: { sessionUpdate: 'user_message_chunk', content: reference },
+    });
+    expect(session.replaySnapshot.compactedReplay[1]?.data).toMatchObject({
+      items: [{ content: [reference] }],
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/flaky-media')),
+    ).toHaveLength(1);
+
+    const page = await session.getTranscriptPage();
+    expect(page.events[0]?.data).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/flaky-media')),
+    ).toHaveLength(2);
+  });
+
   it('evicts least-recently-used media when the cache byte cap is exceeded', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.includes('/session/s-1/media/')) {

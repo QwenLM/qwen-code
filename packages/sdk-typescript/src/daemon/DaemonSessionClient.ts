@@ -1152,11 +1152,21 @@ export class DaemonSessionClient {
     try {
       const media = await cached.pending;
       return { type: block.type, data: media.data, mimeType: media.mimeType };
-    } catch {
-      return {
-        type: 'text',
-        text: '[Attached media is no longer available]',
-      };
+    } catch (err) {
+      // 404/410 means the daemon no longer holds the blob, so pin the
+      // placeholder. Any other failure is transient: return the reference
+      // unchanged so the snapshot keeps its mediaId and a later hydration
+      // pass can retry (the failed cache entry evicted itself above).
+      if (
+        err instanceof DaemonHttpError &&
+        (err.status === 404 || err.status === 410)
+      ) {
+        return {
+          type: 'text',
+          text: '[Attached media is no longer available]',
+        };
+      }
+      return block;
     }
   }
 
