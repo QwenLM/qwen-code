@@ -304,6 +304,12 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**the blockers, the undecided-blocker list and the sentences that qualify the verdict never**',
     );
+    // The last-resort cut has its own order, and it is the opposite of the
+    // rung order above: there, the undecided list never yields; here, it is
+    // the first thing spent, because the author already has it.
+    expect(body).toContain(
+      "it spends the sentences the author already received in an earlier round — the undecided-blocker list — before this round's body Criticals",
+    );
     expect(body).toContain('You do not shorten anything yourself to help it');
     // Where a trimmed section can still be read is not uniform, and the
     // generalized promise ("stays whole in the artifact") is false for the

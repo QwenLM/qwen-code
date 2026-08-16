@@ -4967,8 +4967,21 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       fold: false,
       truncated: false,
     });
-    // The verdict line must not claim a list the body does not carry.
-    expect(verdictLine(r)).toContain('trimmed from the body');
+    // This plan is monolingual, so nothing may claim a translation was
+    // dropped — the body channel of the `hadFold` guarantee, which had no
+    // oracle at all.
+    expect(r.body).not.toContain(
+      'Chinese translation of this body was dropped',
+    );
+    // The verdict line must not claim a list the body does not carry —
+    // and its second half is the only pointer the author gets to where the
+    // list survived, so it is pinned whole, like every sibling verdict
+    // string in this file.
+    expect(verdictLine(r)).toContain(
+      '3 non-Critical finding(s) deferred under the convergence posture ' +
+        '(trimmed from the body to fit GitHub’s limit — whole in the ' +
+        'findings artifact)',
+    );
     expect(verdictLine(r)).not.toContain('listed in the body');
   });
 
@@ -5052,11 +5065,17 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // as real as an emoji in a quoted log line) puts a surrogate pair on the
     // boundary, where removing the guard leaves a lone high surrogate in the
     // posted body.
-    // The one-character prefix is load-bearing: without it the cut for this
-    // fixture lands BETWEEN pairs, and the test passes with the guard
-    // deleted. Shifting the boundary by one code unit puts it inside one.
+    // A BAND of pairs, not one boundary: calibrating the fixture to the
+    // exact cut position made the oracle depend on four remote constants,
+    // and a three-character change to the protected tail moved the cut
+    // clear of every pair — after which the guard could be deleted green.
+    // Anywhere in this band, the cut lands inside a pair.
     const r = composeReview(
-      base({ bodyCriticals: ['q' + '\u{20000}'.repeat(40_000)] }),
+      base({
+        bodyCriticals: [
+          'A'.repeat(40_000) + '\u{20000}'.repeat(20_000) + 'B'.repeat(20_000),
+        ],
+      }),
     );
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.body).toContain('was TRUNCATED to fit');
@@ -5074,23 +5093,37 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // One pass was not enough: quoted model text can already carry an
     // unpaired high, and a cut inside the astral pair that follows it leaves
     // TWO halves — removing one still posts invalid UTF-16.
+    // A band again, so no exact cut position is assumed. The band is full
+    // of PRE-EXISTING lone highs — the author's own bytes, which this code
+    // must not rewrite — so the oracle is the junction, not the whole body:
+    // whatever the cut ends on, the character handed to the tail must not
+    // be an unpaired half.
     const r = composeReview(
       base({
-        bodyCriticals: [
-          'A'.repeat(64_724) + '\uD800' + '\u{20000}' + 'B'.repeat(20_000),
-        ],
+        // A solid RUN of unpaired highs spanning the cut: wherever the cut
+        // lands inside it, one strip leaves another half, so a single-pass
+        // guard cannot pass. The alternating band did not force that —
+        // two cut positions in three were clean after one strip.
+        bodyCriticals: ['A'.repeat(60_000) + '\uD800'.repeat(20_000)],
       }),
     );
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.truncated).toBe(true);
-    expect(LONE_SURROGATE.test(r.body)).toBe(false);
+    const junction = r.body.indexOf('\n\n⚠️ This review body was TRUNCATED');
+    expect(junction).toBeGreaterThan(0);
+    // The cut can only orphan a HIGH half, so that is the whole invariant:
+    // the last character it hands to the tail must not be one.
+    expect(/[\uD800-\uDBFF]/.test(r.body.charAt(junction - 1))).toBe(false);
   });
 
-  it('spends ordinary prose before the undecided blockers — and stops claiming nothing blocking went', () => {
-    // The undecided-blocker list is the record of what the review could not
-    // clear. Untagged it sorted BELOW the body Criticals in the last-resort
-    // order and was spent first, under a notice that still read "Nothing
-    // blocking was trimmed" — a body that dropped a blocker while denying it.
+  it("spends the copy the author already has before this round's only copy", () => {
+    // Both are blocker-grade, so the cut has to choose. The undecided list
+    // was DELIVERED to the author in the round that raised it; this round's
+    // body Criticals exist nowhere the author can reach. So the undecided
+    // list goes first — and the notice stops claiming nothing blocking was
+    // trimmed, which is what was actually wrong when this shape first came
+    // up. Tying the two at `keep: 2` inverted the loss instead of fixing
+    // the claim.
     const r = composeReview(
       base({
         severityFloor: 'critical',
@@ -5102,9 +5135,16 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     );
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.truncated).toBe(true);
-    expect(r.body).toContain('ZZZ old blocker');
+    expect(r.body).toContain('C'.repeat(50_000));
+    expect(r.body).not.toContain('ZZZ old blocker');
     expect(r.body).not.toContain('Nothing blocking was trimmed');
     expect(r.body).toContain('was TRUNCATED to fit');
+    // The trim notice is `keep: 1` and must survive the cut that spent
+    // everything below it — without it the rank drops are disclosed
+    // nowhere in the posted body.
+    expect(r.body).toContain(
+      'the deferred-findings list and the not-reviewed and non-blocking disclosures did not fit',
+    );
     // The truncation exit dropped ranks on its way here, and owes the same
     // stderr line the rank loop pushes — a record naming only the cut
     // leaves the kinds it dropped disclosed nowhere but the body.
@@ -5293,6 +5333,10 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain('did not fit');
     expect(r.body).toContain('read them in the terminal report.');
     expect(r.body).not.toContain('findings artifact');
+    // The stderr twin carries the same condition and had no oracle: an
+    // operator sent to a list that does not exist is the same false record
+    // in the channel the operator actually reads.
+    expect(r.remediation.join('\n')).not.toContain('findings artifact');
   });
 
   it('keeps a verdict-qualifying opener that merges with nothing else', () => {
@@ -5315,6 +5359,30 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.bodyTrim.truncated).toBe(true);
     expect(r.body).toContain(
       'Review incomplete — unverified findings disclosed.',
+    );
+    // The standalone `keep: 1` disclosure beside it: untagged it sorts to
+    // tier 3 and the cut spends it before the blockers, posting a capped
+    // verdict with the reason amputated.
+    expect(r.body).toContain('still carried the');
+  });
+
+  it('keeps the unlicensed-deferral cap disclosure through a truncation', () => {
+    // The only standalone `keep: 1` clause reachable at rung 3. Untagged it
+    // sorts to tier 3 and the cut spends it before the blockers — posting a
+    // truncated body without the sentence that says the verdict is capped
+    // and findings may be under-posted, which the trim policy calls one of
+    // the things that never yields.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['B'.repeat(70_000)],
+        deferredSuggestions: [nit(1), nit(2)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain('deferred without a posture licence');
+    expect(r.body).toContain(
+      'this verdict is capped either way: findings may be under-posted this round',
     );
   });
 
@@ -5340,6 +5408,93 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).not.toContain('They are listed below');
   });
 
+  it('closes a code fence the cut left open, so the notice is not swallowed', () => {
+    // A blocker quoting code in a fenced block is the ordinary shape of a
+    // blocker. GFM extends an unclosed fence to the end of the document, so
+    // an unbalanced cut renders the truncation notice and the footer as
+    // code at the bottom of a multi-thousand-line block — the author reads
+    // a truncated body as a complete review.
+    const fenced = '```ts\n' + 'const x = 1;\n'.repeat(6_000);
+    const r = composeReview(base({ bodyCriticals: [fenced] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    // Balanced: an odd count would leave the tail inside the block.
+    expect(countOf(r.body, '```') % 2).toBe(0);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes an HTML comment the cut left open', () => {
+    // Worse than a fence: an unclosed `<!--` hides the notice, the footer
+    // and the ledger marker from the rendered page outright.
+    const commented = '<!-- reviewer note\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [commented] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(countOf(r.body, '<!--')).toBe(countOf(r.body, '-->'));
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('ranks the plan-gate disclosures with the not-reviewed ones, not with the deferral list', () => {
+    // `deferredBlock`, `testPlanBlock` and `repositoryContextBlock` all
+    // carry `trim: 2`, and no overflow fixture carried any of them — so
+    // both mutations shipped green: `2 → 1` drops the disclosure WITH the
+    // deferral display (inverting the documented order), and deleting the
+    // tag makes it un-trimmable, sending a borderline body to the cut.
+    const withContext = (blocker: string) =>
+      composeReview({
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          repositoryContext: {
+            version: 1,
+            provider: 'test',
+            label: 'guard',
+            domains: ['modeled-executable-system'],
+            relatedPaths: [],
+            recommendedTests: [],
+            requiredConfigurations: [],
+            requiredAgents: [],
+            unverifiedDimensions: ['crypto-boundary', 'ffi-boundary'],
+            verificationNotes: [],
+          },
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        severityFloor: 'critical',
+        bodyCriticals: [blocker],
+        deferredSuggestions: [nit(1), nit(2), nit(3)],
+      });
+
+    // Self-calibrating rather than pinned to a byte size: scan a range and
+    // require BOTH shapes to exist. `trim: 2 → 1` removes the first (the
+    // block would go with the deferral display); deleting the tag removes
+    // the second (the block would never yield).
+    // Fine-grained on purpose: the rank-1-only window is as wide as the
+    // deferral display itself (~750 chars), so a coarse scan steps over the
+    // shape that proves the ranks are distinct.
+    const runs = Array.from({ length: 61 }, (_, i) => 50_000 + i * 250).map(
+      (n) => withContext('B'.repeat(n)),
+    );
+    const survivesRank1 = runs.find(
+      (r) =>
+        r.bodyTrim.deferralList &&
+        !r.bodyTrim.truncated &&
+        r.body.includes('Repository proof boundary'),
+    );
+    const goesWithRank2 = runs.find(
+      (r) =>
+        r.bodyTrim.deferralList &&
+        !r.body.includes('Repository proof boundary'),
+    );
+    // The fixture must actually emit the block, or the test proves nothing.
+    expect(runs[0].bodyTrim.sections).toBe(0);
+    expect(runs[0].body).toContain('Repository proof boundary');
+    expect(survivesRank1).toBeDefined();
+    expect(goesWithRank2).toBeDefined();
+    expect(goesWithRank2!.bodyTrim.sections).toBeGreaterThan(
+      survivesRank1!.bodyTrim.sections,
+    );
+  });
+
   it('holds room for the ledger marker, so the POSTED body still fits', () => {
     // The marker is appended after the body composes, so the budget reserves
     // its cap — measured on the value `submit` actually posts.
@@ -5359,6 +5514,39 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       ),
     });
     expect(r.body).toContain('<!-- qwen-review-ledger ');
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    // Presence is not enough: this fixture truncates, and a marker moved
+    // inside the content the cut measures would be sliced — the prefix
+    // still matches `toContain` while the next round's `parseLedger`
+    // returns null and the whole cross-round work list is lost.
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(parseLedger(r.body)).not.toBeNull();
+  });
+
+  it('reserves the marker on the rung-2 exit too, not only on the cut', () => {
+    // Every other rank-dropping fixture uses a PR-less plan, where the
+    // reserve is 0. A PR-named body that fits AFTER a rank drop must be
+    // measured against the reserved budget: unreserved, it exits rung 2 at
+    // up to 65,024 chars, the marker rides on top, and the POST 422s —
+    // losing the review this whole file exists to deliver.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      bodyCriticals: ['B'.repeat(56_000)],
+      deferredSuggestions: [nit(1), nit(2), nit(3)],
+    });
+    expect(r.bodyTrim.deferralList).toBe(true);
+    expect(r.bodyTrim.truncated).toBe(false);
+    expect(r.body).toContain('<!-- qwen-review-ledger ');
+    expect(parseLedger(r.body)).not.toBeNull();
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
   });
 });

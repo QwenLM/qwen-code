@@ -340,6 +340,22 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
+  it('reads a null `fold` as no fold, like the shape it defaults for', () => {
+    // `??` accepts null as well as undefined, which is the module's stated
+    // absence semantics — and a future "check all four fields the same
+    // way" edit would turn a truthful null into a throw, losing the durable
+    // artifact of a review that posted fine.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      bodyTrim: { ...(verdict.bodyTrim as object), fold: null },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim.fold,
+    ).toBe(false);
+  });
+
   it('reads an absent `fold` as no fold — the first budget build did not record one', () => {
     // `fold` shipped a build later than its three siblings. A composed file
     // from that build is not malformed; it simply predates the field, and

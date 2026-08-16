@@ -1890,7 +1890,13 @@ function composeReviewBody(
       `trimmed does not fit the room this body has. Read the complete text in ` +
       `the terminal report and this run's findings artifact.`;
     const tail = `${hardNote}${footerTail}`;
-    let cut = head.slice(0, Math.max(0, bodyBudget - tail.length));
+    // Headroom for the closers below, so balancing the markup can never
+    // push the body back over the budget it was just cut to fit.
+    const CLOSER_RESERVE = 12;
+    let cut = head.slice(
+      0,
+      Math.max(0, bodyBudget - tail.length - CLOSER_RESERVE),
+    );
     // A loop, not one pass: the cut can only orphan a HIGH surrogate (it
     // takes a prefix, so no low half is ever separated from a high that
     // precedes it in the same string), but text the model quoted may already
@@ -1904,6 +1910,23 @@ function composeReviewBody(
     ) {
       cut = cut.slice(0, -1);
     }
+    // Close what the cut left open. A blocker quoting code in a fenced
+    // block is the ordinary shape of a blocker, and GFM extends an
+    // unclosed fence to the end of the document: the truncation notice and
+    // the footer then render INSIDE a multi-thousand-line code block, and
+    // the author reads a truncated body as a complete review. An unclosed
+    // `<!--` hides them outright. The machine channels read raw text and
+    // never cared; this is for the human reading the PR page.
+    // Counted anywhere, not only at line starts: a body Critical is
+    // rendered as `**[Critical]** <the model's text>`, so the fence opening
+    // its first line is mid-line by the time it reaches here.
+    const odd = (marker: string): boolean => cut.split(marker).length % 2 === 0;
+    const closers =
+      ((cut.match(/<!--/g) ?? []).length > (cut.match(/-->/g) ?? []).length
+        ? '\n-->'
+        : '') +
+      (odd('```') ? '\n```' : '') +
+      (odd('~~~') ? '\n~~~' : '');
     bodyTrim.truncated = true;
     noteTrimmedRanks(droppedRanks);
     remediation.push(
@@ -1912,7 +1935,7 @@ function composeReviewBody(
         `left by GitHub's ${BODY_MAX_CHARS}-character review limit, so the ` +
         `posted body is truncated`,
     );
-    return `${cut}${tail}`;
+    return `${cut}${closers}${tail}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
@@ -2166,15 +2189,20 @@ function composeReviewBody(
     cannotTell.length === 0
       ? []
       : [
-          // Blocker-grade retention: this is the list of things the review
-          // could not clear, and the tail cut must spend ordinary prose
-          // before it spends any of it. Untagged, it sorted BELOW the
-          // body Criticals and went first, under a notice that still said
-          // nothing blocking had been trimmed.
-          {
-            ...formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath)),
-            keep: 2,
-          },
+          // Deliberately untagged (rank 3, spent first by the last-resort
+          // cut). These entries are open blockers the review could not
+          // clear — and every one of them was DELIVERED to the author in
+          // the round that raised it, where this round's body Criticals are
+          // the only copy that exists. So when the cut has to choose, it
+          // spends the copy the author can still scroll up to.
+          //
+          // Tagging it `keep: 2` (tied with the body Criticals, and earlier
+          // in the parts array, so the stable sort protected it) inverted
+          // that and made this round's blockers the first thing spent. What
+          // was wrong in the shape that prompted the tag was the trim
+          // notice claiming "Nothing blocking was trimmed" over a cut —
+          // fixed where the claim is made, not by reordering the loss.
+          formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath)),
         ];
 
   // Model-written blockers: quoted as-is in both halves.
@@ -2937,10 +2965,7 @@ function mdField(s: unknown): string {
  * `agent-prompt` convention so a mid-flight upgrade finds the same file).
  */
 function scriptLintReportName(pr: unknown): string {
-  const positive =
-    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
-  return positive
+  return isPositivePrNumber(pr)
     ? `qwen-review-pr-${pr}-script-lint.json`
     : 'qwen-review-script-lint.json';
 }
@@ -2977,10 +3002,7 @@ export function testPlanGate(planPath: string): { notes: string[] } {
   }
   // A local review has no PR body, so there is no Test Plan to have checked.
   const pr = plan.prNumber;
-  const isPr =
-    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
-    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
-  if (!isPr) return { notes };
+  if (!isPositivePrNumber(pr)) return { notes };
 
   let report: TestPlanReport;
   try {
