@@ -1153,6 +1153,15 @@ describe('runNonInteractive', () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
     const runAbortController = new AbortController();
+    let interactionOpen = true;
+    getActiveInteractionSpanSpy.mockImplementation(() =>
+      interactionOpen ? interactionSpan : undefined,
+    );
+    endInteractionSpanSpy.mockImplementation((_status, metadata) => {
+      if (metadata?.promptId === 'budget-stream-abort') {
+        interactionOpen = false;
+      }
+    });
     mockGeminiClient.sendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield { type: GeminiEventType.Content, value: 'partial response' };
@@ -1160,7 +1169,17 @@ describe('runNonInteractive', () => {
           await new Promise<void>((_, reject) => {
             runAbortController.signal.addEventListener(
               'abort',
-              () => reject(new Error('stream aborted after budget expiry')),
+              () => {
+                if (
+                  getActiveInteractionSpanSpy('budget-stream-abort') ===
+                  interactionSpan
+                ) {
+                  endInteractionSpanSpy('cancelled', {
+                    promptId: 'budget-stream-abort',
+                  });
+                }
+                reject(new Error('stream aborted after budget expiry'));
+              },
               { once: true },
             );
           });
@@ -3592,7 +3611,7 @@ describe('runNonInteractive', () => {
 
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
-    const apiError = new Error('API connection failed');
+    const apiError = new Error('API connection failed: token=secret');
     mockGeminiClient.sendMessageStream.mockImplementation(() => {
       throw apiError;
     });
@@ -3605,6 +3624,12 @@ describe('runNonInteractive', () => {
         'prompt-id-4',
       ),
     ).rejects.toThrow(apiError);
+
+    expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-id-4',
+      errorMessage: 'headless invocation failed',
+      errorType: 'Error',
+    });
   });
 
   it('should not exit if a tool is not found, and should send error back to model', async () => {

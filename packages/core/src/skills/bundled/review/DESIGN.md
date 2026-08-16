@@ -93,7 +93,21 @@ A single reverse audit pass leaves whatever the reverse audit agent itself misse
 
 One dry round was the original rule, and PR #6457 shows why it is unsound. The per-round Critical yield across its eight review rounds was `2, 2, 7, 0, 0, 5, 3, 1`. The review returned "no blockers" **twice**, and the next round surfaced five Criticals — three of them in code that had been in the diff since the first commit. A yield of zero is evidence about one round's agents, not about the code.
 
-Requiring two consecutive dry rounds makes a single lazy or context-starved agent unable to end the loop. The hard cap moves from 3 rounds to 5, and when the cap is what stopped the loop the output must say so rather than implying convergence.
+Requiring two consecutive dry rounds makes a single lazy or context-starved agent unable to end the loop. The hard cap moves from 3 rounds to 5, and when the cap is what stopped the loop the output must say so rather than implying convergence. (The cap has since become one value per topology — see "Why the round cap is per topology" below.)
+
+### Why the round cap is per topology
+
+Five was one number standing in for three prices. What the cap bounds is a **round**, and a round costs one auditor on 3A, one auditor per non-retired chunk on 3B, and ~90 minutes on a huge diff. That is two orders of magnitude across the topologies a single cap had to serve, so it was necessarily wrong at one end: too loose to bound the huge case — which is why `HUGE_REVERSE_AUDIT_ROUNDS` had to be carved out of it — and, at the other end, tight enough on 3A to stop loops that were still confirming Criticals, for a saving of about five calls out of a review that cost 17-23 of them before this change.
+
+The asymmetry that decides it is the one this whole design is built on: a missed issue costs another `/review` iteration, and per-run cost is the cheaper side of that trade (see "Competitors" below). On 3A the marginal round is a single agent; on huge it is an hour and a half of a six-hour ceiling. The cap should say so.
+
+So the cap is read from the plan's topology tier (`reverseAuditRoundTier`): **10** on 3A, **5** on 3B, **3** when huge. Three consequences worth naming:
+
+- **The huge tier is checked first and wins.** It is a finishability ruling, and a huge diff is territory-fanned-out by construction anyway. A 3A diff can never be huge — `effective = max(src, floor(total/8))` is at most `max(500, 400)` under the 3A gate — so the two tiers cannot contend.
+- **One predicate, not two sets of numbers.** The tier reads `isTerritoryFanOut`, the same gate the roster turns on, which is why that function moved into `budget.ts`: a second copy of `500`/`3200` would eventually disagree with the roster about which fan-out a review owed.
+- **The cap is a belt, not the terminator.** The loop still ends on two consecutive dry rounds, and in a time-budgeted run the deadline gate — which prices the round it is admitting plus the reserve — is the operative bound. The static cap is what a local run (no deadline) has instead, which is exactly why it should not be a number borrowed from another topology's arithmetic.
+
+What this does **not** change: a cap stop is still a non-converged stop. It writes the marker, caps the verdict, and owes its `unreviewedDimensions` entry, at ten exactly as at five.
 
 ### Why the reverse audit fans out per chunk
 
@@ -593,14 +607,14 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 
 ## LLM call budget
 
-**Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 17-23 calls (typically 17-19):**
+**Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 17-28 calls (typically 17-19):**
 
 | Stage                   | Calls               | Why                                                                                                                                                                                                                                                                       |
 | ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Review agents           | 14 (+0-2)           | issue fidelity + 3 procedural correctness walks (1a/1b/1c) + security + 3 quality slices (3a/3b/3c) + perf/tests + 3 undirected personas + build&test, plus 0-2 diff-specialized finders; cross-repo skips Agents 7 and 1c (12), non-PR skips Agent 0 (13)                |
 | Sharded verification    | `ceil(F/8)`         | F = findings; typically 1-2; keeps each verifier's job small on high-finding reviews                                                                                                                                                                                      |
-| Iterative reverse audit | 2-5 (2-3 huge)      | loop ends after two consecutive dry rounds; 5-round hard cap — 3 for a huge diff (effective ≥ 3000 lines)                                                                                                                                                                 |
-| **Total**               | **~17-23 (~15-22)** | Row maxima do not co-occur on typical runs (~17-19 is common), but the honest sum of ranges is 17-23 same-repo, 15-22 cross-repo/local. **Low effort: 0 subagent calls** — the angle rotation runs in the orchestrator's own context; medium launches its reduced fan-out |
+| Iterative reverse audit | 2-10                | loop ends after two consecutive dry rounds; 10-round hard cap — one auditor a round on 3A, so the marginal round is one call. A 3A diff is never "huge": `effective = max(src, total/8) ≤ max(500, 400)`, so the huge tier cannot reach this table                        |
+| **Total**               | **~17-28 (~15-27)** | Row maxima do not co-occur on typical runs (~17-19 is common), but the honest sum of ranges is 17-28 same-repo, 15-27 cross-repo/local. **Low effort: 0 subagent calls** — the angle rotation runs in the orchestrator's own context; medium launches its reduced fan-out |
 
 **Large diffs (> 500 source lines OR > 3200 total diff lines, Step 3B, high effort) — `ceil(diffLines / 400)` chunk agents + `5..7` whole-diff agents + `3H` invariant agents (H = heavy files) + `ceil(F/8)` verify (F = findings) + `rounds × chunks` reverse audit.** The reverse audit dominates: it fans out one auditor per chunk per round, and the stop rule needs two consecutive dry rounds (hard cap 5 — **3 for a huge diff, effective ≥ 3000 lines**, which narrows the per-chunk multiplier to `2..3`). PR #6457 (5801 diff lines, 19 chunks, 1 heavy file) costs ~27-29 first-wave calls, then `19 × (2..5) = 38-95` reverse auditors — ~66-126 calls total depending on how long the audit keeps finding (a huge-diff cap-3 run of the same shape narrows this to `19 × (2..3) = 38-57`); ~70 is the clean-run floor, and the count scales with chunks and findings, not a fixed ceiling.
 
@@ -688,22 +702,22 @@ The convergence concern that motivated the summary is real but narrower than it 
 
 For a PR with 15 findings:
 
-| Approach                                            | LLM calls          | Notes                                                                                                                   |
-| --------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Copilot (1 agent)                                   | 1                  | Lowest cost, lowest coverage                                                                                            |
-| Gemini (2 LLM tasks)                                | 2                  | Good cost, medium coverage                                                                                              |
-| Our design (5 agents, N verify)                     | 21                 | 5+15+1 — too expensive                                                                                                  |
-| Our design (5 agents, batch verify, single reverse) | 7                  | 5+1+1 — original design                                                                                                 |
-| Our design (9 agents, iterative reverse)            | 11-13              | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                                    |
-| Our design (10 agents)                              | 12-14              | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                                        |
-| Our design (14 agents + effort levels, current)     | 17-23 high / 0 low | 14(+0-2)+ceil(F/8)+(2-5) under 3A; low runs inline with no subagents, 3-6 angles by diff size — cost scales with intent |
-| Claude /ultrareview                                 | 5-20               | Cloud-hosted, cost on Anthropic                                                                                         |
+| Approach                                            | LLM calls          | Notes                                                                                                                    |
+| --------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Copilot (1 agent)                                   | 1                  | Lowest cost, lowest coverage                                                                                             |
+| Gemini (2 LLM tasks)                                | 2                  | Good cost, medium coverage                                                                                               |
+| Our design (5 agents, N verify)                     | 21                 | 5+15+1 — too expensive                                                                                                   |
+| Our design (5 agents, batch verify, single reverse) | 7                  | 5+1+1 — original design                                                                                                  |
+| Our design (9 agents, iterative reverse)            | 11-13              | 9+1+(1-3) — +50% cost for meaningfully higher recall                                                                     |
+| Our design (10 agents)                              | 12-14              | 10+1+(1-3) — adds issue-fidelity/root-cause gate                                                                         |
+| Our design (14 agents + effort levels, current)     | 17-28 high / 0 low | 14(+0-2)+ceil(F/8)+(2-10) under 3A; low runs inline with no subagents, 3-6 angles by diff size — cost scales with intent |
+| Claude /ultrareview                                 | 5-20               | Cloud-hosted, cost on Anthropic                                                                                          |
 
 ## Future optimization: Fork Subagent
 
 > Dependency: [Fork Subagent proposal](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report-p0-p1-core.md#2-fork-subagentp0)
 
-**Current problem:** Each of the ~17-23 LLM calls (14-16 review + sharded verify + 2-5 reverse audit rounds) creates a new subagent from scratch. At ~52K per agent (50K system + 2K task), that is ~880K-1.2M input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters even more under the current 14-agent design than under the original 5-agent design. (Effort levels bound the cost from the other side: low runs spawn no subagents at all, and medium spawns the reduced fan-out.)
+**Current problem:** Each of the ~17-28 LLM calls (14-16 review + sharded verify + 2-10 reverse audit rounds) creates a new subagent from scratch. At ~52K per agent (50K system + 2K task), that is ~880K-1.5M input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters even more under the current 14-agent design than under the original 5-agent design. (Effort levels bound the cost from the other side: low runs spawn no subagents at all, and medium spawns the reduced fan-out.)
 
 **Fork Subagent solution:** Instead of creating independent subagents, fork the current conversation. All forks inherit the parent's full context (system prompt, conversation history, Step 1/1.1/1.5 results) and share a prompt cache prefix. The API caches the common prefix once; each fork only pays for its unique delta (~2K per agent).
 
@@ -711,13 +725,13 @@ For a PR with 15 findings:
 Current (independent subagents):
   Agent 1: [50K system] + [2K task]  = 52K
   Agent 2: [50K system] + [2K task]  = 52K
-  ...× 17-23 agents                 = ~880K-1.2M total input tokens
+  ...× 17-28 agents                 = ~880K-1.5M total input tokens
 
 With Fork + prompt cache sharing:
   Cached prefix: [50K system + conversation history]  (cached once)
   Fork 1: [cache hit] + [2K delta]   = ~2K effective
   Fork 2: [cache hit] + [2K delta]   = ~2K effective
-  ...× 17-23 forks                  = ~50K cached + ~34-46K delta = ~84-96K total
+  ...× 17-28 forks                  = ~50K cached + ~34-56K delta = ~84-106K total
 ```
 
 **Additional benefits for /review:**
@@ -727,7 +741,7 @@ With Fork + prompt cache sharing:
 - Verification and reverse audit agents inherit all prior findings naturally
 - Agent 6 personas can fork from a shared diff-loaded base, paying only the persona-framing delta
 
-**Estimated savings:** ~88-92% token reduction (~780K-1.1M → ~80-92K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
+**Estimated savings:** ~90-93% token reduction (~880K-1.5M → ~84-106K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
 
 **Why not implemented now:** Fork Subagent requires changes to the Qwen Code core (`AgentTool`, `forkSubagent.ts`, `CacheSafeParams`). This is a platform-level feature (~400 lines, ~5 days), not a /review-specific change. When available, /review should be updated to use fork instead of independent subagents.
 
