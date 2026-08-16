@@ -247,24 +247,32 @@ function validateVerdict(value: unknown): PersistedVerdict {
   const rawTrim = verdict['bodyTrim'] ?? {
     sections: 0,
     deferralList: false,
+    fold: false,
     truncated: false,
   };
   const trim = object(rawTrim, 'Composed verdict.bodyTrim');
+  // `fold` shipped after the other three, so it gets absence semantics of
+  // its own: a composed file from the first budget build records the trim it
+  // knew about, and refusing it would fail a save over a field whose absence
+  // is the truth ("no fold drop recorded").
+  const fold = trim['fold'] ?? false;
   if (
     typeof trim['sections'] !== 'number' ||
     !Number.isInteger(trim['sections']) ||
     trim['sections'] < 0 ||
     typeof trim['deferralList'] !== 'boolean' ||
+    typeof fold !== 'boolean' ||
     typeof trim['truncated'] !== 'boolean'
   ) {
     throw new Error(
-      'Composed verdict.bodyTrim must carry a non-negative integer `sections` and boolean `deferralList` / `truncated`.',
+      'Composed verdict.bodyTrim must carry a non-negative integer `sections` and boolean `deferralList` / `fold` / `truncated`.',
     );
   }
   return {
     bodyTrim: {
       sections: trim['sections'],
       deferralList: trim['deferralList'],
+      fold,
       truncated: trim['truncated'],
     },
     event: event(verdict['event'], 'Composed verdict.event'),

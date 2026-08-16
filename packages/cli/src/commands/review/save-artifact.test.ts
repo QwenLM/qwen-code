@@ -68,7 +68,7 @@ const verdict = {
   // the validator's absent-means-zero default.
   deferredCount: 2,
   // Also non-default on purpose, for the same reason.
-  bodyTrim: { sections: 2, deferralList: true, truncated: false },
+  bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: false },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -323,6 +323,10 @@ describe('saveReviewArtifact', () => {
       'a non-boolean truncated',
       { sections: 1, deferralList: false, truncated: 1 },
     ],
+    [
+      'a non-boolean fold',
+      { sections: 1, deferralList: false, fold: 'yes', truncated: false },
+    ],
   ] as const)('refuses a present bodyTrim carrying %s', (_label, bad) => {
     // Same reasoning as deferredCount above: the absent-means-default arm
     // exists for pre-budget composed files, and it must not become a
@@ -336,6 +340,27 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
+  it('reads an absent `fold` as no fold — the first budget build did not record one', () => {
+    // `fold` shipped a build later than its three siblings. A composed file
+    // from that build is not malformed; it simply predates the field, and
+    // refusing it would fail the save over a truthful absence.
+    const paths = fixture();
+    const { fold: _absent, ...older } = verdict.bodyTrim as Record<
+      string,
+      unknown
+    >;
+    writeJson(paths.composed, { ...verdict, bodyTrim: older });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim,
+    ).toEqual({
+      sections: 2,
+      deferralList: true,
+      fold: false,
+      truncated: false,
+    });
+  });
+
   it('reads an absent or null bodyTrim as untrimmed — a pre-budget composed file must still save', () => {
     const paths = fixture();
     const { bodyTrim: _absent, ...preBudget } = verdict;
@@ -347,6 +372,7 @@ describe('saveReviewArtifact', () => {
       ).toEqual({
         sections: 0,
         deferralList: false,
+        fold: false,
         truncated: false,
       });
       rmSync(paths.out, { force: true });

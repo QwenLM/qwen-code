@@ -3063,7 +3063,12 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
-      bodyTrim: { sections: 0, deferralList: false, truncated: false },
+      bodyTrim: {
+        sections: 0,
+        deferralList: false,
+        fold: false,
+        truncated: false,
+      },
       lowSignal: null,
       ...over,
     });
@@ -4864,6 +4869,22 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   // what order, is the policy under test: the deferral display yields first,
   // the not-reviewed disclosures second, the blockers and the caps never.
   const LIMIT = 65536;
+  /** An unpaired half in EITHER direction — the oracle was one-sided. */
+  const LONE_SURROGATE =
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const countOf = (haystack: string, needle: string): number =>
+    haystack.split(needle).length - 1;
+  /** A cumulative findings file with one entry the verifier never ruled on. */
+  const findingsWithUnverifiedTag = (): string => {
+    const f = join(dir, 'qwen-review-findings-budget.md');
+    writeFileSync(
+      f,
+      '- **File:** src/pay.ts:42\n' +
+        '- **Issue:** off-by-one in the retry cap\n' +
+        '- **Severity:** Critical — [unverified]\n',
+    );
+    return f;
+  };
   const nit = (i: number): DeferredEntry => ({
     file: `f${i}.ts`,
     line: 1,
@@ -4881,8 +4902,19 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       }),
     );
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
-    expect(r.body).not.toContain('were trimmed from this body');
+    // Name the notices the module actually emits. The first version of this
+    // guard forbade a phrase no code path writes, so it held over a body
+    // carrying a spurious trim banner.
+    expect(r.body).not.toContain('was trimmed to fit');
+    expect(r.body).not.toContain('was dropped to fit');
+    expect(r.body).not.toContain('was TRUNCATED to fit');
     expect(r.body).toContain('Deferred under the convergence posture');
+    expect(r.bodyTrim).toEqual({
+      sections: 0,
+      deferralList: false,
+      fold: false,
+      truncated: false,
+    });
   });
 
   it('trims the deferral display first, discloses the count, and keeps the blockers', () => {
@@ -4932,6 +4964,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.bodyTrim).toEqual({
       sections: 1,
       deferralList: true,
+      fold: false,
       truncated: false,
     });
     // The verdict line must not claim a list the body does not carry.
@@ -4974,9 +5007,18 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.body).toContain('was TRUNCATED to fit');
     expect(r.body).toContain(FOOTER);
-    // No half-open fold, and no lone surrogate at the cut.
-    expect(r.body.includes('<details>')).toBe(r.body.includes('</details>'));
-    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
+    // No half-open fold — COUNTED, not merely present-or-absent: a body
+    // carrying one opener and two closers passed the boolean form.
+    expect(countOf(r.body, '<details>')).toBe(countOf(r.body, '</details>'));
+    // Two-sided: the cut can only orphan a high surrogate, but an oracle
+    // that looks for one direction cannot report a regression that produces
+    // the other.
+    expect(LONE_SURROGATE.test(r.body)).toBe(false);
+    // This exit owes its own stderr line; no other push carries the
+    // sentence, and deleting it left the suite green.
+    expect(r.remediation.join('\n')).toContain(
+      'so the posted body is truncated',
+    );
   });
 
   it('keeps the downgrade disclosure through the COMMENT opener merge', () => {
@@ -5016,9 +5058,30 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     );
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.body).toContain('was TRUNCATED to fit');
-    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
+    expect(LONE_SURROGATE.test(r.body)).toBe(false);
     expect(r.body.includes('\uFFFD')).toBe(false);
     expect(r.bodyTrim.truncated).toBe(true);
+    // The truncation exit owes its own stderr line, and no other push
+    // carries this sentence.
+    expect(r.remediation.join('\n')).toContain(
+      'so the posted body is truncated',
+    );
+  });
+
+  it('clears a run of lone high surrogates the cut exposes', () => {
+    // One pass was not enough: quoted model text can already carry an
+    // unpaired high, and a cut inside the astral pair that follows it leaves
+    // TWO halves — removing one still posts invalid UTF-16.
+    const r = composeReview(
+      base({
+        bodyCriticals: [
+          'A'.repeat(64_724) + '\uD800' + '\u{20000}' + 'B'.repeat(20_000),
+        ],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(LONE_SURROGATE.test(r.body)).toBe(false);
   });
 
   it('spends ordinary prose before the undecided blockers — and stops claiming nothing blocking went', () => {
@@ -5048,11 +5111,12 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     );
   });
 
-  it('a fold-only overflow after a rank drop does not call the English text complete', () => {
-    // Two exits, one claim each, and they contradicted: the rank loop had
-    // dropped sections, then the fold-only exit said the English text above
-    // was complete and pushed only its own stderr line — so the instruction
-    // to recover the dropped sections went nowhere.
+  it('drops the bilingual fold BEFORE it drops any content', () => {
+    // The fold is a translation of the English above it: dropping it costs
+    // the author nothing the body does not still say, where every other rung
+    // costs a finding or a disclosure. Measured against a bilingual body,
+    // this shape used to spend the whole deferral list with ~24,000
+    // characters of headroom sitting behind the fold.
     const r = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], { han: true }),
       env: ENV,
@@ -5065,14 +5129,62 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       unreviewedDimensions: ['security — gap'],
     });
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim).toEqual({
+      sections: 0,
+      deferralList: false,
+      fold: true,
+      truncated: false,
+    });
+    // Everything content-bearing survives.
+    expect(r.body).toContain('Deferred under the convergence posture');
+    expect(r.body).toContain('Not reviewed: security');
+    expect(r.body).not.toContain('<details>');
+    expect(r.body).toContain('Chinese translation of this body was dropped');
+    // The zero-rank arm of the fold notice and of its stderr line: no trim
+    // notice exists, so neither may point at one.
+    expect(r.body).not.toContain('apart from the sections');
+    const budgetLines = r.remediation.filter((l) =>
+      l.startsWith('body budget:'),
+    );
+    expect(budgetLines).toEqual([
+      "body budget: the bilingual fold was dropped to fit GitHub's " +
+        '65536-character review limit — the English body is complete',
+    ]);
+  });
+
+  it('drops sections only after the fold, and says so in both channels', () => {
+    // English-only still overflows here, so rung 2 runs — and both exits owe
+    // their own stderr line: the rank-naming one and the fold one. Deleting
+    // either used to leave the whole suite green.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { han: true }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      bodyCriticals: ['C'.repeat(64400)],
+      deferredSuggestions: [nit(1), nit(2)],
+      unreviewedDimensions: ['security — gap'],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.truncated).toBe(false);
+    expect(r.bodyTrim.fold).toBe(true);
     expect(r.bodyTrim.sections).toBeGreaterThan(0);
+    expect(r.bodyTrim.deferralList).toBe(true);
     expect(r.body).toContain('Chinese translation of this body was dropped');
     expect(r.body).toContain(
       'apart from the sections the notice at the top names',
     );
-    expect(r.remediation.join('\n')).toContain(
+    const budgetLines = r.remediation.filter((l) =>
+      l.startsWith('body budget:'),
+    );
+    expect(budgetLines).toHaveLength(2);
+    expect(budgetLines[0]).toContain(
       'repeat the trimmed sections in your terminal summary',
+    );
+    expect(budgetLines[1]).toContain(
+      'the English body is complete apart from the trimmed sections',
     );
   });
 
@@ -5122,6 +5234,74 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.sections).toBe(5);
     expect(r.body).toContain('(5 section(s))');
+  });
+
+  it('points at the findings artifact only when the deferral list is what went', () => {
+    // Rank 2 drops alone on any run with disclosures and no posture
+    // deferrals. The unconditional pointer then told the author to read
+    // "deferred findings in this run's findings artifact" — of which there
+    // are none. The sibling stderr line had the condition all along.
+    const dims = ['security', 'perf', 'a11y', 'i18n'].map(
+      (d, i) => `${d} — ${'D'.repeat(700)}${i}`,
+    );
+    const r = composeReview(
+      base({
+        bodyCriticals: ['B'.repeat(64_000)],
+        unreviewedDimensions: dims,
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.deferredCount).toBe(0);
+    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.bodyTrim.sections).toBeGreaterThan(0);
+    expect(r.body).toContain('did not fit');
+    expect(r.body).toContain('read them in the terminal report.');
+    expect(r.body).not.toContain('findings artifact');
+  });
+
+  it('keeps a verdict-qualifying opener that merges with nothing else', () => {
+    // R2-3's shape: the COMMENT merge contains ONLY the clause-3 opener, so
+    // it inherits that clause's retention and nothing else's. Untagged, the
+    // merged paragraph defaulted to the weakest rank and the tail cut spent
+    // "Review incomplete — unverified findings disclosed." before it spent
+    // a single blocker.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      findingsPath: findingsWithUnverifiedTag(),
+      cannotTellCriticals: ['Z'.repeat(70_000)],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain(
+      'Review incomplete — unverified findings disclosed.',
+    );
+  });
+
+  it('the unlicensed-deferral disclosure promises no adjacency it cannot keep', () => {
+    // The dangerous shape: the disclosure survives (`keep: 1`) while the
+    // list it refers to is dropped as rank 1. Its old wording — "They are
+    // listed below" — was then false by its own content. Locating the block
+    // by a substring both wordings share left that sentence free to return,
+    // so the wording itself is pinned here.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['B'.repeat(64_300)],
+        deferredSuggestions: [nit(1), nit(2), nit(3)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).not.toContain('Deferred under the convergence posture');
+    expect(r.body).toContain('deferred without a posture licence');
+    expect(r.body).toContain(
+      'They are listed in this body when it has room for them, and always ' +
+        "in the terminal report and this run's findings artifact",
+    );
+    expect(r.body).not.toContain('They are listed below');
   });
 
   it('holds room for the ledger marker, so the POSTED body still fits', () => {

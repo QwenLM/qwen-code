@@ -294,8 +294,15 @@ describe('bundled review skill', () => {
     // is the one thing this must never license.
     const body = skillBody();
     expect(body).toContain('rejected by the API **whole**');
+    expect(body).toContain('**the Chinese fold first**');
     expect(body).toContain(
-      'the deferral display first, the not-reviewed disclosures second',
+      'then the deferral display, then the not-reviewed disclosures',
+    );
+    // The other half of the policy. A "simplify the prose" edit turning
+    // `never` into `last` would leave every prefix pin matching while the
+    // skill started licensing the one trim this budget exists to refuse.
+    expect(body).toContain(
+      '**the blockers, the undecided-blocker list and the sentences that qualify the verdict never**',
     );
     expect(body).toContain('You do not shorten anything yourself to help it');
     // Where a trimmed section can still be read is not uniform, and the
@@ -320,6 +327,13 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain(
       'it is **not guaranteed**: the list is the first section the body budget trims',
+    );
+    // The tails carry the load: without them the paragraph reads as a
+    // durability promise again, which is the drift this pin exists for.
+    expect(body).toContain('so an overflowing body can carry none of it');
+    expect(body).toContain('has no cross-round record on the PR at all');
+    expect(body).toContain(
+      "when the budget trims it, the terminal summary is where the author's copy comes from",
     );
   });
 

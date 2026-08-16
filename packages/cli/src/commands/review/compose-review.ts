@@ -533,6 +533,11 @@ export interface ComposeReviewResult {
     sections: number;
     /** The deferral display was one of them. */
     deferralList: boolean;
+    /**
+     * The bilingual fold was dropped — the first rung, and the only one that
+     * costs no content: the English above it says the same thing.
+     */
+    fold: boolean;
     /** The un-trimmable remainder still overflowed and was cut. */
     truncated: boolean;
   };
@@ -1687,10 +1692,20 @@ function composeReviewBody(
           en: ' Nothing blocking was trimmed.',
           zh: '被裁剪的均非阻断内容。',
         };
+    // The artifact pointer is about the deferral list, so it rides only when
+    // that list is what went. Rank 2 can drop alone — it does, on any run
+    // with disclosures and no posture deferrals — and the unconditional
+    // pointer then sent the author to read a list that does not exist.
+    const artifact = ranks.includes(1)
+      ? {
+          en: `, and deferred findings in this run's findings artifact`,
+          zh: '，延后发现另见本次运行的 findings 工件',
+        }
+      : { en: '', zh: '' };
     return {
       keep: 1,
-      en: `⚠️ This body was trimmed to fit GitHub's ${BODY_MAX_CHARS}-character review limit: ${en} did not fit (${sections} section(s)). Sentences below that refer to them still hold — read them in the terminal report, and deferred findings in this run's findings artifact.${safe.en}`,
-      zh: `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，本正文已裁剪：${zh}未能放入（共 ${sections} 个段落）。下方引用它们的句子依然成立——请在终端报告中查看，延后发现另见本次运行的 findings 工件。${safe.zh}`,
+      en: `⚠️ This body was trimmed to fit GitHub's ${BODY_MAX_CHARS}-character review limit: ${en} did not fit (${sections} section(s)). Sentences below that refer to them still hold — read them in the terminal report${artifact.en}.${safe.en}`,
+      zh: `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，本正文已裁剪：${zh}未能放入（共 ${sections} 个段落）。下方引用它们的句子依然成立——请在终端报告中查看${artifact.zh}。${safe.zh}`,
     };
   };
 
@@ -1700,13 +1715,24 @@ function composeReviewBody(
    * longer exists.
    *
    * A POST over GitHub's limit is rejected whole, so an over-long body must
-   * degrade, and the ORDER of the degradation is the policy: parts yield by
+   * degrade, and the ORDER of the degradation is the policy: the bilingual
+   * fold yields FIRST (it is a translation of the English above it, so it
+   * costs the author nothing the body does not still say), then parts by
    * ascending `trim` rank (the deferral display before the not-reviewed
-   * disclosures), the blockers and the caps never yield, and every drop is
+   * disclosures), the blockers and the caps never, and every drop is
    * disclosed with its count and its kind — a list silently shortened reads
    * as a list that was complete.
+   *
+   * The fold going first is what keeps the loss minimal: measured against a
+   * bilingual body, a mild overflow spent the whole deferral list while
+   * 24,000 characters of headroom sat behind a fold that says nothing new.
    */
-  const bodyTrim = { sections: 0, deferralList: false, truncated: false };
+  const bodyTrim = {
+    sections: 0,
+    deferralList: false,
+    fold: false,
+    truncated: false,
+  };
   /**
    * Name what a trim dropped, and say where it can still be read.
    *
@@ -1736,6 +1762,49 @@ function composeReviewBody(
   const render = (parts: Bi[], sep: string): string => {
     const full = assemble(parts, sep);
     if (full === '' || full.length <= bodyBudget) return full;
+    const footerTail = footer === '' ? '' : `\n\n${footer}`;
+    /** The English-only body: no fold, so nothing here is duplicated. */
+    const enOnly = (ps: Bi[], note: string): string =>
+      `${ps.map((p) => p.en).join(sep)}${note}${footerTail}`;
+    // A monolingual body (attribution off, or a translation identical to its
+    // English) has no fold to drop. Every rung below still measures the same
+    // string — `enOnly` and `assemble` agree when there is no fold — but
+    // nothing may CLAIM a translation was dropped, in the body or on stderr:
+    // that is the false-record class this budget exists to refuse.
+    const hadFold = full !== enOnly(parts, '');
+    /** What the body says about the fold it dropped. */
+    const foldNote = (sections: number): string =>
+      !hadFold
+        ? ''
+        : `\n\n⚠️ The Chinese translation of this body was dropped to fit ` +
+          `GitHub's ${BODY_MAX_CHARS}-character review limit; the English ` +
+          `text above is complete${
+            sections > 0
+              ? ' apart from the sections the notice at the top names'
+              : ''
+          }.`;
+    const noteFoldDropped = (sections: number): void => {
+      if (!hadFold) return;
+      bodyTrim.fold = true;
+      remediation.push(
+        `body budget: the bilingual fold was dropped to fit GitHub's ` +
+          `${BODY_MAX_CHARS}-character review limit — the English body is ` +
+          `complete${sections > 0 ? ' apart from the trimmed sections' : ''}`,
+      );
+    };
+
+    // Rung 1 — the fold. It is a translation of text that survives above it,
+    // so dropping it costs the author no content at all, where every rung
+    // below costs a finding or a disclosure. With no fold, `foldOnly` IS the
+    // body that just overflowed, so this rung cannot fire.
+    const foldOnly = enOnly(parts, foldNote(0));
+    if (hadFold && foldOnly.length <= bodyBudget) {
+      noteFoldDropped(0);
+      return foldOnly;
+    }
+
+    // Rung 2 — disclosure sections, by ascending trim rank, measured on the
+    // body that has already lost its fold.
     const ranks = [
       ...new Set(
         parts
@@ -1755,63 +1824,31 @@ function composeReviewBody(
       survivors = survivors.filter((p) => p.trim !== rank);
       droppedRanks.push(rank);
       droppedSections += going;
-      const trimmed = assemble(
+      const trimmed = enOnly(
         [trimNote(droppedRanks, droppedSections, false), ...survivors],
-        sep,
+        foldNote(droppedSections),
       );
       if (trimmed.length <= bodyBudget) {
         bodyTrim.sections = droppedSections;
         bodyTrim.deferralList = droppedRanks.includes(1);
         noteTrimmedRanks(droppedRanks);
+        noteFoldDropped(droppedSections);
         return trimmed;
       }
     }
     bodyTrim.sections = droppedSections;
     bodyTrim.deferralList = droppedRanks.includes(1);
-    // What remains is un-trimmable by policy — the blockers, the undecided
-    // blockers, the sentences that qualify the verdict — and it still
-    // overflows. Drop the bilingual fold first: it is pure duplication of
-    // text that survives above it, and a cut inside it would leave
-    // unbalanced markup on the PR page.
-    const withNote = (cut: boolean): Bi[] => [
+    noteFoldDropped(droppedSections);
+    // Rung 3 — a real cut. What remains is un-trimmable by policy: the
+    // blockers, the undecided blockers, the sentences that qualify the
+    // verdict. Order it by `keep` so the cut spends prose the author already
+    // has before it spends this round's only-copy blockers.
+    const head = [
       ...(droppedRanks.length > 0
-        ? [trimNote(droppedRanks, droppedSections, cut)]
+        ? [trimNote(droppedRanks, droppedSections, true)]
         : []),
       ...survivors,
-    ];
-    const footerTail = footer === '' ? '' : `\n\n${footer}`;
-    // Composition order, because this branch cuts nothing: reordering a
-    // body that survives whole buys no room and files "Unresolved, please
-    // confirm" as a footnote to the 40,000-character blocker above it.
-    const natural = withNote(false)
-      .map((p) => p.en)
-      .join(sep);
-    if (natural.length + footerTail.length <= bodyBudget) {
-      // The fold alone was the overflow: nothing is cut, so nothing may
-      // claim a truncation. Say what actually happened — and do not call
-      // the English text complete when the rank loop above dropped
-      // sections out of it.
-      const foldNote =
-        `\n\n⚠️ The Chinese translation of this body was dropped to fit ` +
-        `GitHub's ${BODY_MAX_CHARS}-character review limit; the English text ` +
-        `above is complete${
-          droppedRanks.length > 0
-            ? ' apart from the sections the notice at the top names'
-            : ''
-        }.`;
-      noteTrimmedRanks(droppedRanks);
-      remediation.push(
-        `body budget: the bilingual fold was dropped to fit GitHub's ` +
-          `${BODY_MAX_CHARS}-character review limit — the English body is ` +
-          `complete${
-            droppedRanks.length > 0 ? ' apart from the trimmed sections' : ''
-          }`,
-      );
-      return `${natural}${foldNote}${footerTail}`;
-    }
-    // Order the remainder by `keep` so the tail cut spends prose the author
-    // already has before it spends this round's only-copy blockers.
-    const head = withNote(true)
+    ]
       .sort((a, b) => (a.keep ?? 3) - (b.keep ?? 3))
       .map((p) => p.en)
       .join(sep);
@@ -1825,7 +1862,17 @@ function composeReviewBody(
       `the terminal report and this run's findings artifact.`;
     const tail = `${hardNote}${footerTail}`;
     let cut = head.slice(0, Math.max(0, bodyBudget - tail.length));
-    if (/[\uD800-\uDBFF]/.test(cut.charAt(cut.length - 1))) {
+    // A loop, not one pass: the cut can only orphan a HIGH surrogate (it
+    // takes a prefix, so no low half is ever separated from a high that
+    // precedes it in the same string), but text the model quoted may already
+    // carry unpaired highs of its own — `…x\uD800\u{20000}` cut inside the
+    // pair leaves `…x\uD800\uD800`, and removing one still posts a lone
+    // half. Text with an unpaired LOW is left as the author wrote it: that
+    // half was already unpaired before this budget touched anything.
+    while (
+      cut.length > 0 &&
+      /[\uD800-\uDBFF]/.test(cut.charAt(cut.length - 1))
+    ) {
       cut = cut.slice(0, -1);
     }
     bodyTrim.truncated = true;
@@ -2411,21 +2458,33 @@ function composeReviewBody(
     // follow, the opener says the review is PARTIAL instead, so the pair
     // reads in one direction; the certifying and the zero-certified openers
     // above keep their exact wording.
+    // Every one of these is a sentence that qualifies the verdict, so each
+    // carries `keep: 1`. The COMMENT path merges this clause into one
+    // paragraph with its neighbours and takes the strongest tag among them —
+    // untagged, a merge of only these defaulted to the weakest, and the tail
+    // cut spent "Review incomplete — unverified findings disclosed." before
+    // it spent a single blocker.
     clauses.push(
       coverageOpener ??
         (canCertify
-          ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
+          ? {
+              keep: 1,
+              en: 'Reviewed — no blockers.',
+              zh: '已审查——无阻断问题。',
+            }
           : findingsFileUnreadable
             ? {
+                keep: 1,
                 en: 'Review incomplete — findings unavailable.',
                 zh: '审查未完成——发现不可用。',
               }
             : findingsUnverifiedAtCompose
               ? {
+                  keep: 1,
                   en: 'Review incomplete — unverified findings disclosed.',
                   zh: '审查未完成——未验证的发现已披露。',
                 }
-              : { en: 'Reviewed.', zh: '已审查。' }),
+              : { keep: 1, en: 'Reviewed.', zh: '已审查。' }),
     );
   }
 
@@ -2447,6 +2506,7 @@ function composeReviewBody(
     // eight hours of real bot reviews carried that dead reference on five
     // different pull requests.
     clauses.push({
+      keep: 1,
       en:
         `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
         `anchored to a changed line and were dropped; nothing further to act ` +
