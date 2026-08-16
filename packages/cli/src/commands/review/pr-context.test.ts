@@ -1311,6 +1311,12 @@ describe('renderLedgerSection', () => {
     // first, `pass it as --since <sha>` refers to nothing.
     expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
     expect(anchored).toContain('validates it against the fetched history');
+    // …and the two fragments the block's own comment claims but does not
+    // reach: the command that takes the flag, and what it does with it.
+    // Without the first, the tail names no command and the relative clause
+    // dangles.
+    expect(anchored).toContain('on a `fetch-pr` re-run');
+    expect(anchored).toContain('scopes the diff and plan');
     // The CONDITION, not just the instruction. Dropping the clause leaves the
     // tail telling the orchestrator, unconditionally and in imperative tone,
     // to re-run with a sha that may already have been deterministically

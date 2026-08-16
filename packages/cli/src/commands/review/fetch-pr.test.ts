@@ -457,14 +457,28 @@ describe('fetch-pr report assembly', () => {
 
   const ANCHOR = 'a'.repeat(40);
   const BASE = 'b'.repeat(40);
+  /**
+   * `anchor..head` for ONE coherent history, so the pair below can be read as
+   * a real round rather than two unrelated captures:
+   *
+   *   base   [line,        line2, tail]
+   *   anchor [line, added, line2, tail]
+   *   head   [line, added, line2, bulk × 200, tail]
+   *
+   * The old pair gave the same head commit two different trees — a 3-line
+   * file here and a 204-line one in FULL_DIFF — which no capture can produce,
+   * and which a later case extending either side would be written against.
+   */
   const DELTA_DIFF = [
     'diff --git a/a.ts b/a.ts',
     '--- a/a.ts',
     '+++ b/a.ts',
-    '@@ -1,2 +1,3 @@',
+    '@@ -1,4 +1,204 @@',
     ' line',
-    '+added',
+    ' added',
     ' line2',
+    ...Array.from({ length: 200 }, (_, i) => `+bulk ${i}`),
+    ' tail',
     '',
   ].join('\n');
   /**
@@ -650,7 +664,7 @@ describe('fetch-pr report assembly', () => {
       'diff --git a/a.ts b/a.ts',
       '--- a/a.ts',
       '+++ b/a.ts',
-      '@@ -400,2 +400,2 @@',
+      '@@ -400,1 +400,1 @@',
       '-experiment',
       '+original',
       '',
@@ -749,10 +763,16 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffPath).not.toBeNull();
   });
 
-  it('scopes a valid anchor when NO base resolved, stale or not', async () => {
-    // `base-untrusted` is about a base that cannot be trusted, not about a
-    // base that does not exist: the delta range needs no base at all, so a
-    // deleted or renamed base branch must not cost a valid anchor its scope.
+  it('refuses to scope when NO base resolved — nothing to be contained in', async () => {
+    // This used to scope, on the reasoning that the delta range needs no base
+    // and so a deleted or renamed base branch should not cost a valid anchor
+    // its scope. The capture reasoning is right; the SCOPE reasoning is not.
+    // With no base there is no PR diff to check the delta against, and "no
+    // diff to check against" is the absence of proof, not proof — it was the
+    // one arm where an uncontained delta shipped by design, and the shape it
+    // ships is the same "undo per feedback" revert every sibling arm refuses.
+    // `base-untrusted` still means a base that cannot be TRUSTED; this is a
+    // base that does not exist, and the reason says the oracle could not rule.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
@@ -762,10 +782,15 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     expect(report.incremental).toEqual({
       since: ANCHOR,
-      effective: true,
-      diffBase: ANCHOR,
+      effective: false,
+      reason: 'containment-unverified',
     });
-    expect(report.diffPath).not.toBeNull();
+    // Nothing is published, which is what a base-free round does ANYWAY: with
+    // no merge base there is no full range either, and the command already
+    // tells agents to fall back to running `git diff` themselves. So this
+    // costs no review that existed — it removes the one arm that shipped a
+    // scope no containment check had ever seen.
+    expect(report.diffPath).toBeNull();
   });
 
   it('keeps upToDate through a partition failure — the stop flow needs no plan', async () => {
@@ -1334,7 +1359,7 @@ describe('fetch-pr report assembly', () => {
     expect(line).not.toContain('could not be partitioned');
   });
 
-  it('survives a partition failure when NO base ever resolved', async () => {
+  it('refuses the anchor before the partitioner when NO base ever resolved', async () => {
     // The rescue reads `fullText`, which is null when the base branch was
     // deleted or renamed — the state the blessed "scopes a valid anchor when
     // NO base resolved" test establishes, here combined with a partitioner
@@ -1356,10 +1381,16 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).toBeNull();
+    // The base-free arm now refuses for containment BEFORE anything is
+    // partitioned, so the reason names the earlier cause. That also makes the
+    // rescue's `fullText !== null` guard unreachable from here: `scopedDelta`
+    // can no longer be true without a base, so it now implies a non-null
+    // `fullText`. The guard stays as a guard; what changed is that this shape
+    // no longer reaches it.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'partition-failed',
+      reason: 'containment-unverified',
     });
   });
 
@@ -1985,16 +2016,30 @@ describe('containmentRuling — the containment oracle', () => {
     file: string,
     [start, count]: [number, number],
     deleted: string[],
-  ) =>
-    [
+    /**
+     * New-side junction the deletions sit at. Defaults to the hunk's own
+     * start; pass the delta's junction when modelling "the PR performs the
+     * same deletion", because sameness is (content, position) and not content
+     * alone — a `-X` displayed elsewhere in the file is no help to a comment
+     * anchored here.
+     */
+    junction: number = start,
+  ) => {
+    const lead = junction - start; // context lines before the deletions
+    const added = count - lead; // `+` lines after them
+    return [
       `diff --git a/${file} b/${file}`,
       `--- a/${file}`,
       `+++ b/${file}`,
-      `@@ -${start},${deleted.length} +${start},${count} @@`,
+      // Counts declared truthfully: old side is the leading context plus the
+      // deleted lines, new side is that context plus the added ones.
+      `@@ -${start},${lead + deleted.length} +${start},${count} @@`,
+      ...Array.from({ length: lead }, (_, i) => ` ctx ${start + i}`),
       ...deleted.map((d) => `-${d}`),
-      ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
+      ...Array.from({ length: added }, (_, i) => `+line ${junction + i}`),
       '',
     ].join('\n');
+  };
 
   /**
    * A delta section that DELETES `what`, wrapped in context.
@@ -2083,12 +2128,12 @@ describe('containmentRuling — the containment oracle', () => {
     // Both hunks are seen: covered by a wide outer, refused by a narrow one.
     // The outer shares the `-old` deletion, so what is measured here is the
     // marker's effect on hunk boundaries and not the content rule.
-    expect(contained(withMarker, secDeleting('a.ts', [1, 100], ['old']))).toBe(
-      true,
-    );
-    expect(contained(withMarker, secDeleting('a.ts', [1, 10], ['old']))).toBe(
-      false,
-    );
+    expect(
+      contained(withMarker, secDeleting('a.ts', [1, 100], ['old'], 1)),
+    ).toBe(true);
+    expect(
+      contained(withMarker, secDeleting('a.ts', [1, 10], ['old'], 1)),
+    ).toBe(false);
   });
 
   it('checks EVERY section of the delta, not just the first', () => {
@@ -2161,12 +2206,12 @@ describe('containmentRuling — the containment oracle', () => {
     // not display.
     const twice = deletes('a.ts', 6, ['return true;', 'return true;']);
     expect(
-      contained(twice, secDeleting('a.ts', [1, 100], ['return true;'])),
+      contained(twice, secDeleting('a.ts', [1, 100], ['return true;'], 7)),
     ).toBe(false);
     expect(
       contained(
         twice,
-        secDeleting('a.ts', [1, 100], ['return true;', 'return true;']),
+        secDeleting('a.ts', [1, 100], ['return true;', 'return true;'], 7),
       ),
     ).toBe(true);
   });
@@ -2219,7 +2264,7 @@ describe('containmentRuling — the containment oracle', () => {
     expect(
       containmentRuling(
         deletes(nameA, 6, ['X']),
-        secDeleting(nameB, [1, 100], ['X']),
+        secDeleting(nameB, [1, 100], ['X'], 7),
       ),
     ).toEqual({ ok: false, unverified: true });
 
@@ -2230,7 +2275,7 @@ describe('containmentRuling — the containment oracle', () => {
     expect(
       containmentRuling(
         deletes('a.ts', 6, [sentA]),
-        secDeleting('a.ts', [1, 100], [sentB]),
+        secDeleting('a.ts', [1, 100], [sentB], 7),
       ),
     ).toEqual({ ok: false, unverified: true });
 
@@ -2245,13 +2290,13 @@ describe('containmentRuling — the containment oracle', () => {
     expect(
       containmentRuling(
         deletes(nameA, 6, ['X']),
-        secDeleting('a.ts', [1, 100], ['X']),
+        secDeleting('a.ts', [1, 100], ['X'], 7),
       ),
     ).toEqual({ ok: false, unverified: true });
     expect(
       containmentRuling(
         deletes('a.ts', 6, ['X']),
-        secDeleting(nameA, [1, 100], ['X']),
+        secDeleting(nameA, [1, 100], ['X'], 7),
       ),
     ).toEqual({ ok: false, unverified: true });
   });
@@ -2264,11 +2309,17 @@ describe('containmentRuling — the containment oracle', () => {
     // names "a blank line" as a shape it cares about, and no fixture supplied
     // one.
     expect(
-      contained(deletes('a.ts', 6, ['a']), secDeleting('a.ts', [1, 100], [''])),
+      contained(
+        deletes('a.ts', 6, ['a']),
+        secDeleting('a.ts', [1, 100], [''], 7),
+      ),
     ).toBe(false);
     // A genuinely blank deleted line is matched by a blank one.
     expect(
-      contained(deletes('a.ts', 6, ['']), secDeleting('a.ts', [1, 100], [''])),
+      contained(
+        deletes('a.ts', 6, ['']),
+        secDeleting('a.ts', [1, 100], [''], 7),
+      ),
     ).toBe(true);
   });
 
@@ -2279,7 +2330,7 @@ describe('containmentRuling — the containment oracle', () => {
     // line X from b.ts to a.ts, and the undo round deletes it from a.ts. The
     // PR's own diff displays `-X` only in b.ts, so a comment anchored on the
     // a.ts deletion hits a line GitHub does not show there.
-    const full = `${secDeleting('a.ts', [1, 100], [])}${secDeleting('b.ts', [1, 100], ['X'])}`;
+    const full = `${secDeleting('a.ts', [1, 100], [])}${secDeleting('b.ts', [1, 100], ['X'], 7)}`;
     expect(contained(deletes('a.ts', 6, ['X']), full)).toBe(false);
     // …and it is displayed where the PR actually deletes it.
     expect(contained(deletes('b.ts', 6, ['X']), full)).toBe(true);
@@ -2295,14 +2346,15 @@ describe('containmentRuling — the containment oracle', () => {
       'diff --git a/a.ts b/a.ts',
       '--- a/a.ts',
       '+++ b/a.ts',
-      // encloses the delta's range but deletes nothing
-      '@@ -2,14 +2,14 @@',
+      // encloses the delta's range but deletes nothing. Counts declared to
+      // match the body: 3 context + 1 changed + 9 context on each side.
+      '@@ -2,13 +2,13 @@',
       ...Array.from({ length: 3 }, (_, i) => ` c${i}`),
       '-edited',
       '+edited2',
       ...Array.from({ length: 9 }, (_, i) => ` d${i}`),
-      // deletes X, but nowhere near
-      '@@ -40,11 +40,10 @@',
+      // deletes X, but nowhere near. Old side 1 + 1 + 8, new side 1 + 8.
+      '@@ -40,10 +40,9 @@',
       ' e0',
       '-X',
       ...Array.from({ length: 8 }, (_, i) => ` e${i + 1}`),
@@ -2313,9 +2365,46 @@ describe('containmentRuling — the containment oracle', () => {
     expect(
       contained(
         deletes('a.ts', 6, ['X']),
-        secDeleting('a.ts', [1, 100], ['X']),
+        secDeleting('a.ts', [1, 100], ['X'], 7),
       ),
     ).toBe(true);
+  });
+
+  it('starts the body scan AFTER the hunk header, not at the section metadata', () => {
+    // The scan begins at `diffStart` (the `@@` line's own index) precisely so
+    // the section's `--- a/<path>` metadata is not read as a deletion. Nothing
+    // pinned that: no inner fixture ever deleted content shaped like a
+    // stripped header. Two hunks, because a widened window also sweeps the
+    // inner section's own header and would otherwise cancel out.
+    const deletesHeaderShape = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -6,3 +6,2 @@',
+      ' c',
+      '-- a/a.ts',
+      ' c2',
+      '@@ -20,3 +20,2 @@',
+      ' d',
+      '-- a/a.ts',
+      ' d2',
+      '',
+    ].join('\n');
+    void deletesHeaderShape;
+    // The attack shape: the delta deletes a line whose text is exactly what a
+    // stripped `--- a/<path>` header looks like, at the junction the outer
+    // hunk STARTS at — which is where a widened scan would record the outer's
+    // own header. The PR's diff deletes no such line, so this must be refused.
+    const innerAtJunctionOne = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,2 +1,1 @@',
+      '-- a/a.ts',
+      ' keep',
+      '',
+    ].join('\n');
+    expect(contained(innerAtJunctionOne, sec('a.ts', [[1, 100]]))).toBe(false);
   });
 
   it('reads a deletion that ends the hunk body, with no trailing context', () => {
@@ -2337,7 +2426,7 @@ describe('containmentRuling — the containment oracle', () => {
     // happens if the scan SAW the trailing `-X` at all.
     expect(contained(endsInDeletion, sec('a.ts', [[1, 100]]))).toBe(false);
     expect(
-      contained(endsInDeletion, secDeleting('a.ts', [1, 100], ['X'])),
+      contained(endsInDeletion, secDeleting('a.ts', [1, 100], ['X'], 10)),
     ).toBe(true);
   });
 
@@ -2358,6 +2447,118 @@ describe('containmentRuling — the containment oracle', () => {
     expect(contained(deletes('m.sh', 6, ['X']), modeOnly)).toBe(false);
   });
 
+  it("needs EVERY delta hunk's deletion displayed, not just one of them", () => {
+    // Round 1 chains edits and adds a duplicate X near a legitimately deleted
+    // twin; round 2's undo deletes both copies. The full capture is one merged
+    // hunk displaying `-X` once, the delta is two hunks deleting one each, and
+    // the second copy is displayed nowhere. Matching by content alone let the
+    // single displayed occurrence clear both.
+    const twoHunks = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -7,3 +7,2 @@',
+      ' c1',
+      '-X',
+      ' c2',
+      '@@ -24,3 +23,2 @@',
+      ' d1',
+      '-X',
+      ' d2',
+      '',
+    ].join('\n');
+    // The PR displays `-X` at ONE of the two junctions (8), not both.
+    const oneX = secDeleting('a.ts', [1, 100], ['X'], 8);
+    expect(contained(twoHunks, oneX)).toBe(false);
+    // Both junctions displayed → both delta hunks are covered.
+    const bothX = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,42 +1,40 @@',
+      // 7 context → cursor 8, where the delta's first `-X` sits; 16 more →
+      // cursor 24, where its second sits. New side 7+16+17 = 40, old side +2.
+      ...Array.from({ length: 7 }, (_, i) => ` p${i}`),
+      '-X',
+      ...Array.from({ length: 16 }, (_, i) => ` q${i}`),
+      '-X',
+      ...Array.from({ length: 17 }, (_, i) => ` r${i}`),
+      '',
+    ].join('\n');
+    expect(contained(twoHunks, bothX)).toBe(true);
+  });
+
+  it("does not let the no-newline marker shift a deletion's junction", () => {
+    // The marker belongs to neither side, so it must not advance the new-side
+    // cursor. If it did, every junction after it in the hunk would be off by
+    // one and would stop matching the PR's own — turning a legitimately
+    // displayed deletion into a refusal, silently, on the most common
+    // real-world diff artifact there is.
+    const withMarker = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -6,4 +6,2 @@',
+      ' ctx',
+      '-gone',
+      '\\ No newline at end of file',
+      '-X',
+      ' ctx after',
+      '',
+    ].join('\n');
+    // Both deletions sit at junction 7: the marker spends no line.
+    const outer = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,102 +1,100 @@',
+      ...Array.from({ length: 6 }, (_, i) => ` z${i}`),
+      '-gone',
+      '-X',
+      ...Array.from({ length: 94 }, (_, i) => ` y${i}`),
+      '',
+    ].join('\n');
+    expect(contained(withMarker, outer)).toBe(true);
+  });
+
+  it('ties a deleted line to the junction it was deleted at', () => {
+    // Content alone does not say WHERE. A single inner hunk against a single
+    // outer hunk, budget spent exactly once — so no amount of counting closes
+    // this — where the PR deletes `dup` near the top of the file and the delta
+    // deletes `dup` thirty lines down, at a junction the PR's diff never
+    // touches. Junctions are comparable for the same reason ranges are: both
+    // captures end at the same head tree.
+    const delta = deletes('a.ts', 30, ['dup']); // junction 31
+    expect(contained(delta, secDeleting('a.ts', [1, 100], ['dup'], 6))).toBe(
+      false,
+    );
+    expect(contained(delta, secDeleting('a.ts', [1, 100], ['dup'], 31))).toBe(
+      true,
+    );
+  });
+
+  it('accepts when the PR displays MORE occurrences than the delta deletes', () => {
+    // The battery pinned the under-supplied refusal and the exact match; the
+    // over-supplied accept was pinned nowhere, so rewriting the consume loop
+    // as an equality check survives. That mutant rules `hunks-outside-pr-diff`
+    // — a PROVEN violation that did not happen — on the ordinary shape where
+    // the PR deletes two identical lines and the `--since` round deletes only
+    // the one that came after the anchor, and that reason is never retried.
+    const one = deletes('a.ts', 6, ['dup']); // junction 7
+    const outerTwo = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,102 +1,100 @@',
+      ...Array.from({ length: 6 }, (_, i) => ` m${i}`),
+      '-dup', // junction 7 — the one the delta also deletes
+      '-dup', // junction 7 as well: two deletions at the same place
+      ...Array.from({ length: 94 }, (_, i) => ` n${i}`),
+      '',
+    ].join('\n');
+    expect(contained(one, outerTwo)).toBe(true);
+  });
+
   it('refuses a deletion the PR diff does not itself perform', () => {
     // New-side ranges cannot see a deletion: what survives it on the new side
     // is context, which a covering hunk contains for free. So a delta that
@@ -2366,10 +2567,12 @@ describe('containmentRuling — the containment oracle', () => {
     // became a diff whose content GitHub displays on neither side.
     const delta = deletes('a.ts', 6, ['X1']);
     // Same file, and a range wide enough to cover — only the deletion differs.
-    expect(contained(delta, secDeleting('a.ts', [1, 100], ['X1']))).toBe(true);
-    expect(contained(delta, secDeleting('a.ts', [1, 100], ['unrelated']))).toBe(
-      false,
+    expect(contained(delta, secDeleting('a.ts', [1, 100], ['X1'], 7))).toBe(
+      true,
     );
+    expect(
+      contained(delta, secDeleting('a.ts', [1, 100], ['unrelated'], 7)),
+    ).toBe(false);
     // A PR diff that only adds lines deletes nothing, so it displays nothing
     // to anchor a comment on.
     expect(contained(delta, sec('a.ts', [[1, 100]]))).toBe(false);
@@ -2377,7 +2580,7 @@ describe('containmentRuling — the containment oracle', () => {
     expect(
       contained(
         deletes('a.ts', 6, ['X1', 'X2']),
-        secDeleting('a.ts', [1, 100], ['X1']),
+        secDeleting('a.ts', [1, 100], ['X1'], 7),
       ),
     ).toBe(false);
   });
@@ -2398,7 +2601,7 @@ describe('containmentRuling — the containment oracle', () => {
       ].join('\n');
     // The outer performs the same deletion — otherwise the content rule
     // refuses first and the junction arithmetic goes unmeasured.
-    const outer = secDeleting('a.ts', [1, 19], ['gone', 'gone2']);
+    const outer = secDeleting('a.ts', [1, 19], ['gone', 'gone2'], 19);
     // covering hunk [1,19]: a junction AT its end is contained…
     expect(contained(deletionAt(19), outer)).toBe(true);
     // …one past it is not, and neither is two past.

@@ -97,6 +97,15 @@ describe('bundled review skill', () => {
     // steps, and nothing else in this file notices — checking out the
     // merge-base SKILL.md leaves every other test here green.
     const body = skillBody();
+    // The bullet's OPENING, which is the only instruction that makes `--since`
+    // fire on the primary (cache) path at all. Repo-wide sweep found zero
+    // assertions naming the cache file or `lastCommitSha`, so a revert to the
+    // pre-PR ordering — cache read beside the fetch report, after `fetch-pr` —
+    // silently degrades every cached-anchor round to a full review.
+    expect(body).toContain(
+      'read `.qwen/review-cache/pr-<n>.json` **before** `fetch-pr`',
+    );
+    expect(body).toContain('pass it to the fetch as `--since <lastCommitSha>`');
     expect(body).toContain(
       '**You never run `git` against an anchor yourself**',
     );
@@ -119,6 +128,22 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'REPLACING any `--since` it already carries, never appending a second one',
     );
+  });
+
+  it('pins which refusal reasons the recovery flow may retry', () => {
+    // The orchestrator's recovery loop acts on this prose alone, and the
+    // producer deliberately manufactures both planless shapes. Deleting the
+    // retry exception strands the one shape a re-run fixes; widening the
+    // retryable set re-refuses a dead anchor every round forever.
+    const body = skillBody();
+    expect(body).toContain(
+      'Every other reason is deterministic for the same sha and must NOT be retried',
+    );
+    expect(body).toContain('Retry that one, once.');
+    // …and the exception's OTHER condition: a null merge base has two causes
+    // and only the fetch-failure one is retryable.
+    expect(body).toContain('`baseFetchFailed: true`');
+    expect(body).toContain('found no common ancestor at all');
   });
 
   it('records the range the round actually reviewed in provenance', () => {
