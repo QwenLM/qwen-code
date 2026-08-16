@@ -49,6 +49,17 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['Main.java', true],
     ['src/main/kotlin/Main.kt', false],
     ['docs/notes.java.md', false],
+    ['scripts/build.sh', true],
+    ['tools/release.bash', true],
+    ['scripts/win/setup.ps1', true],
+    ['.github/scripts/label-pr.mjs', true],
+    ['scripts/tests/install-script.test.js', true],
+    ['packages/cli/scripts/tests/pack.spec.ts', true],
+    // A test outside the script layer is not handed a shell syllabus, and a
+    // document that merely talks about one is not code.
+    ['src/pay.test.ts', false],
+    ['scripts/build.js', false],
+    ['docs/how-to-run.sh.md', false],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -118,6 +129,94 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     expect(out).toContain('…and 5 more');
     expect(out).toContain('.github/workflows/ci9.yml');
     expect(out).not.toContain('.github/workflows/ci10.yml');
+  });
+});
+
+describe('pathRulesFor — the shell/CI-lane rule', () => {
+  // The gap it closes, measured on a real PR (#9220): eight review rounds on
+  // Linux runners hardened a workflow's wipe script, added `realpath -m` to
+  // canonicalize its path guard, and added a test pinning that line. `-m` is a
+  // GNU coreutils extension — Darwin's realpath(1) exits 1 on it — so the
+  // script's `|| printf` fallback silently keeps the raw path and the new test
+  // is red on the `test_macos` lane. Nothing caught it: every agent ran on a
+  // GNU host, and no dimension asks which lanes execute a file. A human
+  // reviewer running the suite on a Mac found it in one round.
+  it('attaches to shell, CI scripts, and the tests that drive them', () => {
+    const out = pathRulesFor([
+      'scripts/tests/qwen-pr-review-workflow.test.js',
+      'src/pay.ts',
+    ]);
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+    expect(out).toContain('scripts/tests/qwen-pr-review-workflow.test.js');
+    expect(out).not.toContain('src/pay.ts');
+  });
+
+  it('stacks with the workflow rule on a diff that changes embedded shell', () => {
+    // The security checklist owns what the workflow does with its token; this
+    // one owns whether its `run:` block works on the hosts it runs on. A
+    // workflow diff needs both, and neither subsumes the other.
+    const out = pathRulesFor(['.github/workflows/ci.yml']);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('makes the lane inventory the first question, including the skipped ones', () => {
+    // The trap is structural, not linguistic: a merge_group-only job reports as
+    // "skipped" on the PR page, so a fully green PR is not evidence about it,
+    // and the first red lands in the queue where it ejects the whole batch.
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('which lanes execute this file');
+    expect(out).toContain('merge_group');
+    expect(out).toMatch(/reports as \*\*skipped\*\*|reports as \*\*skipped/);
+    expect(out).toContain('merge-queue failure');
+    // A suite excluded on one platform is not excluded on the others — the
+    // exact shape of the miss on #9220 (vitest.config.ts gated win32 only).
+    expect(out).toMatch(/gated off Windows is \*\*not\*\* gated off macOS/);
+  });
+
+  it('names the non-GNU userlands and the flags that differ', () => {
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('realpath -m');
+    expect(out).toContain('busybox');
+    expect(out).toContain('sed -i');
+    // The silent-degradation shape: the fallback means nothing fails, the
+    // guard just stops happening.
+    expect(out).toContain('silently skips the canonicalization');
+  });
+
+  it('separates the two findings a GNU-ism produces, at different severities', () => {
+    // A Linux-only production script with a GNU-ism is not a bug; the test that
+    // asserts the GNU behaviour on a macOS lane is. Collapsing the two produces
+    // either a false alarm on the script or a missed red lane.
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toMatch(/not the same severity/);
+    expect(out).toMatch(/gate the \*\*test\*\*, not to weaken the script/);
+  });
+
+  it('pins the path-identity and privilege traps', () => {
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('/private/var/folders');
+    expect(out).toContain('realpathSync');
+    expect(out).toContain('CAP_DAC_OVERRIDE');
+    // A vacuously-passing test is the failure mode root hides behind.
+    expect(out).toMatch(/assertion vacuous/);
+  });
+
+  it('prescribes a capability probe rather than a platform check', () => {
+    // `skipIf(platform === 'darwin')` is wrong in both directions, so the fix
+    // shape has to be named — it is the part the model does not supply itself.
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('probe the capability, not the platform');
+    expect(out).toContain("spawnSync('realpath'");
+    expect(out).toContain('busybox lane');
+  });
+
+  it('keeps the severity and scoping discipline of the skill', () => {
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('reviewing this diff, not auditing this file');
+    expect(out).toContain('Favour precision over recall');
+    // The receipt: a lane and a mechanism, or it is a worry, not a finding.
+    expect(out).toMatch(/If you cannot name the lane, you do not have one/);
   });
 });
 
