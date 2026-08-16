@@ -2543,6 +2543,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     onHoldMarkers = [],
     markerPadBytes = 0,
     editedBaseChanged = false,
+    deleteFails = false,
   }) {
     const doc = parse(workflow);
     const step = doc.jobs['review-pr'].steps.find(
@@ -2553,8 +2554,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       '${{ github.event_name }}': eventName,
       '${{ github.event.action }}': action,
       '${{ github.event.pull_request.number }}': '4242',
-      "${{ github.event.changes.base && 'true' || 'false' }}":
-        editedBaseChanged ? 'true' : 'false',
+      "${{ github.event.changes.base && 'true' || 'false' }}": editedBaseChanged
+        ? 'true'
+        : 'false',
       '${{ github.event.issue.number }}': '4242',
       '${{ github.event.inputs.pr_number }}': '4242',
       '${{ github.event.inputs.review_mode }}': 'dry-run',
@@ -2583,6 +2585,12 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             '#!/usr/bin/env bash',
             'echo "$@" >> "$CONTEXT_GH_CALLS"',
             'case "$*" in',
+            // Ordered BEFORE the labels answer: the stale-label strip is a
+            // `-X DELETE` on the same */labels* URL, and only this branch
+            // can fail it (exercising the gate's failure branch). The
+            // pattern is quoted: an unquoted space would split it into two
+            // case words and bash rejects the line outright.
+            '  *"-X DELETE"*) if [ "${CONTEXT_DELETE_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi ;;',
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
             '  */comments*)',
             '    if [ "${CONTEXT_MARKERS_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi',
@@ -2611,6 +2619,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
         CONTEXT_LABELS: labels.join(' '),
         CONTEXT_MARKERS: JSON.stringify(markerRows),
         CONTEXT_MARKERS_FAIL: markersFail ? '1' : '0',
+        CONTEXT_DELETE_FAIL: deleteFails ? '1' : '0',
         CONTEXT_MARKER_PAD: String(markerPadBytes),
         CONTEXT_HEAD_SHA: headSha,
         CONTEXT_BASE_SHA: baseSha,
@@ -2697,6 +2706,31 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.summary).toContain('Removed stale status/on-hold');
     expect(r.ghCalls).toContain('labels/status%2Fon-hold');
     expect(r.ghCalls).toContain('-X DELETE');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('a failed label removal never aborts the gate — it reports and leaves the label (#9193)', () => {
+    // The DELETE sits behind `[ -n "$MARKERS" ] &&` inside an `if` on
+    // purpose: under `set -euo pipefail` a bare DELETE would abort the
+    // whole Resolve PR context step on a transient API error or rate
+    // limit, before `should_run=true` is written — hard-failing the
+    // review workflow. Before this stub mode existed the failure branch
+    // was unreachable (the */labels* case answered the DELETE first and
+    // always exited 0), so unwrapping the `if` survived every test.
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'newhead999',
+      deleteFails: true,
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=oldhead111 base=base777 -->',
+      ],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain(
+      'Failed to remove stale status/on-hold — leaving it in place',
+    );
+    expect(r.summary).not.toContain('Removed stale status/on-hold');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
