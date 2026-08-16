@@ -288,6 +288,71 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       'cannot show that `--comment` was requested',
     );
   });
+
+  it('surfaces the recorded host on the --user-authorized fast path too', () => {
+    // The fast path publishes because the user asked, but it must not drop
+    // the recorded target's host: submit's platform binding keys on it, and
+    // a fast path that binds none re-opens the leak — a recorded Aone
+    // codereview review, user-authorised from a non-Aone cwd with no
+    // --host/GH_HOST, would post at github.com's same-named repo.
+    const auth = authFor(
+      'https://code.alibaba-inc.com/g/p/codereview/123 --comment',
+      { userAuthorized: true },
+    );
+    expect(auth.ok).toBe(true);
+    expect(auth.recordedHost).toBe('code.alibaba-inc.com');
+    // A bare pr-number still binds no host — the environment fallback.
+    expect(
+      authFor('123 --comment', { userAuthorized: true }).recordedHost,
+    ).toBeUndefined();
+    // A missing args file degrades to undefined without blocking the
+    // user-authorised publish (best effort by design).
+    expect(
+      reviewWriteAuthorization({
+        userAuthorized: true,
+        skillArgs: join(dir, 'no-such-fast-path.txt'),
+        pr: 123,
+        repo: 'o/r',
+      }).recordedHost,
+    ).toBeUndefined();
+  });
+});
+
+describe('the user-authorized fast path keeps the refusal shut (round-6 witness)', () => {
+  // End to end through the REAL gate: a review recorded against an Aone
+  // codereview URL, then `submit --user-authorized` with no --host and no
+  // GH_HOST from a cwd whose probe reads GitHub (the registry mock). Before
+  // the fast path surfaced recordedHost, the refusal's environment fallback
+  // saw nothing Aone and the review POSTed at github.com's same-named repo.
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+  });
+
+  it('refuses a recorded Aone target even when the user authorised the post', () => {
+    const skillArgs = file(
+      'fast-path-aone.txt',
+      'https://code.alibaba-inc.com/g/p/codereview/123 --comment\n',
+    );
+    expect(() =>
+      runSubmit(
+        args({ skillArgs, userAuthorized: true, pr: 123, repo: 'g/p' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    const out = JSON.parse(
+      writeStdoutSpy.mock.calls.map((c) => String(c[0])).join(''),
+    ) as { posted?: boolean; reason?: string };
+    expect(out).toEqual({ posted: false, reason: 'aone-read-only-phase' });
+    expect(ghMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('the posting gate', () => {

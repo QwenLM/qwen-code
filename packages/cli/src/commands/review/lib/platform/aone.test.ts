@@ -98,6 +98,42 @@ describe('aoneReader.resolveRepo', () => {
     expect(message).not.toContain('SECRET123');
     expect(message).not.toContain('private_token');
   });
+
+  it('an embedded NEWLINE cannot smuggle the query token past the strip', () => {
+    // git stores and re-emits newline-bearing remote URLs, and a plain `.`
+    // in the `[?#]`-strip stops at the first `\n` — the token would survive
+    // cleaning. `[\s\S]*` eats it: the URL then PARSES (the strip removed
+    // the whole query), so there is no refusal message to leak through.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'https://gitlab.alibaba-inc.com/g/p?private_token=SECRET\nx';
+      return '';
+    });
+    expect(aoneReader.resolveRepo()).toEqual({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+    });
+  });
+
+  it('redacts a newline-smuggled token on the refusal path too', () => {
+    // Same smuggle, but the origin is unparseable (single segment) — the
+    // refusal message must not echo the token the strip removed.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'https://code.alibaba-inc.com/solo?private_token=SECRET\nx';
+      return '';
+    });
+    let message = '';
+    try {
+      aoneReader.resolveRepo();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('cannot parse the origin remote');
+    expect(message).toContain('solo');
+    expect(message).not.toContain('SECRET');
+  });
 });
 
 describe('aoneReader.getCommentBody', () => {

@@ -82,12 +82,15 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
   // optional `.git` suffix. The query/fragment strip comes first because
   // query-string credentials (`?private_token=…`, a real CI pattern) would
   // otherwise become part of the repo coordinate and echo unredacted into
-  // meta's stdout and the refusal messages. Slashes go before `.git` so two
-  // or more trailing slashes after `.git` (`…/p.git//`) cannot defeat the
-  // suffix strip. Git accepts both shapes as remote URLs.
+  // meta's stdout and the refusal messages. `[\s\S]*` (not `.`) eats
+  // newlines too: git stores and re-emits newline-bearing remote URLs, and
+  // a plain `.*$` stops at the first `\n`, letting `?private_token=SECRET\n`
+  // survive the strip and leak through the refusal message. Slashes go
+  // before `.git` so two or more trailing slashes after `.git` (`…/p.git//`)
+  // cannot defeat the suffix strip. Git accepts all of these shapes.
   const cleaned = url
     .trim()
-    .replace(/[?#].*$/, '')
+    .replace(/[?#][\s\S]*$/, '')
     .replace(/\/+$/, '')
     .replace(/\.git$/, '');
   const take = (host: string, path: string): RepoIdentity | null => {
@@ -121,7 +124,7 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
  *  same reason, and a parse REFUSAL must not undo that defense. */
 function redactUrl(url: string): string {
   return url
-    .replace(/[?#].*$/, '')
+    .replace(/[?#][\s\S]*$/, '')
     .replace(/\/\/[^@/]+@/, '//<redacted>@')
     .replace(/^[^@/]+@/, '<redacted>@');
 }

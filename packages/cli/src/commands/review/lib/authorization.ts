@@ -86,6 +86,29 @@ export interface WriteAuthorizationRequest {
 }
 
 /**
+ * Best-effort extraction of the recorded pr-url target's host for the
+ * `--user-authorized` fast path — it must publish without running the full
+ * gate, but the write gate's platform binding must not lose the host the
+ * recorded target names. Any read/parse trouble degrades to `undefined` (the
+ * environment fallback) and never blocks a user-authorised publish.
+ */
+function recordedHostFromArgsFile(
+  req: WriteAuthorizationRequest,
+): string | undefined {
+  try {
+    const path =
+      currentSessionId() === '' && req.skillArgs
+        ? req.skillArgs
+        : defaultSkillArgsPath();
+    const raw = readFileSync(path, 'utf8');
+    const t = parseReviewArgs(raw, { comment: req.defaultComment }).target;
+    return t.type === 'pr-url' ? t.host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Exactly three things authorise a public write, and all are facts rather than
  * impressions: `--comment` in the arguments the user typed (re-parsed from the
  * CLI's verbatim record), the standing `review.comment` setting, or
@@ -98,17 +121,31 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   why: string;
   /**
    * The host the recorded target names, when it names one: a pr-url target
-   * carries it; a bare pr-number and the `--user-authorized` fast path bind
-   * no host (undefined). Write gates that must reason about the target's
-   * PLATFORM read it here instead of re-deriving the platform from the
-   * runtime environment alone — the effective host can be steered by an
-   * ambient GH_HOST export away from where the recorded review actually
-   * lives (submit's Aone refusal uses it to stay shut in both directions).
+   * carries it; a bare pr-number binds none (undefined). The
+   * `--user-authorized` fast path reads it best-effort from the recorded
+   * args (below) for the same reason the slow path does. Write gates that
+   * must reason about the target's PLATFORM read it here instead of
+   * re-deriving the platform from the runtime environment alone — the
+   * effective host can be steered by an ambient GH_HOST export away from
+   * where the recorded review actually lives (submit's Aone refusal uses
+   * it to stay shut in both directions).
    */
   recordedHost?: string;
 } {
   if (req.userAuthorized) {
-    return { ok: true, why: 'the user asked for this review to be published' };
+    return {
+      ok: true,
+      why: 'the user asked for this review to be published',
+      // The fast path publishes because the user asked — but it must still
+      // surface the recorded target's host: the write gate's platform
+      // binding keys on it, and skipping it here re-opens the exact leak
+      // the binding exists to close (a recorded Aone codereview target,
+      // user-authorised from a non-Aone cwd with no --host/GH_HOST, would
+      // otherwise post at github.com's same-named repo). Best effort: any
+      // read/parse trouble degrades to undefined (the environment
+      // fallback) and never blocks a user-authorised publish.
+      recordedHost: recordedHostFromArgsFile(req),
+    };
   }
 
   const sessionScoped = defaultSkillArgsPath();
