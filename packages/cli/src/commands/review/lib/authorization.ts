@@ -96,6 +96,16 @@ export interface WriteAuthorizationRequest {
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
+  /**
+   * The host the recorded target names, when it names one: a pr-url target
+   * carries it; a bare pr-number and the `--user-authorized` fast path bind
+   * no host (undefined). Write gates that must reason about the target's
+   * PLATFORM read it here instead of re-deriving the platform from the
+   * runtime environment alone — the effective host can be steered by an
+   * ambient GH_HOST export away from where the recorded review actually
+   * lives (submit's Aone refusal uses it to stay shut in both directions).
+   */
+  recordedHost?: string;
 } {
   if (req.userAuthorized) {
     return { ok: true, why: 'the user asked for this review to be published' };
@@ -195,5 +205,6 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     why: verdict.comment.requested
       ? `\`--comment\` was in the review arguments for #${authorisedPr}`
       : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
+    recordedHost: t.type === 'pr-url' ? t.host : undefined,
   };
 }

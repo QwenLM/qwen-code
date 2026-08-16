@@ -22,12 +22,14 @@ const {
   ghMock,
   ghWithInputMock,
   getPlatformReaderMock,
+  authMock,
   stdoutMock,
   stderrMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   ghWithInputMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
+  authMock: vi.fn(),
   stdoutMock: vi.fn(),
   stderrMock: vi.fn(),
 }));
@@ -43,9 +45,21 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
   };
 });
 
-// Steer detection to Aone so the refusal fires regardless of cwd.
-vi.mock('./lib/platform/registry.js', () => ({
-  getPlatformReader: getPlatformReaderMock,
+// Steer detection so the refusal's environment arms fire regardless of cwd.
+vi.mock('./lib/platform/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./lib/platform/registry.js')>();
+  return {
+    ...actual,
+    getPlatformReader: getPlatformReaderMock,
+  };
+});
+
+// Steer the authorisation gate (incl. the recordedHost it surfaces) — the
+// real gate needs a session-scoped args file that does not exist under
+// vitest.
+vi.mock('./lib/authorization.js', () => ({
+  reviewWriteAuthorization: authMock,
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -91,6 +105,12 @@ describe('submit refuses an Aone target with the exit-3 refusal shape', () => {
     process.exitCode = undefined;
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    // Default: authorised, no recorded host (the `--user-authorized` fast
+    // path / bare pr-number target shape).
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+    });
   });
 
   afterEach(() => {
@@ -124,6 +144,10 @@ describe('submit refuses an Aone target with the exit-3 refusal shape', () => {
   it('an UNAUTHORISED Aone run takes the normal auth-refusal path first', () => {
     // The refusal sits BELOW the authorisation gate: a default (non-posting)
     // run ends with the auth gate's own exit-3 shape, never the Aone one.
+    authMock.mockReturnValue({
+      ok: false,
+      why: '`--comment` was not in the review arguments',
+    });
     getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
     expect(() =>
       runSubmit(base({ userAuthorized: false }), 'unknown', {
@@ -153,23 +177,65 @@ describe('submit refuses an Aone target with the exit-3 refusal shape', () => {
   });
 
   it('detects from GH_HOST too — an Aone-pointing env export is refused, not an opaque gh failure', () => {
-    // Detection is fed the EFFECTIVE host (resolveGhHost: flag → GH_HOST
-    // → undefined), so an operator's exported GH_HOST pointing at an Aone
-    // host reaches the refusal instead of dying inside gh.
-    let seenHost: string | undefined;
-    getPlatformReaderMock.mockImplementation(({ host }: { host?: string }) => {
-      seenHost = host;
-      return { kind: host === 'gitlab.alibaba-inc.com' ? 'aone' : 'github' };
-    });
+    // The refusal consults resolveGhHost (flag → GH_HOST → undefined): an
+    // operator's exported GH_HOST pointing at an Aone host reaches the
+    // refusal instead of dying inside gh. (The environment arm short-
+    // circuits before the reader probe, so no host is asserted here — the
+    // refusal shape itself is the proof.)
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
     process.env['GH_HOST'] = 'gitlab.alibaba-inc.com';
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
-    expect(seenHost).toBe('gitlab.alibaba-inc.com');
     expect(process.exitCode).toBe(3);
     expect(postedJson()).toEqual({
       posted: false,
       reason: 'aone-read-only-phase',
     });
+  });
+
+  it('a RECORDED Aone host refuses even when the effective host is non-Aone', () => {
+    // Fail-open close: a recorded codereview-URL target names an Aone host;
+    // an ambient GH_HOST export (the Enterprise pattern) must not steer the
+    // write past the read-only guarantee to the wrong host's same-named
+    // repo.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'code.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    process.env['GH_HOST'] = 'ghe.example.com';
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'aone-read-only-phase',
+    });
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a RECORDED non-Aone host is not vetoed by an Aone cwd probe', () => {
+    // Over-refusal close: the recorded pr-url binding is the explicit
+    // signal the registry's precedence documents — a github.com review run
+    // from inside an Aone-origin clone must still post.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'github.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    // Past the refusal the minimal `{}` payload fails its own consistency
+    // check — the assertion is that the failure is THAT, not the Aone
+    // refusal.
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).toThrow(/payload contradicts itself/);
+    expect(process.exitCode).toBeUndefined();
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone Code is not supported'),
+    );
   });
 });

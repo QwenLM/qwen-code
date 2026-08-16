@@ -59,7 +59,7 @@ import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
-import { getPlatformReader } from './lib/platform/registry.js';
+import { getPlatformReader, isAoneHost } from './lib/platform/registry.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -180,7 +180,7 @@ function normalizeInlineComments(
 function authorization(
   args: SubmitArgs,
   defaultComment: boolean,
-): { ok: boolean; why: string } {
+): { ok: boolean; why: string; recordedHost?: string } {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
     defaultComment,
@@ -475,13 +475,33 @@ export function runSubmit(
   // path above, and the command no longer dies with a throw before the gate
   // can rule (an authorised Aone `--dry-run` lands on this same exit-3
   // refusal: a payload that can never post has no posting-consistency to
-  // validate). Detected from the EFFECTIVE host: the flag, else GH_HOST
-  // (ghEnv inherits the operator's export when no module host is set, so a
-  // GH_HOST pointing at an Aone host must hit this refusal, not an opaque
-  // gh failure), else the cwd clone. resolveGhHost trims, so a padded
-  // `--host` cannot slip past detection. The findings are not lost: they
-  // are in the terminal output and the saved report.
-  if (getPlatformReader({ host: resolveGhHost(args.host) }).kind === 'aone') {
+  // validate).
+  //
+  // The platform decision is bound in BOTH directions, because the
+  // runtime-effective host alone fails both ways:
+  //  - Recorded Aone target + non-Aone effective host (an ambient GH_HOST
+  //    export beside a bare-MR-number Aone review) must still refuse —
+  //    otherwise the read-only guarantee leaks and the review POSTs to the
+  //    wrong host's same-named repo. So a recorded Aone host always
+  //    refuses, whatever the environment resolves.
+  //  - Recorded non-Aone target (pr-url host binding) must NOT be vetoed
+  //    by the cwd probe from an Aone-origin clone — the recorded binding
+  //    is the explicit signal the registry's precedence documents.
+  //  - No recorded host (bare pr-number, `--user-authorized`): fall back
+  //    to the flag, then GH_HOST (ghEnv inherits the operator's export
+  //    when no module host is set, so an Aone-pointing GH_HOST must hit
+  //    this refusal, not an opaque gh failure), then the cwd clone.
+  // resolveGhHost trims, so a padded `--host` cannot slip past detection.
+  // The findings are not lost: they are in the terminal output and the
+  // saved report.
+  const recordedHost = auth.recordedHost;
+  const aoneWrite =
+    isAoneHost(recordedHost) ||
+    (recordedHost === undefined &&
+      (isAoneHost(resolveGhHost(args.host)) ||
+        getPlatformReader({ host: args.host?.trim() || undefined }).kind ===
+          'aone'));
+  if (aoneWrite) {
     writeStderrLine(
       `REFUSED to post to ${args.repo}#${args.pr}: posting review comments ` +
         `to Aone Code is not supported yet (read-only phase). The findings ` +

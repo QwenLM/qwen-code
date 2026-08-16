@@ -77,6 +77,27 @@ describe('aoneReader.resolveRepo', () => {
       /no `origin` remote \(error: No such remote 'origin'\)/,
     );
   });
+
+  it('redacts a query-string token even on the PARSE-FAILURE path', () => {
+    // The success path strips `[?#].*$` so credentials cannot become the
+    // repo coordinate; the refusal message must not undo that defense —
+    // `?private_token=…` origins carry no `@` for the userinfo redaction.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'https://code.alibaba-inc.com/solo?private_token=SECRET123';
+      return '';
+    });
+    let message = '';
+    try {
+      aoneReader.resolveRepo();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('cannot parse the origin remote');
+    expect(message).toContain('solo');
+    expect(message).not.toContain('SECRET123');
+    expect(message).not.toContain('private_token');
+  });
 });
 
 describe('aoneReader.getCommentBody', () => {
@@ -221,13 +242,37 @@ describe('aoneReader.fetchDiff', () => {
       return '';
     });
     gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
-    aoneReader.fetchDiff(7, 'g/p');
+    // NOTE: capture the calls BEFORE `mockRestore()` — vitest's restore
+    // clears the recorded calls (it does mockReset's work), so a
+    // restore-then-assert reads an empty spy.
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let stderrCalls: unknown[][] = [];
+    try {
+      aoneReader.fetchDiff(7, 'g/p');
+      stderrCalls = stderrSpy.mock.calls.slice();
+    } finally {
+      stderrSpy.mockRestore();
+    }
     expect(gitRawMock).toHaveBeenCalledWith(
       ...PINNED_DIFF_CONFIG,
       'diff',
       ...PINNED_DIFF_FLAGS,
       '__qwen-review-diff-7~1..__qwen-review-diff-7',
     );
+    // The fallback is DISCLOSED: a multi-commit MR gets only its last
+    // commit as the diff, and the skill must not review a silent fragment.
+    expect(
+      stderrCalls.some((c) =>
+        String(c[0]).includes('no merge-base with origin/master'),
+      ),
+    ).toBe(true);
+    expect(
+      stderrCalls.some((c) =>
+        String(c[0]).includes("a multi-commit MR's diff may be incomplete"),
+      ),
+    ).toBe(true);
   });
 
   it('refuses to diff from a clone of a DIFFERENT repo', () => {

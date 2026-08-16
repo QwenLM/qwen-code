@@ -112,12 +112,16 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
   return null;
 }
 
-/** Redact a userinfo prefix before putting a URL in a message. Covers both
- *  the URL form (`//user:token@`) and the scp form (`user:token@host:…`,
- *  common for `insteadOf`/token-bearing origins) — the raw secret must not
- *  reach stderr/logs/the transcript. */
+/** Redact a URL before putting it in a message — the raw secret must not
+ *  reach stderr/logs/the transcript. Covers the userinfo prefix in both the
+ *  URL form (`//user:token@`) and the scp form (`user:token@host:…`, common
+ *  for `insteadOf`/token-bearing origins), AND the query/fragment channel:
+ *  `?private_token=…` origins carry no `@`, so a userinfo-only redaction
+ *  would echo them — parseRemoteUrl strips them on its success path for the
+ *  same reason, and a parse REFUSAL must not undo that defense. */
 function redactUrl(url: string): string {
   return url
+    .replace(/[?#].*$/, '')
     .replace(/\/\/[^@/]+@/, '//<redacted>@')
     .replace(/^[^@/]+@/, '<redacted>@');
 }
@@ -312,7 +316,18 @@ export const aoneReader: ReviewPlatformReader = {
         base = git('merge-base', `origin/${target}`, ref);
       } catch {
         // Target branch not present locally — fall back to diffing the head
-        // against its first parent (single-commit AGit-Flow CRs).
+        // against its first parent (single-commit AGit-Flow CRs). DISCLOSE:
+        // a multi-commit MR then gets only its LAST commit served as the
+        // complete diff, and the target-fetch WARNING above (if it fired)
+        // reads as though a merge-base were still resolved — it was not.
+        // fetch-pr's GitHub path is loud about this same class
+        // (`baseFetchFailed` → WARNING); silence here would let the skill
+        // review and post findings over a fragment of the change.
+        process.stderr.write(
+          `WARNING: no merge-base with origin/${target} — diffing the head ` +
+            `against its first parent; a multi-commit MR's diff may be ` +
+            `incomplete.\n`,
+        );
         base = `${ref}~1`;
       }
       // gitRaw, not git(): git() has no maxBuffer (1 MiB default → ENOBUFS on
