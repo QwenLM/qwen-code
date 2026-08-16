@@ -1067,20 +1067,28 @@ function appendRecoveryContinuationParts(
  *    a provider that never validates signatures is the cheaper failure than
  *    permanently wedging a session that does.
  *
- * Applied at THREE call sites: at the end of a single stream's
+ * Applied at FOUR call sites: at the end of a single stream's
  * consolidation; inside the XML tool-call recovery branch, immediately
  * before the recovered `functionCall` parts are appended (the per-stream
  * call has already early-returned there, because recovery's own gate
  * requires `hasToolCall === false`, and once the calls are appended the
- * episode is no longer trailing); and on the truncated turn's OWN parts
- * (with `hasToolCall` reinterpreted as "the recovery continuation is about
- * to introduce a functionCall") immediately before `coalesceRecoveryPairs`
- * merges it with a recovery continuation. The last call site exists because
- * the per-stream trailing check can't see a functionCall that hasn't
- * arrived yet: the MAX_TOKENS recovery loop only proceeds when the
- * truncated turn has NO functionCall of its own, so the first call site's
- * `hasToolCall` is false and it never fires -- exactly the precondition
- * under which the merge is about to attach one from a different attempt.
+ * episode is no longer trailing) -- gated there on whether the episode was
+ * ALREADY trailing before that branch's own text-removal loop runs, since
+ * splicing out non-thought text parts would otherwise manufacture a
+ * trailing position for an episode that was never trailing in the actual
+ * stream; on the truncated turn's OWN parts (with `hasToolCall`
+ * reinterpreted as "the recovery continuation is about to introduce a
+ * functionCall") immediately before `coalesceRecoveryPairs` merges it with
+ * a recovery continuation; and immediately before a transport-continuation
+ * prefix is inserted into a parts array holding only thought parts --
+ * inserting first would bury the episode mid-array (past the "trailing"
+ * position) before the coalescing-site check ever runs. The
+ * `coalesceRecoveryPairs` call site exists because the per-stream trailing
+ * check can't see a functionCall that hasn't arrived yet: the MAX_TOKENS
+ * recovery loop only proceeds when the truncated turn has NO functionCall
+ * of its own, so the first call site's `hasToolCall` is false and it never
+ * fires -- exactly the precondition under which the merge is about to
+ * attach one from a different attempt.
  *
  * Scope limit: the coalescing call site mutates in-memory history only.
  * `recordAssistantTurn` has already written the truncated turn to the
@@ -4978,6 +4986,23 @@ export class GeminiChat {
         // always sets `episodePart.text`, even '' for a signature-only
         // episode), while isValidNonThoughtTextPart would leave a
         // thoughtSignature-bearing non-thought part's raw XML behind.
+        // Capture trailing-ness BEFORE the removal loop below: that loop
+        // splices out every visible (non-thought) text part, which would
+        // otherwise manufacture a trailing dangling episode out of one that
+        // was never trailing in the actual stream. A COMPLETE, untruncated
+        // turn from a non-signing provider that emitted XML tool-calls (e.g.
+        // `[thought(unsigned), text-with-XML]`, finish reason present, no
+        // truncation) has no wedge risk -- non-signing providers never
+        // validate signatures -- so dropping its reasoning here has no
+        // protective benefit and is a pure, avoidable loss from history, the
+        // JSONL record, and `--resume` replay.
+        const lastPartBeforeRemoval =
+          consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
+        const hadTrailingDanglingThought = Boolean(
+          lastPartBeforeRemoval?.thought &&
+            lastPartBeforeRemoval.text &&
+            !lastPartBeforeRemoval.thoughtSignature,
+        );
         const textIndices: number[] = [];
         for (let i = 0; i < consolidatedHistoryParts.length; i++) {
           if (isVisibleTextPart(consolidatedHistoryParts[i]!))
@@ -5004,10 +5029,17 @@ export class GeminiChat {
         // that preceded the consumed XML, so the trailing-only check would
         // see a text part last and no-op, persisting
         // `[thought(unsigned), text, functionCall]` and wedging the turn.
-        dropDanglingUnsignedTrailingThought(
-          consolidatedHistoryParts,
-          recovery.functionCallParts.some((p) => p.functionCall !== undefined),
-        );
+        //
+        // Gated on `hadTrailingDanglingThought` (captured above, before the
+        // removal loop) rather than unconditionally: the removal loop always
+        // leaves a thought part last once every non-thought text part is
+        // gone, but that "trailing" position may be an artifact of the
+        // removal, not a genuine stream truncation. Only a thought episode
+        // that was ALREADY last -- i.e. a real dangling truncation -- is
+        // eligible for the drop.
+        if (hadTrailingDanglingThought) {
+          dropDanglingUnsignedTrailingThought(consolidatedHistoryParts, true);
+        }
         if (recovery.remainingText) {
           consolidatedHistoryParts.splice(
             Math.min(insertAt, consolidatedHistoryParts.length),
@@ -5136,6 +5168,15 @@ export class GeminiChat {
     if (streamError === null && transportContinuationPrefix) {
       const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
       if (textIndex < 0) {
+        // Fourth call site for the dangling-episode drop. When only thought
+        // parts remain, `findIndex((part) => !part.thought)` below is -1 and
+        // the prefix would land at the very end -- burying a trailing
+        // dangling episode mid-array before the coalescing-site trailing-only
+        // check ever runs. Once text follows the episode, that later check
+        // can never protect it again, so it must be dropped HERE, before the
+        // splice, accepting the same documented false-positive trade-off
+        // (see this function's doc comment) the other call sites accept.
+        dropDanglingUnsignedTrailingThought(consolidatedHistoryParts, true);
         // Continuation returned no visible text of its own (e.g. only a
         // functionCall). Thought episodes are consolidated inline above, so
         // insert the prefix after any leading thought parts to keep the

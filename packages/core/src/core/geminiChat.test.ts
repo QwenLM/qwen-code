@@ -9292,8 +9292,13 @@ describe('GeminiChat', async () => {
       it('inserts the delivered text when the continuation has no text part', async () => {
         // Covers `textIndex < 0`: a thinking model completes the continuation
         // with only a thought part. The delivered text has nothing to merge
-        // into, so it is inserted as its own part — and must land *after* the
-        // thought, not ahead of it.
+        // into, so it would be inserted as its own part after any leading
+        // thought parts -- but inserting it AFTER an unsigned trailing
+        // thought would bury that episode mid-array before the
+        // coalescing-site trailing-only drop ever runs (see the
+        // "fourth call site" in dropDanglingUnsignedTrailingThought's doc
+        // comment), so the episode is dropped first and only the merged
+        // text survives.
         vi.useFakeTimers();
         try {
           vi.mocked(mockContentGenerator.generateContentStream)
@@ -9323,10 +9328,7 @@ describe('GeminiChat', async () => {
 
           expect(chat.getHistory().at(-1)).toEqual({
             role: 'model',
-            parts: [
-              { text: 'only thinking', thought: true },
-              { text: 'part one ' },
-            ],
+            parts: [{ text: 'part one ' }],
           });
         } finally {
           vi.useRealTimers();
@@ -16218,12 +16220,16 @@ describe('GeminiChat', async () => {
       );
     });
 
-    it('drops a dangling unsigned episode that PRECEDES the consumed XML text, when remainingText is re-inserted after it', async () => {
-      // The drop is trailing-only, so it must run while the episode is
-      // actually last. If it runs after `remainingText` is spliced back in,
-      // the re-inserted text sits behind the episode, the trailing check
-      // sees a text part last and no-ops, and the appended functionCall
-      // wedges the turn exactly as if the drop were absent.
+    it('keeps a dangling unsigned episode that PRECEDES the consumed XML text (it was never trailing)', async () => {
+      // The drop is trailing-only, and trailing-ness must be judged from the
+      // ORIGINAL stream shape, before the recovery branch's own removal loop
+      // splices out non-thought text parts. Here the unsigned episode is
+      // FIRST, not last -- a complete, untruncated turn from a non-signing
+      // provider (finish reason STOP, no truncation) -- so it was never
+      // trailing and must survive: dropping it would have no protective
+      // benefit (non-signing providers never validate signatures) and would
+      // be a pure loss of legitimate reasoning from history and the JSONL
+      // record.
       //
       // Shape: an unsigned episode first, then a plain-text part carrying a
       // stray `thoughtSignature` and no `thought` flag -- the wire shape
@@ -16265,12 +16271,14 @@ describe('GeminiChat', async () => {
       const parts = chat.getHistory()[1]!.parts ?? [];
       expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(parts.some((p) => p.text?.includes('<invoke'))).toBe(false);
-      // No unsigned thinking may share an active tool-use turn.
-      expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(false);
-      expect(parts.some((p) => p.text === 'planning my read')).toBe(false);
-      // remainingText is non-empty here, and the drop fires on this path --
-      // the visible prose the user already saw streamed must survive both the
-      // pop and the re-insertion, or `--resume` loses it permanently.
+      // The unsigned episode was never trailing, so it survives -- it is not
+      // the dangling-truncation shape this drop exists to catch, and this
+      // non-signing provider's tool-use turn carries no wedge risk from it.
+      expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(true);
+      expect(parts.some((p) => p.text === 'planning my read')).toBe(true);
+      // remainingText is non-empty here; the visible prose the user already
+      // saw streamed must survive the re-insertion, or `--resume` loses it
+      // permanently.
       expect(parts.some((p) => p.text === 'Sure.')).toBe(true);
     });
 
