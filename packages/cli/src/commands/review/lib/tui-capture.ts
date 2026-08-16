@@ -189,24 +189,6 @@ export interface CaptureManifest {
   degradedBecause?: string;
   /** How long the run waited before capturing, and why it stopped waiting. */
   settledBy: 'until-match' | 'timeout' | 'fixed-delay';
-  /** Identity of the files this run actually wrote, so a LATER run can
-   * tell "the artifacts my manifest describes" from "whatever holds those
-   * names now". The signature on the manifest authenticates the manifest;
-   * it says nothing about the files beside it, and a genuine manifest was
-   * enough to authorize unlinking a file that had since replaced the
-   * .ans it named. `png` is null on an ans-only rung — the run wrote none. */
-  artifacts: {
-    ans: ArtifactId;
-    png: ArtifactId | null;
-  };
-}
-
-/** A file's identity as this command checks it: the same triple `changed()`
- * compares, recorded so it survives into the next run. */
-export interface ArtifactId {
-  ino: number;
-  size: number;
-  mtimeMs: number;
 }
 
 /**

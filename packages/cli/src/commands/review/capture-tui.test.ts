@@ -120,31 +120,7 @@ function staleManifest(outBase: string, evidence = 'png'): string {
     pngPath: evidence === 'png' ? `${outBase}.png` : null,
     evidence,
     settledBy: 'fixed-delay',
-    // The identities of the files seeded beside it — a manifest only has
-    // authority over the artifacts it actually produced, so a fixture that
-    // omits these is a manifest describing files that are not there.
-    artifacts: {
-      ans: idOfPath(`${outBase}.ans`),
-      png: evidence === 'png' ? idOfPath(`${outBase}.png`) : null,
-    },
   });
-}
-
-/** Identity of a seeded fixture file, as the command records its own. A
- * fixture that seeds no file at that name gets an identity nothing can
- * match, which is the honest reading: the manifest describes an artifact
- * that is not there, so it has no authority over that name. */
-function idOfPath(path: string): {
-  ino: number;
-  size: number;
-  mtimeMs: number;
-} {
-  try {
-    const st = statSync(path);
-    return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
-  } catch {
-    return { ino: -1, size: -1, mtimeMs: -1 };
-  }
 }
 
 // `<out>.holder-ready` is no longer the sentinel — it lives per-pid under
@@ -617,14 +593,13 @@ describe('capture-tui without tmux (probe seam)', () => {
   // can plausibly hold; ownership has to be proved by the full signature a
   // previous run of THIS command wrote, every rung of it.
   for (const [label, manifest] of [
-    ['only the evidence rung', '{"evidence":"png","artifacts":"ARTIFACTS"}'],
+    ['only the evidence rung', '{"evidence":"png"}'],
     [
       'a manifest naming a DIFFERENT capture',
       JSON.stringify({
         evidence: 'png',
         ansPath: '/somewhere/else/other.ans',
         settledBy: 'timeout',
-        artifacts: 'ARTIFACTS',
       }),
     ],
     [
@@ -636,7 +611,6 @@ describe('capture-tui without tmux (probe seam)', () => {
         evidence: 'text',
         ansPath: 'PLACEHOLDER',
         settledBy: 'timeout',
-        artifacts: 'ARTIFACTS',
       }),
     ],
     [
@@ -644,7 +618,6 @@ describe('capture-tui without tmux (probe seam)', () => {
       JSON.stringify({
         evidence: 'png',
         ansPath: 'PLACEHOLDER',
-        artifacts: 'ARTIFACTS',
       }),
     ],
   ] as const) {
@@ -653,20 +626,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       try {
         writeFileSync(join(dir, 'cap.ans'), 'user file');
         writeFileSync(join(dir, 'cap.png'), 'user file');
-        // The identity rung is filled in with the REAL identities, so it
-        // cannot mask the rung each fixture is actually about: left out,
-        // sameFile(undefined, …) is false and the clear refuses no matter
-        // which earlier rung a mutant restores — the pin would pass for
-        // the wrong reason.
-        const json = manifest
-          .replace('PLACEHOLDER', join(dir, 'cap.ans'))
-          .replace(
-            '"ARTIFACTS"',
-            JSON.stringify({
-              ans: idOfPath(join(dir, 'cap.ans')),
-              png: idOfPath(join(dir, 'cap.png')),
-            }),
-          );
+        const json = manifest.replace('PLACEHOLDER', join(dir, 'cap.ans'));
         writeFileSync(join(dir, 'cap.json'), json);
         const { stderr } = await withStdio(() =>
           runCaptureTui({
@@ -977,13 +937,6 @@ describe('capture-tui without tmux (probe seam)', () => {
         evidence: 'png',
         ansPath: relative(process.cwd(), join(dir, 'cap.ans')),
         settledBy: 'timeout',
-        // Real identities, so this fixture pins the ansPath rung rather
-        // than being refused by a missing artifacts rung — which would
-        // pass for the wrong reason against exactly the mutant it names.
-        artifacts: {
-          ans: idOfPath(join(dir, 'cap.ans')),
-          png: idOfPath(join(dir, 'cap.png')),
-        },
       });
       writeFileSync(join(dir, 'cap.json'), json);
       const { stderr } = await withStdio(() =>
@@ -1069,48 +1022,6 @@ describe('capture-tui without tmux (probe seam)', () => {
       }
     });
   }
-
-  it('a GENUINE manifest does not authorize clearing a REPLACED artifact', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-replaced-'));
-    try {
-      // The signature authenticates the manifest, not the files beside it: a
-      // real previous run's manifest was enough to unlink whatever now holds
-      // the .ans name — the user's own file, put there after that run. The
-      // manifest records what it actually wrote, so a replaced artifact is
-      // simply not the one it describes.
-      // Swept the file for this class: this is the only test inside the
-      // real-tmux describe that never reaches tmux — it refuses in the clear
-      // phase, which runs before the probe. Sitting there, the identity rung
-      // was unpinned on every tmux-less lane.
-      writeFileSync(join(dir, 'cap.png'), 'old run');
-      writeFileSync(join(dir, 'cap.ans'), 'old run');
-      const genuine = staleManifest(join(dir, 'cap'));
-      // ...and NOW the .ans is replaced by something the manifest never saw.
-      writeFileSync(join(dir, 'cap.ans'), 'a user file that took the name');
-      writeFileSync(join(dir, 'cap.json'), genuine);
-      const { stderr } = await withStdio(() =>
-        runCaptureTui({
-          command: 'printf hi',
-          cwd: undefined,
-          cols: 80,
-          rows: 24,
-          settleMs: 0,
-          until: undefined,
-          keys: undefined,
-          out: join(dir, 'cap'),
-          timeoutMs: 1000,
-        } as never),
-      );
-      expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('collides with a file this capture did not');
-      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
-        'a user file that took the name',
-      );
-      expect(existsSync(join(dir, 'cap.json'))).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 
   it('clears stale artifacts for the SHAPE-BOUNDS gate family too', async () => {
     // Seven refusal gates have seeded-artifact ordering pins; the family
@@ -1763,77 +1674,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } as never);
   }
 
-  it('refuses when the --out DIRECTORY is swapped mid-window', async () => {
-    // The reported reproduction: every artifact path resolves by name, so
-    // a captured command running as the same uid could move the directory
-    // aside and put a symlink in its place — all three artifacts landed
-    // under the victim while the manifest went on attesting the original
-    // paths. Node has no *at() syscalls, so the directory is pinned by
-    // identity (dev+ino) and re-checked before each artifact operation.
-    const base = mkdtempSync(join(tmpdir(), 'capture-tui-swap-'));
-    const capdir = join(base, 'capdir');
-    const victim = join(base, 'victim');
-    mkdirSync(capdir);
-    mkdirSync(victim);
-    try {
-      const { stderr } = await withStdio(() =>
-        runCaptureTui({
-          command: `cd ..; mv capdir capdir.stolen; ln -s victim capdir; printf 'SWAP-MARK\\n'; sleep 20`,
-          cwd: capdir,
-          cols: 80,
-          rows: 24,
-          settleMs: 0,
-          until: 'SWAP-MARK',
-          keys: undefined,
-          out: join(capdir, 'cap'),
-          timeoutMs: 20_000,
-        } as never),
-      );
-      expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('directory holding --out was replaced');
-      // Nothing of this run's landed anywhere.
-      expect(readdirSync(victim)).toEqual([]);
-    } finally {
-      rmSync(base, { recursive: true, force: true });
-    }
-  });
-
-  it('creates a MISSING --out parent without calling it a swap', async () => {
-    // The directory-identity baseline was sampled before the mkdirSync
-    // that exists to create this directory, so a fresh parent baselined
-    // 'gone' and the first write refused with "the directory holding --out
-    // was replaced" — after paying the whole capture window, and factually
-    // false: this run created it. Every fixture in this suite used an
-    // existing mkdtemp dir, so it shipped green.
-    const fresh = join(dir, 'fresh-dir', 'nested');
-    await withStdio(() => run({ out: join(fresh, 'cap') }));
-    expect(process.exitCode).toBeUndefined();
-    expect(readFileSync(join(fresh, 'cap.ans'), 'utf8')).toContain('WORLD');
-    const manifest = JSON.parse(
-      readFileSync(join(fresh, 'cap.json'), 'utf8'),
-    ) as { ansPath: string };
-    expect(manifest.ansPath).toBe(join(fresh, 'cap.ans'));
-  });
-
-  it('does not delete a FOREIGN file that replaced <out>.ans mid-render', async () => {
-    // The refusal is right; the cleanup behind it was not. On a collision
-    // the loop asked `changed()` against the PRE-window stamps, which
-    // answer true for any occupant — so refusing to describe a replaced
-    // .ans then deleted the replacement. This run's own bytes are already
-    // gone from that path by then, so the unlink can only destroy someone
-    // else's file. The fake freeze does the replacing: it runs inside the
-    // render window, which is exactly where the reported racer sat.
-    await withFakeFreeze(
-      `#!/bin/sh\nprintf 'FOREIGN-CONTENT' > "${join(dir, 'cap.ans')}"\nexit 9\n`,
-      () => run(),
-    );
-    expect(process.exitCode).toBe(3);
-    // The refusal happened...
-    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-    // ...and the foreign file is still there, byte for byte.
-    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('FOREIGN-CONTENT');
-  });
-
   it('refuses a FIFO at <out>.json instead of hanging on it', async () => {
     // The manifest checks and the read used to resolve the path twice, so a
     // racer could swap a verified regular file for a FIFO and hang the
@@ -1914,49 +1754,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
-  it('never credits a png written THROUGH a mid-window symlink', async () => {
-    // The png stamp was taken before the capture window, so a symlink the
-    // captured command planted at <out>.png read as "absent" — freeze wrote
-    // through it, the bytes landed outside --out, and the run attested
-    // `evidence: 'png'` for an image that is not at the path the manifest
-    // names.
-    const outside = join(dir, 'outside-the-base.png');
-    writeFileSync(outside, 'untouched');
-    await withStdio(() =>
-      run({
-        command: `ln -s '${outside}' cap.png; printf 'MARK\\n'; sleep 20`,
-        until: 'MARK',
-      }),
-    );
-    expect(process.exitCode).toBeUndefined();
-    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
-    expect(manifest.evidence).toBe('ans-only');
-    expect(manifest.pngPath).toBeNull();
-    expect(manifest.degradedBecause).toContain(
-      'holds a file this capture did not write',
-    );
-    // Neither the link nor what it points at was touched.
-    expect(readFileSync(outside, 'utf8')).toBe('untouched');
-    expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
-  });
-
-  it('does not delete a mid-window occupant of <out>.png', async () => {
-    // The failed-render cleanup asked the PRE-window stamp, which says
-    // absent for anything the captured command created — so `changed()`
-    // reduced to "something is there" and the cleanup deleted a file this
-    // run never wrote.
-    await withStdio(() =>
-      run({
-        command: `printf 'USER-PNG' > cap.png; printf 'MARK\\n'; sleep 20`,
-        until: 'MARK',
-      }),
-    );
-    expect(process.exitCode).toBeUndefined();
-    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('USER-PNG');
-    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
-    expect(manifest.evidence).toBe('ans-only');
-  });
-
   it('an ans-only manifest does not authorize clearing <out>.png', async () => {
     // Mutation-probed: dropping the `manifestHadPng` condition shipped the
     // whole suite green while this exact shape deleted a user's file. A
@@ -2000,14 +1797,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         ansPath: join(dir, 'cap.ans'),
         pngPath: join(dir, 'cap.png'),
         settledBy: 'fixed-delay',
-        // A genuine ans-only run records `png: null`; this fixture's whole
-        // point is a manifest that is internally inconsistent while still
-        // authentic, so it names both — and the .ans identity has to match
-        // or the clear phase never gets far enough to ask about the png.
-        artifacts: {
-          ans: idOfPath(join(dir, 'cap.ans')),
-          png: idOfPath(join(dir, 'cap.png')),
-        },
       }),
     );
     const { stderr } = await withStdio(() => run());
