@@ -27,6 +27,14 @@ on:
         required: false
         default: 'sympy__sympy-20590'
         type: 'string'
+      execution_backend:
+        description: 'Execution backend; eas-smoke validates infrastructure only'
+        required: true
+        default: 'eas-smoke'
+        type: 'choice'
+        options:
+          - 'eas-smoke'
+          - 'eas-harbor'
 
 permissions:
   contents: 'read'
@@ -43,6 +51,9 @@ jobs:
     runs-on: 'ubuntu-latest'
     outputs:
       should_run: '${{ steps.gate.outputs.should_run }}'
+      execution_backend: '${{ steps.gate.outputs.execution_backend }}'
+      instance_limit: '${{ steps.gate.outputs.instance_limit }}'
+      instance_id: '${{ steps.gate.outputs.instance_id }}'
     steps:
       - name: 'Check release version'
         id: 'gate'
@@ -52,12 +63,35 @@ jobs:
           RELEASE_PRERELEASE: '${{ github.event.release.prerelease || false }}'
         run: |-
           should_run='false'
+          execution_backend='eas-harbor'
+          instance_limit='500'
+          instance_id=''
           if [[ "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
             should_run='true'
+            execution_backend='${{ inputs.execution_backend }}'
+            instance_limit='${{ inputs.instance_limit }}'
+            if [[ "${instance_limit}" == '1' ]]; then
+              instance_id='${{ inputs.instance_id }}'
+            fi
+          elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-smoke-[0-9A-Za-z._-]+$ ]]; then
+            should_run='true'
+            execution_backend='eas-smoke'
+            instance_limit='1'
+            instance_id='astropy__astropy-12907'
+          elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-full-[0-9A-Za-z._-]+$ ]]; then
+            should_run='true'
+            execution_backend='eas-harbor'
+            instance_limit='500'
+            instance_id=''
           elif [[ "${RELEASE_PRERELEASE}" == 'false' && "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.0$ ]]; then
             should_run='true'
           fi
-          echo "should_run=${should_run}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "should_run=${should_run}"
+            echo "execution_backend=${execution_backend}"
+            echo "instance_limit=${instance_limit}"
+            echo "instance_id=${instance_id}"
+          } >> "${GITHUB_OUTPUT}"
           if [[ "${should_run}" == 'false' ]]; then
             echo "::notice::Skipping benchmark for ${RELEASE_TAG:-non-release event}"
           fi
@@ -66,15 +100,25 @@ jobs:
     name: 'Dispatch SWE-bench Verified to DSW'
     needs: 'release_gate'
     if: '${{ needs.release_gate.outputs.should_run == ''true'' }}'
-    runs-on: ['self-hosted', 'Linux', 'X64', 'qwen-benchmark-dsw']
+    runs-on: ['self-hosted', 'Linux', 'X64', 'qwen-benchmark-dsw-hk-eas']
     timeout-minutes: 15
     env:
       RELEASE_TAG: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.release_tag }}'
       QWEN_REF: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}'
-      INSTANCE_LIMIT: '${{ github.event_name == ''release'' && ''500'' || inputs.instance_limit }}'
-      BENCHMARK_INSTANCE_ID: '${{ (github.event_name != ''release'' && inputs.instance_limit == ''1'') && inputs.instance_id || '''' }}'
+      INSTANCE_LIMIT: '${{ needs.release_gate.outputs.instance_limit }}'
+      BENCHMARK_INSTANCE_ID: '${{ needs.release_gate.outputs.instance_id }}'
       BENCHMARK_IDEMPOTENCY_KEY: 'dsw-release-v1-${{ github.run_id }}'
       GITHUB_RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+      BENCHMARK_EXECUTION_BACKEND: '${{ needs.release_gate.outputs.execution_backend }}'
+      DSW_POOL_ROOT: '/mnt/workspace/qwen-benchmark-acr-prewarm'
+      POOL_BIN: '/mnt/workspace/qwen-benchmark-eas-poc/venv/bin/qwen-benchmark-pool'
+      POOL_PYTHON: '/mnt/workspace/qwen-benchmark-eas-poc/venv/bin/python'
+      PYTHONPATH: '/mnt/workspace/qwen-benchmark-eas-poc'
+      SWE_VERIFIED_DATASET_ROOT: '/mnt/workspace/qwen-benchmark-acr-prewarm/datasets/swe-bench-verified'
+      EAS_TEMPLATE_MANIFEST: '/mnt/workspace/qwen-benchmark-acr-prewarm/deploy/eas/templates.json'
+      ACR_IMAGE_MANIFEST: '/mnt/workspace/qwen-benchmark-eas-poc/state/acr-manifest-c104f840.json'
+      ACR_IMAGE_STATE_DIR: '/mnt/data/qwen-benchmark/acr-prewarm/c104f840/state'
+      BENCHMARK_POOL_DATABASE_URL: 'postgresql://postgres@/qwen_benchmark_eas_long_pool?host=/mnt/dynamic/qwen-benchmark-pg/run&port=55432'
 
     steps:
       - name: 'Checkout pipeline'
