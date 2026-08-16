@@ -326,9 +326,21 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
   });
 
   it('vetoes a return that declares a chunk uncoverable', () => {
-    const prompt = built('chunk-1');
+    // Production shape: a chunk agent's launch prompt carries its `chunk N
+    // of M` line — that line is how BOTH pipeline authorities assign the
+    // record, and the veto keys on the record's own assignment exactly as
+    // they do.
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, 'chunk-1');
+    writeFileSync(brief, 'The chunk-1 brief.');
+    const prompt =
+      `You are reviewing chunk 1 of 2.\n` + `read_file(file_path="${brief}")`;
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent('chunk-1')}.txt`),
+      prompt,
+    );
     transcript('S0', 'a0', prompt, {
-      opens: [briefPath(plan, 'chunk-1')],
+      opens: [brief],
       finalText: 'Uncoverable: chunk 1 — a line exceeds the read limit',
     });
     const r = recoverFindings({ plan, out: out() }, ENV);
@@ -510,6 +522,79 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     const r = recoverFindings({ plan, out: out() }, ENV);
     expect(r.recoveredKeys).toEqual([key]);
     expect(r.latestReverseAuditRound).toBe(2);
+  });
+
+  it('a PER-CHUNK auditor quoting its own chunk declaration is still recovered', () => {
+    // The sixth divergence: the veto keyed on `chunkOfKey(key)` while both
+    // pipeline authorities key it on `assignedChunk(rec)` — null here, since
+    // the production per-chunk audit prompt carries no `chunk N of M` line.
+    // A certified auditor QUOTING its own chunk's declaration (the briefs
+    // mandate verbatim quoting) was dropped from recovery while coverage
+    // counted the same record as recovered work, and
+    // `latestReverseAuditRound` regressed a round.
+    const key = 'reverse-audit--chunk-3--round-1--abc123def456';
+    const roundList = findingsFilePath(
+      plan,
+      'reverse-audit--round-1--abc123def456',
+    );
+    writeFileSync(roundList, '- **[Critical]** x.ts:1 — y');
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, 'The brief.');
+    const prompt =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${roundList}")\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('S0', 'a0', prompt, {
+      opens: [brief, roundList, DIFF],
+      finalText:
+        'Audited the round-1 evidence for chunk 3. It reads:\n' +
+        'Uncoverable: chunk 3 — a line exceeds the read limit\n' +
+        'The declaration is sound.',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([key]);
+    expect(r.latestReverseAuditRound).toBe(1);
+  });
+
+  it('a per-chunk VERIFY shard cannot skip the findings floor', () => {
+    // The seventh entrance: `verify--chunk-N--…` keys fell into the
+    // chunk-territory branch (`chunk !== null` and not reverse-audit) and
+    // were certified on a diff read alone — skipping the findings floor
+    // coverage's `deliveryOf` holds every verify key to. Only the bare
+    // chunk ROLE takes the territory-only branch now.
+    const key = 'verify--chunk-2--round-1--abc123def456';
+    const list = findingsFilePath(plan, 'verify--round-1--abc123def456');
+    writeFileSync(list, '- **[Critical]** x.ts:1 — y');
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, 'The brief.');
+    const prompt =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${list}")\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+
+    // Diff and brief opened, findings list skipped → refused.
+    transcript('S0', 'a0', prompt, {
+      opens: [brief, DIFF],
+      finalText: 'All verified.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+
+    // List read too → recovered.
+    transcript('S0', 'a1', prompt, {
+      opens: [brief, list, DIFF],
+      finalText: 'All verified, list compared.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      key,
+    ]);
   });
 
   it('certifies a NON-chunk agent that opened its brief AND the findings list only', () => {

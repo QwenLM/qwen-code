@@ -127,20 +127,23 @@ function meetsBar(
   // tool calls, and a mid-flight-dead agent's narration must not be handed
   // to the resumed orchestrator as certified final text.
   if (!rec.returned) return false;
-  // Coverage infers the assignment from the launch prompt because that is all
-  // it has; recovery is matching a record to a KEY the CLI built, which says
-  // the same thing directly. Fall back to the prompt for a record whose key
-  // does not name a chunk.
+  // The DUTY chunk — the territory whose diff read the key demands — comes
+  // from the key, with the prompt as fallback: recovery is matching a record
+  // to a KEY the CLI built, which names the chunk directly.
   const chunk = chunkOfKey(key) ?? assignedChunk(rec);
-  // The veto is chunk-SCOPED, as it is in coverage's walk: there the regex is
-  // applied to an agent's own declaration about its own chunk. Applied raw to
-  // any final text, it also matches a QUOTATION — and quoting the evidence
-  // verbatim is exactly what a reverse-audit brief instructs. A certified
-  // auditor that quoted an `Uncoverable:` line was dropped from recovery, and
-  // `latestReverseAuditRound` regressed with it, restarting the audit loop a
-  // round early.
+  // The VETO chunk is the record's OWN assignment — `assignedChunk(rec)`,
+  // exactly as both pipeline authorities key it (coverage's walk and its
+  // `certifies()`). A per-chunk audit key names a chunk, but the production
+  // per-chunk audit prompt carries no `chunk N of M` line, and keying the
+  // veto on the KEY's chunk dropped a certified auditor whose final text
+  // QUOTED its own chunk's declaration (the briefs mandate verbatim
+  // quoting) — while coverage counted the same record as recovered work:
+  // two authorities of one pipeline answering oppositely about one
+  // transcript. `latestReverseAuditRound` regressed with the drop and the
+  // resumed run restarted a round the dead attempt had completed.
+  const own = assignedChunk(rec);
   const declared = UNCOVERABLE_RE.exec(rec.finalText);
-  if (declared !== null && chunk !== null && Number(declared[1]) === chunk) {
+  if (declared !== null && own !== null && Number(declared[1]) === own) {
     return false;
   }
   // EVERY role opens its brief — the live walk gates `ok` on `unreadBriefs`
@@ -151,8 +154,13 @@ function meetsBar(
     a.includes(JSON.stringify(briefPath(planPath, key))),
   );
   if (!openedBrief) return false;
-  if (chunk !== null && !key.startsWith('reverse-audit')) {
-    // A chunk agent's proof of TERRITORY is the diff it opened.
+  if (/^chunk-\d+$/.test(key)) {
+    // The chunk ROLE only — its proof of territory is the diff it opened,
+    // and its prompt names no findings list. Keyed on the exact bare form:
+    // `chunk !== null` also matched per-chunk VERIFY shards
+    // (`verify--chunk-N--…`), certifying them on a diff read alone and
+    // skipping the findings floor coverage's `deliveryOf` holds every
+    // verify key to.
     return rec.diffToolCalls > 0;
   }
   // The findings floor keys on the POINTER the recorded prompt names — not a
