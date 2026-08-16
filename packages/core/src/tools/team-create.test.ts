@@ -59,6 +59,26 @@ describe('TeamCreateTool', () => {
     expect(tool.name).toBe('team_create');
   });
 
+  it('does not promise peer-DM summaries the idle notification never carries (#9283)', () => {
+    const description = new TeamCreateTool(makeConfig()).description;
+
+    // TeammateIdleEvent carries only {agentId, name, timestamp}, and
+    // nothing attaches a peer-message summary to it or to anything else
+    // the leader receives on idle — the automatic idle report is the
+    // teammate's OWN final answer. A description promising a peer-DM
+    // summary makes coordination look more observable than it is.
+    expect(description).not.toContain('Peer DM visibility');
+    expect(description).not.toContain('brief summary is included');
+    // And it states what the leader ACTUALLY receives on idle, so the
+    // gap cannot silently grow back in the other direction.
+    expect(description.replace(/\s+/g, ' ')).toContain(
+      "the runtime forwards that teammate's final answer to you automatically",
+    );
+    expect(description.replace(/\s+/g, ' ')).toContain(
+      'There is no summary of teammate-to-teammate messages',
+    );
+  });
+
   it('creates a team and sets manager on config', async () => {
     const config = makeConfig();
     const tool = new TeamCreateTool(config);
