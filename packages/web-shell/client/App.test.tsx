@@ -32,6 +32,7 @@ type MockConnection = {
   sessionId: string | undefined;
   clientId: string;
   displayName: string | undefined;
+  titleSource?: 'manual' | 'auto';
   workspaceCwd: string;
   currentModel: string;
   currentMode: string;
@@ -10051,9 +10052,63 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.clearSession).toHaveBeenCalled();
       });
     });
-    // The cleared connection drops the session id (the real clearSession
-    // does this via setConnection; the mock leaves it to the test).
+    // The cleared connection drops the session id, title source, and display
+    // name (the real clearSession does this via setConnection; the mock
+    // leaves it to the test).
     mockConnection.sessionId = undefined;
+    mockConnection.titleSource = undefined;
+    mockConnection.displayName = undefined;
+
+    // Capture the session id at rename time: the manual name must be applied
+    // to the successor session, not before it exists (#8977).
+    let renameTargetSessionId: string | undefined;
+    mockSessionActions.renameSession.mockImplementation(async () => {
+      renameTargetSessionId = mockConnection.sessionId;
+      return undefined;
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+        );
+      });
+    });
+    expect(renameTargetSessionId).toBe('session-2');
+  });
+
+  it('keeps a manual session name across a repeated /clear (#8977)', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-2';
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalled();
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.titleSource = undefined;
+    mockConnection.displayName = undefined;
+
+    // A second /clear before any prompt must not discard the stashed name.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+      });
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.titleSource = undefined;
+    mockConnection.displayName = undefined;
 
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('!echo hi');
@@ -10083,6 +10138,8 @@ describe('App session callbacks', () => {
       });
     });
     mockConnection.sessionId = undefined;
+    mockConnection.titleSource = undefined;
+    mockConnection.displayName = undefined;
 
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('!echo hi');

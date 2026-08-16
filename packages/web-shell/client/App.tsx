@@ -9318,10 +9318,14 @@ export function App({
             // are never carried forward — /clear on an auto-titled session
             // still starts untitled.
             const conn = connectionRef.current;
+            // A repeated /clear before a prompt has already cleared the
+            // connection's title info; keep the name stashed by the first.
             carryOverManualNameRef.current =
-              conn.titleSource === 'manual' && conn.displayName?.trim()
-                ? conn.displayName
-                : undefined;
+              conn.titleSource === undefined
+                ? carryOverManualNameRef.current
+                : conn.titleSource === 'manual' && conn.displayName?.trim()
+                  ? conn.displayName
+                  : undefined;
             createNewSession();
             return true;
           }
