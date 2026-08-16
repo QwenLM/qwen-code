@@ -271,6 +271,10 @@ export function validateAuthMethod(
     );
   }
 
+  if (authMethod === AuthType.USE_COPILOT) {
+    return null;
+  }
+
   if (authMethod === AuthType.USE_ANTHROPIC) {
     const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
     if (apiKeyError) {

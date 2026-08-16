@@ -3080,6 +3080,47 @@ const SETTINGS_SCHEMA = {
             description: 'Base URL for OpenAI compatible API.',
             showInDialog: false,
           },
+          copilot: {
+            type: 'object',
+            label: 'GitHub Copilot',
+            category: 'Security',
+            requiresRestart: true,
+            default: {},
+            description: 'GitHub Copilot authentication settings.',
+            showInDialog: false,
+            properties: {
+              enabled: {
+                type: 'boolean',
+                label: 'Copilot Enabled',
+                category: 'Security',
+                requiresRestart: true,
+                default: false,
+                description:
+                  'Whether GitHub Copilot authentication is enabled.',
+                showInDialog: false,
+              },
+              githubTokenPath: {
+                type: 'string',
+                label: 'GitHub Token Path',
+                category: 'Security',
+                requiresRestart: true,
+                default: undefined as string | undefined,
+                description:
+                  'Filesystem path to a GitHub token (ghu_/gho_) used for Copilot CAPI exchange.',
+                showInDialog: false,
+              },
+              enterpriseUrl: {
+                type: 'string',
+                label: 'Copilot Enterprise URL',
+                category: 'Security',
+                requiresRestart: true,
+                default: undefined as string | undefined,
+                description:
+                  'GitHub Copilot enterprise proxy endpoint URL, overriding the default CAPI base.',
+                showInDialog: false,
+              },
+            },
+          },
         },
       },
       allowedHttpHookUrls: {
