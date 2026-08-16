@@ -6873,7 +6873,22 @@ async function runQwenServeImpl(
           // channel-reload-filter (ACP-free, so it respects the serve
           // fast-path import boundary), mirroring the stop-record
           // contract, so its filtering logic is directly testable (R14-5).
-          const filterReloadSelection = createDaemonReloadSelectionFilter();
+          // The state access is dependency-injected from this lazily
+          // loaded runtime: a static import of the channel command graph
+          // in channel-reload-filter would drag the settings/extension
+          // closure into the serve fast-path bundle (check-serve-fast-
+          // path-bundle), while injection keeps the production derivation
+          // — the same canonicalization and daemon state file the stop
+          // side writes (#8975).
+          const filterReloadSelection = createDaemonReloadSelectionFilter({
+            canonicalizeWorkspace,
+            readRuntimeStates: (canonicalWorkspaceCwd) =>
+              new workerRuntime.ChannelStateStore(
+                workerRuntime.daemonChannelRuntimeStatePath(
+                  canonicalWorkspaceCwd,
+                ),
+              ).readAll(),
+          });
           // R14: the explicit-set side of the reload-filter contract. An
           // explicit names-mode (re-)commit force-starts, but its
           // pre-existing `stopped` records survive the commit; an

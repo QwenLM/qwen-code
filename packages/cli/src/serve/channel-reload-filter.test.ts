@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { ChannelStateStore } from '../commands/channel/channel-state-store.js';
 import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
 import { createDaemonReloadSelectionFilter } from './channel-reload-filter.js';
@@ -25,6 +26,10 @@ import type { ServeChannelSelection } from './types.js';
 // explicitly stopped sibling — the resurrection the filter exists to
 // prevent. These tests run the real ChannelStateStore against a temp
 // QWEN_HOME so the path derivation under test is the production one.
+// The filter takes its state access as injected deps (the serve fast-path
+// bundle boundary forbids static imports of the channel command graph in
+// channel-reload-filter); makeFilter below mirrors the run-qwen-serve
+// wiring so the derivation under test stays the production one.
 describe('createDaemonReloadSelectionFilter (R14-5)', () => {
   const workspace = '/workspace/filter';
   let home: string;
@@ -50,6 +55,17 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
     selection: { mode: 'names', names },
   });
 
+  // Same wiring run-qwen-serve uses: canonicalization + daemon state read
+  // from the real channel command graph modules.
+  const makeFilter = () =>
+    createDaemonReloadSelectionFilter({
+      canonicalizeWorkspace,
+      readRuntimeStates: (canonicalWorkspaceCwd) =>
+        new ChannelStateStore(
+          daemonChannelRuntimeStatePath(canonicalWorkspaceCwd),
+        ).readAll(),
+    });
+
   it('drops a name with a persisted stopped record and keeps its cleared sibling', () => {
     // The core contract: seed the daemon state file exactly the way a
     // stop records it (recordChannelsStopped -> the same
@@ -59,7 +75,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
       'telegram',
       'stopped',
     );
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['telegram', 'feishu'],
@@ -79,7 +95,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
     );
     store.set('telegram', 'stopped');
     store.set('telegram', 'active');
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['telegram'],
@@ -95,7 +111,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
     // Identity, not just equality: the manager and its callers use the
     // returned object directly; a fresh clone on a no-op filter would be
     // a silent behavior change this suite should notice.
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['telegram'],
@@ -113,7 +129,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
       'orphan',
       'stopped',
     );
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['orphan', 'telegram'],
@@ -129,7 +145,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
       'telegram',
       'stopped',
     );
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = { mode: 'all' };
 
     expect(filter(selection, [group(workspace, ['telegram'])])).toBe(selection);
@@ -146,7 +162,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
       'telegram',
       'stopped',
     );
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['telegram'],
@@ -166,7 +182,7 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
       'telegram',
       'stopped',
     );
-    const filter = createDaemonReloadSelectionFilter();
+    const filter = makeFilter();
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['telegram', 'feishu'],

@@ -468,6 +468,28 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
   });
 
+  it('keeps the daemon reload-selection filter free of the channel command graph', () => {
+    // run-qwen-serve statically imports channel-reload-filter on the
+    // serve fast path; a VALUE import of the channel command graph
+    // (channel-state-store / runtime -> settings, extensions, channel
+    // registry closure) drags glob/chokidar/@iarna/toml/fzf and the core
+    // shell runtime into the pre-listen bundle
+    // (scripts/check-serve-fast-path-bundle.js). State access arrives as
+    // injected deps from the lazily loaded worker runtime instead
+    // (#8975).
+    const filterSource = readFileSync(
+      'src/serve/channel-reload-filter.ts',
+      'utf8',
+    );
+
+    expect(filterSource).not.toMatch(
+      /import\s+(?!type\b)[^;]*from ['"]\.\.\/commands\/channel\//,
+    );
+    expect(filterSource).toContain(
+      "import type { ChannelRuntimeState } from '../commands/channel/channel-state-store.js';",
+    );
+  });
+
   it('keeps request helpers from value-importing the ACP compatibility shim', () => {
     const requestHelpersSource = readFileSync(
       'src/serve/server/request-helpers.ts',

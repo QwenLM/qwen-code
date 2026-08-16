@@ -5,12 +5,27 @@
  */
 
 import * as path from 'node:path';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { ChannelStateStore } from '../commands/channel/channel-state-store.js';
 import type { ChannelRuntimeState } from '../commands/channel/channel-state-store.js';
-import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
+
+/**
+ * Runtime deps injected by the caller instead of statically imported: the
+ * channel command graph (`../commands/channel/*`) reaches the settings,
+ * extension and channel-registry closures, which the serve fast-path bundle
+ * boundary forbids in the pre-listen static closure
+ * (scripts/check-serve-fast-path-bundle.js). run-qwen-serve wires these from
+ * the lazily loaded channel worker runtime (`ensureChannelRuntime`), so the
+ * derivation stays the production one — the SAME canonicalization and the
+ * SAME daemon state file recordChannelsStopped / clearStoppedRecord use —
+ * without a static edge (fast-path.test.ts pins the absence of the edge).
+ */
+export type DaemonReloadSelectionFilterDeps = {
+  canonicalizeWorkspace: (workspaceCwd: string) => string;
+  readRuntimeStates: (
+    canonicalWorkspaceCwd: string,
+  ) => Record<string, ChannelRuntimeState>;
+};
 
 /**
  * The reload-side mirror of the daemon stop-record contract
@@ -32,7 +47,9 @@ import type { ServeChannelSelection } from './types.js';
  * boundary forbids the ACP runtime modules the routes graph pulls in
  * (fast-path.test pins it), and this filter needs none of them (R14-5).
  */
-export function createDaemonReloadSelectionFilter(): (
+export function createDaemonReloadSelectionFilter(
+  deps: DaemonReloadSelectionFilterDeps,
+): (
   selection: ServeChannelSelection,
   groups: readonly ChannelWorkspaceGroup[],
 ) => ServeChannelSelection {
@@ -50,13 +67,11 @@ export function createDaemonReloadSelectionFilter(): (
       // rethrows non-ENOENT fs errors, so degrade to the resolved form.
       let canonical: string;
       try {
-        canonical = canonicalizeWorkspace(workspaceCwd);
+        canonical = deps.canonicalizeWorkspace(workspaceCwd);
       } catch {
         canonical = path.resolve(workspaceCwd);
       }
-      states = new ChannelStateStore(
-        daemonChannelRuntimeStatePath(canonical),
-      ).readAll();
+      states = deps.readRuntimeStates(canonical);
       stateByWorkspace.set(workspaceCwd, states);
     }
     return states[name] === 'stopped';
