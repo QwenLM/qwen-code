@@ -129,6 +129,40 @@ reject_fix() {
     echo "::warning::could not write the gate rejection detail; the verdict stands."
   exit 1
 }
+# Growth-audit verdict gate: a round tagged KISS_AUDIT (its counting window
+# is over the growth budget) must carry the audit's machine-readable verdict
+# — the audit IS the round's judgment of the over-budget approach, and a
+# round that skipped it must not push (the rubber-stamp hole by absence).
+# Sits at the head of the check section (after reject_fix so the rejection
+# shape is shared), before the build/schema/footprint checks AND before the
+# no-commit/no-op exits below: the verdict is required even for a no-op
+# audit round whose verdict is sound with nothing left to fix. Malformed is
+# agent misbehavior, not a build problem — NON-retryable, so the repair pass
+# is never invoked and the next scan simply re-runs the audit.
+if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
+  AUDIT_VERDICT=''
+  if [[ -f "${WORKDIR}/growth-audit.json" ]]; then
+    AUDIT_VERDICT="$(jq -r '
+        select((.verdict // "") | IN("sound", "drift", "conflict"))
+        | select((.kiss.result // "") | IN("pass", "fail"))
+        | select((.minimal_change.result // "") | IN("pass", "fail"))
+        | .verdict' "${WORKDIR}/growth-audit.json" 2> /dev/null || true)"
+  fi
+  if [[ -z "${AUDIT_VERDICT}" ]]; then
+    {
+      echo "Growth-audit round (this counting window is over its growth budget) without a valid growth-audit.json verdict."
+      echo "The audit must run BEFORE any edit this round, and the verdict file must carry verdict sound|drift|conflict plus kiss.result and minimal_change.result each pass|fail. Re-run the audit and produce the file; do not push without it."
+    } >> "${GATE_LOG}"
+    reject_fix 'growth-audit round missing a valid growth-audit.json verdict (audit skipped or malformed)' 'false' 'false'
+  fi
+  echo "🔎 growth-audit verdict: ${AUDIT_VERDICT}"
+  # Record the verdict the GATE validated, for the report step to consume
+  # via the step output. The report must NOT re-read the file itself: the
+  # branch's own build/tests run as the runner user after this point and
+  # WORKDIR is a predictable path they can write — the validated verdict is
+  # the only verdict that may reach the trail marker and the re-arm.
+  echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+fi
 baseline_also_fails() {
   # A deterministic rejection is only chargeable to this round if the same
   # check passes WITHOUT the round's commits. Measured counterexample, run

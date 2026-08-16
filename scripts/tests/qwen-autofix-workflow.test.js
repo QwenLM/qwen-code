@@ -2896,11 +2896,12 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
-    // Five sites now: the four feedback/deferral exclusions plus the
-    // over-budget census, which must not count command comments as
-    // feedback batches either.
+    // Six sites now: the four feedback/deferral exclusions, the over-budget
+    // census (command comments are not feedback batches), and the conflict
+    // handoff wake filter (a /command comment is not a trusted-human
+    // response and must not unpark a conflict verdict).
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      5,
+      6,
     );
   });
 
@@ -6739,21 +6740,55 @@ exit 1
     expect(skill).toContain('Deferred non-Critical feedback');
   });
 
-  it('escalates to a maintainer-decision handoff when the diff keeps growing past budget (non-convergence)', () => {
+  it('turns a budget breach into a growth-audit round instead of a divergence stop', () => {
     // Critical-only only trims non-Criticals, so a Critical-driven diff keeps
-    // growing anyway. The divergence detector reads this window's prior
-    // per-round growth markers and, once the brake has been over budget for
-    // >= GROWTH_DIVERGENCE_ROUNDS rounds and the diff is still not shrinking,
-    // flags the round to STOP and hand off — not patch again.
-    expect(workflow).toContain(
-      "GROWTH_DIVERGENCE_ROUNDS: '${{ vars.QWEN_AUTOFIX_GROWTH_DIVERGENCE_ROUNDS || 2 }}'",
+    // growing anyway — but a budget breach no longer escalates to a
+    // maintainer handoff. The divergence ladder (GROWTH_DIVERGENCE_ROUNDS /
+    // GROWTH_DIVERGED / PREV_SUM) is retired wholesale: the breach engages
+    // Critical-only AND makes the round a growth-audit round — a size signal
+    // triggers a JUDGMENT, never a stop. Pin the old machinery gone from the
+    // workflow entirely, so a resurrection fails here instead of riding along
+    // silently under a renamed variable.
+    expect(workflow).not.toContain('GROWTH_DIVERGENCE_ROUNDS');
+    expect(workflow).not.toContain('GROWTH_DIVERGED');
+    expect(workflow).not.toContain('growth_diverged');
+    expect(workflow).not.toContain('PREV_SUM');
+    // The audit rides the prepare step's kiss_audit output into BOTH
+    // verification gates and BOTH report steps — deleted wiring would
+    // silently inert the verdict gate and the trail marker (the writers on
+    // either end fall back to :-false/:-none, so only an end-to-end count
+    // catches it). The failure/handoff report needs the tag too: it still
+    // emits the verdict trail marker (emit_growth_audit_marker false).
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'echo "kiss_audit=${KISS_AUDIT}"',
     );
-    // Extract the divergence block and run it against fixture history.
-    const divBlock = prepareBranchAndFeedbackStep.match(
-      /(if \[\[ ! "\$\{GROWTH_DIVERGENCE_ROUNDS\}"[\s\S]*?GROWTH_DIVERGED='true'\n\s+fi\n\s+fi)/,
-    )?.[1];
-    expect(divBlock).toBeTruthy();
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-diverge-'));
+    expect(
+      workflow.match(
+        /KISS_AUDIT: '\$\{\{ steps\.prepare\.outputs\.kiss_audit \}\}'/g,
+      ) ?? [],
+    ).toHaveLength(4);
+    expect(verificationGateSteps[1]).toContain(
+      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+    );
+    expect(repairVerificationGateStep).toContain(
+      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+    );
+
+    // Extract the census + audit-trigger block and run it against fixture
+    // marker history: it counts this window's prior over-budget rounds into
+    // OVER_ROUNDS_PRIOR (count only — no boolean, no PREV_SUM compare) and
+    // sets KISS_AUDIT on the FIRST breach.
+    const auditBlock = prepareBranchAndFeedbackStep.match(
+      /OVER_ROUNDS_PRIOR=0\n\s+KISS_AUDIT='false'[\s\S]*?echo "kiss_audit=\$\{KISS_AUDIT\}" >> "\$\{GITHUB_OUTPUT\}"/,
+    )?.[0];
+    expect(auditBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-audit-'));
     // Markers carry round= (informational) and run= (GITHUB_RUN_ID) — deduped
     // on run= and ordered on measured= (the prepare-time instant; created_at
     // fallback for legacy markers), the per-workflow-run id: a retry or a
@@ -6787,12 +6822,10 @@ exit 1
       created_at: '2026-06-01T00:00:00Z',
       body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} measured=${measured} key=${key} -->`,
     });
-    const diverge = ({
-      src,
-      test,
-      criticalOnlyGrowth = 'true',
+    const census = ({
       history,
-      div = 2,
+      criticalOnlyGrowth = 'true',
+      netMeasured = 'true',
       // The comparability cutoff (base update OR external head move); markers
       // measured at/before it are dropped as incomparable.
       cutoff = '',
@@ -6802,96 +6835,93 @@ exit 1
       currentRun = 9999,
     }) => {
       writeFileSync(join(dir, 'ic.json'), JSON.stringify(history));
-      // The printf result is the FINAL line; a malformed-div round also emits
-      // a `::warning::` annotation to stdout first, so take the last line.
-      return execFileSync(
+      const outFile = join(dir, 'gh-output.txt');
+      writeFileSync(outFile, '');
+      const line = execFileSync(
         'bash',
         [
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nLIVE_REARM_KEY=W1\nWORKDIR=${dir}\n` +
-            `NET_MEASURED=true\nCRITICAL_ONLY_GROWTH=${criticalOnlyGrowth}\n` +
+            `NET_MEASURED=${netMeasured}\nCRITICAL_ONLY_GROWTH=${criticalOnlyGrowth}\n` +
             `GROWTH_NOW_CUTOFF='${cutoff}'\nGITHUB_RUN_ID=${currentRun}\n` +
-            `GROWTH_SRC=${src}\nGROWTH_TEST=${test}\nGROWTH_DIVERGENCE_ROUNDS=${div}\n` +
-            `${divBlock}\nprintf '\\n%s %s' "$GROWTH_DIVERGED" "$OVER_ROUNDS_PRIOR"`,
+            `GITHUB_OUTPUT=${outFile}\n` +
+            `${auditBlock}\nprintf '%s %s' "$OVER_ROUNDS_PRIOR" "$KISS_AUDIT"`,
         ],
         { encoding: 'utf8' },
-      )
-        .trim()
-        .split('\n')
-        .pop();
+      ).trim();
+      return { line, output: readFileSync(outFile, 'utf8') };
     };
     const climbing = [
       marker(300, 200, 'true', 1),
       marker(400, 250, 'true', 2),
       marker(500, 300, 'true', 3),
     ];
-    // 3 prior over-budget rounds, still climbing → diverged.
-    expect(diverge({ src: 550, test: 300, history: climbing })).toBe('true 3');
-    // Same history but the diff SHRANK below the previous round's sum → not.
-    expect(diverge({ src: 100, test: 100, history: climbing })).toBe('false 3');
-    // EXACTLY at the threshold (2 prior rounds, div=2), still climbing → diverged.
+    // 3 prior over-budget rounds counted, and the breach makes this round an
+    // audit round. The outputs feed the feedback renderer + report env.
+    const climbed = census({ history: climbing });
+    expect(climbed.line).toBe('3 true');
+    expect(climbed.output).toBe('critical_only_growth=true\nkiss_audit=true\n');
+    // The audit fires at the FIRST breach — zero priors still audit.
+    expect(census({ history: [] }).line).toBe('0 true');
+    // 2 and 1 prior over-budget rounds count exactly.
     expect(
-      diverge({
-        src: 500,
-        test: 300,
+      census({
         history: [marker(300, 200, 'true', 1), marker(400, 250, 'true', 2)],
-      }),
-    ).toBe('true 2');
-    // Current sum EQUAL to the previous round's sum (not shrinking) → diverged.
-    expect(diverge({ src: 500, test: 300, history: climbing })).toBe('true 3');
-    // A transient SPIKE does not raise the bar forever: after sums 350, 1150
-    // (spike), 400, a plateau at 400 is still >= the PREVIOUS round (400), so a
-    // real runaway escalates — the window-wide max (1150) would have suppressed
-    // it for the rest of the window.
-    expect(
-      diverge({
-        src: 250,
-        test: 150,
-        history: [
-          marker(200, 150, 'true', 1),
-          marker(700, 450, 'true', 2),
-          marker(250, 150, 'true', 3),
-        ],
-      }),
-    ).toBe('true 3');
-    // Only 1 prior over-budget round (< threshold) → not diverged yet.
-    expect(
-      diverge({ src: 999, test: 999, history: [marker(500, 300, 'true', 1)] }),
-    ).toBe('false 1');
+      }).line,
+    ).toBe('2 true');
+    expect(census({ history: [marker(500, 300, 'true', 1)] }).line).toBe(
+      '1 true',
+    );
     // The CURRENT run's own markers (run == GITHUB_RUN_ID) are excluded: a
     // re-run of a failed job keeps the run id and its failed attempt already
     // posted a marker, which must not count as a PRIOR over-budget round. Here
     // run 9999 is the current run; only the genuine prior (run 1001) counts.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         currentRun: 9999,
         history: [
           marker(500, 300, 'true', 1, 'W1', { run: 1001 }),
           marker(600, 400, 'true', 1, 'W1', { run: 9999 }),
         ],
-      }),
-    ).toBe('false 1');
+      }).line,
+    ).toBe('1 true');
     // A retry-doubled marker (same run id) counts ONCE.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           marker(500, 300, 'true', 1, 'W1', { run: 1001 }),
           marker(500, 300, 'true', 1, 'W1', { run: 1001 }),
         ],
-      }),
-    ).toBe('false 1');
-    // When a run was re-run and posted two markers with DIFFERENT sums, the
-    // LATEST attempt (by measured=) wins, not jq's stale first: run 1002's
-    // fresh attempt (sum 300 @ T2) is PREV_SUM, so current 400 >= 300 →
-    // diverged. Keeping the stale first (sum 900) would read 400 >= 900 → not.
+      }).line,
+    ).toBe('1 true');
+    // Within-run collapse keys on measured=, NOT array position: run 1002's
+    // LATEST measurement (by measured=) is over budget, but it sits BETWEEN
+    // two under-budget attempts in the comment list — an array-first OR an
+    // array-last collapse instead of max_by(measured=) would drop the run
+    // (#9192 R2-4 shape).
     expect(
-      diverge({
-        src: 250,
-        test: 150,
+      census({
+        history: [
+          marker(300, 200, 'true', 1, 'W1', { run: 1001 }),
+          marker(80, 40, 'false', 2, 'W1', {
+            run: 1002,
+            measured: '2026-01-01T00:02:00Z',
+          }),
+          marker(500, 400, 'true', 2, 'W1', {
+            run: 1002,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+          marker(90, 45, 'false', 2, 'W1', {
+            run: 1002,
+            measured: '2026-01-01T00:05:00Z',
+          }),
+        ],
+      }).line,
+    ).toBe('2 true');
+    // …and a re-run posting two over-budget attempts still counts exactly
+    // ONCE — the collapse is a dedup, whatever attempt represents the run.
+    expect(
+      census({
         history: [
           marker(300, 200, 'true', 1, 'W1', { run: 1001 }),
           marker(600, 300, 'true', 2, 'W1', {
@@ -6903,94 +6933,73 @@ exit 1
             measured: '2026-01-01T00:02:00Z',
           }),
         ],
-      }),
-    ).toBe('true 2');
-    // measured= order inverts run order across DISTINCT runs — a failed
-    // job's re-run keeps its OLD run id but stamps a NEWER measured=:
-    // PREV_SUM must follow measured=, so the current 150 >= 100 runaway
-    // escalates. Reverting to run-id ordering would read run 1002's stale
-    // 900 as PREV_SUM and suppress it (#9192 R2-4).
-    expect(
-      diverge({
-        src: 100,
-        test: 50,
-        history: [
-          marker(60, 40, 'true', 1, 'W1', {
-            run: 1001,
-            measured: '2026-01-01T00:09:00Z',
-          }),
-          marker(500, 400, 'true', 2, 'W1', {
-            run: 1002,
-            measured: '2026-01-01T00:02:00Z',
-          }),
-        ],
-      }),
-    ).toBe('true 2');
+      }).line,
+    ).toBe('2 true');
     // Two DISTINCT runs that share round= AND a frozen eval watermark (the
     // state-triggered conflict lane: a push stamps NEXT_ROUND, the following
     // no-op re-stamps the same ROUND, neither NEWEST nor ROUND advances) are
     // counted SEPARATELY by their distinct run ids — round=/wm alone (the
-    // pre-fix key) would have collapsed them and stalled the handoff forever.
+    // pre-fix key) would have collapsed them and stalled the count forever.
     expect(
-      diverge({
-        src: 500,
-        test: 300,
+      census({
         history: [
           marker(300, 200, 'true', 2, 'W1', { run: 1001 }),
           marker(400, 250, 'true', 2, 'W1', { run: 1002 }),
           marker(500, 300, 'true', 2, 'W1', { run: 1003 }),
         ],
-      }),
-    ).toBe('true 3');
-    // "Most recent" is the highest RUN id, not the max sum and not the first:
-    // prior over-budget sums 900 (run 1) then 500 (run 2, agent shrank), a
-    // partial regrow to 700 is >= the most-recent 500 → diverged. Comparing
-    // against the first/max (900) would wrongly suppress it (700 < 900).
-    expect(
-      diverge({
-        src: 400,
-        test: 300,
-        history: [
-          marker(600, 300, 'true', 1, 'W1', { run: 1001 }),
-          marker(300, 200, 'true', 2, 'W1', { run: 1002 }),
-        ],
-      }),
-    ).toBe('true 2');
-    // Not over budget THIS round → still counts (accurate trajectory) but no handoff.
-    expect(
-      diverge({
-        src: 999,
-        test: 999,
-        criticalOnlyGrowth: 'false',
-        history: climbing,
-      }),
-    ).toBe('false 3');
+      }).line,
+    ).toBe('3 true');
+    // Round-based Critical-only WITHOUT a breach is NOT an audit round: the
+    // audit rides on TOP of the growth breach, it does not replace the
+    // round-based ladder — and the count still reports the trajectory.
+    const roundsOnly = census({
+      criticalOnlyGrowth: 'false',
+      history: climbing,
+    });
+    expect(roundsOnly.line).toBe('3 false');
+    expect(roundsOnly.output).toBe(
+      'critical_only_growth=false\nkiss_audit=false\n',
+    );
+    // Unmeasured growth (no trusted merge base) never audits: the census
+    // stays 0 (the jq read is gated on NET_MEASURED). criticalOnlyGrowth is
+    // the only state reachable unmeasured — see the zeroing pin below.
+    const unmeasured = census({
+      netMeasured: 'false',
+      criticalOnlyGrowth: 'false',
+      history: climbing,
+    });
+    expect(unmeasured.line).toBe('0 false');
+    expect(unmeasured.output).toBe(
+      'critical_only_growth=false\nkiss_audit=false\n',
+    );
+    // …and a breach is UNREACHABLE unmeasured in the first place: the nets
+    // are zeroed when the measurement failed, so the budget compare cannot
+    // trip and KISS_AUDIT (which keys solely on CRITICAL_ONLY_GROWTH) stays
+    // false — the verdict needs numbers to judge, and it gets them or not
+    // at all.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '[[ "${NET_MEASURED}" != \'true\' ]] && { GROWTH_SRC=0; GROWTH_TEST=0; }',
+    );
     // Prior markers under a DIFFERENT window key don't count.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           marker(500, 300, 'true', 1, 'W2'),
           marker(600, 400, 'true', 2, 'W2'),
         ],
-      }),
-    ).toBe('false 0');
+      }).line,
+    ).toBe('0 true');
     // Markers from a non-bot author don't count.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: climbing.map((m) => ({ ...m, user: { login: 'attacker' } })),
-      }),
-    ).toBe('false 0');
+      }).line,
+    ).toBe('0 true');
     // Markers measured at/before the comparability cutoff (a base update OR an
     // external head move) are excluded — re-anchoring makes pre-cutoff sums
     // incomparable; only the post-cutoff round remains.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         cutoff: '2026-01-01T12:00:00Z',
         history: [
           marker(500, 300, 'true', 1, 'W1', {
@@ -7003,31 +7012,27 @@ exit 1
             measured: '2026-01-01T18:00:00Z',
           }),
         ],
-      }),
-    ).toBe('false 1');
+      }).line,
+    ).toBe('1 true');
     // …and the boundary is STRICT: a marker measured exactly AT the cutoff
     // is dropped as incomparable (at second granularity a same-second stamp
     // and base-update comment can collide) — a `>` → `>=` flip ships green
     // without this pin (#9192 R4-7).
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         cutoff: '2026-01-01T12:00:00Z',
         history: [
           marker(500, 300, 'true', 1, 'W1', {
             measured: '2026-01-01T12:00:00Z',
           }),
         ],
-      }),
-    ).toBe('false 0');
+      }).line,
+    ).toBe('0 true');
     // A re-run whose FRESH attempt came back under budget must not be
     // represented by its own stale over=true attempt: the per-run collapse
     // happens BEFORE the over-filter, so the run drops out entirely.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           marker(300, 150, 'true', 1, 'W1', {
             run: 1001,
@@ -7038,8 +7043,8 @@ exit 1
             measured: '2026-01-01T00:09:00Z',
           }),
         ],
-      }),
-    ).toBe('false 0');
+      }).line,
+    ).toBe('0 true');
     // Mirror of that case for the FAILURE path's inert marker: a re-run
     // attempt that crashed BEFORE prepare posts over=false with NO measured=
     // (MEASURED_AT empty), so its fallback is the comment's created_at —
@@ -7048,9 +7053,7 @@ exit 1
     // over that fallback, or the inert marker erases the run's real
     // over-budget count (#9192 R3-1).
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           {
             user: { login: 'qwen-code-dev-bot' },
@@ -7063,16 +7066,13 @@ exit 1
             body: '<!-- autofix-growth-now src=0 test=0 over=false round=1 run=1001 key=W1 -->',
           },
         ],
-      }),
-    ).toBe('false 1');
-    // Same defect at the handoff threshold: two real over-budget priors, the
-    // second erased by the inert marker — without the explicit-measured
-    // preference the count drops to 1 and the divergence handoff (div=2) is
-    // suppressed while the diff keeps climbing.
+      }).line,
+    ).toBe('1 true');
+    // Same defect shape at count 2: the second over-budget round erased by an
+    // inert marker — without the explicit-measured preference the census
+    // under-reports the trajectory the audit judges.
     expect(
-      diverge({
-        src: 500,
-        test: 300,
+      census({
         history: [
           {
             user: { login: 'qwen-code-dev-bot' },
@@ -7090,15 +7090,13 @@ exit 1
             body: '<!-- autofix-growth-now src=0 test=0 over=false round=2 run=1002 key=W1 -->',
           },
         ],
-      }),
-    ).toBe('true 2');
+      }).line,
+    ).toBe('2 true');
     // …and two LEGACY markers for the same run (neither carries measured=)
     // still collapse on the created_at fallback: the explicit-measured
     // preference must not disturb fallback-vs-fallback ordering.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           {
             user: { login: 'qwen-code-dev-bot' },
@@ -7111,15 +7109,13 @@ exit 1
             body: '<!-- autofix-growth-now src=80 test=40 over=false round=1 run=1001 key=W1 -->',
           },
         ],
-      }),
-    ).toBe('false 0');
+      }).line,
+    ).toBe('0 true');
     // Backward compatibility: a marker posted BEFORE measured= existed still
     // counts, falling back to its comment's created_at — deploying the
     // measured= switch must not blank the census of an in-flight window.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           {
             user: { login: 'qwen-code-dev-bot' },
@@ -7127,13 +7123,11 @@ exit 1
             body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
           },
         ],
-      }),
-    ).toBe('false 1');
+      }).line,
+    ).toBe('1 true');
     // …and a legacy marker is still subject to the cutoff, via that fallback.
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         cutoff: '2026-01-01T12:00:00Z',
         history: [
           {
@@ -7142,16 +7136,14 @@ exit 1
             body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
           },
         ],
-      }),
-    ).toBe('false 0');
+      }).line,
+    ).toBe('0 true');
     // …and the created_at fallback ITSELF is pinned: a legacy marker whose
     // created_at sits AFTER the cutoff still counts. Dropping the fallback
     // (measured= absent → "") would exclude every post-update legacy marker
     // and under-count the census (#9192 R2-3).
     expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         cutoff: '2026-01-01T12:00:00Z',
         history: [
           {
@@ -7160,33 +7152,24 @@ exit 1
             body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
           },
         ],
-      }),
-    ).toBe('false 1');
-    // A malformed GROWTH_DIVERGENCE_ROUNDS falls back to 2 (the sanitize guard
-    // at the top of the block) instead of crashing the `-ge` arithmetic: two
-    // prior over-budget rounds still climbing → diverged.
+      }).line,
+    ).toBe('1 true');
+    // over=false markers (rounds that pulled back under budget) never count —
+    // a one-off overshoot that recovered must not inflate the trajectory.
+    // Pins the `.over == "true"` filter.
     expect(
-      diverge({
-        src: 500,
-        test: 300,
-        div: 'abc',
-        history: [marker(300, 200, 'true', 1), marker(400, 250, 'true', 2)],
-      }),
-    ).toBe('true 2');
-    // over=false markers (rounds that pulled back under budget) count neither
-    // toward OVER_ROUNDS_PRIOR nor as PREV_SUM — a one-off overshoot that
-    // recovered must NOT escalate. Pins the `.over == "true"` filter.
-    expect(
-      diverge({
-        src: 999,
-        test: 999,
+      census({
         history: [
           marker(500, 300, 'true', 1),
           marker(100, 50, 'false', 2),
           marker(90, 40, 'false', 3),
         ],
-      }),
-    ).toBe('false 1');
+      }).line,
+    ).toBe('1 true');
+    // The census's jq-failure and non-numeric fallbacks are load-bearing (a
+    // crash here would kill prepare, not just the brake) — pin their shape.
+    expect(auditBlock).toContain('2> /dev/null || echo 0');
+    expect(auditBlock).toContain('|| OVER_ROUNDS_PRIOR=0');
     // Writer→reader round-trip: expand EACH real writer echo through bash and
     // feed the marker it produces back through the extracted reader, so a
     // format drift between writer and reader (the marker is encoded four
@@ -7214,9 +7197,7 @@ exit 1
       ).trim();
       // Counted as 1 prior over-budget run — 0 is what a format mismatch or a
       // dead key= (e.g. key=${WINDOW} after a re-arm) would yield.
-      return diverge({
-        src: 999,
-        test: 999,
+      return census({
         history: [
           {
             user: { login: 'qwen-code-dev-bot' },
@@ -7224,19 +7205,18 @@ exit 1
             body: produced,
           },
         ],
-      });
+      }).line;
     };
-    expect(roundTrip('NEXT_ROUND')).toBe('false 1'); // push path
-    expect(roundTrip('ROUND')).toBe('false 1'); // no-op path
-    expect(roundTrip('MARK_ROUND')).toBe('false 1'); // failure/handoff path
+    expect(roundTrip('NEXT_ROUND')).toBe('1 true'); // push path
+    expect(roundTrip('ROUND')).toBe('1 true'); // no-op path
+    expect(roundTrip('MARK_ROUND')).toBe('1 true'); // failure/handoff path
     // …and it still round-trips when MEASURED_AT is empty — prepare never
     // ran (#9192 R2-1) or the round could not measure (#9192 R4-3): measured=
     // omits itself rather than emit an empty value no scan can match, so the
     // marker survives on the created_at fallback instead of silently dropping.
-    expect(roundTrip('NEXT_ROUND', { omitMeasuredAt: true })).toBe('false 1');
-    expect(roundTrip('ROUND', { omitMeasuredAt: true })).toBe('false 1');
-    expect(roundTrip('MARK_ROUND', { omitMeasuredAt: true })).toBe('false 1');
-    rmSync(dir, { recursive: true, force: true });
+    expect(roundTrip('NEXT_ROUND', { omitMeasuredAt: true })).toBe('1 true');
+    expect(roundTrip('ROUND', { omitMeasuredAt: true })).toBe('1 true');
+    expect(roundTrip('MARK_ROUND', { omitMeasuredAt: true })).toBe('1 true');
 
     // The report writes the per-round growth-now marker on ALL THREE report
     // paths so the history is complete (a no-op round records its size, and a
@@ -7330,28 +7310,26 @@ exit 1
     expect(prepareBranchAndFeedbackStep).toContain(
       'GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"',
     );
-    // growth_diverged is NOT emitted as a step output — the handoff is
-    // enforced by the feedback.md text, so a dangling dead output would only
-    // mislead a future consumer.
-    expect(prepareBranchAndFeedbackStep).not.toContain('growth_diverged=');
-    // The trajectory + non-convergence blocks reach the agent via feedback.md,
+
+    // The trajectory + growth-audit blocks reach the agent via feedback.md,
     // AND their render guards are executed both ways — a flipped guard (inject
-    // the handoff into converging rounds, or drop it from diverging ones) must
+    // the audit into converging rounds, or drop it from breaching ones) must
     // fail here, not ship green.
     const trajGuard = prepareBranchAndFeedbackStep.match(
       /if \[\[ "\$\{NET_MEASURED\}" == 'true' \]\]; then\n\s+echo "## Diff growth this window"[\s\S]*?\n\s+fi/,
     )?.[0];
-    const handoffGuard = prepareBranchAndFeedbackStep.match(
-      /if \[\[ "\$\{GROWTH_DIVERGED\}" == 'true' \]\]; then\n\s+echo "## Needs a maintainer's decision[\s\S]*?\n\s+fi/,
-    )?.[0];
     expect(trajGuard).toBeTruthy();
-    expect(handoffGuard).toBeTruthy();
+    const auditGuard = prepareBranchAndFeedbackStep.match(
+      /if \[\[ "\$\{KISS_AUDIT\}" == 'true' \]\]; then[\s\S]*?\n {12}fi(?=\n {12}echo "## Reviews")/,
+    )?.[0];
+    expect(auditGuard).toBeTruthy();
     // DISTINCT src/test values so a transposed ${GROWTH_SRC}/${GROWTH_TEST} in
     // either advisory body fails here (the numbers this feature feeds the
     // agent must be the right way round).
     const renderEnv =
       'GROWTH_SRC=7\nGROWTH_TEST=9\nGROWTH_BUDGET_SRC_LINES=1\n' +
-      'GROWTH_BUDGET_TEST_LINES=1\nOVER_ROUNDS_PRIOR=2\n';
+      'GROWTH_BUDGET_TEST_LINES=1\nOVER_ROUNDS_PRIOR=2\n' +
+      `AUTOFIX_BOT=qwen-code-dev-bot\nLIVE_REARM_KEY=W1\nWORKDIR=${dir}\n`;
     const runGuard = (block, vars) =>
       execFileSync('bash', ['-c', `${vars}${block}`], { encoding: 'utf8' });
     const trajOn = runGuard(trajGuard, `NET_MEASURED=true\n${renderEnv}`);
@@ -7360,20 +7338,419 @@ exit 1
     expect(
       runGuard(trajGuard, `NET_MEASURED=false\n${renderEnv}`),
     ).not.toContain('## Diff growth this window');
-    const handoffOn = runGuard(
-      handoffGuard,
-      `GROWTH_DIVERGED=true\n${renderEnv}`,
+    // Audit round ON: the heading, the numbers, and the window's audit trail
+    // (a re-audit after a prior verdict must bring new evidence).
+    writeFileSync(
+      join(dir, 'ic.json'),
+      JSON.stringify([
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-01-02T00:00:00Z',
+          body: '<!-- autofix-growth-audit verdict=sound win=W1 -->',
+        },
+        // A trail marker under a DEAD window key is not this window's trail.
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-01-02T00:00:00Z',
+          body: '<!-- autofix-growth-audit verdict=conflict win=W0 -->',
+        },
+      ]),
     );
-    expect(handoffOn).toContain("## Needs a maintainer's decision");
-    expect(handoffOn).toContain('source 7 / test 9');
+    const auditOn = runGuard(auditGuard, `KISS_AUDIT=true\n${renderEnv}`);
+    expect(auditOn).toContain(
+      '## Growth audit required — this window is over its growth budget',
+    );
+    expect(auditOn).toContain('source 7 / test 9');
+    expect(auditOn).toContain('2 prior round(s) already over budget');
+    expect(auditOn).toContain('growth-audit.json');
+    expect(auditOn).toContain(
+      'Prior growth audits this window — a repeated verdict needs new evidence:',
+    );
+    expect(auditOn).toContain('- 2026-01-02T00:00:00Z: verdict=sound');
+    expect(auditOn).not.toContain('verdict=conflict');
+    // No trail yet → the section says so (the audit is the first).
+    writeFileSync(join(dir, 'ic.json'), '[]');
+    const auditFirst = runGuard(auditGuard, `KISS_AUDIT=true\n${renderEnv}`);
+    expect(auditFirst).toContain('No prior growth audit this window.');
+    // Converging round → the audit section must not render.
+    expect(runGuard(auditGuard, `KISS_AUDIT=false\n${renderEnv}`)).toBe('');
+
+    // Conflict-handoff idempotence: a conflict verdict parks the PR at a
+    // genuinely human call. Until a trusted human responds (or a new failing
+    // check arrives), scans must not launch agents or post comments —
+    // review-bot regeneration alone would otherwise churn one identical
+    // handoff after another. Execute the real block against fixture state.
+    const conflictBlock = prepareBranchAndFeedbackStep.match(
+      /CONFLICT_SINCE="\$\(jq[\s\S]*?conflict handoff pending[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(conflictBlock).toBeTruthy();
+    const conflictMarker = (createdAt, win = 'W1') => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: createdAt,
+      body: `<!-- autofix-growth-audit verdict=conflict win=${win} -->`,
+    });
+    const T0 = '2026-01-01T00:00:00Z';
+    const park = ({
+      stale = 'false',
+      markerCreatedAt = T0,
+      win = 'W1',
+      rv = [],
+      rc = [],
+      // Extra ISSUE comments appended after the conflict marker itself
+      // (control-marker/command comments live here in reality).
+      ic = [],
+      checks = [],
+    }) => {
+      writeFileSync(
+        join(dir, 'ic.json'),
+        JSON.stringify([conflictMarker(markerCreatedAt, win), ...ic]),
+      );
+      writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+      writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+      writeFileSync(join(dir, 'checks.json'), JSON.stringify(checks));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nREVIEW_BOT=qwen-code-ci-bot\n` +
+            `LIVE_REARM_KEY=W1\nWORKDIR=${dir}\nSTALE=${stale}\n` +
+            `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+            `${conflictBlock}\nprintf '%s' "$STALE"`,
+        ],
+        { encoding: 'utf8' },
+      );
+      return {
+        stale: out.trim().split('\n').pop(),
+        parked: out.includes('conflict handoff pending'),
+      };
+    };
+    // No response at all → the scan idles.
+    expect(park({})).toEqual({ stale: 'true', parked: true });
+    // A NEWER trusted-human review wakes the PR.
     expect(
-      runGuard(handoffGuard, `GROWTH_DIVERGED=false\n${renderEnv}`),
-    ).not.toContain("## Needs a maintainer's decision");
-    expect(handoffGuard).toContain('defer-to-human');
-    // The agent-facing policy documents the handoff (a second guard).
+      park({
+        rv: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            state: 'COMMENTED',
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: 'take direction B',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'false', parked: false });
+    // …but a review OLDER than the conflict marker does not.
+    expect(
+      park({
+        rv: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2025-12-31T00:00:00Z',
+            body: 'earlier feedback',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    // The review bot's regeneration is exactly what must NOT wake: an
+    // update-branch merge re-reviews every new head.
+    expect(
+      park({
+        rv: [
+          {
+            user: { login: 'qwen-code-ci-bot' },
+            author_association: 'NONE',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: 'regenerated findings',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    // Neither does an untrusted login nor an APPROVED review (only
+    // CHANGES_REQUESTED/COMMENTED carry actionable feedback).
+    expect(
+      park({
+        rv: [
+          {
+            user: { login: 'drive-by' },
+            author_association: 'NONE',
+            state: 'COMMENTED',
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: 'bump',
+          },
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            state: 'APPROVED',
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: 'lgtm',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    // A newer trusted-human ISSUE comment wakes…
+    expect(
+      park({
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            created_at: '2026-01-02T00:00:00Z',
+            body: 'we discussed; going with option B',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'false', parked: false });
+    // …and so does a newer trusted-human reply in a review thread — a
+    // human answering inside the contested thread is exactly the response
+    // the handoff waits for (that leg carries no marker/command filter).
+    expect(
+      park({
+        rc: [
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            created_at: '2026-01-02T00:00:00Z',
+            body: 'direction B, see the design doc',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'false', parked: false });
+    // …but the loop's OWN control markers riding an issue comment are not
+    // human feedback (a re-arm posts its own marker), and neither are slash
+    // commands — the /retry lift happens through LIVE_REARM_KEY instead.
+    expect(
+      park({
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            created_at: '2026-01-02T00:00:00Z',
+            body: '<!-- autofix-rearm ts=2026-01-02T00:00:00Z -->',
+          },
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            created_at: '2026-01-02T00:00:00Z',
+            body: '  @qwen-code /retry',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    // A NEW failing check wakes (the human answered through CI); a passing
+    // one does not.
+    expect(
+      park({
+        checks: [
+          {
+            name: 'build',
+            workflowName: 'CI',
+            conclusion: 'FAILURE',
+            completedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'false', parked: false });
+    expect(
+      park({
+        checks: [
+          {
+            name: 'build',
+            workflowName: 'CI',
+            conclusion: 'SUCCESS',
+            completedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    // …and the autofix workflow's OWN check runs are excluded wholesale,
+    // address lanes included: under a park no address round can legitimately
+    // run, so any review-address check newer than the marker is necessarily
+    // the conflict round's OWN failed check (posted after the handoff).
+    // Counting it would let the loop's own output unpark the very round it
+    // came from, and the wasted failure rounds feed CONSEC_FAIL toward a
+    // terminal lockout on the exact PR a human is settling. A manual re-run
+    // reaches prepare and parks green; /retry is the sanctioned lift.
+    expect(
+      park({
+        checks: [
+          {
+            name: 'develop-fix (1)',
+            workflowName: 'Qwen Autofix',
+            conclusion: 'FAILURE',
+            completedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    expect(
+      park({
+        checks: [
+          {
+            name: 'review-address (1)',
+            workflowName: 'Qwen Autofix',
+            conclusion: 'TIMED_OUT',
+            completedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'true', parked: true });
+    // The checks leg reads `.conclusion // .state` and `.completedAt //
+    // .updatedAt` — a check reported through the FALLBACK fields wakes too
+    // (dropping a fallback must not silently disable check-driven wakes).
+    expect(
+      park({
+        checks: [
+          {
+            name: 'build',
+            workflowName: 'CI',
+            state: 'FAILURE',
+            updatedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toEqual({ stale: 'false', parked: false });
+    // A conflict marker under a DEAD window key (re-armed since) does not
+    // park — the new window has no pending handoff.
+    expect(park({ win: 'W0' })).toEqual({ stale: 'false', parked: false });
+    // Already stale → the block is inert (no re-announcement, no recompute).
+    expect(park({ stale: 'true' })).toEqual({ stale: 'true', parked: false });
+
+    // Report marker emission: every audit round posts its verdict under the
+    // key the baseline was READ under; a sound verdict ADDITIONALLY re-arms —
+    // but only on the completed-round paths. Execute the real function. The
+    // verdict arrives via AUDIT_VERDICT — the verdict the verification GATE
+    // validated and surfaced as a step output — and the function must NOT
+    // re-read growth-audit.json: the branch's own build/tests run as the
+    // runner user and WORKDIR is a predictable path they can write, so a
+    // re-read could be overwritten after the gate looked (a forged re-arm,
+    // or a conflict verdict flipped back to sound, defeating the park).
+    const emitMarkerFn = pushAndReportStep.match(
+      /emit_growth_audit_marker\(\) \{[\s\S]*?\n {10}\}/,
+    )?.[0];
+    expect(emitMarkerFn).toBeTruthy();
+    expect(emitMarkerFn).not.toContain('growth-audit.json');
+    expect(emitMarkerFn).toContain('AUDIT_VERDICT');
+    // The failure/handoff report step has its OWN copy of the helper (each
+    // step is a fresh shell). A drift between the copies — marker format,
+    // re-arm suppression, the win= fallback — would ship green unless
+    // pinned: extract both and require them identical.
+    const emitMarkerFnFailure = reviewAddressReportStep.match(
+      /emit_growth_audit_marker\(\) \{[\s\S]*?\n {10}\}/,
+    )?.[0];
+    expect(emitMarkerFnFailure).toBeTruthy();
+    expect(emitMarkerFnFailure).toBe(emitMarkerFn);
+    // Both report steps bind the gate-validated verdict (the repair pass's
+    // if it ran, else the first pass's).
+    const auditVerdictBind =
+      "AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict || steps.verify.outputs.audit_verdict }}'";
+    expect(pushAndReportStep).toContain(auditVerdictBind);
+    expect(reviewAddressReportStep).toContain(auditVerdictBind);
+    // Push + no-op report paths allow the re-arm; the failure/handoff path
+    // records the verdict (the trail must stay complete) but must NOT re-arm
+    // — a FAILED round must not re-anchor the window.
+    expect(
+      pushAndReportStep.match(/emit_growth_audit_marker true/g) ?? [],
+    ).toHaveLength(2);
+    expect(reviewAddressReportStep).toContain('emit_growth_audit_marker false');
+    const emitWith = ({
+      allow,
+      kissAudit = 'true',
+      auditVerdict = 'sound',
+      growthBaseWin = 'W1',
+      window = 'none',
+    }) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${emitMarkerFn}\nKISS_AUDIT=${kissAudit}\nAUDIT_VERDICT='${auditVerdict}'\n` +
+            `GROWTH_BASE_WIN=${growthBaseWin}\nWINDOW=${window}\n` +
+            `emit_growth_audit_marker ${allow}`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+    // sound on a completed round → verdict marker AND re-arm.
+    expect(emitWith({ allow: 'true' })).toBe(
+      '<!-- autofix-growth-audit verdict=sound win=W1 -->\n<!-- autofix-rearm -->',
+    );
+    // sound on the FAILED report path → verdict marker, never the re-arm.
+    expect(emitWith({ allow: 'false' })).toBe(
+      '<!-- autofix-growth-audit verdict=sound win=W1 -->',
+    );
+    // drift and conflict post the trail marker only — the simplification
+    // re-measures naturally; conflict is parked for the human.
+    expect(emitWith({ allow: 'true', auditVerdict: 'drift' })).toBe(
+      '<!-- autofix-growth-audit verdict=drift win=W1 -->',
+    );
+    expect(emitWith({ allow: 'true', auditVerdict: 'conflict' })).toBe(
+      '<!-- autofix-growth-audit verdict=conflict win=W1 -->',
+    );
+    // Outside the verdict taxonomy or empty → NO marker (a garbage verdict
+    // must never reach the trail or trigger a re-arm; defense in depth —
+    // the gate only ever surfaces the three valid values).
+    expect(emitWith({ allow: 'true', auditVerdict: 'shrug' })).toBe('');
+    expect(emitWith({ allow: 'true', auditVerdict: '' })).toBe('');
+    expect(
+      emitWith({
+        allow: 'true',
+        auditVerdict: 'sound win=W9 -->\n<!-- autofix-rearm',
+      }),
+    ).toBe('');
+    // Not an audit round → nothing, whatever the verdict says.
+    expect(emitWith({ allow: 'true', kissAudit: 'false' })).toBe('');
+    // win= falls back to the live window key, then none — same dead-key rule
+    // as the growth-now markers.
+    expect(emitWith({ allow: 'false', growthBaseWin: '', window: 'W2' })).toBe(
+      '<!-- autofix-growth-audit verdict=sound win=W2 -->',
+    );
+
+    // The verification gate REQUIRES the verdict on audit rounds: presence +
+    // shape, NON-retryable (agent misbehavior, not a build problem — the
+    // repair pass must never be invoked). The behavioral half of this pin
+    // runs the real gate script end-to-end in the A/B describe below.
+    expect(reviewVerificationRunner).toContain(
+      'if [[ "${KISS_AUDIT:-false}" == \'true\' ]]; then',
+    );
+    expect(reviewVerificationRunner).toContain(
+      "reject_fix 'growth-audit round missing a valid growth-audit.json verdict (audit skipped or malformed)' 'false' 'false'",
+    );
+    expect(reviewVerificationRunner).toContain(
+      'IN("sound", "drift", "conflict")',
+    );
+    expect(reviewVerificationRunner).toContain('.kiss.result');
+    expect(reviewVerificationRunner).toContain('.minimal_change.result');
+    // The validated verdict is surfaced as a step output for the report to
+    // consume — the TOCTOU guard: the report never re-reads the file.
+    expect(reviewVerificationRunner).toContain(
+      'echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"',
+    );
+    // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
+    // whose verdict is sound with nothing left to fix still needs the artifact.
+    const verdictGateAt = reviewVerificationRunner.indexOf(
+      '# Growth-audit verdict gate:',
+    );
+    expect(verdictGateAt).toBeGreaterThan(-1);
+    expect(verdictGateAt).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then',
+      ),
+    );
+
+    // The agent-facing policy documents the audit, and the old
+    // non-convergence handoff text is GONE (a second guard on both sides).
     const skill = readAutofixSkill();
-    expect(skill).toContain('this PR is not converging');
+    expect(skill).toContain('Growth audit required');
+    expect(skill).toContain('growth-audit.json');
     expect(skill).toContain('Diff-growth trajectory');
+    expect(skill).not.toContain('this PR is not converging');
+    expect(skill).not.toContain(
+      "Needs a maintainer's decision — this PR is not converging",
+    );
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
@@ -7912,7 +8289,12 @@ exit 1
     );
     // Four sites: the NEWEST computation, the live-watermark revalidation,
     // the "Failed checks" rendering, and the "Still-red checks" rendering
-    // — all must share the same address-check carve-out.
+    // share the address-check carve-out (the autofix workflow's OTHER lanes
+    // failing is the loop's own business, not actionable feedback). The
+    // conflict-handoff wake filter deliberately does NOT share it: under a
+    // park no address round can legitimately run, so it excludes ALL Qwen
+    // Autofix checks — the conflict round's own failed check must not
+    // unpark its own park.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
@@ -15174,6 +15556,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     baselineNoIdentity = false,
     trackedDirt = false,
     commFail = false,
+    // Growth-audit rounds: tag the gate with KISS_AUDIT and optionally seed
+    // the audit's verdict file in the workdir.
+    kissAudit = false,
+    auditJson = null,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -15319,6 +15705,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
       writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      if (auditJson !== null) {
+        writeFileSync(join(workdir, 'growth-audit.json'), auditJson);
+      }
       const outFile = join(dir, 'gh-output');
       writeFileSync(outFile, '');
 
@@ -15353,6 +15742,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             HUGE_FAIL: hugeFail ? '1' : '',
             WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
             RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
+            KISS_AUDIT: kissAudit ? 'true' : 'false',
           },
         },
       );
@@ -15644,6 +16034,129 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  // Growth-audit rounds (the counting window is over its growth budget) must
+  // carry the audit's machine-readable verdict — the audit IS the round's
+  // judgment of the over-budget approach, and a round that skipped it must
+  // not push (the rubber-stamp hole by absence). Rejection is NON-retryable:
+  // a malformed verdict is agent misbehavior, not a build problem, so the
+  // repair pass must never be invoked.
+  const validAuditJson = JSON.stringify({
+    verdict: 'sound',
+    kiss: { result: 'pass', simpler_alternative: null },
+    minimal_change: { result: 'pass', untraceable_hunks: [] },
+    rationale: 'every hunk traces to a finding',
+  });
+
+  it('rejects a growth-audit round that skipped the audit, non-retryably', () => {
+    const r = runGate({ kissAudit: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    // No verdict reached the gate, so none may reach the report either.
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.rejection).toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+    // Rejected at the head of the check section, before any check ran.
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('rejects a verdict-less audit round even on the no-commit path', () => {
+    // Behavioral proof of the ordering the indexOf pin asserts: the verdict
+    // gate sits BEFORE the no-commit/no-op exits, so an audit round whose
+    // agent produced no commit still needs the artifact — a new early exit
+    // added above the verdict gate would let this round escape it.
+    const r = runGate({ kissAudit: true, agentCommit: false });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.rejection).toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+  });
+
+  it('rejects a malformed growth-audit verdict the same way (non-retryable)', () => {
+    // A verdict value outside the taxonomy…
+    let r = runGate({
+      kissAudit: true,
+      auditJson: JSON.stringify({
+        verdict: 'shrug',
+        kiss: { result: 'pass' },
+        minimal_change: { result: 'pass' },
+      }),
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.rejection).toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+    // …and a canonical verdict missing one axis result are both inert.
+    r = runGate({
+      kissAudit: true,
+      auditJson: JSON.stringify({
+        verdict: 'drift',
+        minimal_change: { result: 'pass' },
+      }),
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('audit_verdict=');
+  });
+
+  it('passes a growth-audit round carrying a valid verdict and proceeds to the checks', () => {
+    // A valid verdict lets the round PROCEED: the deterministic checks run
+    // and their own rejection (a stubbed red build) is what ends the round —
+    // retryable, unlike the verdict rejection. The all-green audit
+    // composition (valid verdict + green checks → outcome=fixed) is NOT
+    // executed anywhere: the green path runs into the bite section, whose
+    // mapfile needs bash >= 4 (the macOS system bash is 3.2). That gap is
+    // acceptable: the gate script references KISS_AUDIT/AUDIT_VERDICT only
+    // inside the verdict-gate block, so past it an audit round is
+    // structurally identical to a non-audit round ('keeps the green path
+    // intact' covers that shape with kissAudit unset).
+    // failAt terminates the run before the bite section for the same
+    // bash-version reason.
+    const r = runGate({
+      kissAudit: true,
+      auditJson: validAuditJson,
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('growth-audit verdict: sound');
+    expect(r.stdout).not.toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+    // The gate-validated verdict is surfaced for the report — the TOCTOU
+    // guard: the report consumes THIS, never a re-read of the file.
+    expect(r.outputs).toContain('audit_verdict=sound');
+    // The round was charged for the BUILD, on the retryable path — proof it
+    // cleared the verdict gate and reached the deterministic checks.
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('stub build FAILED');
+  });
+
+  it('leaves the growth-audit verdict check inert on non-audit rounds', () => {
+    // Without the KISS_AUDIT tag a malformed verdict file must not engage
+    // the check — the round proceeds to the checks and ends on their own
+    // (retryable) rejection, with no verdict line and no verdict rejection.
+    const r = runGate({
+      auditJson: '{"verdict":"bogus"}',
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain('growth-audit verdict');
+    expect(r.stdout).not.toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.outputs).toContain('retryable=true');
   });
 });
 
