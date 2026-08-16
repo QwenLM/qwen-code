@@ -1374,7 +1374,12 @@ export const useGeminiStream = (
       }
       if (targetSupportsImage && nextParts !== null) {
         return {
-          parts: nextParts,
+          parts: (Array.isArray(nextParts) ? nextParts : [nextParts]).map(
+            (part) =>
+              typeof part === 'string' || !hasImageParts([part])
+                ? part
+                : clampInlineMediaPart(part),
+          ),
           shouldProceed: true,
           modelOverrideResolutionFailed,
         };

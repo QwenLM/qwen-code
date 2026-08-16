@@ -6626,7 +6626,8 @@ export class Session implements SessionContext {
     const parts: Part[] = [];
     for (const resolved of audioCheckedMessages) {
       const finalized =
-        modelOverrideResolutionFailed && hasImageParts(resolved.parts)
+        modelOverrideResolutionFailed &&
+        (hasImageParts(resolved.parts) || hasAudioParts(resolved.parts))
           ? await this.#applyBridgeConversionsIfNeeded(
               resolved.parts,
               abortSignal,
@@ -11347,7 +11348,9 @@ export class Session implements SessionContext {
       },
     );
     if (targetSupportsImage && hasImageParts(parts)) {
-      return parts;
+      return parts.map((part) =>
+        hasImageParts([part]) ? clampInlineMediaPart(part) : part,
+      );
     }
     if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
       return parts;

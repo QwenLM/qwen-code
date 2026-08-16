@@ -933,6 +933,52 @@ describe('useGeminiStream', () => {
     ]);
   });
 
+  it('clamps images forwarded through a multimodal inline override', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'omni-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true, image: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: {
+        modalities: { audio: true, image: true },
+      },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'inspect and listen' }, audioPart, imagePart],
+      modelOverride: 'omni-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model omni-model inspect');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent.match(/Media omitted/g)).toHaveLength(2);
+    expect(sent).not.toContain('inlineData');
+  });
+
   it('fails closed when an inline model override does not support audio', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },

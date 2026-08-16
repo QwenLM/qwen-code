@@ -1789,6 +1789,53 @@ describe('runNonInteractive', () => {
     ]);
   });
 
+  it('clamps images sent through an image-capable slash prompt override', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const mockCommand = {
+      name: 'image-model',
+      description: 'submit an image to another model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect this image' }, imagePart],
+        modelOverride: 'image-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'image-model', authType: AuthType.QWEN_OAUTH }]);
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/image-model',
+        'prompt-image-model-clamped',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    const sent = JSON.stringify(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[0],
+    );
+    expect(sent).toContain('Media omitted');
+    expect(sent).not.toContain('inlineData');
+  });
+
   it('fails closed when a slash prompt selects a text-only model', async () => {
     setupMetricsMock();
     const mockCommand = {

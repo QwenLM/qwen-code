@@ -1404,6 +1404,9 @@ export async function runNonInteractive(
           await routeAbort();
         }
       }
+      if (inlineModelOverride !== undefined && hasImageParts(initialParts)) {
+        initialParts = initialParts.map((part) => clampInlineMediaPart(part));
+      }
       if (
         inlineModelOverride === undefined &&
         shouldRunVisionBridge(config) &&
