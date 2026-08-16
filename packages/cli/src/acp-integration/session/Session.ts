@@ -4109,11 +4109,13 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
-            } else if (!isSlashInput) {
-              // record user message for session management. Slash input is
-              // recorded after command resolution below: a user-defined
-              // command shadowing the built-in `advisor` name keeps its
-              // user-turn record (R18-6).
+            } else if (!isSlashInput || slashCommandName !== 'advisor') {
+              // record user message for session management. Only `/advisor`
+              // defers its record to after command resolution below — a
+              // user-defined command shadowing the name must keep its record
+              // (R18-6) — while every other slash command records here,
+              // BEFORE its action runs: `/clear` swaps in a fresh recorder
+              // inside its action, so its record must land first (R20-9).
               const recorder = this.config.getChatRecordingService();
               if (promptDisplayText !== undefined) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
@@ -4181,13 +4183,16 @@ export class Session implements SessionContext {
 
               // Classify by the RESOLVED command, not the raw token: a
               // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6).
+              // must keep its transcript records (R18-6). Only `/advisor`
+              // defers its user-message record to here — every other slash
+              // command was already recorded above, before its action ran.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
                 resolvedCommandInfo.name === 'advisor'
               );
               if (
+                slashCommandName === 'advisor' &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry

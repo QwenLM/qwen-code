@@ -15619,6 +15619,44 @@ describe('Session', () => {
         ).toMatchObject({ goal: { goalId: 'goal-2' } });
       });
 
+      // R20-9: `/clear` swaps in a fresh recorder inside its action, so its
+      // user-turn record must land BEFORE the action runs — otherwise the
+      // deferred record is written into the NEW session's transcript.
+      it('records /clear user-turn before the session switch', async () => {
+        mockChatRecordingService.recordUserMessage.mockClear();
+        const callOrder: string[] = [];
+        mockChatRecordingService.recordUserMessage.mockImplementationOnce(
+          () => {
+            callOrder.push('recordUserMessage');
+          },
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            callOrder.push('action-start');
+            hooks?.startNewSession?.('new-session-id');
+            callOrder.push('action-end');
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Conversation cleared.',
+            };
+          },
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/clear' }],
+        });
+
+        expect(callOrder).toEqual([
+          'recordUserMessage',
+          'action-start',
+          'action-end',
+        ]);
+      });
+
       it('preserves canonical Goal state publication order', async () => {
         const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
           snapshot: core.GoalSnapshotV2,
