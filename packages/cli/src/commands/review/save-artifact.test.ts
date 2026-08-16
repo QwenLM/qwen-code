@@ -340,41 +340,22 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
-  it('reads a null `fold` as no fold, like the shape it defaults for', () => {
-    // `??` accepts null as well as undefined, which is the module's stated
-    // absence semantics — and a future "check all four fields the same
-    // way" edit would turn a truthful null into a throw, losing the durable
-    // artifact of a review that posted fine.
+  it('refuses a present bodyTrim with no `fold` — that shape never shipped', () => {
+    // The object-level default below covers a composed file from a CLI
+    // predating the budget. Within a PRESENT record there is no such
+    // history to be kind to: every build that writes `bodyTrim` writes all
+    // four fields, so a missing one is a malformed record.
     const paths = fixture();
-    writeJson(paths.composed, {
-      ...verdict,
-      bodyTrim: { ...(verdict.bodyTrim as object), fold: null },
-    });
-    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
-    expect(
-      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim.fold,
-    ).toBe(false);
-  });
-
-  it('reads an absent `fold` as no fold — the first budget build did not record one', () => {
-    // `fold` shipped a build later than its three siblings. A composed file
-    // from that build is not malformed; it simply predates the field, and
-    // refusing it would fail the save over a truthful absence.
-    const paths = fixture();
-    const { fold: _absent, ...older } = verdict.bodyTrim as Record<
+    const { fold: _gone, ...noFold } = verdict.bodyTrim as Record<
       string,
       unknown
     >;
-    writeJson(paths.composed, { ...verdict, bodyTrim: older });
-    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
-    expect(
-      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim,
-    ).toEqual({
-      sections: 2,
-      deferralList: true,
-      fold: false,
-      truncated: false,
-    });
+    writeJson(paths.composed, { ...verdict, bodyTrim: noFold });
+
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/bodyTrim/);
+    expect(existsSync(paths.out)).toBe(false);
   });
 
   it('reads an absent or null bodyTrim as untrimmed — a pre-budget composed file must still save', () => {

@@ -251,17 +251,18 @@ function validateVerdict(value: unknown): PersistedVerdict {
     truncated: false,
   };
   const trim = object(rawTrim, 'Composed verdict.bodyTrim');
-  // `fold` shipped after the other three, so it gets absence semantics of
-  // its own: a composed file from the first budget build records the trim it
-  // knew about, and refusing it would fail a save over a field whose absence
-  // is the truth ("no fold drop recorded").
-  const fold = trim['fold'] ?? false;
+  // No per-field tolerance for `fold`: every build that writes a `bodyTrim`
+  // at all writes all four fields (`git log -S bodyTrim` is this branch and
+  // nothing else), so a present record missing one is malformed, not old.
+  // The tolerance that IS owed lives above, on the object: a composed file
+  // from a CLI predating the budget carries no `bodyTrim`, and that absence
+  // is the truth rather than an error.
   if (
     typeof trim['sections'] !== 'number' ||
     !Number.isInteger(trim['sections']) ||
     trim['sections'] < 0 ||
     typeof trim['deferralList'] !== 'boolean' ||
-    typeof fold !== 'boolean' ||
+    typeof trim['fold'] !== 'boolean' ||
     typeof trim['truncated'] !== 'boolean'
   ) {
     throw new Error(
@@ -272,7 +273,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     bodyTrim: {
       sections: trim['sections'],
       deferralList: trim['deferralList'],
-      fold,
+      fold: trim['fold'],
       truncated: trim['truncated'],
     },
     event: event(verdict['event'], 'Composed verdict.event'),
