@@ -192,7 +192,7 @@ export function renderShellLayerBriefList(
 
 /** The marker an auditor writes to receipt a walked layer — the `Budget gap:`
  *  analogue. `Layer walked: <id> — <note>`; the note is free text after the id. */
-const LAYER_RECEIPT_LINE_RE =
+export const LAYER_RECEIPT_LINE_RE =
   /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z0-9-]*)/i;
 
 /**
