@@ -1428,6 +1428,57 @@ describe('runChannelDaemonWorker', () => {
     await handle.close();
   });
 
+  it('sanitizes an evil webhook channel name in the zero-channel degrade stub (R15-27)', async () => {
+    // R14-10's evil-name assertions run against a names-mode selection
+    // that never reaches the zero-channel stub, and the stub's own pins
+    // use the plain name 'telegram' (identity for the sanitizer). A
+    // stub-only sanitizer drop therefore ships green while a zero-channel
+    // worker receiving a webhook whose channelName carries CR/LF/NEL/
+    // U+2028/U+2029 fails the anchored classifier `/^Channel ".+" is not
+    // running\.$/u` (no `s` flag: `.` rejects real line breaks), flipping
+    // channel_worker_unavailable (503) to channel_webhook_enqueue_failed.
+    // Drive the stub with an evil name and pin the classifier match.
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockLoadChannelsConfig.mockReturnValueOnce({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    const evilName = 'evil\r\n\u0085\u2028\u2029channel';
+    const webhookTask = {
+      channelName: evilName,
+      source: 'github-ci',
+      eventType: 'check_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: { runId: 123 },
+    };
+
+    // The anchored classifier matches ONLY because the sanitizer removed
+    // every raw line break from the embedded name.
+    expect(() => handle.validateWebhookTask(webhookTask)).toThrow(
+      /^Channel ".+" is not running\.$/,
+    );
+    let message = '';
+    try {
+      handle.validateWebhookTask(webhookTask);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toMatch(/[\r\n\u0085\u2028\u2029]/);
+    expect(mockSanitizeLogText).toHaveBeenCalledWith(evilName, 128);
+    await expect(handle.runWebhookTask(webhookTask)).rejects.toThrow(
+      /^Channel ".+" is not running\.$/,
+    );
+    await handle.close();
+  });
+
   it('serves with zero channels when every configured channel is stopped (#8975)', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
@@ -1560,6 +1611,11 @@ describe('runChannelDaemonWorker', () => {
     );
     // prune receives the FULL configured set: a post-selection or partial
     // list would wipe the stopped records of exactly the skipped channels.
+    // Call-COUNT pin (R15-29): membership alone is satisfied by a refactor
+    // adding a SECOND post-selection `prune(selectedNames)` — the real
+    // store would then delete the skipped channels' stopped entries and the
+    // next `--channel all` resurrects them. Match the names-mode pin pair.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
     expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
       'telegram',
       'feishu',
@@ -1605,6 +1661,51 @@ describe('runChannelDaemonWorker', () => {
       ['telegram'],
       { defaultCwd: '/workspace' },
     );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
+  it('keeps the names-mode prune-failure warning on the best-effort sink and still starts (R15-28)', async () => {
+    // Names-mode twin of the mode-all prune-failure test: the prune
+    // catch -> best-effort warning -> start-continues branch has zero
+    // names-mode coverage (both prune-failure tests use mode:'all').
+    // Routing the warning to the loud writeStdoutLine ships green through
+    // the suite, yet under the failing-stdout condition the warning exists
+    // for, the loud write raises the async stdout 'error' event and kills
+    // the worker mid-start (the R11-13 hazard). Deleting the warning
+    // likewise ships green.
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStorePrune.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    mockChannelStateStoreReadAll.mockReturnValueOnce({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // Warning on the best-effort sink, absent on the loud sink. The
+    // names-mode branch carries its OWN copy ('continuing with the
+    // explicit selection.') — the mode-all 'falling back to recorded
+    // states.' wording is a different string, so this pin is branch-
+    // specific and a loud-sink move of THIS copy fails here.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; continuing with the explicit selection.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; continuing with the explicit selection.',
+    );
+    // The explicit selection still starts despite the prune failure.
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram'],
       requestedChannels: ['telegram'],

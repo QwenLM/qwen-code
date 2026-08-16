@@ -771,6 +771,19 @@ describe('createChannelWorkerManager', () => {
         mode: 'names',
         names: ['feishu'],
       });
+      // …and the reconcile itself ran against the FILTERED groups, not
+      // the committed ones: reconciling committedGroups would
+      // force-start the stopped sibling, and the ready `active` write
+      // would erase its record permanently (R15-57).
+      expect(test.group.reconcile).toHaveBeenLastCalledWith(
+        [
+          {
+            workspaceCwd: PRIMARY,
+            selection: { mode: 'names', names: ['feishu'] },
+          },
+        ],
+        expect.objectContaining({ force: true }),
+      );
 
       await test.manager.reload();
 
@@ -808,6 +821,93 @@ describe('createChannelWorkerManager', () => {
         names: ['feishu'],
       });
     });
+
+    it('rejects reloadWorkspace when the filter drops the requested name (R15-38)', async () => {
+      // A union "fix" re-adding the dropped requested name would
+      // resurrect an explicitly stopped channel through reloadWorkspace:
+      // the resolve must fail the owner check instead.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      await expect(
+        test.manager.reloadWorkspace(PRIMARY, 'telegram'),
+      ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+    });
+
+    it('commits the filtered selection on reloadWorkspace too (R15-38 coherence)', async () => {
+      // commit(filteredSelection, …) — committing the UNFILTERED
+      // selection desyncs it from the filtered resolve: the next
+      // reload's keep-fallback retains the stopped name and the
+      // reconcile force-starts it.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      await test.manager.reloadWorkspace(PRIMARY, 'feishu');
+
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['feishu'],
+      });
+    });
+
+    it('passes EVERY committed group to the filter in multi-workspace resolves (R15-37)', async () => {
+      // Per-workspace attribution is the filter's core contract: passing
+      // only the first committed group (or keying the state cache on a
+      // constant) makes a secondary workspace's `stopped` record
+      // invisible — the next reload-op force-starts the explicitly
+      // stopped channel there.
+      const filter = vi.fn((selection: ServeChannelSelection) => selection);
+      const group = fakeGroup();
+      const manager = createChannelWorkerManager({
+        resolveGroups: vi.fn(async (selection: ServeChannelSelection) =>
+          splitWorkspaceGroups(selection),
+        ),
+        createGroup: vi.fn(() => group),
+        reserveLease: vi.fn(),
+        releaseLease: vi.fn(),
+        filterReloadSelection: filter,
+      });
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram', 'secondary-feishu'],
+      };
+      await manager.setSelection(selection);
+
+      await manager.reload();
+
+      expect(filter).toHaveBeenCalledWith(selection, [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['secondary-feishu'] },
+        },
+      ]);
+    });
   });
 
   describe('clearStoppedRecords (R14)', () => {
@@ -818,7 +918,9 @@ describe('createChannelWorkerManager', () => {
     // and leave it committed-but-ownerless with the record never
     // cleared.
     function setupWithClear(
-      clearStoppedRecords: (groups: readonly ChannelWorkspaceGroup[]) => void,
+      clearStoppedRecords: (
+        groups: readonly ChannelWorkspaceGroup[],
+      ) => readonly string[],
     ) {
       const resolveGroups = vi.fn(async (selection: ServeChannelSelection) =>
         workspaceGroups(selection),
@@ -834,7 +936,7 @@ describe('createChannelWorkerManager', () => {
     }
 
     it('clears records after a successful names-mode commit', async () => {
-      const clearStoppedRecords = vi.fn();
+      const clearStoppedRecords = vi.fn(() => [] as string[]);
       const test = setupWithClear(clearStoppedRecords);
       const selection: ServeChannelSelection = {
         mode: 'names',
@@ -849,11 +951,60 @@ describe('createChannelWorkerManager', () => {
       ]);
     });
 
+    it('clears records once per commit, including the reconcile branch (R15-7)', async () => {
+      // Production has TWO clearRecordsForCommit call sites in
+      // applySelection (group creation and reconcile): the second commit
+      // over an existing group exercises the reconcile one. Dropping the
+      // hook there leaves a stale stopped record, and an automatic
+      // refreshWorkspaces before the ready `active` write filters the
+      // still-starting name out — committed-but-ownerless.
+      const clearStoppedRecords = vi.fn(() => [] as string[]);
+      const test = setupWithClear(clearStoppedRecords);
+      const first: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram'],
+      };
+      const second: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      };
+
+      await test.manager.setSelection(first);
+      await test.manager.setSelection(second);
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(2);
+      expect(clearStoppedRecords).toHaveBeenNthCalledWith(1, [
+        { workspaceCwd: PRIMARY, selection: first },
+      ]);
+      expect(clearStoppedRecords).toHaveBeenNthCalledWith(2, [
+        { workspaceCwd: PRIMARY, selection: second },
+      ]);
+    });
+
+    it('clears records on the initial start path (R15-58)', async () => {
+      // Production reaches the hook via startInitial too (serve wiring);
+      // a mutation skipping the clear when initial === true leaves
+      // pre-existing stopped records alive past the restart commit.
+      const clearStoppedRecords = vi.fn(() => [] as string[]);
+      const test = setupWithClear(clearStoppedRecords);
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram'],
+      };
+
+      await test.manager.startInitial(selection);
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(1);
+      expect(clearStoppedRecords).toHaveBeenCalledWith([
+        { workspaceCwd: PRIMARY, selection },
+      ]);
+    });
+
     it('does not clear records on a mode-all commit', async () => {
       // mode-`all` restore honors stopped records by design (#8975);
       // clearing them on an all-mode commit would resurrect exactly the
       // channels the user stopped.
-      const clearStoppedRecords = vi.fn();
+      const clearStoppedRecords = vi.fn(() => [] as string[]);
       const test = setupWithClear(clearStoppedRecords);
 
       await test.manager.setSelection({ mode: 'all' });
@@ -862,7 +1013,7 @@ describe('createChannelWorkerManager', () => {
     });
 
     it('never lets a throwing clear fail an already-committed selection', async () => {
-      const clearStoppedRecords = vi.fn(() => {
+      const clearStoppedRecords = vi.fn((): string[] => {
         throw new Error('state write exploded');
       });
       const test = setupWithClear(clearStoppedRecords);
@@ -874,6 +1025,40 @@ describe('createChannelWorkerManager', () => {
         mode: 'names',
         names: ['telegram'],
       });
+    });
+
+    it('surfaces reported clear failures on the set result (R15-19)', async () => {
+      // A surviving stopped record means the reload filter DROPS the
+      // name and a later reload-op permanently trims the committed
+      // selection: the loss must ride the set result like the DELETE
+      // route's, not vanish into a silent degrade.
+      const clearStoppedRecords = vi.fn(() => [PRIMARY]);
+      const test = setupWithClear(clearStoppedRecords);
+
+      const result = await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram'],
+      });
+
+      expect(result.statePersisted).toBe(false);
+      expect(result.statePersistFailedWorkspaces).toEqual([PRIMARY]);
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['telegram'],
+      });
+    });
+
+    it('keeps the happy-path set result shape when every clear persists', async () => {
+      const clearStoppedRecords = vi.fn(() => [] as string[]);
+      const test = setupWithClear(clearStoppedRecords);
+
+      const result = await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram'],
+      });
+
+      expect(result).not.toHaveProperty('statePersisted');
+      expect(result).not.toHaveProperty('statePersistFailedWorkspaces');
     });
   });
 
@@ -2093,21 +2278,82 @@ describe('createChannelWorkerManager', () => {
       true,
     );
 
+    // R15-17: the enable rebuild sources names from the COMMITTED
+    // selection, not the filtered committedChannelNames() view, so the
+    // dead sibling `telegram` is retained (not silently dropped) and the
+    // recovery reconcile relaunches the whole committed selection.
+    // feishu — the never-connected channel this test targets — is still
+    // relaunched.
     expect(result).toMatchObject({ changed: true });
     expect(test.resolveGroups).toHaveBeenLastCalledWith(
-      { mode: 'names', names: ['feishu'] },
+      { mode: 'names', names: ['telegram', 'feishu'] },
       'set',
     );
     expect(group.reconcile).toHaveBeenCalledTimes(1);
 
-    // The disable direction degrades to a no-op instead of the 409
-    // owner-mismatch: stopping a channel that is not running is a valid
-    // no-op, and the disable of a dead channel must not throw.
+    // The disable direction must not throw the 409 owner-mismatch for a
+    // dead channel: it trims feishu from the committed selection
+    // (retaining the dead sibling telegram — no collapse to the
+    // whole-stop, R15-17) rather than rejecting.
     const disable = await test.manager.setChannelEnabled(
       { name: 'feishu', workspaceCwd: PRIMARY },
       false,
     );
-    expect(disable).toMatchObject({ changed: false });
+    expect(disable).toMatchObject({ changed: true });
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['telegram'] },
+      'set',
+    );
+  });
+
+  it('retains a dead sibling instead of collapsing to a whole-stop when the last live channel is disabled (R15-17)', async () => {
+    // Symptom 2 (collapse): committed [dead, live], `dead` on a
+    // terminal-failed worker (excluded from committedChannelNames),
+    // `live` healthy. Disabling the LAST live channel must trim to
+    // [dead] — rebuilding from the committed selection's source of truth
+    // — NOT collapse to names=[] whose whole-stop capture intersects the
+    // terminal worker's carried connected set and persists the crashed
+    // (never user-stopped) `dead` channel as a clean stopped record
+    // (crash laundering against R9-5).
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['dead', 'live'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['dead'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        lastConnectedChannels: ['dead'],
+        error: 'Channel worker restart budget exhausted.',
+      }),
+      workerSnapshot({
+        state: 'running',
+        channels: ['live'],
+        requestedChannels: ['live'],
+        primary: false,
+      }),
+    ]);
+
+    // dead is excluded from the filtered view, live is committed.
+    expect(test.manager.committedChannelNames()).toEqual(['live']);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'live', workspaceCwd: PRIMARY },
+      false,
+    );
+
+    // Trimmed to the dead sibling, not collapsed to a whole-stop: the
+    // lease stays reserved and the committed selection keeps `dead`.
+    expect(result).toMatchObject({ changed: true });
+    expect(test.releaseLease).not.toHaveBeenCalled();
+    expect(test.manager.state().selection).toEqual({
+      mode: 'names',
+      names: ['dead'],
+    });
   });
 
   it('records only the connected channels from a budget-exhausted mode-names worker (#8975)', async () => {

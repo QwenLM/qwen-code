@@ -72,7 +72,13 @@ function observeChild(proc: ChildProcess): ChildTranscript {
   };
   proc.stdout?.on('data', onData);
   proc.stderr?.on('data', onData);
-  proc.once('exit', (code) => {
+  // Settle completeness on 'close', not 'exit' (R15-22): Node documents
+  // 'exit' as firing before stdio streams are necessarily drained, so a
+  // waiter whose needle sits in the undelivered tail would reject with
+  // 'Process exited (0) before …' against a correctly behaving child.
+  // 'close' fires after the streams drain (and also carries the code);
+  // every spawn here pipes stdio.
+  proc.once('close', (code) => {
     transcript.exited = true;
     transcript.exitCode = code;
     for (const notify of transcript.waiters) notify();
@@ -141,8 +147,15 @@ function waitForListeningUrl(
       transcript.waiters.delete(check);
     };
     const check = () => {
+      // Require a terminator after the URL (R15-3): the buffer grows in
+      // pipe chunks, and a boundary can fall INSIDE the URL — without the
+      // lookahead, `[^\s)]+` terminates at buffer end and resolves a
+      // truncated prefix (`http://127.0.0` instead of
+      // `http://127.0.0.1:41237`), the exact chunk-splitting flake this
+      // file's header cites. The emitter always follows the URL with
+      // whitespace or ')', so the lookahead matches only complete lines.
       const match = transcript.output.match(
-        /listening on (https?:\/\/[^\s)]+)/,
+        /listening on (https?:\/\/[^\s)]+)(?=[\s)])/,
       );
       if (match) {
         finish();
@@ -225,7 +238,12 @@ function runToCompletion(
     proc.stderr?.on('data', (chunk: Buffer) => {
       output += chunk.toString('utf-8');
     });
-    proc.once('exit', (code) => {
+    // Settle on 'close', not 'exit' (R15-22): 'exit' can fire before the
+    // final pipe chunks are read (libuv processes SIGCHLD before the last
+    // pipe read under CPU saturation), so an assertion on the trailing
+    // line — e.g. `expect(output).toContain('Stopped channels stay
+    // stopped')` — would fail against a correctly behaving command.
+    proc.once('close', (code) => {
       clearTimeout(timer);
       resolve({ code, output });
     });
@@ -647,6 +665,31 @@ describe('qwen channel stop → start round trip (#8975)', () => {
     }
     child = undefined;
 
+    // Phase 3b (R15-46): a SECOND bare start must STILL skip. Phase 3's
+    // skip is read-only only if the stop record survives being honored —
+    // a consume-once mutation (record deleted after selectActiveChannels
+    // honors it) passes phase 3 and then phase 4 re-records `active`
+    // before phase 5, so every phase stays green while the SECOND restart
+    // resurrects the channel (the adoption merge cannot restore a
+    // snapshot-identical, generation-unchanged legacy entry). Re-assert
+    // the skip before phase 4 re-establishes the record.
+    child = spawnService();
+    await waitForLine(child, '"mockbot" skipped (stopped before restart)');
+    await waitForLine(child, 'serving with 0 channels');
+    const secondSkipExited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const secondSkipShutdown = await secondSkipExited;
+    if (isPosix) {
+      expect(secondSkipShutdown.signal).toBeNull();
+      expect(secondSkipShutdown.code).toBe(0);
+    }
+    child = undefined;
+
     // Phase 4: an explicit by-name start clears the stop record and the
     // channel connects again — the inverse half of "Stopped channels stay
     // stopped UNTIL STARTED AGAIN BY NAME". Every other service spawn in
@@ -851,6 +894,31 @@ describe('qwen channel stop → start round trip (#8975)', () => {
       expect(code).toBe(0);
     }
     child = undefined;
+
+    // Phase 3b (R15-46): a SECOND bare start from workspace B must STILL
+    // skip — the adopted stop record must survive being honored once, or a
+    // consume-once mutation resurrects the channel on the second restart
+    // (twin of the legacy-adoption round-trip pin).
+    child = spawn(process.execPath, [CLI_BIN, 'channel', 'start'], {
+      cwd: workspaceB,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    await waitForLine(child, '"mockbot" skipped (stopped before restart)');
+    await waitForLine(child, 'serving with 0 channels');
+    const secondSkipExited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const secondSkipShutdown = await secondSkipExited;
+    if (isPosix) {
+      expect(secondSkipShutdown.signal).toBeNull();
+      expect(secondSkipShutdown.code).toBe(0);
+    }
+    child = undefined;
   }, 120000);
 });
 
@@ -861,6 +929,15 @@ describe('qwen channel stop → start round trip (#8975)', () => {
 // siblings cannot even collect. Only the graceful-SIGTERM exit-code
 // assertions stay POSIX-gated: on Windows kill('SIGTERM') force-
 // terminates and the shutdown handler never runs (R9-8).
+//
+// CI disclosure (R15-24): as of this PR no CI job COLLECTS this file on
+// Windows — integration_cli is ubuntu-only, test_windows runs only the
+// unit `test:ci` and only on merge_group, and e2e.yml covers Linux+macOS.
+// The suite is platform-agnostic so it WILL exercise the Windows
+// path-derivation shape wherever it is collected (e.g. locally or by a
+// future Windows integration job), but today its Windows-specific value is
+// not gated by any job. This comment states what CI actually exercises
+// rather than claiming a Windows collection that does not exist.
 describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
   // The daemon half of the stop-write → restore-read handoff: every unit
   // test mocks at least one side of the path derivation (daemon-worker

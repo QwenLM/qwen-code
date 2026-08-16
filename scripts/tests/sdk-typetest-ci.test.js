@@ -56,9 +56,21 @@ describe('sdk-typescript typetest CI fence', () => {
     );
     const include = typetestConfig.include ?? [];
     const files = typetestConfig.files ?? [];
-    const coversTypetest = [...include, ...files].some((entry) =>
-      String(entry).includes('test/unit'),
+    const exclude = typetestConfig.exclude ?? [];
+    // Pin the EXACT typetest file, not just 'some test/unit entry'
+    // (R15-10): pointing include at another test/unit file — or adding
+    // daemon-public-surface.test.ts to exclude — would satisfy a loose
+    // substring check while the typetest leaves the tsc program, so every
+    // shape regression the fence exists to catch (e.g. statePersisted
+    // silently dropped from DaemonChannelStopResult) ships green
+    // (expectTypeOf erases to no-ops under plain vitest).
+    expect([...include, ...files]).toContain(
+      'test/unit/daemon-public-surface.test.ts',
     );
-    expect(coversTypetest).toBe(true);
+    expect(
+      exclude.some((entry) =>
+        String(entry).includes('daemon-public-surface.test.ts'),
+      ),
+    ).toBe(false);
   });
 });

@@ -159,6 +159,12 @@ describe('stopCommand', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('running under a different user'),
     );
+    // Classifier INPUT pin (R15-32): the probe must run against the
+    // pidfile's pid — a type-safe `classifyProcessAccess(process.pid)`
+    // compiles and ships green through every argument-insensitive stub,
+    // while in production the self-probe always returns `signalable` and
+    // the EPERM other-user refusal is skipped.
+    expect(mockClassifyProcessAccess).toHaveBeenCalledWith(1234);
     // NO channel-state write — scoped or legacy: the crash-path record is
     // exactly what the pre-fix EPERM-as-dead misjudgment produced (#8975).
     expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
@@ -201,6 +207,9 @@ describe('stopCommand', () => {
     expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('running under a different user'),
     );
+    // Classifier INPUT pin (R15-32): the dead probe must run against the
+    // pidfile's pid, not the self process.
+    expect(mockClassifyProcessAccess).toHaveBeenCalledWith(1234);
     // Scoped AND legacy writes, like every other explicit stop.
     expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
       ['telegram', 'feishu'],
@@ -262,6 +271,12 @@ describe('stopCommand', () => {
       ),
     );
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // Sink-negative twin (R15-54): an arm-scoped hoist emitting the loss
+    // alarm inside this bare-notice branch must fail — nothing was
+    // recorded, so a resurrection warning would be false.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
     // The stale serve pidfile is still cleaned up.
     expect(mockRemoveServiceInfo).toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
@@ -286,6 +301,11 @@ describe('stopCommand', () => {
       'No channel service is running.',
     );
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // Sink-negative twin (R15-54): nothing was recorded, so the loss
+    // alarm must not print in this bare-notice arm.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
     expect(mockRemoveServiceInfo).toHaveBeenCalled();
   });
 
@@ -344,6 +364,16 @@ describe('stopCommand', () => {
     expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    // Cross-mode state-store negatives (R15-31): a daemon stop must never
+    // record into the standalone legacy GLOBAL store — injecting a
+    // daemon-branch local persist (the natural "fix" for a missing
+    // statePersisted) would make every later standalone `--channel all`
+    // in ANY workspace skip channels never stopped in standalone mode
+    // (the issue 8975 outage). The cross-mode siblings carry this full
+    // triple; the daemon-success test must too.
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
@@ -647,9 +677,27 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
-    // …and the loss warning still fires after it.
+    // …and the loss warning still fires after it. Membership alone does
+    // not pin that ordering — a refactor hoisting the loss warning above
+    // the success notice would keep both assertions green while inverting
+    // the user-visible output order on a failing disk. Pin the order via
+    // invocationCallOrder, matching this file's convention (R15-4).
     expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
+    );
+    const bestEffortCalls = mockWriteStdoutLineBestEffort.mock.calls;
+    const successCall = bestEffortCalls.findIndex(
+      (args) => args[0] === 'Daemon-managed channels stopped.',
+    );
+    const lossCall = bestEffortCalls.findIndex((args) =>
+      String(args[0]).includes('could not persist the stopped record'),
+    );
+    expect(successCall).toBeGreaterThanOrEqual(0);
+    expect(lossCall).toBeGreaterThan(successCall);
+    expect(
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[successCall],
+    ).toBeLessThan(
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[lossCall]!,
     );
   });
 
@@ -1439,6 +1487,14 @@ describe('stopCommand', () => {
     // Sink twin (R12-3): the real warning sink is the best-effort one.
     expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
+    );
+    // The recorded-conditional guidance IS printed (R15-34): this branch
+    // exits before the tail guidance block, so it mirrors it — without
+    // this, a user whose service died between the liveness check and the
+    // signal gets a persisted stop with no "stay stopped" explanation,
+    // inconsistent with the clean-stop and SIGKILL siblings.
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
     );
     expect(mockRemoveServiceInfo).toHaveBeenCalled();
   });

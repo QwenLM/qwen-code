@@ -10,6 +10,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { canonicalizeWorkspacePath } from '@qwen-code/channel-base';
@@ -45,6 +46,28 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       getGlobalQwenDir: () => getStateHome(),
     },
     atomicWriteFileSync: mockAtomicWriteFileSync,
+  };
+});
+
+// R15-49: delegates to the real mkdirSync; individual tests can ARM a
+// single EEXIST at a specific path to simulate the concurrent-creation
+// race between prepareStateDirectory's existsSync and mkdirSync.
+const mkdirEexistOnce = vi.hoisted(() => ({ armed: false, target: '' }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    mkdirSync: ((p: Parameters<typeof actual.mkdirSync>[0], opts?: unknown) => {
+      if (mkdirEexistOnce.armed && String(p) === mkdirEexistOnce.target) {
+        mkdirEexistOnce.armed = false;
+        const error = new Error(
+          `EEXIST: file already exists, mkdir '${p}'`,
+        ) as NodeJS.ErrnoException;
+        error.code = 'EEXIST';
+        throw error;
+      }
+      return actual.mkdirSync(p as string, opts as never);
+    }) as typeof actual.mkdirSync,
   };
 });
 
@@ -140,24 +163,68 @@ describe('channelRuntimeStatePath', () => {
   // lstat-walk) keeps every POSIX test green while case variants of one
   // existing workspace hash to TWO state files. The merge queue runs a
   // Windows job, so this pin actually executes there (R14-23).
-  it.runIf(process.platform === 'win32')(
-    'collapses case-variant spellings of the same directory (R14-23)',
-    () => {
-      const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
-      testDirs.push(root);
-      const realDir = join(root, 'CaseMixedDir');
-      mkdirSync(realDir);
-      const leaf = basename(realDir);
-      const swapped = join(
-        root,
-        leaf === leaf.toLowerCase() ? leaf.toUpperCase() : leaf.toLowerCase(),
-      );
+  // Case collapse is a property of the FILESYSTEM, not the OS: win32
+  // volumes are case-insensitive, and darwin's APFS is by default — but a
+  // case-SENSITIVE APFS volume also exists. Gate on both and probe the
+  // native filesystem (R15-25): if the swapped spelling does not resolve
+  // to the created directory, the volume is case-sensitive and the
+  // assertion does not apply there.
+  it.runIf(
+    process.platform === 'win32' || process.platform === 'darwin',
+  )('collapses case-variant spellings of the same directory (R14-23)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
+    testDirs.push(root);
+    const realDir = join(root, 'CaseMixedDir');
+    mkdirSync(realDir);
+    const leaf = basename(realDir);
+    const swapped = join(
+      root,
+      leaf === leaf.toLowerCase() ? leaf.toUpperCase() : leaf.toLowerCase(),
+    );
+    // Guard probe: on a case-sensitive volume the swapped spelling is a
+    // NONEXISTENT path, so the assertion would be meaningless — skip.
+    if (!existsSync(swapped)) return;
 
-      expect(channelRuntimeStatePath(swapped)).toBe(
-        channelRuntimeStatePath(realDir),
+    expect(channelRuntimeStatePath(swapped)).toBe(
+      channelRuntimeStatePath(realDir),
+    );
+  });
+
+  it('falls back to the resolved spelling when realpath fails with a non-ENOENT error (R15-48)', () => {
+    // canonicalizeWorkspacePath catches ALL realpath errors
+    // (EACCES/EIO/ELOOP) and falls back to the resolved spelling —
+    // deliberately, since the store is a never-fails subsystem. This PR
+    // makes that tolerance load-bearing: channelRuntimeStatePath calls it
+    // on the standalone stop/start critical path and recordStoppedChannels
+    // evaluates it OUTSIDE any try/catch. Narrowing the catch to
+    // ENOENT-only must fail here — a transient EACCES realpath failure
+    // would otherwise throw, lose the explicit stop record, and the next
+    // `--channel all` resurrects the channel (#8975).
+    const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
+    testDirs.push(root);
+    const spy = vi
+      .spyOn(fs.realpathSync, 'native')
+      .mockImplementation(() => {
+        throw Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+      });
+    try {
+      expect(() => channelRuntimeStatePath(root)).not.toThrow();
+      // The resolved (not realpath) spelling is hashed.
+      expect(channelRuntimeStatePath(root)).toBe(
+        join(
+          getStateHome(),
+          'channels',
+          'standalone',
+          hashDaemonWorkspace(root),
+          'channel-state.json',
+        ),
       );
-    },
-  );
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('adoptLegacyChannelState (#8975)', () => {
@@ -293,22 +360,35 @@ describe('adoptLegacyChannelState (#8975)', () => {
       });
       writeFileSync(channelRuntimeStatePath(), legacyBody, 'utf-8');
 
-      adoptLegacyChannelState(workspace);
+      // Establish the hazard precondition (R15-26): under a RESTRICTIVE
+      // umask the mkdirSync({mode:0o700}) alone lands the dirs at 0o600
+      // (no traverse bit), so the asserted 0o700 is only reachable via
+      // prepareStateDirectory's per-level chmodSync enforcement. Without
+      // the umask, any permissive CI umask produces 0o700 from the mode
+      // argument alone and the enforcement is untested. process.umask()
+      // restores in finally (verified working on this repo's Node).
+      const oldUmask = process.umask(0o177);
+      try {
+        adoptLegacyChannelState(workspace);
 
-      // Pin the deliberate restrictive permissions on the adopted file and
-      // its directory: the legacy file was written by an older release at
-      // default umask, and adoption exists to normalize it (#8975).
-      expect(statSync(workspacePath).mode & 0o777).toBe(0o600);
-      expect(statSync(dirname(workspacePath)).mode & 0o777).toBe(0o700);
-      // Adoption creates the intermediate `standalone` dir AND the leaf
-      // hash dir via the recursive mkdirSync: BOTH must land restrictive,
-      // not just the leaf — a split mkdir applying the mode only to the
-      // leaf would leave ~/.qwen/channels/standalone/ world-enumerable
-      // (every workspace hash directory) with the pins above green
-      // (R9-9).
-      expect(statSync(dirname(dirname(workspacePath))).mode & 0o777).toBe(
-        0o700,
-      );
+        // Pin the deliberate restrictive permissions on the adopted file
+        // and its directory: the legacy file was written by an older
+        // release at default umask, and adoption exists to normalize it
+        // (#8975).
+        expect(statSync(workspacePath).mode & 0o777).toBe(0o600);
+        expect(statSync(dirname(workspacePath)).mode & 0o777).toBe(0o700);
+        // Adoption creates the intermediate `standalone` dir AND the leaf
+        // hash dir via the recursive mkdirSync: BOTH must land
+        // restrictive, not just the leaf — a split mkdir applying the mode
+        // only to the leaf would leave ~/.qwen/channels/standalone/
+        // world-enumerable (every workspace hash directory) with the pins
+        // above green (R9-9).
+        expect(statSync(dirname(dirname(workspacePath))).mode & 0o777).toBe(
+          0o700,
+        );
+      } finally {
+        process.umask(oldUmask);
+      }
     },
   );
 
@@ -503,6 +583,46 @@ describe('adoptLegacyChannelState (#8975)', () => {
 
     expect(existsSync(workspacePath)).toBe(false);
     expect(readFileSync(legacyPath, 'utf-8')).toBe(legacyBody);
+  });
+
+  it('tolerates an EEXIST race on the state directory and still adopts (R15-49)', () => {
+    // The sole concurrency guard on state-directory creation
+    // (prepareStateDirectory's mkdir loop) swallows EEXIST: two concurrent
+    // first-writes (parallel first scoped stops, or a stop racing another
+    // workspace's first adoption) both pass the existsSync check, and the
+    // mkdir loser throws EEXIST. Without the swallow the scoped write
+    // fails after the channels already stopped — the durable stop record
+    // is lost and the next `--channel all` resurrects them (#8975).
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+    });
+    writeFileSync(legacyPath, legacyBody, 'utf-8');
+    // Arm ONE EEXIST at the leaf hash level; the real mkdirSync handles
+    // every other level.
+    mkdirEexistOnce.armed = true;
+    mkdirEexistOnce.target = dirname(workspacePath);
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+      // The race must not surface as a failed adoption.
+      expect(writeSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('could not adopt legacy channel state'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+      mkdirEexistOnce.armed = false;
+      mkdirEexistOnce.target = '';
+    }
+
+    // The target is still seeded from the legacy map.
+    expect(existsSync(workspacePath)).toBe(true);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
   });
 
   it('leaves no target behind when the legacy read fails, so the next start retries', () => {
@@ -1039,6 +1159,9 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       generation: expect.any(Number),
       channels: { telegram: 'active' },
+      // Per-entry write epoch stamped on the entry the write named
+      // (R15-15).
+      entryEpochs: { telegram: expect.any(Number) },
       adoptedLegacy: {},
     });
 
@@ -1305,6 +1428,9 @@ describe('ChannelStateStore', () => {
       version: 1,
       generation: 0,
       channels: { telegram: 'active' },
+      // Per-entry write epoch stamped on the entry the write named
+      // (R15-15).
+      entryEpochs: { telegram: 0 },
       adoptedLegacy: { telegram: 'stopped' },
       adoptedLegacyGeneration: 1234,
     });
@@ -1366,6 +1492,9 @@ describe('ChannelStateStore', () => {
       version: 1,
       generation: 0,
       channels: { telegram: 'stopped' },
+      // Per-entry write epoch stamped on the entry the write named
+      // (R15-15): generation 0 is this entry's epoch baseline.
+      entryEpochs: { telegram: 0 },
       // A writer-created file records an EMPTY adoption snapshot: `{}`
       // marks 'has seen the legacy file' so a first-ever legacy stop
       // later merges instead of baselining into invisibility; ABSENT
@@ -1740,6 +1869,40 @@ describe('ChannelStateStore', () => {
         adoptedLegacy: { telegram: 'stopped' },
         adoptedLegacyGeneration: 0,
       });
+    });
+
+    it('prunes stale locally-recorded entries under a writer-created empty marker (R15-50)', () => {
+      // The `adoptedLegacy: {}` marker is the shape most workspaces have
+      // (most never adopt — every writer-created file carries it). Both
+      // preserveAdopted tests above hand-write NON-empty snapshots, so a
+      // regression special-casing the empty marker as 'everything
+      // adopted/exempt' (`if (Object.keys(adopted).length === 0) return
+      // states;`) would disable pruning for exactly the population that
+      // never had a legacy file, ship green, and leave stale `stopped`
+      // records for channels removed from settings — re-adding such a
+      // channel skips it forever, the precise regression prune prevents.
+      const store = new ChannelStateStore(filePath);
+      // Writer-created file: three locally-recorded stops, empty marker.
+      store.setMany(['telegram', 'feishu', 'discord'], 'stopped');
+      expect(
+        (JSON.parse(readFileSync(filePath, 'utf-8')) as { adoptedLegacy?: unknown })
+          .adoptedLegacy,
+      ).toEqual({});
+
+      const states = store.prune(['discord'], { preserveAdopted: true });
+
+      // Both stale locally-recorded entries are pruned (nothing adopted to
+      // exempt); the configured name survives.
+      expect(states).toEqual({ discord: 'stopped' });
+      expect(new ChannelStateStore(filePath).readAll()).toEqual({
+        discord: 'stopped',
+      });
+      // The empty marker survives the rewrite, keeping the
+      // first-ever-legacy-stop merge branch armed (R10-6).
+      expect(
+        (JSON.parse(readFileSync(filePath, 'utf-8')) as { adoptedLegacy?: unknown })
+          .adoptedLegacy,
+      ).toEqual({});
     });
 
     it('still deletes adopted entries on the default prune without opts (#8975)', () => {

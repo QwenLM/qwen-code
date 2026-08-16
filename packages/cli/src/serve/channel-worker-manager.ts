@@ -51,6 +51,19 @@ export interface ChannelWorkerSetResult {
   state: ChannelWorkerControlState;
   /** Internal HTTP status hint; omitted from the response body. */
   created?: boolean;
+  /**
+   * Only present on failure: the commit succeeded, but clearing a
+   * committed name's persisted `stopped` record did not persist — a
+   * later automatic reload-op resolve filters the name out and
+   * permanently trims the committed selection (R15-19). The client gets
+   * the loss signal and a retry handle instead of a silent undo (#8975).
+   */
+  statePersisted?: boolean;
+  /**
+   * Set alongside `statePersisted = false`: the canonical workspace
+   * paths whose record clear failed, so a retry can be targeted (R14).
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface ChannelWorkerStopResult {
@@ -186,11 +199,22 @@ export interface CreateChannelWorkerManagerOptions {
    * channel_worker_not_enabled) with the record never cleared: dead
    * until stop+start or another PUT (R14). mode-`all` commits must NOT
    * clear: `--channel all` restore honors `stopped` records by design.
-   * Never-fails: a clear failure degrades to keeping the record (the
-   * pre-fix window); it must not fail an already-committed selection —
-   * persistence failures never flip a succeeded operation (#8975).
+   * Never throws — a clear failure must not fail an already-committed
+   * selection (persistence failures never flip a succeeded operation),
+   * but it must not be SILENT either: post-R14 a surviving `stopped`
+   * record means the reload filter DROPS the name and a later reload-op
+   * permanently trims the committed selection — the "degrades to the
+   * pre-fix window" framing predates the filter and is wrong (R15-19).
+   * Returns the canonical workspace paths whose clear FAILED (a `trySet`
+   * returning false on a record that WAS `stopped`, or a non-ENOENT
+   * pre-read failure that leaves the record unknown); the manager
+   * surfaces them as `statePersisted: false` +
+   * `statePersistFailedWorkspaces` on the set result, mirroring the
+   * DELETE route's loss plumbing (#8975).
    */
-  clearStoppedRecords?: (groups: readonly ChannelWorkspaceGroup[]) => void;
+  clearStoppedRecords?: (
+    groups: readonly ChannelWorkspaceGroup[],
+  ) => readonly string[];
   createGroup: (groups: readonly ChannelWorkspaceGroup[]) => ChannelWorkerGroup;
   reserveLease: (selection: ServeChannelSelection) => void;
   releaseLease: () => void;
@@ -542,19 +566,40 @@ export function createChannelWorkerManager(
 
   // Post-commit hook for explicit names-mode selections: clear persisted
   // `stopped` records for the committed names (see the
-  // `clearStoppedRecords` option doc). Never-fails (R14).
+  // `clearStoppedRecords` option doc). Never throws — a clear failure
+  // must not fail an already-committed selection — but it returns the
+  // workspaces whose clear FAILED so the set result surfaces the loss
+  // (a surviving record lets the reload filter drop the name and a later
+  // reload-op permanently trims the committed selection, R15-19).
   const clearRecordsForCommit = (
     selection: ServeChannelSelection,
     groups: readonly ChannelWorkspaceGroup[],
-  ): void => {
-    if (!opts.clearStoppedRecords || selection.mode !== 'names') return;
+  ): string[] => {
+    if (!opts.clearStoppedRecords || selection.mode !== 'names') return [];
     try {
-      opts.clearStoppedRecords(groups);
+      return [...opts.clearStoppedRecords(groups)];
     } catch {
-      // Degrade to keeping the record (the pre-fix window); a clear
-      // failure must not fail an already-committed selection.
+      // An UNEXPECTED hook error (not a reported per-workspace failure)
+      // cannot be attributed: degrade to no loss signal rather than fail
+      // the committed selection.
+      return [];
     }
   };
+
+  // Loss fields for the set result: only present on failure, mirroring
+  // the DELETE route's shape (#8975, R15-19).
+  const clearLossFields = (
+    persistFailedWorkspaces: readonly string[],
+  ): Pick<
+    ChannelWorkerSetResult,
+    'statePersisted' | 'statePersistFailedWorkspaces'
+  > =>
+    persistFailedWorkspaces.length === 0
+      ? {}
+      : {
+          statePersisted: false,
+          statePersistFailedWorkspaces: [...persistFailedWorkspaces],
+        };
 
   const classifyFailure = (
     error: unknown,
@@ -685,13 +730,17 @@ export function createChannelWorkerManager(
         );
       }
       commit(selection, targetGroups);
-      clearRecordsForCommit(selection, targetGroups);
+      const persistFailedWorkspaces = clearRecordsForCommit(
+        selection,
+        targetGroups,
+      );
       return {
         changed: true,
         replaced: false,
         partial: isPartial(candidate.snapshots()),
         state: snapshot(),
         created: enabling,
+        ...clearLossFields(persistFailedWorkspaces),
       };
     }
 
@@ -700,13 +749,17 @@ export function createChannelWorkerManager(
         onRollingBack: () => setTransition('rolling_back', selection),
       });
       commit(selection, targetGroups);
-      clearRecordsForCommit(selection, targetGroups);
+      const persistFailedWorkspaces = clearRecordsForCommit(
+        selection,
+        targetGroups,
+      );
       return {
         changed: result.changed || !sameSelection,
         replaced: !sameSelection,
         partial: isPartial(result.workers),
         state: snapshot(),
         created: enabling,
+        ...clearLossFields(persistFailedWorkspaces),
       };
     } catch (error) {
       setTransition('idle');
@@ -893,6 +946,20 @@ export function createChannelWorkerManager(
         const committedNames = committedChannelNames();
         const currentlyEnabled = committedNames.includes(owner.name);
         if (currentlyEnabled) assertCommittedOwner(owner);
+        // The dead-name exclusion in committedChannelNames() is the
+        // recovery contract for per-channel start (R8-18); the committed
+        // SELECTION is the source of truth for enable/disable rebuilds.
+        // Rebuilding from the filtered view silently dropped a
+        // terminal-failed worker's names on every enable/disable commit —
+        // ghosts that break every later reload-op resolve, and a collapse
+        // to names=[] when the last live sibling is disabled, whose
+        // whole-stop capture launders the crash into a clean `stopped`
+        // record (R15-17). Mode-`all` commitments carry no name list;
+        // their committed names come from live workers as before.
+        const selectionNames =
+          committedSelection?.mode === 'names'
+            ? committedSelection.names
+            : committedNames;
         if (enabled) {
           if (currentlyEnabled) {
             return {
@@ -905,17 +972,23 @@ export function createChannelWorkerManager(
           }
           const selection: ServeChannelSelection = {
             mode: 'names',
-            names: [...committedNames, owner.name],
+            names: selectionNames.includes(owner.name)
+              ? [...selectionNames]
+              : [...selectionNames, owner.name],
           };
           const targetGroups = await opts.resolveGroups(selection, 'set');
           assertRequiredOwner(targetGroups, owner);
           if (hardKilled) throw drainingError();
           return applySelection(selection, false, targetGroups);
         }
-        if (!currentlyEnabled) {
+        // A dead-committed name (terminal-failed worker, excluded from
+        // committedChannelNames) is still trimmed and re-committed: that
+        // re-commit is what removes the ghost from the selection when
+        // service.remove deletes its channel (R15-17).
+        if (!currentlyEnabled && !selectionNames.includes(owner.name)) {
           return { changed: false, state: snapshot() };
         }
-        const names = committedNames.filter((name) => name !== owner.name);
+        const names = selectionNames.filter((name) => name !== owner.name);
         return names.length === 0
           ? stopSelectionNow()
           : applySelection({ mode: 'names', names }, false);

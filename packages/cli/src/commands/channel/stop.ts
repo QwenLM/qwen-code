@@ -282,6 +282,18 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       writeStderrLine(
         'Failed to send signal — process may have already exited.',
       );
+      // The recorded-conditional guidance below never runs on this
+      // branch (it exits first): mirror it here, or a user whose service
+      // died between the liveness check and the signal gets a persisted
+      // stop with no "stay stopped" explanation — a later bare
+      // `qwen channel start` skips the channels and nothing in the
+      // output said why (inconsistent with the clean-stop and SIGKILL
+      // siblings, R15-34).
+      if (hadChannels && recorded) {
+        writeStdoutLine(
+          'Stopped channels stay stopped until started again by name: qwen channel start <name>.',
+        );
+      }
       removeServiceInfo();
       process.exit(0);
     }

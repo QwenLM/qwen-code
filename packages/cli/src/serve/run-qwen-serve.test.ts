@@ -525,6 +525,17 @@ const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
 const mockChannelWorkerEnabledState = vi.hoisted(() => ({
   value: undefined as boolean | undefined,
 }));
+// R15-11: capture the options run-qwen-serve passes to
+// createChannelWorkerManager so the wiring tests can pin the reload
+// filter / stopped-record hooks the serve layer injects.
+const capturedChannelManagerOptions = vi.hoisted(() => ({
+  value: undefined as
+    | {
+        filterReloadSelection?: unknown;
+        clearStoppedRecords?: unknown;
+      }
+    | undefined,
+}));
 const mockTotalMemBytes = vi.hoisted(() => ({
   value: undefined as number | undefined,
 }));
@@ -572,6 +583,7 @@ vi.mock('./channel-worker-manager.js', async (importOriginal) => {
     createChannelWorkerManager: (
       ...args: Parameters<typeof actual.createChannelWorkerManager>
     ) => {
+      capturedChannelManagerOptions.value = args[0];
       const manager = actual.createChannelWorkerManager(...args);
       return {
         ...manager,
@@ -8237,6 +8249,59 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(worker.deliverChannelMessage).toHaveBeenCalledWith(delivery);
     } finally {
       await handle.close();
+    }
+  });
+
+  it('wires the reload filter and stopped-record clear hooks into the channel worker manager (R15-11)', async () => {
+    // The two wiring lines in run-qwen-serve (filterReloadSelection +
+    // clearStoppedRecords) are the serve half of the R14 reload-filter
+    // contract; the manager/filter/store suites cover the units in
+    // isolation but nothing composes them. Pin that the serve layer
+    // actually injects BOTH hooks when it builds the manager, or a
+    // dropped wiring line desyncs the pair and re-opens the explicit-stop
+    // resurrection the filter exists to prevent (#8975).
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-wiring-')),
+    );
+    capturedChannelManagerOptions.value = undefined;
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      // Read through a typed local: the `= undefined` reset above narrows
+      // the mutable ref to `undefined` under control-flow analysis (the
+      // mock's reassignment happens in a callback TS cannot track).
+      const options = capturedChannelManagerOptions.value as
+        | {
+            filterReloadSelection?: unknown;
+            clearStoppedRecords?: unknown;
+          }
+        | undefined;
+      expect(options).toBeDefined();
+      expect(options?.filterReloadSelection).toEqual(expect.any(Function));
+      expect(options?.clearStoppedRecords).toEqual(expect.any(Function));
+    } finally {
+      await handle.close();
+      capturedChannelManagerOptions.value = undefined;
     }
   });
 

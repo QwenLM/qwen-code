@@ -299,6 +299,19 @@ const mockChannel = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // mockReset (not just clearAllMocks/mockClear): clearAllMocks does NOT
+  // drain queued mockImplementationOnce/mockReturnValueOnce entries, so an
+  // unconsumed once-entry — exactly what a regression in a pinned path
+  // leaves behind — leaks into the NEXT test's first call, mislocalizing
+  // the failure or silently flipping results (R15-30). These five mocks
+  // receive the PR's once-entries; reset drains the queue. Their defaults
+  // are re-applied below (mockRouterRestoreSessions) or they are plain
+  // recorders (the rest).
+  mockWriteServiceInfo.mockReset();
+  mockChannelDisconnect.mockReset();
+  mockBridgeStop.mockReset();
+  mockRouterRestoreSessions.mockReset();
+  mockChannelLoopSchedulerStart.mockReset();
   mockBridgeStart.mockResolvedValue(undefined);
   mockChannelConnect.mockRejectedValue(new Error('stop after channel setup'));
   mockChannelStateStoreReadAll.mockReturnValue({});
@@ -522,6 +535,17 @@ describe('startCommand.handler', () => {
       // …and dropped before channel creation: only the configured
       // sibling is created.
       expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      // Pin the CREATED name (R15-52): a count-only assertion lets an
+      // inverted reserved-name filter (keeping only reserved keys) pass —
+      // it would still warn once and call createChannel exactly once, but
+      // for the reserved `'all'` entry, connecting the placeholder the
+      // filter exists to prevent.
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
     } finally {
       if (keepAlive) clearInterval(keepAlive);
       exitSpy.mockRestore();

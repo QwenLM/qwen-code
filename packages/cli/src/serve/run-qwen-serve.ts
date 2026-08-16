@@ -6898,12 +6898,17 @@ async function runQwenServeImpl(
           // ownerless with the record never cleared. Clear the committed
           // names' records on commit so the filter cannot drop them.
           // mode-`all` groups keep their records (`--channel all` honors
-          // them by design). Never-fails: degrade to keeping the record
-          // (the pre-fix window) — a clear failure must not fail an
-          // already-committed selection (#8975).
+          // them by design). Never throws — a clear failure must not
+          // fail an already-committed selection — but reports the failed
+          // workspaces: post-R14 a surviving record means the filter
+          // DROPS the name and a later reload-op permanently trims the
+          // committed selection, so the loss rides the set result as
+          // statePersisted: false (the "degrades to the pre-fix window"
+          // framing predates the filter and was wrong, R15-19).
           const clearStoppedRecords = (
             groups: readonly ChannelWorkspaceGroup[],
-          ): void => {
+          ): string[] => {
+            const failedWorkspaces: string[] = [];
             for (const target of groups) {
               if (target.selection.mode !== 'names') continue;
               let canonical: string;
@@ -6915,13 +6920,28 @@ async function runQwenServeImpl(
               const store = new workerRuntime.ChannelStateStore(
                 workerRuntime.daemonChannelRuntimeStatePath(canonical),
               );
-              const states = store.readAll();
+              // Fail-closed pre-read (the service-side clearStoppedRecord
+              // twin, R15-2): readAll() swallows non-ENOENT failures as
+              // an empty map, which would hide a stopped record that the
+              // filter then uses to drop the name. prune([]) reads
+              // through the writers' fail-closed path without writing; a
+              // throw means the record is UNKNOWN — report the loss.
+              let states: Record<string, 'active' | 'stopped'>;
+              try {
+                states = store.prune([]);
+              } catch {
+                failedWorkspaces.push(canonical);
+                continue;
+              }
+              let failedHere = false;
               for (const name of target.selection.names) {
                 if (states[name] === 'stopped') {
-                  store.trySet(name, 'active');
+                  if (!store.trySet(name, 'active')) failedHere = true;
                 }
               }
+              if (failedHere) failedWorkspaces.push(canonical);
             }
+            return failedWorkspaces;
           };
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??

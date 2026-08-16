@@ -33,36 +33,69 @@ interface ChannelStateFile {
    */
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
   /**
+   * The legacy file's `entryEpochs` at the last adoption sync (R15-15):
+   * the per-entry baseline for re-stop detection. A content diff alone
+   * cannot see a re-stop — re-stopping an already-stopped channel
+   * re-asserts the same entry, the snapshot matches, and the merge loop
+   * would drop the re-stop (the explicitly re-stopped channel resurrects
+   * on `--channel all`). Re-stop detection is PER-ENTRY: `applyChange`
+   * stamps each entry it names with the write's new `generation` value
+   * (its epoch), so a snapshot-identical entry is re-applied only when
+   * ITS OWN epoch moved past the epoch recorded here — exactly the
+   * "some write named this entry after adoption" signal. The global
+   * generation arithmetic this replaced (see `adoptedLegacyGeneration`)
+   * assumed each entry added since the snapshot accounts for exactly one
+   * generation step, but writes bump generation by the number of entries
+   * named — repeated writes of ONE new entry inflated the delta and
+   * re-applied snapshot-identical entries over an explicit restart
+   * recorded in the target (an unrelated workspace's activity re-stopping
+   * a channel nobody stopped, R15-15). Absent when the legacy file had
+   * no epochs at sync time; adoption then falls back to the global
+   * arithmetic for one sync (see `adoptedLegacyGeneration`).
+   */
+  adoptedLegacyEntryEpochs?: Record<string, number>;
+  /**
    * The legacy file's `generation` at the last adoption sync (R11-14).
-   * A content diff alone cannot see a re-stop: the only legacy writer is
-   * this PR's own no-workspace stop fallback (the file is introduced by
-   * this PR, so older releases never write it), and it echoes the WHOLE
-   * stored map on every stop — re-stopping an already-stopped channel
-   * re-asserts the same entries. The snapshot matches, so the merge loop
-   * would drop the re-stop and the explicitly re-stopped channel
-   * resurrects on `--channel all`. Every store write bumps `generation`
-   * BY THE NUMBER OF ENTRIES WRITTEN (R14), so the watermark scopes the
-   * re-stop detection arithmetically: each entry added since the
-   * snapshot accounts for exactly one generation step, so when the
-   * generation moved MORE than the number of entries added, at least one
-   * write touched an entry that was NOT new — a re-stop — and
-   * snapshot-identical entries are re-applied even when a batched stop
-   * mixes the re-stop with a new entry in a single write (the production
-   * shape: `recordStoppedChannels` stops a service's whole channel list
-   * in ONE `setMany`; a per-rewrite bump of 1 made that mixed batch
-   * indistinguishable from a pure new stop, dropping the re-stop, R13-10).
-   * A pure new stop keeps `delta == added` (no rewrite detected — the
-   * comparison cannot relax to `>=`). A moved-but-content-equal
-   * generation is the zero-added-entries special case. Re-applying is
-   * limited to snapshot-identical entries, so an explicit restart
-   * recorded since still wins over a stale adopted stop (the R9-3
-   * direction stays closed). The mtime-based watermark this replaced
-   * was unreliable in both directions: coarse-mtime filesystems
-   * (exFAT/FAT32 2 s, some NFS/SMB 1 s) hid real rewrites, and any
-   * external `touch`/backup re-materialization with unchanged bytes
-   * forged one. Generation lives in the content, so neither pole exists
-   * (R11-14). `-1` records a legacy file without generation (pre-
-   * feature, tolerated); absent means this file predates watermark
+   * Two uses, in priority order:
+   *
+   * 1. Lineage-break signal (R15-15): a legacy generation LOWER than
+   *    this watermark means the file was deleted/recreated since the
+   *    snapshot (user cleanup, backup restore — the counter resets), so
+   *    no arithmetic on the new counter can see pre-break re-stops. The
+   *    sync treats EVERY snapshot-identical entry as re-stopped — the
+   *    fail-safe over-stop direction the R10-5 comment accepts (an
+   *    under-start is one explicit start away; a resurrected explicitly
+   *    stopped channel is the #8975 regression). The mirror (a
+   *    higher-generation replacement with content-equal entries) is
+   *    caught per-entry when epochs exist and by the arithmetic below
+   *    when they do not.
+   * 2. Fallback re-stop arithmetic for legacy files WITHOUT `entryEpochs`
+   *    (pre-epoch writers, tolerated): every store write bumps
+   *    `generation` BY THE NUMBER OF ENTRIES WRITTEN (R14), so when the
+   *    generation moved MORE than the number of entries added since the
+   *    snapshot, at least one write touched an entry that was NOT new —
+   *    a re-stop — and snapshot-identical entries are re-applied even
+   *    when a batched stop mixes the re-stop with a new entry in a
+   *    single write (the production shape: `recordStoppedChannels` stops
+   *    a service's whole channel list in ONE `setMany`; a per-rewrite
+   *    bump of 1 made that mixed batch indistinguishable from a pure new
+   *    stop, dropping the re-stop, R13-10). This arithmetic is exact
+   *    only when every post-snapshot write names exclusively NEW entries
+   *    — the epoch map above is the precise replacement when available
+   *    (R15-15). A pure new stop keeps `delta == added` (no rewrite
+   *    detected — the comparison cannot relax to `>=`). A
+   *    moved-but-content-equal generation is the zero-added-entries
+   *    special case.
+   *
+   * Re-applying is limited to snapshot-identical entries, so an explicit
+   * restart recorded since still wins over a stale adopted stop (the
+   * R9-3 direction stays closed). The mtime-based watermark the
+   * generation replaced was unreliable in both directions: coarse-mtime
+   * filesystems (exFAT/FAT32 2 s, some NFS/SMB 1 s) hid real rewrites,
+   * and any external `touch`/backup re-materialization with unchanged
+   * bytes forged one. Generation lives in the content, so neither pole
+   * exists (R11-14). `-1` records a legacy file without generation
+   * (pre-feature, tolerated); absent means this file predates watermark
    * recording and adoption keeps the content-only diff for one sync.
    */
   adoptedLegacyGeneration?: number;
@@ -78,6 +111,20 @@ interface ChannelStateFile {
    * coarse filesystem granularity cannot hide it.
    */
   generation?: number;
+  /**
+   * Per-entry write epoch: for each channel entry, the `generation` value
+   * of the LAST write that named it (R15-15). Stamped by every
+   * `applyChange` write for exactly the entries the write names — the
+   * legacy writer (`recordStoppedChannels`' no-workspace fallback) writes
+   * the stopping service's channel list, NOT an echo of the whole stored
+   * map, so per-entry epochs are the only precise "written after
+   * adoption" signal. Adoption compares a snapshot-identical entry's
+   * current epoch against `adoptedLegacyEntryEpochs` to detect re-stops
+   * the content diff cannot see; entries without an epoch baseline on
+   * either side are not re-applied (an unprovable re-stop must not
+   * override an explicit restart, the R9-3 direction).
+   */
+  entryEpochs?: Record<string, number>;
 }
 
 /**
@@ -174,13 +221,16 @@ function prepareStateDirectory(dir: string): void {
  * the snapshot are NOT re-applied: the legacy file is deliberately kept
  * forever (a later-starting workspace adopts the same stops), so blindly
  * re-merging it would override an explicit restart recorded in this
- * workspace's own map with the stale old stop. Exception: a rewrite of
- * the legacy file whose entry set is unchanged (the no-workspace stop
- * fallback echoing the whole stored map when re-stopping an
- * already-stopped channel) is invisible to the content diff, so the sync
- * also records the legacy file's generation counter; when it moved since
- * the snapshot was recorded, the rewrite itself is a new stop signal and
- * snapshot-identical entries are re-applied (#8975, R11-14). Entries that
+ * workspace's own map with the stale old stop. Exception: a rewrite that
+ * re-asserts a snapshot-identical entry (a re-stop of an already-stopped
+ * channel) is invisible to the content diff, so the sync also records the
+ * legacy file's generation counter and per-entry write epochs; an entry
+ * is re-applied when its OWN epoch moved past the recorded snapshot
+ * epoch, with a fallback to the global generation arithmetic for legacy
+ * files without epochs and a fail-safe re-apply of every
+ * snapshot-identical entry when the generation REGRESSED (lineage break:
+ * file deleted/recreated, counter reset) (#8975, R11-14, R15-15).
+ * Entries that
  * disappeared from the legacy file are likewise never propagated: it
  * carries no workspace attribution, so its loss or rewrite must not
  * destroy this workspace's records. Best-effort — any failure only loses
@@ -192,6 +242,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   if (!existsSync(legacyPath)) return;
   let legacyChannels: Record<string, ChannelRuntimeState>;
   let legacyGeneration: number;
+  let legacyEntryEpochs: Record<string, number> | undefined;
   try {
     // The generation watermark lives INSIDE the content, so one
     // readFileSync observes one consistent (generation, channels) pair by
@@ -213,6 +264,9 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     // record -1 so the NEXT rewrite — the first one stamping a real
     // generation — is visible as a change (R11-14).
     legacyGeneration = parsed?.generation ?? -1;
+    // Absent on pre-epoch legacy files: adoption falls back to the
+    // generation arithmetic for this sync (R15-15).
+    legacyEntryEpochs = parsed?.entryEpochs;
   } catch {
     // ENOENT can still race the existsSync above; anything else is a real
     // open/read failure (EACCES/EIO/EISDIR on a shared ~/.qwen): the
@@ -260,42 +314,82 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   const channels: Record<string, ChannelRuntimeState> =
     target?.channels ?? Object.create(null);
   const snapshot = target?.adoptedLegacy;
-  // A rewrite of the legacy file re-asserts snapshot-identical entries:
-  // the only legacy writer (this PR's own no-workspace stop fallback)
-  // echoes the WHOLE stored map on every write and bumps the generation
-  // BY THE NUMBER OF ENTRIES WRITTEN, so a re-stop is arithmetically
-  // visible even when it shares ONE batched write with a new stop. Scope
-  // the detection by the watermark: every entry added since the snapshot
-  // accounts for exactly one generation step, so when the generation
-  // moved MORE than the number of entries added, at least one write
-  // touched a non-new (snapshot-identical) entry in between — a re-stop
-  // that the plain content diff cannot see (a concurrent new stop in the
-  // same batched write otherwise masks it, resurrecting the re-stopped
-  // channel on the next `--channel all` — the exact #8975 regression,
-  // R13-10). A pure new stop keeps `delta == added` and is NOT a
-  // rewrite (the comparison cannot relax to `>=`, or a plain new stop
-  // would re-apply snapshot-identical entries over an explicit restart —
-  // the R9-3 direction). An entry-set-UNCHANGED rewrite is the special
-  // case where the delta exceeds zero added entries. The watermark is
-  // unified across the `-1` (pre-generation / externally materialized)
-  // boundary: the first stamped write after adoption lands at
-  // `g - (-1)` = the number of entries written, which is the SAME
-  // per-entry semantics as the `>= 0` branch. The old content-only diff
-  // at `-1` could only see entry-set-UNCHANGED rewrites, so a batched
-  // re-stop + new stop at that boundary was dropped and the re-stopped
-  // channel resurrected (#8975, R14). The generation lives in the
-  // content, so external mtime bumps (touch, backup restore) cannot
-  // forge the signal and coarse-mtime filesystems cannot hide a real
-  // rewrite.
+  const adoptedGeneration = target?.adoptedLegacyGeneration;
+  const snapshotEpochs = target?.adoptedLegacyEntryEpochs;
+  // A rewrite of the legacy file re-asserts snapshot-identical entries —
+  // a re-stop the plain content diff cannot see (a re-stop of an
+  // already-stopped channel re-asserts the same entry). Detection runs in
+  // three tiers (R15-15):
+  //
+  // 1. Lineage break: a generation LOWER than the recorded watermark
+  //    means the file was deleted/recreated (counter reset), so no
+  //    arithmetic on the new counter can see pre-break re-stops — every
+  //    snapshot-identical entry is fail-safe re-stopped. The mirror
+  //    (higher-generation replacement) is caught by tiers 2/3.
+  // 2. Per-entry epochs (legacy files stamped by this PR's writer): a
+  //    snapshot-identical entry is a re-stop exactly when ITS OWN epoch
+  //    moved past the epoch recorded at snapshot time. Precise under the
+  //    real writer, which writes the stopping service's channel list (NOT
+  //    an echo of the whole stored map) and bumps generation BY THE
+  //    NUMBER OF ENTRIES NAMED — so the tier-3 arithmetic alone inflates
+  //    when one NEW entry is written repeatedly (delta 2, added 1) and
+  //    would re-apply snapshot-identical entries over an explicit restart
+  //    recorded in the target (an unrelated workspace's activity
+  //    re-stopping a channel nobody stopped).
+  // 3. Fallback arithmetic for legacy files WITHOUT epochs (pre-epoch
+  //    writers, tolerated): every entry added since the snapshot accounts
+  //    for exactly one generation step, so when the generation moved MORE
+  //    than the number of entries added, at least one write touched a
+  //    non-new (snapshot-identical) entry in between — a re-stop that the
+  //    plain content diff cannot see (a concurrent new stop in the same
+  //    batched write otherwise masks it, resurrecting the re-stopped
+  //    channel on the next `--channel all` — the exact #8975 regression,
+  //    R13-10). A pure new stop keeps `delta == added` and is NOT a
+  //    rewrite (the comparison cannot relax to `>=`, or a plain new stop
+  //    would re-apply snapshot-identical entries over an explicit restart
+  //    — the R9-3 direction). An entry-set-UNCHANGED rewrite is the
+  //    special case where the delta exceeds zero added entries. The
+  //    watermark is unified across the `-1` (pre-generation / externally
+  //    materialized) boundary: the first stamped write after adoption
+  //    lands at `g - (-1)` = the number of entries written, which is the
+  //    SAME per-entry semantics as the `>= 0` branch. The old
+  //    content-only diff at `-1` could only see entry-set-UNCHANGED
+  //    rewrites, so a batched re-stop + new stop at that boundary was
+  //    dropped and the re-stopped channel resurrected (#8975, R14).
+  //
+  // Generation and epochs live in the content, so external mtime bumps
+  // (touch, backup restore) cannot forge the signal and coarse-mtime
+  // filesystems cannot hide a real rewrite.
   const addedSinceSnapshot = snapshot
     ? Object.keys(legacyChannels).filter((name) => snapshot[name] === undefined)
         .length
     : 0;
-  const legacyRewritten =
+  const generationRegressed =
     snapshot !== undefined &&
-    target?.adoptedLegacyGeneration !== undefined &&
-    target.adoptedLegacyGeneration !== legacyGeneration &&
-    legacyGeneration - target.adoptedLegacyGeneration > addedSinceSnapshot;
+    adoptedGeneration !== undefined &&
+    legacyGeneration < adoptedGeneration;
+  const epochsUsable =
+    legacyEntryEpochs !== undefined && snapshotEpochs !== undefined;
+  const legacyRewrittenByArithmetic =
+    snapshot !== undefined &&
+    adoptedGeneration !== undefined &&
+    !epochsUsable &&
+    adoptedGeneration !== legacyGeneration &&
+    legacyGeneration - adoptedGeneration > addedSinceSnapshot;
+  // Per-entry re-stop predicate over snapshot-identical entries.
+  const reStopped = (name: string): boolean => {
+    if (generationRegressed) return true;
+    if (epochsUsable) {
+      const current = legacyEntryEpochs?.[name];
+      const adopted = snapshotEpochs?.[name];
+      // No baseline on either side: unprovable — an inferred re-stop
+      // must not override an explicit restart (the R9-3 direction).
+      return (
+        current !== undefined && adopted !== undefined && current > adopted
+      );
+    }
+    return legacyRewrittenByArithmetic;
+  };
   const merged: string[] = [];
   // A corrupt/unreadable target is treated as empty by design, so reseed
   // it from the whole legacy map; a valid target without a snapshot
@@ -307,25 +401,32 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       if (snapshot?.[name] !== state) {
         channels[name] = state;
         merged.push(name);
-      } else if (legacyRewritten && channels[name] !== state) {
-        // Rewrite detected since the snapshot (see the watermark logic
-        // above): the moved generation proves at least one content-
-        // preserving rewrite — a re-stop — and the only legacy writer
-        // (this PR's own no-workspace stop fallback) echoes the WHOLE
-        // stored map on every stop, so the rewrite re-asserts every
-        // entry. Treat the re-assertion as a stop event over an explicit
-        // restart recorded since (R10-5).
-        // Accepted trade-off: the echo cannot say WHICH entry the stop
-        // touched, so a no-op re-stop of one already-stopped channel
-        // also re-stops explicitly restarted siblings in every adopted
-        // workspace — the fail-safe direction (an under-start is one
-        // explicit start away; a resurrected explicitly stopped channel
-        // is the #8975 regression) (#8975).
+      } else if (reStopped(name) && channels[name] !== state) {
+        // Re-stop detected since the snapshot (see the tier list above):
+        // a write named this entry after adoption, re-asserting it. Treat
+        // the re-assertion as a stop event over an explicit restart
+        // recorded since (R10-5).
+        // Accepted trade-off: the lineage-break tier (and the no-epoch
+        // arithmetic it falls back to) cannot say WHICH entry the stop
+        // touched, so it re-stops explicitly restarted siblings too — the
+        // fail-safe direction (an under-start is one explicit start away;
+        // a resurrected explicitly stopped channel is the #8975
+        // regression) (#8975).
         channels[name] = state;
         merged.push(name);
       }
     }
   }
+  // A content-preserving rewrite signal (a detected re-stop that merged
+  // nothing because the target already matches): the write still runs to
+  // advance the recorded watermarks, or every later sync re-detects it.
+  const rewriteSignal =
+    generationRegressed ||
+    legacyRewrittenByArithmetic ||
+    (snapshot !== undefined &&
+      Object.entries(legacyChannels).some(
+        ([name, state]) => snapshot[name] === state && reStopped(name),
+      ));
   // Nothing new and the snapshot is already recorded: skip the write so a
   // normal start does not pay an fsync'd rewrite of an unchanged file. A
   // detected rewrite still writes even with nothing merged, to advance
@@ -333,14 +434,17 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   // MISSING generation watermark also writes (R11-20): the skip must not
   // fire before the one-shot baseline write that STARTS recording, or
   // entry-set-unchanged re-stops stay invisible on every subsequent sync
-  // while the legacy content stays unchanged.
+  // while the legacy content stays unchanged. Same for a MISSING epoch
+  // baseline: the first sync that sees a legacy epoch map must record it,
+  // or per-entry re-stop detection never arms (R15-15).
   if (
     targetExisted &&
     target !== undefined &&
     snapshot !== undefined &&
-    target.adoptedLegacyGeneration !== undefined
+    adoptedGeneration !== undefined &&
+    (legacyEntryEpochs === undefined || snapshotEpochs !== undefined)
   ) {
-    if (merged.length === 0 && !legacyRewritten) return;
+    if (merged.length === 0 && !rewriteSignal) return;
   }
   try {
     prepareStateDirectory(path.dirname(targetPath));
@@ -353,6 +457,9 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       channels,
       adoptedLegacy: legacyChannels,
       adoptedLegacyGeneration: legacyGeneration,
+      ...(legacyEntryEpochs
+        ? { adoptedLegacyEntryEpochs: legacyEntryEpochs }
+        : {}),
     };
     atomicWriteFileSync(targetPath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',
@@ -374,8 +481,10 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
 interface ParsedStateFile {
   channels: Record<string, ChannelRuntimeState>;
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
+  adoptedLegacyEntryEpochs?: Record<string, number>;
   adoptedLegacyGeneration?: number;
   generation?: number;
+  entryEpochs?: Record<string, number>;
 }
 
 /** Tolerant state-file parse: any deviation yields `undefined`. */
@@ -407,6 +516,10 @@ function parseStateFile(raw: string): ParsedStateFile | undefined {
   ) {
     result.adoptedLegacy = filterChannelStates(file.adoptedLegacy);
   }
+  const adoptedEpochs = filterEpochs(file.adoptedLegacyEntryEpochs);
+  if (adoptedEpochs) {
+    result.adoptedLegacyEntryEpochs = adoptedEpochs;
+  }
   if (
     typeof file.adoptedLegacyGeneration === 'number' &&
     Number.isFinite(file.adoptedLegacyGeneration)
@@ -415,6 +528,35 @@ function parseStateFile(raw: string): ParsedStateFile | undefined {
   }
   if (typeof file.generation === 'number' && Number.isFinite(file.generation)) {
     result.generation = file.generation;
+  }
+  const entryEpochs = filterEpochs(file.entryEpochs);
+  if (entryEpochs) {
+    result.entryEpochs = entryEpochs;
+  }
+  return result;
+}
+
+/**
+ * Tolerant epoch-map parse (R15-15): keeps finite number values under
+ * non-empty keys, drops everything else. Returns `undefined` (not an
+ * empty map) when the field is absent or not an object — absence means
+ * "no epoch baseline" and must stay distinguishable from an empty map.
+ */
+function filterEpochs(
+  epochs: Record<string, unknown> | undefined,
+): Record<string, number> | undefined {
+  if (
+    typeof epochs !== 'object' ||
+    epochs === null ||
+    Array.isArray(epochs)
+  ) {
+    return undefined;
+  }
+  const result: Record<string, number> = Object.create(null);
+  for (const [name, value] of Object.entries(epochs)) {
+    if (name.length > 0 && typeof value === 'number' && Number.isFinite(value)) {
+      result[name] = value;
+    }
   }
   return result;
 }
@@ -528,18 +670,24 @@ export class ChannelStateStore {
   }
 
   set(name: string, state: ChannelRuntimeState): void {
-    this.applyChange((channels) => {
-      channels[name] = state;
-    }, 1);
+    this.applyChange(
+      (channels) => {
+        channels[name] = state;
+      },
+      [name],
+    );
   }
 
   setMany(names: readonly string[], state: ChannelRuntimeState): void {
     if (names.length === 0) return;
-    this.applyChange((channels) => {
-      for (const name of names) {
-        channels[name] = state;
-      }
-    }, names.length);
+    this.applyChange(
+      (channels) => {
+        for (const name of names) {
+          channels[name] = state;
+        }
+      },
+      names,
+    );
   }
 
   /**
@@ -624,11 +772,12 @@ export class ChannelStateStore {
           delete channels[name];
         }
       },
-      // Delete-only rewrite: bumps the generation by 1 so the counter stays
-      // a monotonic per-rewrite watermark (prune only ever writes the
-      // workspace-scoped store, never the legacy file the adoption diff
-      // reads, so the exact bump here is not load-bearing) (#8975).
-      1,
+      // Delete-only rewrite (names no entry): bumps the generation by 1 so
+      // the counter stays a monotonic per-rewrite watermark (prune only
+      // ever writes the workspace-scoped store, never the legacy file the
+      // adoption diff reads, so the exact bump here is not load-bearing)
+      // (#8975).
+      [],
     );
     for (const name of stale) {
       delete states[name];
@@ -638,7 +787,7 @@ export class ChannelStateStore {
 
   private applyChange(
     mutate: (channels: Record<string, ChannelRuntimeState>) => void,
-    entriesWritten: number,
+    namesWritten: readonly string[],
   ): void {
     // Read via the full-file reader: the adoptedLegacy snapshot must
     // survive every production write, or the next adoption sync loses its
@@ -652,38 +801,58 @@ export class ChannelStateStore {
     const channels = full?.channels ?? Object.create(null);
     mutate(channels);
     prepareStateDirectory(path.dirname(this.filePath));
+    // Every write bumps the generation watermark BY THE NUMBER OF
+    // ENTRIES WRITTEN (R11-14, R14): a new file starts at 0, so the
+    // no-workspace stop fallback writing the legacy map is always
+    // generation-distinguishable from the snapshot the next adoption
+    // recorded, and a batched stop mixing a re-stop with a new entry
+    // moves the counter more than the entry set grew — the adoption
+    // watermark arithmetic needs that per-entry identity to see the
+    // re-stop (see `adoptedLegacyGeneration`).
+    const generation =
+      (full?.generation ?? -1) + Math.max(1, namesWritten.length);
+    // Stamp this write's epoch (the new generation value) on exactly the
+    // entries it names; unnamed surviving entries keep their epoch, and
+    // entries with no prior epoch keep ABSENCE — an unprovable baseline
+    // must not be forged into one (R15-15, see `entryEpochs`).
+    const named = new Set(namesWritten);
+    const priorEpochs = full?.entryEpochs;
+    const entryEpochs: Record<string, number> = Object.create(null);
+    for (const name of Object.keys(channels)) {
+      if (named.has(name)) {
+        entryEpochs[name] = generation;
+      } else if (priorEpochs?.[name] !== undefined) {
+        entryEpochs[name] = priorEpochs[name];
+      }
+    }
     const data: ChannelStateFile = {
       version: STORE_VERSION,
-      // Every write bumps the generation watermark BY THE NUMBER OF
-      // ENTRIES WRITTEN (R11-14, R14): a new file starts at 0, so the
-      // no-workspace stop fallback echoing the legacy map is always
-      // generation-distinguishable from the snapshot the next adoption
-      // recorded, and a batched stop mixing a re-stop with a new entry
-      // moves the counter more than the entry set grew — the adoption
-      // watermark arithmetic needs that per-entry identity to see the
-      // re-stop (see `adoptedLegacyGeneration`).
-      generation: (full?.generation ?? -1) + Math.max(1, entriesWritten),
+      generation,
       channels,
-      // Preserve the snapshot (and its legacy-generation watermark) across
-      // writes this store does not own. When no snapshot exists to
-      // preserve, stamp an EMPTY one ONLY if this write CREATES the file:
-      // every writer in this codebase creates a file only after adoption
-      // ran (start flow) or for a stop record, so the new file has 'seen'
-      // the legacy file — `{}` marks that, letting a later first-ever
-      // legacy stop merge instead of baselining into permanent
-      // invisibility. An EXISTING file without a snapshot keeps absence
-      // (R11-27): it predates snapshot recording (or was reseeded from a
-      // corrupt read), and stamping it would silently convert its next
-      // adoption from the baseline branch into the full-merge branch —
-      // an order-dependent R9-3 hazard where a stale legacy stop
-      // overrides an explicit restart recorded since. Absent stays the
-      // marker for files that genuinely predate snapshot recording
-      // (#8975).
+      ...(Object.keys(entryEpochs).length > 0 ? { entryEpochs } : {}),
+      // Preserve the snapshot (and its legacy-generation watermark and
+      // epoch baseline) across writes this store does not own. When no
+      // snapshot exists to preserve, stamp an EMPTY one ONLY if this
+      // write CREATES the file: every writer in this codebase creates a
+      // file only after adoption ran (start flow) or for a stop record,
+      // so the new file has 'seen' the legacy file — `{}` marks that,
+      // letting a later first-ever legacy stop merge instead of
+      // baselining into permanent invisibility. An EXISTING file without
+      // a snapshot keeps absence (R11-27): it predates snapshot recording
+      // (or was reseeded from a corrupt read), and stamping it would
+      // silently convert its next adoption from the baseline branch into
+      // the full-merge branch — an order-dependent R9-3 hazard where a
+      // stale legacy stop overrides an explicit restart recorded since.
+      // Absent stays the marker for files that genuinely predate snapshot
+      // recording (#8975).
       ...(full?.adoptedLegacy
         ? {
             adoptedLegacy: full.adoptedLegacy,
             ...(full.adoptedLegacyGeneration !== undefined
               ? { adoptedLegacyGeneration: full.adoptedLegacyGeneration }
+              : {}),
+            ...(full.adoptedLegacyEntryEpochs
+              ? { adoptedLegacyEntryEpochs: full.adoptedLegacyEntryEpochs }
               : {}),
           }
         : fileExisted

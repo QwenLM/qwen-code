@@ -321,10 +321,37 @@ export function createChannelManagementService(
   // snapshot, and `requestedChannels` is dropped there (R9-6).
   const terminalFailedWorkerFor = (name: string) => {
     const target = canonicalForGuard(opts.workspaceCwd);
-    return workerFor(name).find(
+    const named = workerFor(name).find(
       (worker) =>
         canonicalForGuard(worker.workspaceCwd) === target &&
         isTerminalFailedWorker(worker),
+    );
+    if (named) return named;
+    // A mode-`all` worker that went terminal carrying NO channel names —
+    // ready with zero channels (the zero-channel degrade) then
+    // crash-exhausted its budget: `{state:'failed', channels:[],
+    // lastRequestedChannels:[], requestedChannels/adapters dropped}` —
+    // matches no name in workerFor's four clauses, but it is still the
+    // owner of every configured name in its workspace. Without this
+    // fallback the crash launders to a bare `stopped` runtime state
+    // (R9-5), start() falls into setChannelEnabled and collapses the
+    // mode-`all` commitment to a names-mode single-channel selection,
+    // and restart() rejects channel_worker_not_enabled, killing the
+    // recovery route (R15-16). A names-mode worker cannot reach this
+    // shape: it launches with at least one requested name, and the
+    // terminal snapshot carries the attempted set in
+    // `lastRequestedChannels` (R9-6) — so an empty carry set plus an
+    // empty/`['all']`-placeholder channel list identifies the dead
+    // mode-`all` worker.
+    return opts.manager.ownershipSnapshots().find(
+      (worker) =>
+        canonicalForGuard(worker.workspaceCwd) === target &&
+        isTerminalFailedWorker(worker) &&
+        !worker.requestedChannels &&
+        !worker.adapters &&
+        (worker.lastRequestedChannels?.length ?? 0) === 0 &&
+        (worker.channels.length === 0 ||
+          worker.channels.some(isAllChannelSelectionName)),
     );
   };
 
@@ -354,7 +381,24 @@ export function createChannelManagementService(
     const store = new ChannelStateStore(
       daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
     );
-    if (store.readAll()[name] !== 'stopped') return;
+    // Fail-closed pre-read: `readAll()` swallows every non-ENOENT read
+    // failure as an empty map, so an unknown-content read would degrade
+    // to "record is not stopped" and start/restart would proceed without
+    // clearing — defeating this function's fail-loud invariant exactly
+    // when the disk is degraded. `prune([])` reads through the same
+    // fail-closed path the writers use (throws on non-ENOENT read
+    // failures, treats missing/corrupt files as empty) without writing
+    // (R15-2).
+    let states: Record<string, 'active' | 'stopped'>;
+    try {
+      states = store.prune([]);
+    } catch {
+      throw new ChannelManagementError(
+        'channel_state_persist_failed',
+        `Channel "${name}" cannot be started: its persisted state could not be read, so a stopped record could not be ruled out and a whole-selection worker may skip it on relaunch.`,
+      );
+    }
+    if (states[name] !== 'stopped') return;
     if (!store.trySet(name, 'active')) {
       throw new ChannelManagementError(
         'channel_state_persist_failed',
@@ -628,7 +672,17 @@ export function createChannelManagementService(
       }
       assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
-      if (workspaceCommittedNames().includes(name)) {
+      // Gate on the committed selection's source of truth, not only the
+      // filtered view: a terminal-failed worker's names are excluded from
+      // workspaceCommittedNames() (the start/recovery contract), but the
+      // worker still owns them — skipping the stop left the removed name
+      // a ghost in the committed selection, failing every later reload-op
+      // resolve until daemon restart (R15-17). The disable re-commits the
+      // trimmed selection, which is what removes the ghost.
+      if (
+        workspaceCommittedNames().includes(name) ||
+        workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd)
+      ) {
         assertOwnedRuntime(name);
         await stopChannel(name);
       }

@@ -1179,6 +1179,16 @@ describe('createChannelWorkerSupervisor', () => {
       requestedChannels: ['telegram', 'feishu'],
     });
     expect(supervisor.snapshot().lastConnectedChannels).toEqual(['telegram']);
+    // Window adapters derive from the ATTEMPTED set (requestedChannels),
+    // NOT the connected subset (R15-39): feishu attempted-but-not-
+    // connected before the crash must still carry an adapter, or a second
+    // connect failure surfaces at ready as a bare `{name, state:'error'}`
+    // with no error field — an undiagnosed entry in `qwen channel list`.
+    // The attempted≠connected fixture is what makes this pin bite.
+    expect(supervisor.snapshot().adapters).toEqual([
+      { name: 'telegram', state: 'starting' },
+      { name: 'feishu', state: 'starting' },
+    ]);
 
     secondChild.emit('message', {
       type: 'ready',
@@ -1274,6 +1284,80 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 33333,
       requestedChannels: ['telegram', 'feishu'],
+    });
+    await supervisor.stop();
+  });
+
+  it('re-carries an EMPTY mode-all set across a second crash inside the window (R15-41)', async () => {
+    // R11-18's fixture carries a NON-empty set; no test runs an EMPTY
+    // carried set through launch()'s truthiness gates. A zero-channel
+    // mode-all worker (ready with channels:[]) crashes once (window 1
+    // re-carries requestedChannels:[] via the truthy-`[]` spread), then
+    // crashes again inside the window: a mutated fallback that drops the
+    // empty set rebuilds the second window from the ['all'] placeholder
+    // alone — phantom `all` leaks into status/list during the window, and
+    // a stop in the window has no carried connected set to intersect.
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const secondChild = new FakeChild(false);
+    const thirdChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild)
+      .mockReturnValueOnce(thirdChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10, 10] },
+    });
+
+    const started = supervisor.start();
+    // Ready with ZERO channels: the committed carried sets are empty.
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: [],
+      requestedChannels: [],
+    });
+    await started;
+
+    firstChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: [],
+    });
+
+    // Second crash BEFORE ready, inside the first restart window: the
+    // empty carried set must survive, not drop to the placeholder alone.
+    secondChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: [],
+      adapters: [],
+    });
+    expect(supervisor.snapshot().lastConnectedChannels).toEqual([]);
+
+    thirdChild.emit('message', {
+      type: 'ready',
+      pid: 33333,
+      channels: [],
+      requestedChannels: [],
+    });
+    await Promise.resolve();
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'running',
+      pid: 33333,
+      requestedChannels: [],
     });
     await supervisor.stop();
   });
@@ -1582,6 +1666,65 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 44444,
     });
+  });
+
+  it('does not carry the stale requestedChannels into a fresh mode-all run after stop()/start() (R15-59)', async () => {
+    // The R10-15 fresh-start reuse test is mode-NAMES, where the
+    // requestedChannelNames() short-circuit means the requestedChannels
+    // fallback never decides; no mode-all test performs stop()/start()
+    // reuse. Dropping the kind guard on the requestedChannels fallback
+    // ships green while production rebuilds a fresh mode-all run's
+    // starting window from the stale pre-stop requestedChannels —
+    // status/list show stale 'starting' adapters until the ready report
+    // commits.
+    vi.useFakeTimers();
+    const firstChild = new FakeChild();
+    const secondChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await started;
+
+    await supervisor.stop();
+
+    const secondStart = supervisor.start();
+    // Fresh mode-all run: the starting window must NOT carry the stale
+    // pre-stop requestedChannels/adapters (the placeholder `channels`
+    // aside).
+    expect(supervisor.snapshot().requestedChannels).toBeUndefined();
+    expect(supervisor.snapshot().adapters).toBeUndefined();
+
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await secondStart;
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'running',
+      pid: 22222,
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await supervisor.stop();
   });
 
   it('does not double-notify or reschedule when a restart launch times out then exits', async () => {

@@ -482,8 +482,16 @@ describe('CLI entry import boundary', () => {
       'utf8',
     );
 
+    // `import ... from` AND `export ... from` (re-exports never begin with
+    // `import`), both non-`type` forms (R15-8).
     expect(filterSource).not.toMatch(
-      /import\s+(?!type\b)[^;]*from ['"]\.\.\/commands\/channel\//,
+      /(?:import|export)\s+(?!type\b)[^;]*from\s+['"]\.\.\/commands\/channel\//,
+    );
+    // Bare side-effect imports (`import '../commands/channel/...';` — no
+    // `from` keyword) are static ESM dependencies esbuild resolves into the
+    // pre-listen bundle too.
+    expect(filterSource).not.toMatch(
+      /import\s+['"]\.\.\/commands\/channel\//,
     );
     expect(filterSource).toContain(
       "import type { ChannelRuntimeState } from '../commands/channel/channel-state-store.js';",

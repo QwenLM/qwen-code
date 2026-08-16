@@ -168,37 +168,58 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
       names: ['telegram'],
     };
 
+    // Build the divergent spelling WITHOUT normalization: path.join and
+    // path.resolve both collapse the dot segment back to the canonical
+    // string, which would let a mutation dropping canonicalizeWorkspace
+    // read the seeded file and ship green (R15-6).
     expect(
-      filter(selection, [group(path.join(workspace, '.'), ['telegram'])]),
+      filter(selection, [group(`${workspace}/.`, ['telegram'])]),
     ).toEqual({ mode: 'names', names: [] });
   });
 
-  it('reads each workspace state at most once (per-filter cache)', () => {
-    // The closure memoizes per workspace; two names owned by the same
-    // workspace must not double-read the state file. A regression
-    // re-reading per name stays behaviorally identical here, so pin the
-    // observable: both names resolve consistently from one seeded read.
+  it('re-reads each owning workspace once per resolve (per-invocation cache, R15-1)', () => {
+    // run-qwen-serve creates exactly ONE filter instance for the whole
+    // daemon lifetime (memoized ensureChannelWorkerManager), so a
+    // factory-scoped cache reads each workspace's state file at most
+    // once and makes stopped records written after that first read
+    // invisible to every later reload-op — resurrecting an explicitly
+    // stopped channel. The cache is per-invocation: same-workspace names
+    // coalesce to ONE read within a resolve, and every later resolve
+    // re-reads.
     new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
       'telegram',
       'stopped',
     );
-    const filter = makeFilter();
+    let reads = 0;
+    const filter = createDaemonReloadSelectionFilter({
+      canonicalizeWorkspace,
+      readRuntimeStates: (canonicalWorkspaceCwd) => {
+        reads += 1;
+        return new ChannelStateStore(
+          daemonChannelRuntimeStatePath(canonicalWorkspaceCwd),
+        ).readAll();
+      },
+    });
     const selection: ServeChannelSelection = {
       mode: 'names',
       names: ['telegram', 'feishu'],
     };
+    const groups = [group(workspace, ['telegram', 'feishu'])];
 
-    expect(
-      filter(selection, [group(workspace, ['telegram', 'feishu'])]),
-    ).toEqual({ mode: 'names', names: ['feishu'] });
-    // A record written AFTER the filter's first read of the workspace is
-    // not visible to the same filter instance (the documented cache).
+    expect(filter(selection, groups)).toEqual({
+      mode: 'names',
+      names: ['feishu'],
+    });
+    expect(reads).toBe(1);
+
+    // A stopped record written AFTER the first resolve is visible to the
+    // NEXT resolve of the SAME instance — the R15-1 contract the
+    // factory-scoped cache broke.
     new ChannelStateStore(daemonChannelRuntimeStatePath(workspace)).set(
       'feishu',
       'stopped',
     );
-    expect(
-      filter(selection, [group(workspace, ['telegram', 'feishu'])]),
-    ).toEqual({ mode: 'names', names: ['feishu'] });
+    expect(filter(selection, groups)).toEqual({ mode: 'names', names: [] });
+    expect(reads).toBe(2);
   });
 });

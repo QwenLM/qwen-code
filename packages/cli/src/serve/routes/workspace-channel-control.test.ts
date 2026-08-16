@@ -235,6 +235,10 @@ describe('DELETE /workspace/channel', () => {
     expect(response.body.statePersistFailedWorkspaces).toEqual([
       '/workspace/a',
     ]);
+    // The internal manager→route plumbing stays stripped on the failure
+    // shape too (R15-60): the success-path strip convention must not be
+    // relaxed when the loss fields ride the body.
+    expect(response.body).not.toHaveProperty('stoppedChannels');
     expect(mockChannelStateStoreInstances).toHaveLength(2);
     expect(mockChannelStateStoreInstances[1]!.path).toBe(
       daemonChannelRuntimeStatePath('/workspace/b'),
@@ -299,6 +303,8 @@ describe('DELETE /workspace/channel', () => {
       '/workspace/a',
       '/workspace/b',
     ]);
+    // Internal plumbing stays stripped on the failure shape too (R15-60).
+    expect(response.body).not.toHaveProperty('stoppedChannels');
     // Both writes were attempted.
     expect(mockChannelStateStoreInstances).toHaveLength(2);
   });
@@ -414,6 +420,8 @@ describe('DELETE /workspace/channel', () => {
     expect(response.body.statePersisted).toBe(false);
     // Attribution names the workspace whose write failed (R14).
     expect(response.body.statePersistFailedWorkspaces).toEqual(['/workspace']);
+    // Internal plumbing stays stripped on the failure shape too (R15-60).
+    expect(response.body).not.toHaveProperty('stoppedChannels');
   });
 
   it('surfaces a lost stop record on the failure path too (#8975)', async () => {

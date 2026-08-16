@@ -182,5 +182,15 @@ describe('customDeepMerge', () => {
     expect(Object.keys((result as { channels: object }).channels)).toEqual([
       'telegram',
     ]);
+    // Dropping `__proto__` from mergeRecursively's skip list keeps BOTH
+    // pinned assertions green while polluting Object.prototype globally —
+    // the pollution never surfaces as own keys of `result.channels`, and
+    // toEqual compares own enumerable properties on both sides. Pin the
+    // global directly (R15-9): under the mutation `({}).type === 'feishu'`
+    // and this fails.
+    expect(({} as { type?: string }).type).toBeUndefined();
+    expect(
+      Object.getPrototypeOf((result as { channels: object }).channels),
+    ).toBe(Object.prototype);
   });
 });
