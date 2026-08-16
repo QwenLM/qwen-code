@@ -8,7 +8,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "npm run clean && esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/main.js",
+    "build": "npm run clean && esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/main.js",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "typecheck": "tsc --noEmit"
   },
@@ -22,6 +22,7 @@
     "@types/node": "^22.0.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.4.5",
+    "undici": "^7.28.0",
     "zod": "^3.25.0"
   }
 }

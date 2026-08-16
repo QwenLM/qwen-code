@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -23,6 +26,22 @@ const exampleRoot = new URL(
   import.meta.url,
 );
 const npmCli = process.env['npm_execpath'] ?? '';
+let exampleBuild: Promise<void> | undefined;
+
+function buildExample(): Promise<void> {
+  exampleBuild ??= execFileAsync(process.execPath, [npmCli, 'run', 'build'], {
+    cwd: exampleRoot,
+  }).then(() => undefined);
+  return exampleBuild;
+}
+
+function stringEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string',
+    ),
+  );
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -94,6 +113,34 @@ describe('local provider extension example', () => {
     expect(
       budgetedEnvelope.items.every((item) => item.content.length > 0),
     ).toBe(true);
+
+    const metadataBudgeted = renderResult(
+      Array.from({ length: 5 }, (_, index) => ({
+        id: `metadata-${index}`,
+        content: 'x'.repeat(500),
+        title: 't'.repeat(150),
+        uri: `https://example.com/${'u'.repeat(40)}`,
+        score: 0.9,
+        updatedAt: '2026-08-13T00:00:00Z',
+      })),
+    );
+    const metadataItems = metadataBudgeted.structuredContent[
+      'untrusted_external_context'
+    ] as {
+      items: Array<{
+        content: string;
+        title?: string;
+        uri?: string;
+        score?: number;
+        updatedAt?: string;
+      }>;
+    };
+    const lastMetadataItem = metadataItems.items.at(-1);
+    expect(lastMetadataItem?.content).toHaveLength(500);
+    expect(lastMetadataItem).not.toHaveProperty('score');
+    expect(lastMetadataItem).not.toHaveProperty('updatedAt');
+    expect(lastMetadataItem).not.toHaveProperty('title');
+    expect(lastMetadataItem).toHaveProperty('uri');
   });
 
   it.each([
@@ -261,20 +308,161 @@ describe('local provider extension example', () => {
   });
 
   it.skipIf(!npmCli)(
+    'serves the exact profile tool with stable failure and cancellation semantics',
+    async () => {
+      await buildExample();
+      let cancellationRequestSeen!: () => void;
+      const cancellationRequest = new Promise<void>((resolve) => {
+        cancellationRequestSeen = resolve;
+      });
+      let cancellationDisconnected = false;
+      const providerServer = createServer((request, response) => {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => {
+          body += chunk;
+        });
+        request.on('end', () => {
+          const parsed = JSON.parse(body) as { query?: unknown };
+          if (parsed.query === 'provider failure') {
+            response.writeHead(500, { 'content-type': 'text/plain' });
+            response.end('secret upstream response body');
+            return;
+          }
+          if (parsed.query === 'cancel provider request') {
+            response.once('close', () => {
+              cancellationDisconnected = true;
+            });
+            cancellationRequestSeen();
+            return;
+          }
+          if (parsed.query === 'provider timeout') return;
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ items: [] }));
+        });
+      });
+      await new Promise<void>((resolve, reject) => {
+        providerServer.once('error', reject);
+        providerServer.listen(0, '127.0.0.1', resolve);
+      });
+      const address = providerServer.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('Provider test server did not bind a TCP port.');
+      }
+
+      const client = new Client({
+        name: 'provider-context-local-example-test',
+        version: '1.0.0',
+      });
+      try {
+        await client.connect(
+          new StdioClientTransport({
+            command: process.execPath,
+            args: [
+              fileURLToPath(
+                new URL(
+                  '../examples/provider-extension-local/dist/main.js',
+                  import.meta.url,
+                ),
+              ),
+            ],
+            cwd: fileURLToPath(exampleRoot),
+            env: stringEnvironment({
+              ...process.env,
+              HTTP_PROXY: '',
+              HTTPS_PROXY: '',
+              ALL_PROXY: '',
+              NO_PROXY: '127.0.0.1,localhost',
+              http_proxy: '',
+              https_proxy: '',
+              all_proxy: '',
+              no_proxy: '127.0.0.1,localhost',
+              PROVIDER_CONTEXT_BASE_URL: `http://127.0.0.1:${address.port}`,
+              PROVIDER_CONTEXT_TOKEN: 'secret',
+            }),
+            stderr: 'pipe',
+          }),
+        );
+
+        const tools = await client.listTools();
+        expect(tools.tools.map((tool) => tool.name)).toEqual([
+          'context_search',
+        ]);
+
+        const failed = await client.callTool({
+          name: 'context_search',
+          arguments: { query: 'provider failure' },
+        });
+        expect(failed).toMatchObject({
+          isError: true,
+          content: [{ type: 'text', text: 'External context search failed.' }],
+        });
+        expect(JSON.stringify(failed)).not.toMatch(
+          /provider failure|secret upstream|127\.0\.0\.1/,
+        );
+
+        const controller = new AbortController();
+        const cancelled = client.callTool(
+          {
+            name: 'context_search',
+            arguments: { query: 'cancel provider request' },
+          },
+          undefined,
+          { signal: controller.signal },
+        );
+        await cancellationRequest;
+        controller.abort();
+        await expect(cancelled).rejects.toThrow();
+        await vi.waitFor(() => expect(cancellationDisconnected).toBe(true), {
+          timeout: 2000,
+        });
+
+        const timeoutStarted = Date.now();
+        const timedOut = await client.callTool(
+          {
+            name: 'context_search',
+            arguments: { query: 'provider timeout' },
+          },
+          undefined,
+          { timeout: 10_000 },
+        );
+        const timeoutElapsed = Date.now() - timeoutStarted;
+        expect(timedOut).toMatchObject({
+          isError: true,
+          content: [{ type: 'text', text: 'External context search failed.' }],
+        });
+        expect(timeoutElapsed).toBeGreaterThanOrEqual(4500);
+        expect(timeoutElapsed).toBeLessThan(8000);
+      } finally {
+        await client.close().catch(() => undefined);
+        providerServer.closeAllConnections();
+        await new Promise<void>((resolve) => {
+          providerServer.close(() => resolve());
+        });
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!npmCli)(
     'packs an executable that fails fast without provider configuration',
     async () => {
-      await execFileAsync(process.execPath, [npmCli, 'run', 'build'], {
-        cwd: exampleRoot,
-      });
+      await buildExample();
       const executable = fileURLToPath(
         new URL(
           '../examples/provider-extension-local/dist/main.js',
           import.meta.url,
         ),
       );
-      for (const [baseUrl, token, stderr] of [
-        ['', '', 'Provider configuration is unavailable.\n'],
-        ['not-a-url', 'secret', 'Provider configuration is invalid.\n'],
+      for (const [baseUrl, token, httpProxy, stderr] of [
+        ['', '', '', 'Provider configuration is unavailable.\n'],
+        ['not-a-url', 'secret', '', 'Provider configuration is invalid.\n'],
+        [
+          'https://provider.example',
+          'secret',
+          'not a URL',
+          'Provider proxy configuration is invalid.\n',
+        ],
       ] as const) {
         await expect(
           execFileAsync(process.execPath, [executable], {
@@ -283,10 +471,14 @@ describe('local provider extension example', () => {
               ...process.env,
               PROVIDER_CONTEXT_BASE_URL: baseUrl,
               PROVIDER_CONTEXT_TOKEN: token,
+              HTTP_PROXY: httpProxy,
+              HTTPS_PROXY: '',
+              ALL_PROXY: '',
+              NO_PROXY: '',
             },
             timeout: 5000,
           }),
-        ).rejects.toMatchObject({ stderr });
+        ).rejects.toMatchObject({ stderr, code: 1, killed: false });
       }
       const { stdout } = await execFileAsync(
         process.execPath,

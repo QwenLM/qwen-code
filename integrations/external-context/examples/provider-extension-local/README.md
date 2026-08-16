@@ -48,6 +48,8 @@ Do not commit a credential to the manifest. This example intentionally does
 not declare Extension `settings` as a credential path until Qwen's complete
 settings-to-MCP-child runtime path has a passing E2E.
 
+Outbound Provider requests honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
+
 ## Build and test locally
 
 ```bash

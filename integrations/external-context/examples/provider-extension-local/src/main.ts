@@ -17,6 +17,7 @@ import {
   searchProvider,
   validateProviderConfiguration,
 } from './provider.js';
+import { installEnvironmentProxy } from './proxy.js';
 
 const server = new McpServer({
   name: 'provider-context-local-example',
@@ -68,6 +69,7 @@ function errorResult(text: string) {
 
 try {
   validateProviderConfiguration();
+  installEnvironmentProxy();
   await server.connect(new StdioServerTransport());
 } catch (error) {
   process.stderr.write(
