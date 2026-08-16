@@ -60,9 +60,9 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['tools/win/build.bat', true],
     ['tools/win/setup.cmd', true],
     ['.github/scripts/label-pr.mjs', true],
-    // py/rb/pl are governed by the scripts arm alone — no lane rule
-    // reaches them — so each spelling is pinned here; the composite-action
-    // rows pin the same extension filter under .github/actions/.
+    // py/rb/pl are matched by no lane branch of their own — they reach the
+    // lane syllabus only through the rule's composition with the
+    // GITHUB_ACTIONS arm; these rows pin each spelling of the filter.
     ['.github/scripts/triage.py', true],
     ['.github/scripts/hook.rb', true],
     ['.github/scripts/tool.pl', true],
@@ -76,6 +76,7 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // The suite config decides which lanes collect the script tests, and it
     // carries a live platform gate — the lane-inventory question applies.
     ['scripts/tests/vitest.config.ts', true],
+    ['scripts/tests/vitest.config.mts', true],
     // The scripts-test branch is anchored to a scripts/ directory, not to a
     // directory that merely ends in the word.
     ['myscripts/install.test.ts', false],
@@ -213,12 +214,15 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     '.github/scripts/pr-safety-precheck.mjs',
     '.github/scripts/cleanup.sh',
     '.github/scripts/deploy.ps1',
+    '.github/scripts/release.ts',
+    '.github/actions/setup/helper.py',
   ])('pairs both checklists on a script-only diff (%s)', (path) => {
     // The security checklist says the scripts a workflow calls are part of
     // the workflow, so a diff touching only such a script needs the
     // expression-injection eyes and the lane eyes together — in every
     // extension the arm admits, not just .mjs: the .sh variant pins the
-    // shell family and the .ps1 variant the Windows lane.
+    // shell family, .ps1 the Windows lane, .ts the node-runtime family,
+    // and .py the composite-action arm's non-shell extensions.
     const out = pathRulesFor([path]);
     expect(out).toContain('GitHub Actions workflows');
     expect(out).toContain('Shell and CI scripts — the lanes that run them');

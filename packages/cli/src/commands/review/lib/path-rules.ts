@@ -53,7 +53,7 @@ const GITHUB_ACTIONS: PathRule = {
   // part of the workflow" paragraph is owed to a script-only diff just as
   // much as to the workflow that calls it.
   matches: (p) =>
-    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/(?:action\.ya?ml|.+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))|scripts\/.+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))$/i.test(
+    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/action\.ya?ml|(?:actions\/.+\/|scripts\/).+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))$/i.test(
       p,
     ),
   checklist: `A workflow is not configuration. It is code that runs on the project's own runners, with the repository's credentials, and some of its inputs come from strangers. The classes below are invisible to a reader looking for "bugs" in YAML.
@@ -86,8 +86,8 @@ const SHELL_LANES: PathRule = {
   // GITHUB_ACTIONS.matches instead of re-spelling them: a workflow diff
   // must stack both checklists, and composing keeps that invariant
   // structural rather than literals kept identical by hand. Precondition:
-  // every path class GITHUB_ACTIONS governs runs shell, so it is owed the
-  // lane syllabus too — only add such classes there. The zsh/PowerShell
+  // every path class GITHUB_ACTIONS governs runs on CI lanes and is owed
+  // the lane syllabus too — only add such classes there. The zsh/PowerShell
   // extensions stay a deliberate superset of pathTool: shellcheck refuses
   // zsh, but the lanes that run these files are what this syllabus exists
   // for.
