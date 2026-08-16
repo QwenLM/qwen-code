@@ -70,3 +70,17 @@ describe('auto-minimize-spam: credential scoping', () => {
     );
   });
 });
+
+describe('auto-minimize-spam: comment coverage', () => {
+  it('scans inline PR review comments without re-minimizing them', () => {
+    assert.ok(minimizeStep, 'minimize step must exist');
+    assert.match(minimizeStep.run, /pulls\/comments/);
+    assert.match(minimizeStep.run, /--paginate/);
+    assert.match(minimizeStep.run, /ALL_CANDIDATES=.*REVIEW_CANDIDATES/);
+    assert.match(minimizeStep.run, /on Minimizable \{ isMinimized \}/);
+    assert.match(
+      minimizeStep.run,
+      /\[ "\$is_minimized" = "true" \] && continue/,
+    );
+  });
+});

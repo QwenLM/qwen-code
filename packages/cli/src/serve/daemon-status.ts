@@ -6,6 +6,13 @@
 
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+} from './acp-http/pre-attach-budget.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
 import type {
   DaemonLogger,
@@ -149,6 +156,7 @@ type WorkspaceStatusSection = DaemonStatusSection<unknown>;
 
 interface FullDaemonStatus {
   sessions: BridgeDaemonStatusSnapshot['sessions'];
+  acpMounts: AcpHttpSnapshot['mounts'];
   acpConnections: AcpHttpSnapshot['connections'];
   workspace: Record<string, WorkspaceStatusSection>;
   auth: {
@@ -186,6 +194,11 @@ interface DaemonStatusLimits {
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
   acpConnectionCap: number | null;
+  acpPreAttachMaxFramesPerStream: number | null;
+  acpPreAttachMaxFramesPerConnection: number | null;
+  acpPreAttachMaxFramesGlobal: number | null;
+  acpPreAttachMaxPayloadBytesPerConnection: number | null;
+  acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
    * The daemon's resolved memory figures. Observed and reported only: nothing
    * consumes them to size a child. `null` on paths that resolve none, such as
@@ -340,6 +353,16 @@ interface DaemonStatusRuntime {
       sseStreams: number;
       wsStreams: number;
       pendingClientRequests: number;
+      preAttach: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
     };
   };
   rateLimit: {
@@ -869,6 +892,22 @@ export async function buildDaemonStatusResponse(
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
+      acpPreAttachMaxFramesPerStream:
+        acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM : null,
+      acpPreAttachMaxFramesPerConnection:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION
+          : null,
+      acpPreAttachMaxFramesGlobal:
+        acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL : null,
+      acpPreAttachMaxPayloadBytesPerConnection:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION
+          : null,
+      acpPreAttachMaxPayloadBytesGlobal:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL
+          : null,
       memory: toDaemonStatusMemoryLimits(
         memoryBudget,
         input.getChildHeapPolicySnapshot?.(),
@@ -924,6 +963,17 @@ export async function buildDaemonStatusResponse(
           sseStreams: acpAggregate?.sseStreams ?? 0,
           wsStreams: acpAggregate?.wsStreams ?? 0,
           pendingClientRequests: acpAggregate?.pendingClientRequests ?? 0,
+          preAttach: {
+            bufferedConnectionFrames:
+              acpAggregate?.bufferedConnectionFrames ?? 0,
+            bufferedSessionFrames: acpAggregate?.bufferedSessionFrames ?? 0,
+            pendingDeliveryFrames: acpAggregate?.pendingDeliveryFrames ?? 0,
+            usedFrames: acpAggregate?.preAttach.usedFrames ?? 0,
+            usedBytes: acpAggregate?.preAttach.usedBytes ?? 0,
+            highWaterFrames: acpAggregate?.preAttach.highWaterFrames ?? 0,
+            highWaterBytes: acpAggregate?.preAttach.highWaterBytes ?? 0,
+            guardFailures: acpAggregate?.preAttach.guardFailures ?? 0,
+          },
         },
       },
       rateLimit: {
@@ -1021,6 +1071,7 @@ async function buildFullStatus(
 
   return {
     sessions,
+    acpMounts: acpSnapshot?.mounts ?? [],
     acpConnections: acpSnapshot?.connections ?? [],
     workspace: {
       mcp,

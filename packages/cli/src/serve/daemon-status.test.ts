@@ -1009,6 +1009,12 @@ describe('buildDaemonStatusResponse', () => {
           sseStreams: 1,
           wsStreams: 0,
           pendingClientRequests: 0,
+          bufferedConnectionFrames: 0,
+          bufferedSessionFrames: 0,
+          pendingDeliveryFrames: 0,
+          preAttachOwnedFrames: 0,
+          preAttachOwnedBytes: 0,
+          preAttachGuardFailures: 0,
           connections: [],
         },
         rateLimitHits: { prompt: 1, mutation: 2, read: 3 },
@@ -1043,6 +1049,12 @@ describe('buildDaemonStatusResponse', () => {
       sseStreams: 0,
       wsStreams: 1,
       pendingClientRequests: 0,
+      bufferedConnectionFrames: 0,
+      bufferedSessionFrames: 0,
+      pendingDeliveryFrames: 0,
+      preAttachOwnedFrames: 0,
+      preAttachOwnedBytes: 0,
+      preAttachGuardFailures: 0,
       connections: [primaryDiagnostic],
     };
 
@@ -1057,16 +1069,75 @@ describe('buildDaemonStatusResponse', () => {
           sseStreams: 0,
           wsStreams: 2,
           pendingClientRequests: 0,
-          mounts: [],
+          bufferedConnectionFrames: 0,
+          bufferedSessionFrames: 0,
+          pendingDeliveryFrames: 1,
+          preAttach: {
+            usedFrames: 3,
+            usedBytes: 4096,
+            pendingDeliveryFrames: 1,
+            highWaterFrames: 7,
+            highWaterBytes: 8192,
+            guardFailures: 4,
+          },
+          mounts: [
+            {
+              workspaceId: null,
+              primary: true,
+              connectionCount: 1,
+              wsStreams: 1,
+              preAttachGuardFailures: 1,
+            },
+            {
+              workspaceId: 'secondary-id',
+              primary: false,
+              connectionCount: 1,
+              wsStreams: 1,
+              preAttachGuardFailures: 3,
+            },
+          ],
           connections: [primaryDiagnostic, secondaryDiagnostic],
         },
       }),
     );
 
     expect(response.runtime.transport.acp.connections).toBe(2);
+    expect(response.runtime.transport.acp.preAttach).toEqual({
+      bufferedConnectionFrames: 0,
+      bufferedSessionFrames: 0,
+      pendingDeliveryFrames: 1,
+      usedFrames: 3,
+      usedBytes: 4096,
+      highWaterFrames: 7,
+      highWaterBytes: 8192,
+      guardFailures: 4,
+    });
+    expect(response.limits).toMatchObject({
+      acpPreAttachMaxFramesPerStream: 256,
+      acpPreAttachMaxFramesPerConnection: 1024,
+      acpPreAttachMaxFramesGlobal: 4096,
+      acpPreAttachMaxPayloadBytesPerConnection: 64 * 1024 * 1024,
+      acpPreAttachMaxPayloadBytesGlobal: 256 * 1024 * 1024,
+    });
     expect(response.full?.acpConnections).toEqual([
       primaryDiagnostic,
       secondaryDiagnostic,
+    ]);
+    expect(response.full?.acpMounts).toEqual([
+      {
+        workspaceId: null,
+        primary: true,
+        connectionCount: 1,
+        wsStreams: 1,
+        preAttachGuardFailures: 1,
+      },
+      {
+        workspaceId: 'secondary-id',
+        primary: false,
+        connectionCount: 1,
+        wsStreams: 1,
+        preAttachGuardFailures: 3,
+      },
     ]);
   });
 
@@ -1836,6 +1907,9 @@ function makeAcpDiagnostic(
     wsStreams: 1,
     bufferedConnectionFrames: 0,
     bufferedSessionFrames: 0,
+    pendingDeliveryFrames: 0,
+    preAttachOwnedFrames: 0,
+    preAttachOwnedBytes: 0,
     workspaceId,
     workspaceCwd,
     primary,
@@ -1926,12 +2000,27 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
                 sseStreams: input.acpSnapshot!.sseStreams,
                 wsStreams: input.acpSnapshot!.wsStreams,
                 pendingClientRequests: input.acpSnapshot!.pendingClientRequests,
+                bufferedConnectionFrames:
+                  input.acpSnapshot!.bufferedConnectionFrames,
+                bufferedSessionFrames: input.acpSnapshot!.bufferedSessionFrames,
+                pendingDeliveryFrames: input.acpSnapshot!.pendingDeliveryFrames,
+                preAttach: {
+                  usedFrames: input.acpSnapshot!.preAttachOwnedFrames,
+                  usedBytes: input.acpSnapshot!.preAttachOwnedBytes,
+                  pendingDeliveryFrames:
+                    input.acpSnapshot!.pendingDeliveryFrames,
+                  highWaterFrames: input.acpSnapshot!.preAttachOwnedFrames,
+                  highWaterBytes: input.acpSnapshot!.preAttachOwnedBytes,
+                  guardFailures: input.acpSnapshot!.preAttachGuardFailures,
+                },
                 mounts: [
                   {
                     workspaceId: null,
                     primary: true,
                     connectionCount: input.acpSnapshot!.connectionCount,
                     wsStreams: input.acpSnapshot!.wsStreams,
+                    preAttachGuardFailures:
+                      input.acpSnapshot!.preAttachGuardFailures,
                   },
                 ],
                 connections: [],
