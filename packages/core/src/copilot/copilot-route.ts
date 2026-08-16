@@ -1,31 +1,18 @@
 // packages/core/src/copilot/copilot-route.ts
 export type CopilotWire = 'messages' | 'responses' | 'chat';
 
+/**
+ * Thrown when a Copilot model slug cannot be routed to any wire. With
+ * pattern-based routing this should not occur in practice — every slug matches
+ * a pattern or falls back to the `chat` wire — but the type is retained so
+ * callers can distinguish a routing failure from a generic error.
+ */
 export class CopilotRouteError extends Error {
   constructor(slug: string, reason: string) {
     super(`Cannot route Copilot model "${slug}": ${reason}`);
     this.name = 'CopilotRouteError';
   }
 }
-
-const CLAUDE_MESSAGES_SLUGS = new Set([
-  'claude-opus-4.6',
-  'claude-opus-4.7',
-  'claude-opus-4.8',
-  'claude-sonnet-4.5',
-  'claude-sonnet-4.6',
-  'claude-sonnet-4.7',
-  'claude-haiku-4.5',
-]);
-
-const GPT5_RESPONSES_SLUGS = new Set([
-  'gpt-5',
-  'gpt-5.1',
-  'gpt-5.2',
-  'gpt-5.4',
-  'gpt-5-mini',
-  'gpt-5-codex',
-]);
 
 function baseSlug(slug: string): string {
   // Strip a provider-namespace prefix (e.g. "anthropic." in
@@ -45,29 +32,18 @@ export function routeForModel(
 ): CopilotWire {
   const base = baseSlug(slug);
 
-  // Tier 1: live catalog
+  // Tier 1: live catalog — an explicit per-slug override always wins.
   if (liveModels?.has(base)) {
     return liveModels.get(base)!;
   }
 
-  // Tier 2: static allowlists
-  if (CLAUDE_MESSAGES_SLUGS.has(base)) return 'messages';
-  if (GPT5_RESPONSES_SLUGS.has(base)) return 'responses';
+  // Tier 2: pattern-based routing. New models in a known family route
+  // correctly without code changes — claude-* is messages-only on CAPI,
+  // gpt-5* uses the OpenAI Responses API.
+  if (base.startsWith('claude-')) return 'messages';
+  if (base.startsWith('gpt-5')) return 'responses';
 
-  // Tier 3: drift policy
-  if (base.startsWith('claude-')) {
-    throw new CopilotRouteError(
-      slug,
-      'unknown claude-* model; CAPI is messages-only for Claude',
-    );
-  }
-  if (base.startsWith('gpt-5') && !base.endsWith('-chat')) {
-    throw new CopilotRouteError(
-      slug,
-      'unknown gpt-5* model; CAPI is responses-only for gpt-5 (non -chat)',
-    );
-  }
-
+  // Tier 3: unknown family — fall back to chat and warn so drift is visible.
   warn?.(`[copilot] unknown model "${slug}" — defaulting to chat wire`);
   return 'chat';
 }
