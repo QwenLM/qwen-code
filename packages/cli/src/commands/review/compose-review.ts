@@ -587,7 +587,11 @@ function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
  * already carries a markdown link is left alone: the model linked it itself,
  * and rewriting inside its link text would corrupt it.
  */
-function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
+function linkifyCommentRefs(
+  text: string,
+  pr: PrIdentity | null,
+  familyContext: string = text,
+): string {
   if (!pr || text.includes('](')) return text;
   // The anchor must point at the instance the PR lives on: the host the
   // plan recorded, else this run's routed host, else an operator-exported
@@ -621,8 +625,10 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
   // entry that echoes pr-context's own header shape (`**Issue-level
   // comment** — … (comment 5199834809)`) carries its id apart from the
   // phrase — routed by adjacency alone, that id anchors under
-  // #discussion_r, a link that can never resolve.
-  const issueLevelEntry = /\bissue(?:-level)?\s+comment\b/i.test(text);
+  // #discussion_r, a link that can never resolve. Detected on
+  // `familyContext` — the entry's full line — so a rendered PIECE of the
+  // entry (a group's shared reason, a bare head) keeps the entry's family.
+  const issueLevelEntry = /\bissue(?:-level)?\s+comment\b/i.test(familyContext);
   return text.replace(
     commentRef,
     (_m, issueLevel: string | undefined, id: string) =>
@@ -655,22 +661,27 @@ function asListLine(text: string, pr: PrIdentity | null): string {
  * list — on #8388 that duplication alone doubled the body.
  */
 function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+  // Head and reason come off the collapsed but UNBOUNDED line: groups key on
+  // the full reason text. Bounding first keyed them on the truncated line —
+  // distinct reasons sharing a long prefix merged into one group claiming a
+  // shared reason, and identical long reasons split when unequal subject
+  // lengths moved the cut. The bound applies per rendered piece instead.
   const parsed = cannotTell.map((raw) => {
     const unmarked = raw.startsWith(CRITICAL_PREFIX)
       ? raw.slice(CRITICAL_PREFIX.length).trim()
       : raw;
-    const line = asListLine(boundDeferredLine(unmarked), pr);
-    // A dangling ` — ` with nothing after it is reasonless — an empty-string
-    // reason would become a group key and render `2 entries — :`. The bound
-    // strands the separator the same way when a cut lands right after it.
-    const subject = line.replace(/ —\s*…$/, '…').replace(/ —$/, '');
-    const idx = subject.indexOf(' — ');
-    // `|| null`: reasonless entries never spawn the empty group key.
+    // A trailing dangling ` — ` (nothing after it) is reasonless; left on
+    // the line it would ride the rendered head (`- **[Critical]** a.ts:1 —`).
+    const line = collapseToLine(unmarked).replace(/ —$/, '');
+    const idx = line.indexOf(' — ');
+    // `|| null`: an empty reason never becomes a group key (`2 entries — :`),
+    // and reasonless entries never spawn one.
     return idx === -1
-      ? { head: subject, reason: null }
+      ? { line, head: line, reason: null }
       : {
-          head: subject.slice(0, idx),
-          reason: subject.slice(idx + 3).trim() || null,
+          line,
+          head: line.slice(0, idx),
+          reason: line.slice(idx + 3).trim() || null,
         };
   });
   // Grouped on the exact reason text, in first-appearance order. A reasonless
@@ -678,6 +689,9 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
   interface Group {
     reason: string | null;
     heads: string[];
+    // The first member's full line: the anchor family for any `comment <id>`
+    // the shared reason carries into the group header.
+    family: string;
   }
   const groups: Group[] = [];
   const byReason = new Map<string, Group>();
@@ -687,20 +701,27 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
       existing.heads.push(p.head);
       continue;
     }
-    const group: Group = { reason: p.reason, heads: [p.head] };
+    const group: Group = { reason: p.reason, heads: [p.head], family: p.line };
     groups.push(group);
     if (p.reason !== null) byReason.set(p.reason, group);
   }
+  // Bound each piece, THEN linkify: the linkifier mints long anchor URLs a
+  // later bound would sever mid-URL.
+  const render = (piece: string, family: string): string =>
+    linkifyCommentRefs(boundDeferredLine(piece), pr, family);
   const lines: string[] = [];
-  for (const { reason, heads } of groups) {
-    if (heads.length === 1) {
+  for (const { reason, heads, family } of groups) {
+    if (reason === null || heads.length === 1) {
+      const head = render(heads[0], family);
       lines.push(
-        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        `- ${CRITICAL_PREFIX} ${
+          reason === null ? head : `${head} — ${render(reason, family)}`
+        }`,
       );
     } else {
       lines.push(
-        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
-        ...heads.map((head) => `  - ${head}`),
+        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${render(reason, family)}:`,
+        ...heads.map((head) => `  - ${render(head, family)}`),
       );
     }
   }

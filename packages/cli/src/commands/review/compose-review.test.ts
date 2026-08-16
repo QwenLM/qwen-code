@@ -5481,17 +5481,55 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(r.body).not.toContain('entries —');
   });
 
-  it('a cut landing right after the separator stays reasonless and keeps the trim mark', () => {
-    // The bound strands the separator at the line's end (` — …`) the way
-    // a trailing-space entry strands it (` — `): both are reasonless, and
-    // the ellipsis still says the entry was cut.
+  it('groups on the full reason, not the bounded line — a shared prefix past the cut is not a shared reason', () => {
+    // Both lines bound to the identical 240-char prefix, but the full
+    // reasons diverge just past the cut: keying the groups on the bounded
+    // line merges them into one group that claims a shared reason while the
+    // distinguishing tails never render. They stay two separate entries.
+    const prefix = 'p'.repeat(250);
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          `a.ts:1 — ${prefix}ALPHA`,
+          `a.ts:1 — ${prefix}BETA`,
+        ],
+      }),
+    );
+    expect(r.body).not.toContain('entries —');
+    expect(r.body.match(/- \*\*\[Critical\]\*\* a\.ts:1 — /g)).toHaveLength(2);
+  });
+
+  it('groups identical long reasons even when subject lengths move the bound cut', () => {
+    // The mirror: one reason, two subject lengths — the bound used to cut
+    // the reason at two different places, and the two truncated keys no
+    // longer matched, splitting what grouping exists to join.
+    const reason = 'r'.repeat(300);
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          `a.ts:1 — ${reason}`,
+          `much-longer-subject.ts:99 — ${reason}`,
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      `- **[Critical]** 2 entries — ${'r'.repeat(240)}…:`,
+    );
+    expect(r.body).toContain('  - a.ts:1');
+    expect(r.body).toContain('  - much-longer-subject.ts:99');
+  });
+
+  it('a long subject no longer eats its reason — the parse runs before the bound', () => {
+    // The bound used to run first: the 240-cut landed right after the
+    // separator, stranding it, and the six-char reason vanished from the
+    // record. Parsing head/reason off the unbounded line keeps both — each
+    // piece is bounded on render.
     const r = composeReview(
       base({
         cannotTellCriticals: [`${'x'.repeat(237)} — reason`],
       }),
     );
-    expect(r.body).toContain(`- **[Critical]** ${'x'.repeat(237)}…`);
-    expect(r.body).not.toContain('— …');
+    expect(r.body).toContain(`- **[Critical]** ${'x'.repeat(237)} — reason`);
   });
 
   it('collapses embedded newlines so a multi-line entry stays one list item', () => {
