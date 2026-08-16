@@ -1141,6 +1141,7 @@ describe('--round — the CLI bakes the round into the identity line and the key
         });
         expect(process.exitCode).toBe(4);
         expect(stderr()).toContain('round cap is 3');
+        expect(readRecordedPrompts(withClockPlan).size).toBe(0);
       } finally {
         if (before === undefined) delete process.env[DEADLINE_ENV];
         else process.env[DEADLINE_ENV] = before;
@@ -4160,6 +4161,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
 
+    delete process.env[DEADLINE_ENV];
     const out = runRound(3);
     expect(process.exitCode).toBeUndefined();
     expect(out).toContain('chunk 13 — retired: dry in rounds 1 and 2');
