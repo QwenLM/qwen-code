@@ -66,7 +66,11 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
 // Magic-matched canonical images may be valid even when their image extension
 // differs. GIF is intentionally excluded because the canonical overview path
 // cannot render it and must not forward it under a mismatched image MIME.
-const CANONICAL_IMAGE_EXTENSIONS = new Set(['jpg', 'png', 'webp']);
+const CANONICAL_IMAGE_EXTENSIONS = new Set(
+  [...CANONICAL_IMAGE_MIME_TYPES].map((mimeType) =>
+    extensionForMimeType(mimeType),
+  ),
+);
 // Every entry must have a magic signature in sniffFileKind (binary-content.ts)
 // AND a MIME_EXTENSIONS entry (same file) mapping the mime to the exact
 // extension string the magic branch returns; missing either classifies every

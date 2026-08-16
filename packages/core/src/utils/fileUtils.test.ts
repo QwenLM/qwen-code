@@ -892,6 +892,17 @@ describe('fileUtils', () => {
       expect(await detectFileType(jpgPath)).toBe('image');
     });
 
+    it('should detect a canonical image saved with a different image extension', async () => {
+      mockMimeGetType.mockReturnValueOnce('image/jpeg');
+      const mislabeledPath = path.join(tempRootDir, 'photo.jpg');
+      actualNodeFs.writeFileSync(
+        mislabeledPath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+
+      expect(await detectFileType(mislabeledPath)).toBe('image');
+    });
+
     it('should detect svg type by extension', async () => {
       expect(await detectFileType('image.svg')).toBe('svg');
       expect(await detectFileType('image.icon.svg')).toBe('svg');
@@ -1201,6 +1212,7 @@ describe('fileUtils', () => {
 
     it('honors an explicitly provided file type without re-detecting content', async () => {
       actualNodeFs.writeFileSync(testImageFilePath, 'plain text content');
+      mockMimeGetType.mockReturnValue('image/png');
 
       const result = await processSingleFileContent(
         testImageFilePath,
