@@ -184,6 +184,38 @@ describe('generatePromptSuggestion', () => {
     expect(result.suggestion).toBe('from base llm');
   });
 
+  it('does not use the cache-safe fork when cache sharing is disabled', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: conversationHistory,
+      model: 'main-model',
+      version: 1,
+      sessionId: 'test-session',
+    });
+    mockRunSideQuery.mockResolvedValue({
+      text: '{"suggestion":"from base llm"}',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'main-model'),
+      getSessionId: vi.fn(() => 'test-session'),
+    } as unknown as Config;
+
+    const result = await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: false },
+    );
+
+    expect(mockGetCacheSafeParamsSessionId).not.toHaveBeenCalled();
+    expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery).toHaveBeenCalled();
+    expect(result.suggestion).toBe('from base llm');
+  });
+
   it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
     mockGetCacheSafeParams.mockReturnValue({
       generationConfig: {},

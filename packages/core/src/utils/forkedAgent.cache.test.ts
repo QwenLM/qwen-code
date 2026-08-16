@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   saveCacheSafeParams,
   getCacheSafeParams,
+  getCacheSafeParamsSessionId,
   clearCacheSafeParams,
   runForkedAgent,
 } from './forkedAgent.js';
@@ -72,6 +73,14 @@ describe('CacheSafeParams', () => {
       saveCacheSafeParams({}, [], 'model', 'session-a');
 
       expect(getCacheSafeParams()?.sessionId).toBe('session-a');
+    });
+
+    it('returns the current session id without reading full params', () => {
+      saveCacheSafeParams({}, [], 'model', 'session-a');
+
+      expect(getCacheSafeParamsSessionId()).toBe('session-a');
+      clearCacheSafeParams();
+      expect(getCacheSafeParamsSessionId()).toBeUndefined();
     });
 
     it('deep clones generationConfig', () => {
