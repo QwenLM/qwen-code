@@ -82,6 +82,7 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  FileTextIcon,
   FolderClosedIcon,
   LoaderCircleIcon,
   UploadIcon,
@@ -156,6 +157,7 @@ interface ChatEditorProps {
   onSubmit: (
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
+    files?: import('../adapters/promptTypes').PromptFile[],
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
@@ -315,6 +317,12 @@ function isTouchLikeDevice(): boolean {
     (typeof window.matchMedia === 'function' &&
       window.matchMedia('(hover: none), (pointer: coarse)').matches)
   );
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function TopComposerTag({
@@ -1473,8 +1481,15 @@ export const ChatEditor = memo(
       renderComposerTagTooltip,
       onComposerTagClick,
       parseUserMessageContent,
+      builtinAtProviders: contextBuiltinAtProviders,
+      atProviders: contextAtProviders,
       fileUploadEnabled,
     } = useWebShellCustomization();
+    // Props win when set (main composer). Split-view ChatPane omits them and
+    // falls back to the App-level customization context.
+    const resolvedBuiltinAtProviders =
+      builtinAtProviders ?? contextBuiltinAtProviders;
+    const resolvedAtProviders = atProviders ?? contextAtProviders;
 
     // File-upload picker. The @ panel's "Upload file" item reports the browsed
     // directory; we click a hidden <input type="file"> so the browser treats it
@@ -1580,8 +1595,8 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
-      builtinAtProviders,
-      atProviders,
+      builtinAtProviders: resolvedBuiltinAtProviders,
+      atProviders: resolvedAtProviders,
       atWorkspaceCwd,
       composerTagIcons,
       parseUserMessageContent,
@@ -2583,7 +2598,9 @@ export const ChatEditor = memo(
             </div>
           )}
           <div className={styles.content}>
-            {(core.composerTags.length > 0 || core.pastedImages.length > 0) && (
+            {(core.composerTags.length > 0 ||
+              core.pastedImages.length > 0 ||
+              core.pastedFiles.length > 0) && (
               <div
                 className={styles.attachments}
                 data-web-shell-composer-attachments
@@ -2682,6 +2699,41 @@ export const ChatEditor = memo(
                         </div>
                       );
                     })}
+                  </div>
+                )}
+                {core.pastedFiles.length > 0 && (
+                  <div className={styles.files}>
+                    {core.pastedFiles.map((file, i) => (
+                      <div
+                        key={`${file.name}-${i}`}
+                        className={styles.fileChip}
+                      >
+                        <FileTextIcon
+                          size={14}
+                          className={styles.fileChipIcon}
+                          aria-hidden="true"
+                        />
+                        <span className={styles.fileChipName}>{file.name}</span>
+                        {file.size !== undefined && (
+                          <span className={styles.fileChipSize}>
+                            {formatAttachmentSize(file.size)}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className={styles.fileChipRemove}
+                          disabled={disabled}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (disabled) return;
+                            core.removeFile(i);
+                          }}
+                          aria-label={`Remove ${file.name}`}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

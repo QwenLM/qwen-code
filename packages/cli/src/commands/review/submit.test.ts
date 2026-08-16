@@ -996,6 +996,42 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).toContain('the inline cache is stale after a rebase');
   });
 
+  it('carries a posture deferral through the submit seam into the posted body', () => {
+    // submit's compose() destructures-and-drops distrusted state fields
+    // (env, prBodyFetcher, draftedComments); a future hardening that adds
+    // deferredSuggestions to that drop would post every review without its
+    // deferral disclosure — "a deferral silently dropped is a finding lost"
+    // — while the compose-review unit tests, which call the function
+    // directly, stay green. This is the only production path from the
+    // model-written state to a posted body.
+    const review = file('deferral-seam.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          {
+            file: 'a.ts',
+            line: 1,
+            source: 'review',
+            severity: 'Suggestion',
+            title: 'tighten the retry backoff',
+          },
+        ],
+      },
+      comments: [],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.body).toContain('Deferred under the convergence posture');
+    expect(sent.body).toContain(
+      '- `a.ts:1 — [review] tighten the retry backoff`',
+    );
+  });
+
   it('rejects a line that is not a positive whole number', () => {
     // Every one of these 422s, and a 422 discards every blocker in the review.
     for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {
@@ -1330,7 +1366,11 @@ describe('the ledger marker on the body that reaches GitHub', () => {
       launch: string,
       reads: string[],
     ) => {
-      writeFileSync(join(d, `${key}.txt`), launch);
+      // Match production (`prompt-record.ts`): the record filename is the
+      // percent-encoded key — a no-op for today's role keys, but a future
+      // one `encodeURIComponent` transforms would otherwise be written to a
+      // name the reader never looks for.
+      writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
       const brief = briefPath(planPath, key);
       writeFileSync(brief, `The ${key} brief.`);
       transcript(id, launch, [...reads, brief]);
@@ -1372,12 +1412,13 @@ describe('the ledger marker on the body that reaches GitHub', () => {
   }
 
   it('injects the session model into the posted marker — QWEN_CODE_MODEL reaches the wire (wiring)', () => {
-    // The certifying identity must be the model the session ACTUALLY runs —
-    // Config publishes it per session, the shell tool injects it into this
-    // subprocess — not the id the state JSON typed. Dropping the runtime
-    // argument from runSubmit's compose call keeps every other suite green
-    // while the POSTED marker's `model` silently falls back to the typed id:
-    // the exact cross-model forgery this PR exists to prevent. Mirrors the
+    // The certifying identity must be the model the runtime published for
+    // the session — Config publishes it per session, the shell tool injects
+    // it into this subprocess — superseding the id the state JSON typed.
+    // Dropping the runtime argument from runSubmit's compose call keeps
+    // every other suite green while the POSTED marker's `model` silently
+    // falls back to the typed id: the exact silent substitution this wiring
+    // exists to catch. Mirrors the
     // compose-review handler's wiring test at the one boundary whose body
     // reaches GitHub.
     const planPath = coveredPlanAt(6771, 'deadbeef00112233');

@@ -115,7 +115,7 @@ export const matchRemoteCommand: CommandModule = {
       .option('owner', {
         type: 'string',
         demandOption: true,
-        describe: 'The repository owner (from the PR URL, or `gh repo view`)',
+        describe: 'The repository owner (from the PR URL, or `review meta`)',
       })
       .option('repo', {
         type: 'string',
@@ -125,7 +125,7 @@ export const matchRemoteCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          "The PR's host — from its URL, or from `gh repo view` for a bare number (omitted: inherit an operator-exported GH_HOST, else github.com)",
+          "The PR's host — from its URL, or from `review meta` for a bare number (omitted: inherit an operator-exported GH_HOST, else github.com)",
       }),
   handler: (argv) => {
     runMatchRemote({

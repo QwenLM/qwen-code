@@ -496,9 +496,12 @@ export function runSubmit(
       payload,
       cliVersion,
       attribution,
-      // The anchor's certifying identity is the model the session ACTUALLY
-      // runs — Config publishes it per session, the shell tool injects it
-      // into this subprocess — not the id the state JSON typed.
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
       process.env['QWEN_CODE_MODEL'],
     ));
   } catch (err) {
