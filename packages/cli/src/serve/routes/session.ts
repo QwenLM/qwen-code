@@ -34,6 +34,7 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
@@ -92,6 +93,10 @@ import {
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  omitSkillDetailsForSdkSurface,
+  omitSkillDetailsFromReplayArrays,
+} from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
@@ -2099,7 +2104,9 @@ export function registerSessionRoutes(
             });
             return;
           }
-          res.status(200).json(session);
+          // Same replay-array shape as the load response; redact skill
+          // bodies for the browser surface (#9234).
+          res.status(200).json(omitSkillDetailsFromReplayArrays(session));
         } catch (err) {
           sendBridgeError(res, err, { route, sessionId });
         }
@@ -2412,7 +2419,9 @@ export function registerSessionRoutes(
             }
           }
         }
-        res.status(200).json(session);
+        // The load response embeds the replay snapshot inline; redact the
+        // skill bodies there just like the SSE egress does (#9234).
+        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
       } catch (err) {
         sendBridgeError(res, err, {
           route,
@@ -2558,54 +2567,53 @@ export function registerSessionRoutes(
             name = name.slice(0, 200);
           }
         }
+        const atRecordId = body?.['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          res.status(400).json({
+            error: '`atRecordId` must be a string',
+            code: 'branch_point_invalid',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const result = await runtime.bridge.branchSession(
           sessionId,
-          { name },
+          {
+            name,
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+          },
           { clientId },
         );
-        try {
-          runtime.generationGuard?.assertOpen();
-        } catch (error) {
-          if (!result.attached) {
-            await runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => false);
-          } else {
+        if (atRecordId === undefined) {
+          const restored = result as BridgeBranchedSession;
+          const releaseLiveBranch = async () => {
+            if (restored.attached) {
+              await runtime.bridge
+                .detachClient(restored.sessionId, restored.clientId)
+                .catch(() => {});
+              return;
+            }
             await runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {});
+              .killSession(restored.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
+          };
+          if (!res.writable) {
+            void releaseLiveBranch();
+            return;
           }
-          throw error;
         }
-        if (!res.writable) {
-          if (!result.attached) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
-          } else {
-            runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          }
-          return;
-        }
-        res.status(201).json(result);
+        if (!res.writable) return;
+        // Branch/side-task responses carry the same replay snapshot shape as
+        // load; apply the same redaction (#9234). The helper returns its
+        // input unchanged when no replay arrays are present (checkpoint
+        // branches), so apply it unconditionally rather than re-deriving the
+        // bridge's variant discrimination here.
+        res
+          .status(201)
+          .json(
+            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
+          );
       },
     ),
   );
@@ -2669,7 +2677,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(result);
+        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
       },
     ),
   );
@@ -2837,7 +2845,13 @@ export function registerSessionRoutes(
         },
       );
       if (result === undefined) return;
-      res.status(200).set('Cache-Control', 'no-store').json(result);
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .json({
+          ...result,
+          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
+        });
     } catch (err) {
       sendBridgeError(res, err, {
         route,
@@ -2957,11 +2971,13 @@ export function registerSessionRoutes(
             return {
               v: 1 as const,
               sessionId,
-              events: replay.updates.map((update) => ({
-                v: 1 as const,
-                type: 'session_update' as const,
-                data: update,
-              })),
+              events: replay.updates.map((update) =>
+                omitSkillDetailsForSdkSurface({
+                  v: 1 as const,
+                  type: 'session_update' as const,
+                  data: update,
+                }),
+              ),
               ...(replay.nextCursor && !cursorTooLarge
                 ? { nextCursor: replay.nextCursor }
                 : {}),

@@ -248,6 +248,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: producerMocks.writeStderrLine,
+  // The settings fallback announces through the SAFE writer; this mock is a
+  // partial one, so an export it does not list is a load-time failure for
+  // every test in the file.
+  writeStderrLineSafe: producerMocks.writeStderrLine,
 }));
 
 vi.mock('../../services/review-worktree-lease.js', () => ({

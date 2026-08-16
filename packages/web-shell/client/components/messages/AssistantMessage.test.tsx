@@ -55,7 +55,6 @@ function renderCompletedThinking(
   const tree = (isStreaming: boolean) => (
     <I18nProvider language={language}>
       <ThinkingMessage
-        messageId={`completed-${durationMs}-${language}`}
         content="private chain of thought"
         isStreaming={isStreaming}
         timestamp={0}
@@ -95,11 +94,7 @@ describe('AssistantMessage thinking logic', () => {
 
   it('keeps replayed completed thinking durationless', () => {
     const container = render(
-      <ThinkingMessage
-        messageId="replayed"
-        content="private chain of thought"
-        timestamp={0}
-      />,
+      <ThinkingMessage content="private chain of thought" timestamp={0} />,
     );
 
     expect(container.textContent).toContain('Done thinking');
@@ -133,7 +128,6 @@ describe('AssistantMessage thinking logic', () => {
 
     const container = render(
       <ThinkingMessage
-        messageId="running"
         content="private chain of thought"
         isStreaming
         timestamp={0}
@@ -186,7 +180,6 @@ describe('AssistantMessage thinking logic', () => {
     });
     const container = render(
       <ThinkingMessage
-        messageId="translated-thinking"
         content="private chain of thought"
         generateContent={generateContent}
       />,
@@ -227,7 +220,6 @@ describe('AssistantMessage thinking logic', () => {
   it('only offers translation when the UI language is Chinese', () => {
     const container = render(
       <ThinkingMessage
-        messageId="english-thinking"
         content="private chain of thought"
         generateContent={async function* () {}}
       />,
@@ -253,8 +245,7 @@ describe('AssistantMessage thinking logic', () => {
     };
     const container = render(
       <ThinkingMessage
-        messageId="empty-translation"
-        content="private chain of thought"
+        content="private chain of thought that fails"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -292,8 +283,7 @@ describe('AssistantMessage thinking logic', () => {
     });
     const container = render(
       <ThinkingMessage
-        messageId="cancel-translation"
-        content="private chain of thought"
+        content="private chain of thought to cancel"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -350,8 +340,7 @@ describe('AssistantMessage thinking logic', () => {
     };
     const container = render(
       <ThinkingMessage
-        messageId="thinking-translation"
-        content="private chain of thought"
+        content="private chain of thought with thinking status"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -376,7 +365,6 @@ describe('AssistantMessage thinking logic', () => {
   it('does not offer translation while thinking is streaming', () => {
     const container = render(
       <ThinkingMessage
-        messageId="still-running"
         content="private chain of thought"
         isStreaming
         generateContent={async function* () {}}
@@ -431,6 +419,69 @@ describe('AssistantMessage streaming markdown', () => {
     act(() => root.render(tree('new unrelated text', true)));
     expect(container.textContent).toContain('new unrelated text');
     expect(container.textContent).not.toContain('old response text');
+  });
+});
+
+describe('AssistantMessage branch action', () => {
+  it('disables the selected action while the branch request is pending', async () => {
+    let resolveBranch!: () => void;
+    const onBranchSession = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveBranch = resolve;
+        }),
+    );
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showBranchAction
+        onBranchSession={onBranchSession}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="Branch"]',
+    );
+
+    act(() => button?.click());
+    expect(button?.disabled).toBe(true);
+    expect(onBranchSession).toHaveBeenCalledOnce();
+
+    await act(async () => resolveBranch());
+    expect(button?.disabled).toBe(false);
+  });
+
+  it('does not leak host branch handler rejections', async () => {
+    const onBranchSession = vi
+      .fn()
+      .mockRejectedValue(new Error('host failure'));
+    const unhandled = vi.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    try {
+      const container = render(
+        <AssistantMessage
+          content="answer"
+          showFooterActions
+          showBranchAction
+          onBranchSession={onBranchSession}
+        />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Branch"]',
+      );
+
+      await act(async () => {
+        button?.click();
+      });
+      // Flush microtasks so a leaked rejection would surface.
+      await act(async () => {});
+
+      expect(onBranchSession).toHaveBeenCalledOnce();
+      expect(button?.disabled).toBe(false);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('unhandledrejection', unhandled);
+    }
   });
 });
 
