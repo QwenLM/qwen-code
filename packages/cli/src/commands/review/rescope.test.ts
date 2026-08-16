@@ -11,7 +11,7 @@
 // it: 2 falls back to the FULL diff, 3 stops as "nothing new", and only 0 may
 // touch the plan.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
@@ -616,5 +616,63 @@ describe('rescope — round-3 findings', () => {
     });
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
     expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+});
+
+describe('rescope — round-5/6 findings', () => {
+  it('a RESTORED importer still gets a reader when what it imports keeps changing', () => {
+    // R6-10: the restored file has no PR-diff section (nothing left to
+    // review in it) but its imports of a still-changing file are live seams
+    // — judged after the fact it fell between both reader classes and got
+    // zero readers.
+    const { base } = seedHistory();
+    // Round 1 (anchor) changed both; the fix round REVERTS caller.ts to its
+    // merge-base content and changes changed.ts again.
+    const anchor = git('rev-parse', 'HEAD');
+    write(CALLER, "import { v } from './changed.js';\nexport const c = v;\n");
+    write(CHANGED, 'export const v = 9;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'revert caller, change callee');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
+    expect(plan.incremental.interaction.map((e) => e.path)).toContain(CALLER);
+  });
+
+  it('a plan naming a symbolic ref instead of a sha refuses', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const plan0 = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan0['fetchedSha'] = 'HEAD';
+    writeFileSync(planPath, JSON.stringify(plan0));
+    const before = readFileSync(planPath, 'utf8');
+    run(planPath, anchor);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('a dead stdout after the plan write does not turn exit 0 into exit 1', () => {
+    // "Only exit 0 rewrites the plan" needs its contrapositive: a non-zero
+    // exit must mean the plan is untouched, so nothing past the write may
+    // throw (EPIPE from `qwen … | head`).
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+    try {
+      expect(() => run(planPath, anchor)).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
   });
 });
