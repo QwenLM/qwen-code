@@ -272,7 +272,12 @@ function rewriteCandidateForScope(
     }
   }
   try {
-    atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2));
+    // noFollow at every write this command owns: these paths are
+    // deterministic and inside the repo, so a planted symlink would redirect
+    // the write onto its target (see cache-commit for the full note).
+    atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
+      noFollow: true,
+    });
   } catch (err) {
     writeStderrLine(
       `rescope: could not rewrite the cache candidate ` +
@@ -330,6 +335,24 @@ function runRescope(args: RescopeArgs): void {
     typeof plan.fetchedSha === 'string' ? plan.fetchedSha : null;
   const mergeBaseSha =
     typeof plan.mergeBaseSha === 'string' ? plan.mergeBaseSha : null;
+  // Both ends of the PR range must be OBJECT IDS, not refs: `fetch-pr` writes
+  // full shas, and a clobbered plan naming a moving ref (`HEAD`, a branch)
+  // would resolve at call time — the interdiff describing one tree, the
+  // worktree reads another, while the exit-0 plan claims a scope that is not
+  // the one under review. Anchor validation below covers only the anchor.
+  const SHA_RE = /^[0-9a-f]{40,64}$/i;
+  if (
+    (fetchedSha !== null && !SHA_RE.test(fetchedSha)) ||
+    (mergeBaseSha !== null && !SHA_RE.test(mergeBaseSha))
+  ) {
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      "rescope: the plan's fetchedSha/mergeBaseSha are not object ids — a " +
+        'symbolic or clobbered ref would scope this round to a range that is ' +
+        'not the one under review. Continue with the full-range plan.',
+    );
+    return;
+  }
   if (!worktreePath || !fetchedSha || !mergeBaseSha) {
     // Local and lightweight plans have no worktree and no fetched range —
     // there is nothing to scope an anchor against.
@@ -520,7 +543,37 @@ function runRescope(args: RescopeArgs): void {
     deltaFiles = verdicts.delta;
     anchorLabel = verdicts.label;
   }
+  // The restoration probe runs BEFORE the widening, not after it. A delta
+  // file the fix round restored to its merge-base state has no PR-diff
+  // section (nothing left to review in it) — but it is also, by definition,
+  // a file whose CURRENT content is the base content, so if it imports a
+  // file that IS still changing, that seam is exactly what the widening
+  // exists to catch. Judged after the fact it fell between both classes:
+  // excluded from the delta readers for having no section, and excluded from
+  // the widening candidates for being in `delta`. It is a CANDIDATE.
+  const restored = (p: string): boolean => {
+    const at = (ref: string) =>
+      gitOpt('-C', worktreePath, 'rev-parse', `${ref}:${p}`);
+    const b = at(mergeBaseSha);
+    const h = at(fetchedSha);
+    // Absent on BOTH sides is deliberately NOT a restoration. Two shapes
+    // produce it and this layer cannot tell them apart: a file the PR added
+    // and this round deleted (net-zero — safe), and a file renamed before
+    // the anchor and deleted now, whose unreviewed deletion hunks sit in the
+    // PR diff under its pre-rename name (dropping it loses them). Refusing
+    // costs a full review on the first shape; dropping loses scope on the
+    // second, so the refusal wins.
+    return b !== null && h !== null && b === h;
+  };
+  const restoredDelta = new Set(deltaFiles.filter(restored));
+  // Two sets, because a restored file plays both parts. As a CHANGE it still
+  // pulls its importers in: round 1 cleared them against the pre-revert
+  // callee, and (importer@head × callee@base) is a pairing no round has
+  // seen. As a FILE it has nothing left to review — its content is the base
+  // content — so it owes no full review and instead becomes a widening
+  // candidate in its own right, for the still-changing files IT imports.
   const delta = new Set(deltaFiles);
+  const deltaLive = new Set(deltaFiles.filter((p) => !restoredDelta.has(p)));
 
   // One import hop over the plan's still-clean SOURCE files. Test and docs
   // dependents stay out: re-running tests is `build-test`'s job, and prose
@@ -533,7 +586,9 @@ function runRescope(args: RescopeArgs): void {
         typeof f.path === 'string' &&
         f.kind === 'source' &&
         f.binary !== true &&
-        !delta.has(f.path),
+        // Keyed on the LIVE delta: a restored file reads as base content, so
+        // it owes no review of its own and is a candidate like any other.
+        !deltaLive.has(f.path),
     )
     .map((f) => f.path);
   const readWorktree = (rel: string): string | null => {
@@ -553,14 +608,27 @@ function runRescope(args: RescopeArgs): void {
     readWorktree,
     packages,
   );
+  // A restored file is inside `delta`, so the pass above skips it as a
+  // candidate by construction (`dependentsOfChanged` never scans a file that
+  // is itself changed). It still needs one: its own imports of files that
+  // are STILL changing are live seams no other reader covers. Keyed on
+  // `deltaLive`, because a restored file importing another restored file has
+  // no moving side to check.
+  for (const [path, edges] of dependentsOfChanged(
+    deltaLive,
+    [...restoredDelta],
+    readWorktree,
+    packages,
+  )) {
+    if (!interaction.has(path)) interaction.set(path, edges);
+  }
 
   // The mislabel gate tests DELTA coverage, deliberately not delta ∪
   // interaction: an interaction file is seam-only scope — its brief forbids
   // a from-scratch re-review — so a plan whose remainder is all interaction
   // still saves real work and is honestly incremental. Only when every plan
   // file is DELTA (owed a full review) is the "incremental" label a lie.
-  const scoped = new Set([...delta, ...interaction.keys()]);
-  if (allPaths.every((p) => delta.has(p))) {
+  if (allPaths.every((p) => deltaLive.has(p))) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
       `rescope: every file in the plan changed since the anchor — there is ` +
@@ -594,6 +662,7 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
+  const scoped = new Set([...deltaLive, ...interaction.keys()]);
   const sections = parseDiff(origDiff.toString('utf8')).files.filter((f) =>
     scoped.has(f.path),
   );
@@ -607,31 +676,13 @@ function runRescope(args: RescopeArgs): void {
   // hunting for scope that does not exist. (The WIDENING above still used
   // the full changed set — a restoration still moves its importers' seams.)
   const sectionPaths = new Set(sections.map((f) => f.path));
-  const unmatched = deltaFiles.filter((p) => !sectionPaths.has(p));
-  // A delta file with no section of the PR's own diff is one of two things,
-  // and only one of them is safe to drop. A RESTORATION (the fix round put
-  // the file back to its merge-base content) genuinely has nothing left to
-  // review. A LINEAGE MISMATCH does not: a file renamed before the anchor
-  // and deleted in the fix round is `new.ts` in the interdiff but `old.ts`
-  // in the PR diff (parseDiff labels a deletion with its left-side path),
-  // so the section carrying its unreviewed hunks is scoped out under a name
-  // nothing matched. Distinguishing them is one cheap probe per unmatched
-  // file: identical blobs on both sides of the PR range means restored.
-  const restored = (p: string): boolean => {
-    const at = (ref: string) =>
-      gitOpt('-C', worktreePath, 'rev-parse', `${ref}:${p}`);
-    const b = at(mergeBaseSha);
-    const h = at(fetchedSha);
-    // Absent on BOTH sides is deliberately NOT droppable. Two shapes produce
-    // it and this layer cannot tell them apart: a file the PR added and this
-    // round deleted (net-zero — safe to drop), and a file renamed before the
-    // anchor and deleted now, whose unreviewed deletion hunks sit in the PR
-    // diff under its pre-rename name (dropping it loses them). Refusing
-    // costs a full review on the first shape; dropping loses scope on the
-    // second, so the refusal wins.
-    return b !== null && h !== null && b === h;
-  };
-  const lineageLost = unmatched.filter((p) => !restored(p));
+  // Every LIVE delta file must carry a section of the PR's own diff. One
+  // that does not is a lineage break — a file renamed before the anchor and
+  // deleted now is `new.ts` in the interdiff but `old.ts` on the PR diff's
+  // deletion section (parseDiff labels a deletion with its left-side path),
+  // so the section holding its unreviewed hunks is scoped out under a name
+  // nothing matched. Restored files are already out of `delta` above.
+  const lineageLost = [...deltaLive].filter((p) => !sectionPaths.has(p));
   if (lineageLost.length > 0) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
@@ -644,9 +695,9 @@ function runRescope(args: RescopeArgs): void {
     return;
   }
   if (sections.length === 0) {
-    // Changed since the anchor, but present in no section of the PR's own
-    // diff — every delta file was restored to its merge-base state. There
-    // is nothing of the PR left to re-review.
+    // Nothing of the PR's own diff is in scope: every changed file was
+    // restored to its merge-base state and nothing imports them. There is
+    // nothing left to re-review.
     fail(
       RESCOPE_EXIT_NOTHING_NEW,
       `rescope: the files changed since ${args.anchor} carry no section of ` +
@@ -655,7 +706,7 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
-  const deltaReported = deltaFiles.filter((p) => sectionPaths.has(p));
+  const deltaReported = [...deltaLive].filter((p) => sectionPaths.has(p));
   let diffPlan;
   try {
     diffPlan = buildDiffPlan(composite.toString('utf8'), args.maxChunkLines);
@@ -727,9 +778,11 @@ function runRescope(args: RescopeArgs): void {
   const out = args.out ?? args.plan;
   try {
     mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-    atomicWriteFileSync(diffRel, composite);
+    atomicWriteFileSync(diffRel, composite, { noFollow: true });
     mkdirSync(dirname(resolve(out)), { recursive: true });
-    atomicWriteFileSync(out, stringifyPlanReport(result));
+    atomicWriteFileSync(out, stringifyPlanReport(result), {
+      noFollow: true,
+    });
   } catch (err) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
@@ -738,15 +791,26 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
-  writeStdoutLine(`Wrote incremental plan to ${out}`);
-  writeStderrLine(
-    `Incremental scope since ${displayAnchor(anchorLabel)}: ` +
-      `${deltaReported.length} changed file(s), ${interaction.size} ` +
-      `interaction file(s) (one import hop), ` +
-      `${incremental.contextFileCount} clean file(s) left out of scope; ` +
-      `${diffPlan.diffLines} diff line(s) -> ${diffPlan.chunks.length} chunk(s).`,
-  );
-  warnOnReportSize(out, READ_FILE_CHAR_CAP);
+  // NOTHING past the plan write may throw. "Only exit 0 rewrites the plan" is
+  // the invariant the skill branches on, and its contrapositive has to hold
+  // too: a non-zero exit must mean the plan is untouched. A dead stdout (the
+  // command piped into `head`, a daemon redirect) makes `write` raise EPIPE,
+  // which would exit 1 over an already-rewritten plan and send the caller
+  // down the "full-range plan untouched" branch against an incremental one.
+  // The reporting is a courtesy; the write is the result.
+  try {
+    writeStdoutLine(`Wrote incremental plan to ${out}`);
+    writeStderrLine(
+      `Incremental scope since ${displayAnchor(anchorLabel)}: ` +
+        `${deltaReported.length} changed file(s), ${interaction.size} ` +
+        `interaction file(s) (one import hop), ` +
+        `${incremental.contextFileCount} clean file(s) left out of scope; ` +
+        `${diffPlan.diffLines} diff line(s) -> ${diffPlan.chunks.length} chunk(s).`,
+    );
+    warnOnReportSize(out, READ_FILE_CHAR_CAP);
+  } catch {
+    // A reader that went away cannot un-write the plan.
+  }
 }
 
 export const rescopeCommand: CommandModule = {

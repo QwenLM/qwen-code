@@ -167,6 +167,27 @@ describe('blobsAt — pathspec magic', () => {
   );
 });
 
+describe('blobsAt — decode aliasing', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses the whole listing when a path cannot decode faithfully',
+    () => {
+      // U+FFFD in a decoded path is ambiguous by construction: it is either
+      // a filename literally containing the replacement character (this
+      // fixture) or a filename whose invalid byte the decode destroyed. The
+      // two collapse to one key, so a plan path could resolve to the OTHER
+      // file's tree entry on both sides and carry its clean verdict over an
+      // edited file. Unusable beats wrong — the caller degrades to full.
+      const mangled = 'a\uFFFD.ts';
+      writeFileSync(join(repo, mangled), 'A\n');
+      git('add', '-A');
+      git('commit', '-q', '--no-verify', '-m', 'replacement-char name');
+      const sha = git('rev-parse', 'HEAD');
+      expect(blobsAt(repo, sha, [mangled])).toBeNull();
+      expect(blobPairs(repo, sha, sha, [mangled])).toBeNull();
+    },
+  );
+});
+
 describe('readFileVerdicts', () => {
   it('round-trips a valid map and rejects every malformation', () => {
     const good = { 'a.ts': { base: 'b1', head: 'h1' } };

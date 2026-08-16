@@ -33,7 +33,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR, REVIEWS_DIR } from './lib/paths.js';
+import { REVIEW_TMP_DIR, REVIEWS_DIR, safeTarget } from './lib/paths.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
 export interface RunReviewArgs {
@@ -109,14 +109,20 @@ export function classifyRunTarget(target?: string): RunTargetClass {
     return { kind: 'pr', number: String(t.number) };
   }
   if (t.type === 'file') {
-    // The skill's `{target}` token for a file review is the file's basename
-    // (`--target <filename>` in the capture step), so that is the identity
-    // the child's artifact names carry. Trailing separators are stripped
+    // The skill's `{target}` token for a file review is the file's
+    // repo-relative path put through `safeTarget` — the same normalization
+    // the CLI applies when it derives filenames — so that is the identity
+    // the child's artifact names carry. It used to be the BASENAME, and the
+    // two diverge for every file in a subdirectory: the child would write
+    // `qwen-review-src_index.ts-composed.json` while the parent polled
+    // `qwen-review-index.ts-composed.json`, never matched, and reported "no
+    // composed verdict was produced" over a review that had already run (and
+    // with `--comment`, already posted). Trailing separators are stripped
     // first: a tab-completed `src/` classifies as a file target and reviews
-    // the directory, and a bare `.pop()` would return `''` — a pin
-    // (`qwen-review--composed.json`) no child artifact can ever carry.
+    // the directory, and the empty remainder would pin a name no child
+    // artifact can ever carry.
     const trimmed = t.path.replace(/[\\/]+$/, '');
-    return { kind: 'file', base: trimmed.split(/[\\/]/).pop() || trimmed };
+    return { kind: 'file', base: safeTarget(trimmed || t.path) };
   }
   return { kind: 'local' };
 }

@@ -29,6 +29,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
@@ -397,7 +398,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // convenience artifact must never take the whole fetch with it.
       try {
         cacheCandidatePath = tmpFile(`pr-${prNumber}`, 'cache-candidate.json');
-        writeFileSync(
+        atomicWriteFileSync(
           cacheCandidatePath,
           JSON.stringify(
             {
@@ -410,6 +411,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             null,
             2,
           ),
+          { noFollow: true },
         );
       } catch (err) {
         cacheCandidatePath = undefined;

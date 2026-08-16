@@ -17,6 +17,9 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  mkdirSync,
+  symlinkSync,
+  lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -269,6 +272,29 @@ describe('cache-commit', () => {
       'a.ts': { base: '100644 b', head: '100644 h' },
     });
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'replaces a planted symlink instead of writing through it',
+    () => {
+      // The cache path is deterministic and inside the repo: a contributor
+      // branch can commit a symlink there, and a maintainer's review would
+      // otherwise clobber the link's target with merged-cache JSON.
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'ORIGINAL');
+      const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: 'm1' });
+      mkdirSync(join(dir, 'cache'), { recursive: true });
+      symlinkSync(victim, argv['out']);
+      run(argv);
+      expect(readFileSync(victim, 'utf8')).toBe('ORIGINAL');
+      expect(lstatSync(argv['out']).isSymbolicLink()).toBe(false);
+      expect(
+        JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+          string,
+          unknown
+        >,
+      ).toMatchObject({ target: 'pr-7' });
+    },
+  );
 
   it('refuses an EMPTY lastModelId, not just a missing one', () => {
     const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: '' });

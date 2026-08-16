@@ -150,7 +150,15 @@ function runCacheCommit(args: CacheCommitArgs): void {
   merged['lastReviewDate'] = new Date().toISOString();
 
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
-  atomicWriteFileSync(args.out, `${JSON.stringify(merged, null, 2)}\n`);
+  // `noFollow`: the target path is deterministic and lives in the repo, so a
+  // contributor branch can commit a SYMLINK there and a maintainer's review
+  // would write merged-cache JSON onto the link's target — an arbitrary-file
+  // clobber inside the reviewer's permissions, invisible in the reviewed
+  // diff. The default resolves the chain and renames onto the resolved file;
+  // this replaces the link itself.
+  atomicWriteFileSync(args.out, `${JSON.stringify(merged, null, 2)}\n`, {
+    noFollow: true,
+  });
   writeStdoutLine(`Committed review cache to ${args.out}`);
 }
 

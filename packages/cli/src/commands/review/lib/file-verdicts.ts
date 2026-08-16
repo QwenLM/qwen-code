@@ -96,12 +96,27 @@ export function blobsAt(
     }
     // `<mode> <type> <oid>\t<path>` records, NUL-terminated. `-z` also turns
     // off the C-style quoting that would otherwise mangle non-ASCII paths.
-    for (const record of raw.toString('utf8').split('\0')) {
+    // Decoding is where a byte-faithful listing can still betray us: an
+    // invalid UTF-8 byte in a filename decodes to U+FFFD, and a SIBLING
+    // literally named with U+FFFD then shares the decoded key. The verdict
+    // recorded under that key would be the sibling's pair on both sides, so
+    // an edited file compares unchanged and its clean verdict transfers.
+    // The whole lookup goes unusable rather than resolving the wrong file —
+    // the caller degrades to the full-range review, which is the direction
+    // every other failure here takes.
+    const text = raw.toString('utf8');
+    if (text.includes('\uFFFD')) return null;
+    const seen = new Set<string>();
+    for (const record of text.split('\0')) {
       if (record === '') continue;
       const tab = record.indexOf('\t');
       if (tab < 0) continue;
       const meta = record.slice(0, tab).split(' ');
       const path = record.slice(tab + 1);
+      // Two records decoding to one key is the same aliasing by another
+      // route (a repo can hold both spellings).
+      if (seen.has(path)) return null;
+      seen.add(path);
       if (meta.length >= 3 && Object.hasOwn(out, path)) {
         out[path] = `${meta[0]} ${meta[2]}`;
       }

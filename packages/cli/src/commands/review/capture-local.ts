@@ -19,6 +19,7 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
@@ -204,7 +205,11 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // promoting a stale candidate from an earlier round.
   let cacheCandidatePath: string | undefined;
   if (treeHeldStill) {
-    writeFileSync(candidatePath, JSON.stringify(candidate, null, 2));
+    // noFollow: a planted symlink at this deterministic path would redirect
+    // the candidate write onto its target (see cache-commit's note).
+    atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
+      noFollow: true,
+    });
     cacheCandidatePath = candidatePath;
   } else {
     try {
