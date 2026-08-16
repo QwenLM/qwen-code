@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -458,7 +459,13 @@ describe('the bundled skill stops on what this module prints', () => {
     ].map((m) => m[1]);
     expect(quotes.length).toBeGreaterThan(0);
 
-    const root = mkdtempSync(join(tmpdir(), 'skill-parity-'));
+    // realpath the fixture root: `bundleStalenessNotices` resolves the entry
+    // with `realpathSync` before deriving the tree, and the mock's fault
+    // injection matches by exact path. On a platform where `tmpdir()` is a
+    // symlink (macOS: /var -> /private/var) an unresolved fixture sits in a
+    // different namespace from every path the walk produces, the read-fault
+    // stage never fires, and its notice silently drops out of the pin.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'skill-parity-')));
     try {
       const distDir = join(root, 'dist');
       mkdirSync(distDir, { recursive: true });
