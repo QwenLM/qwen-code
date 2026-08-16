@@ -1285,8 +1285,14 @@ describe('commitPlanPreservingEpoch — the epoch never advances, even torn', ()
 
   it('refuses when the inode moved even if the mtime was forged back', () => {
     const anchor = statSync(plan);
-    rmSync(plan);
-    writeFileSync(plan, '{"captured":"by-another-run"}');
+    // The imposter is created WHILE the original still exists, then renamed
+    // over it — so its inode is guaranteed distinct. A delete-then-create
+    // fixture is not: ext4 recycles a just-freed inode number immediately,
+    // and the imposter came back as the same (ino, mtime) identity, which
+    // no check can (or should) tell apart.
+    const imposter = join(root, 'imposter.json');
+    writeFileSync(imposter, '{"captured":"by-another-run"}');
+    renameSync(imposter, plan);
     // Forge the anchor's mtime onto the imposter: the inode still differs.
     utimesSync(plan, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
     expect(() =>
