@@ -285,6 +285,7 @@ describe('metaCommand handler', () => {
     );
     (metaCommand.handler as (a: unknown) => void)({ _: [], $0: 'qwen' });
     expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
     expect(writeStdoutLineMock).toHaveBeenCalledWith(
       '{"platform":"github","host":"github.com","ownerRepo":"QwenLM/qwen-code"}',
     );

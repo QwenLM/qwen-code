@@ -537,6 +537,7 @@ describe('issueContextCommand handler', () => {
       out: '/tmp/ic.md',
     });
     expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
     expect(writeStdoutLineMock).toHaveBeenCalledWith(
       expect.stringContaining('"discoveryError":"HTTP 500"'),
     );

@@ -170,6 +170,7 @@ describe('commentBodyCommand handler', () => {
         repo: 'QwenLM/qwen-code',
       });
       expect(stdoutSpy).toHaveBeenCalledWith('the body');
+      expect(setGhHostMock).toHaveBeenCalledWith(undefined);
       // And never the newline-appending line writer for the body.
       expect(writeStdoutLineMock).not.toHaveBeenCalledWith('the body');
       expect(process.exitCode).toBeUndefined();

@@ -138,6 +138,7 @@ describe('fetchDiffCommand handler', () => {
       out: OUT,
     });
     expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
     expect(writeStdoutLineMock).toHaveBeenCalledWith(
       JSON.stringify({
         diffPath: resolve(OUT),
