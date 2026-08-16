@@ -598,6 +598,16 @@ jobs:
                 echo "status/on-hold present but the marker comments were unreadable — failing open, running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "status/on-hold present but not pinned to the live head/base (${HEAD_SHA}/${BASE_SHA}) — running the review lane (#9193)." >> "$GITHUB_STEP_SUMMARY"
+                # The stale pin means the triage-only exemption no longer
+                # matches the live diff, so strip the label too. It sits in
+                # stale.yml's exempt-pr-labels and Stage 1f applies it only
+                # once at open time — without this the PR would skip the
+                # review lane AND never age out via the stale bot.
+                if gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/status%2Fon-hold" -X DELETE 2>/dev/null; then
+                  echo "Removed stale status/on-hold so the stale bot can age this PR (#9193)." >> "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "Failed to remove stale status/on-hold — leaving it in place (#9193)." >> "$GITHUB_STEP_SUMMARY"
+                fi
               fi
             fi
           fi

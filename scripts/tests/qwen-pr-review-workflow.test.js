@@ -2688,6 +2688,10 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     });
     expect(r.output).toContain('should_run=true');
     expect(r.summary).toContain('not pinned to the live head/base');
+    // The stale exemption must not linger in stale.yml's exempt list.
+    expect(r.summary).toContain('Removed stale status/on-hold');
+    expect(r.ghCalls).toContain('labels/status%2Fon-hold');
+    expect(r.ghCalls).toContain('-X DELETE');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
