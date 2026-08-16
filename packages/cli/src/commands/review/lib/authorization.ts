@@ -106,17 +106,32 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
   /**
-   * The posting floor the RECORDED arguments carry (explicit flag beats the
-   * configured setting beats the `auto` default) — present only when this
-   * gate actually parsed the record, i.e. never on the `--user-authorized`
-   * short-circuit or a missing-record refusal. `submit` prefers it over the
-   * state JSON's floor: the record is the operator's verbatim input, the
-   * state is the model's transcription of it.
+   * The posting floor the RECORDED arguments carry — present only when the
+   * record was read AND the floor in it is the OPERATOR'S decision: an
+   * explicit `--severity-floor` flag, or a valid configured setting
+   * (`severityFloorSource` of `explicit`/`configured`). A default-resolved
+   * `auto` — including one produced by silently discarding an invalid
+   * configured value — is NOT a recorded decision and recovers nothing:
+   * letting it outrank a state floor would stand enforcement down over a
+   * record that decided no floor at all. Recovered best-effort on the
+   * `--user-authorized` path too — the sanctioned report-first-then-publish
+   * flow carries a parseable record on disk, and returning before reading
+   * it left that flow's enforcement decided by exactly the transcription
+   * the rest of the gate distrusts. `submit` prefers this over the state
+   * JSON's floor: the record is the operator's verbatim input, the state is
+   * the model's transcription of it.
    */
   recordedSeverityFloor?: 'critical' | 'suggestion' | 'auto';
 } {
   if (req.userAuthorized) {
-    return { ok: true, why: 'the user asked for this review to be published' };
+    return {
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedSeverityFloor: recordedSeverityFloor({
+        defaultSeverityFloor: req.defaultSeverityFloor,
+        skillArgs: req.skillArgs,
+      }),
+    };
   }
 
   const sessionScoped = defaultSkillArgsPath();
@@ -216,6 +231,48 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     why: verdict.comment.requested
       ? `\`--comment\` was in the review arguments for #${authorisedPr}`
       : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
-    recordedSeverityFloor: verdict.severityFloor,
+    recordedSeverityFloor:
+      verdict.severityFloorSource === 'default'
+        ? undefined
+        : verdict.severityFloor,
   };
+}
+
+/**
+ * Best-effort recovery of the operator's recorded posting floor, shared by
+ * every boundary that must resolve the floor from the CLI's verbatim record
+ * rather than the model-written state: the authorization gate's
+ * `--user-authorized` path above, and `compose-review`'s CLI handler — the
+ * boundary that writes the archived composed JSON and the terminal verdict.
+ * Both boundaries resolving through this ONE function is what keeps the
+ * registered artifact and the posted review describing the same floor;
+ * resolving it at `submit` alone made them describe two different reviews
+ * whenever the override fired.
+ *
+ * Returns the floor only when the record is readable AND carries an
+ * operator decision (`severityFloorSource` of `explicit`/`configured`);
+ * every failure mode — no record, unreadable, no decision — returns
+ * undefined and leaves the caller's state value standing, the same
+ * fail-open direction enforcement itself takes. The path rule is the
+ * gate's own: the caller-supplied seam is honoured only when no session id
+ * is present.
+ */
+export function recordedSeverityFloor(opts: {
+  defaultSeverityFloor?: string;
+  skillArgs?: string;
+}): 'critical' | 'suggestion' | 'auto' | undefined {
+  const path =
+    currentSessionId() === '' && opts.skillArgs
+      ? opts.skillArgs
+      : defaultSkillArgsPath();
+  try {
+    const verdict = parseReviewArgs(readFileSync(path, 'utf8'), {
+      severityFloor: opts.defaultSeverityFloor,
+    });
+    return verdict.severityFloorSource === 'default'
+      ? undefined
+      : verdict.severityFloor;
+  } catch {
+    return undefined;
+  }
 }

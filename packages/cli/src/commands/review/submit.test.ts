@@ -173,6 +173,41 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     } as never);
   }
 
+  it('recovers the recorded floor only when the record DECIDED one', () => {
+    // A default-resolved `auto` is not an operator decision — letting it
+    // outrank the state's floor would stand enforcement down over a record
+    // that recorded no floor at all. An invalid configured value is
+    // discarded by the parser and must read the same way.
+    expect(
+      authFor('123 --comment --severity-floor critical').recordedSeverityFloor,
+    ).toBe('critical');
+    expect(authFor('123 --comment').recordedSeverityFloor).toBeUndefined();
+    expect(
+      authFor('123 --comment', { defaultSeverityFloor: 'critical' })
+        .recordedSeverityFloor,
+    ).toBe('critical');
+    expect(
+      authFor('123 --comment', { defaultSeverityFloor: 'crtical' })
+        .recordedSeverityFloor,
+    ).toBeUndefined();
+  });
+
+  it('recovers the recorded floor on the --user-authorized path too', () => {
+    // The sanctioned report-first → user-publishes flow carries a parseable
+    // record on disk; returning before reading it left that flow's
+    // enforcement decided by exactly the model transcription the gate
+    // distrusts.
+    const argsFile = join(dir, 'ua-args.txt');
+    writeFileSync(argsFile, '123 --severity-floor critical\n');
+    const verdict = reviewWriteAuthorization({
+      userAuthorized: true,
+      skillArgs: argsFile,
+      pr: 123,
+    } as never);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.recordedSeverityFloor).toBe('critical');
+  });
+
   it('binds the repo of a URL-shaped authorisation', () => {
     expect(authFor('https://github.com/o/r/pull/123 --comment').ok).toBe(true);
     const wrong = authFor('https://github.com/other/repo/pull/123 --comment');
@@ -1176,6 +1211,60 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         String(c[0]).includes('using the recorded'),
       ),
     ).toBe(true);
+  });
+
+  it('the configured-setting floor leg reaches enforcement end to end', () => {
+    // The `review.severityFloor` setting travels runSubmit opts →
+    // authorization gate → parseReviewArgs defaults → recordedSeverityFloor.
+    // The sibling defaultComment leg has exactly this wiring-regression test;
+    // deleting any link in the new chain must fail here.
+    const review = file('floor-configured.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file('floor-configured-args.txt', '6771 --comment'),
+      }),
+      'unknown',
+      { defaultSeverityFloor: 'critical' },
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+  });
+
+  it('reroutes an unusable-line Suggestion instead of refusing the whole post', () => {
+    // The removal runs BEFORE the consistency gate on purpose: a rerouted
+    // comment is no longer posting, so its unusable line is no longer the
+    // gate's business. Ordered the other way, the gate's wholesale refusal
+    // would take the Critical down with it — the all-or-nothing harm the
+    // 422 doctrine exists to prevent.
+    const review = file('floor-bad-lines.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 0, body: '**[Suggestion]** zero-line anchor' },
+        { path: 'c.ts', body: '**[Suggestion]** no line at all' },
+      ],
+    });
+
+    runSubmit(authorized({ review }));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.comments[0].path).toBe('a.ts');
+    expect(sent.body).toContain('zero-line anchor');
+    expect(sent.body).toContain('no line at all');
+    expect(sent.body).toContain('floor enforcement');
   });
 
   it('rejects a line that is not a positive whole number', () => {

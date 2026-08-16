@@ -87,6 +87,7 @@ import {
   stripReviewFooter,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
+import { recordedSeverityFloor } from './lib/authorization.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -329,6 +330,18 @@ function splitDeferralChannel(raw: unknown): {
 }
 
 /**
+ * The ONE statement of the floor normalisation, shared by the enforcement
+ * gate below and `composeReviewBody`'s licence block. Both run over the same
+ * `severityFloor` in a single compose call, feeding two decisions that must
+ * agree (enforcement fires only where the deferral licence holds) — two
+ * restatements is the predicate-drift class `lib/inline-counts.ts`'s header
+ * exists to prevent.
+ */
+function normalizeSeverityFloor(value: unknown): unknown {
+  return typeof value === 'string' ? value.trim().toLowerCase() : value;
+}
+
+/**
  * The posting floor, enforced in code — the backstop for the posture SKILL
  * Step 6 resolves in prose.
  *
@@ -358,18 +371,6 @@ function splitDeferralChannel(raw: unknown): {
  * path — is left inline instead (fail open; `submit`'s consistency gate
  * refuses pathless comments before anything posts anyway).
  */
-/**
- * The ONE statement of the floor normalisation, shared by the enforcement
- * gate and `composeReviewBody`'s licence block. Both run over the same
- * `severityFloor` in a single compose call, feeding two decisions the
- * enforcement docstring requires to agree ("fires ONLY where the deferral
- * licence already holds") — two restatements is the predicate-drift class
- * `lib/inline-counts.ts`'s header exists to prevent.
- */
-function normalizeSeverityFloor(value: unknown): unknown {
-  return typeof value === 'string' ? value.trim().toLowerCase() : value;
-}
-
 export function floorEnforcedReroute(
   severityFloor: unknown,
   contextUnavailable: boolean,
@@ -386,18 +387,44 @@ export function floorEnforcedReroute(
   drafted.forEach((c, i) => {
     if (severityOf(c) !== 'suggestion') return;
     const body = typeof c.body === 'string' ? c.body : '';
+    const claim = carriedClaimLine(body);
     // The floor excludes deterministic findings — by their source (SKILL
     // Step 6: a `[build]`/`[test]`/`[probe]` finding is pre-confirmed and
     // the posture leaves it inline at any floor). The inline channel
     // carries no source field, so the tag convention decides, through the
-    // same predicate the body-Critical scan reads deterministic by; a
-    // false positive (prose that merely mentions a tag) leaves the
-    // comment inline — the fail-open direction of every other arm here.
-    if (DETERMINISTIC_TAG_RE.test(body)) return;
+    // same predicate the body-Critical scan reads deterministic by — but
+    // over the CLAIM LINE only, never the whole body: the body's tail is
+    // writable surface the state controls (the attribution footer is built
+    // from the model-written `modelId` and appended before this predicate
+    // runs at the submit boundary), and a whole-body match handed that
+    // surface a kill-switch — one `[test]` in a footer carved out every
+    // drafted Suggestion at once. A first-line prose mention still reads
+    // deterministic and stays inline — the fail-open direction of every
+    // other arm here — but the window is one line the tag convention owns,
+    // not the entire comment.
+    if (claim !== null && DETERMINISTIC_TAG_RE.test(claim)) return;
     const file =
       typeof c.path === 'string' && c.path.trim() !== '' ? c.path : null;
     if (file === null) return;
-    const claim = carriedClaimLine(body);
+    // The title carries the WHOLE marker-stripped body, collapsed to one
+    // line — not just the claim line: the skill mandates multi-line
+    // Suggestion bodies (failure scenario, suggested fix), and a moved
+    // comment's body leaves every posted surface, so a first-line-only
+    // title silently dropped the proposed fix from the record. The render
+    // bound (`boundDeferredLine`) still caps the line; the forged-footer
+    // strip keeps an appended attribution out of the record. A carried id
+    // (`R2-4: …`) stays at the front so the human record keeps the
+    // cross-round identity; an all-marker comment gets the same locatable
+    // fallback the ledger builder uses.
+    const sevMarker =
+      severityOf(c) === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+    const rest = stripReviewFooter(
+      body
+        .trimStart()
+        .slice(sevMarker.length)
+        .replace(/^:?\s*/, ''),
+    );
+    const title = collapseToLine(rest);
     indices.push(i);
     entries.push({
       file,
@@ -408,11 +435,7 @@ export function floorEnforcedReroute(
         : {}),
       source: 'review',
       severity: 'Suggestion',
-      // A carried id (`R2-4: …`) stays inside the title so the human record
-      // keeps the cross-round identity; `renderDeferredEntry` never
-      // re-parses it. An all-marker comment gets the same locatable
-      // fallback the ledger builder uses, for the same reason.
-      title: claim && claim.trim() !== '' ? claim : '(comment carried no text)',
+      title: title !== '' ? title : '(comment carried no text)',
     });
   });
   return { indices, entries };
@@ -1098,22 +1121,20 @@ function composeReviewBody(
   // licence below already holds, so the merge can never create an
   // unlicensed state that the model's own entries did not.
   //
-  // Two merge disciplines, both review-round findings on this very diff:
-  // a constructed entry whose (file, line) the model ALSO deferred is
-  // dropped — the model's copy is the richer record (a real source field),
-  // and listing the same finding twice would make `deferredCount` and the
-  // verdict line overcount; its index stays in `reroute.indices`, because
-  // the inline comment still must not post. And the enforced entries come
-  // FIRST: the rendered list is capped at MAX_DEFERRED_SUGGESTION_LINES,
-  // and an enforcement note pointing at a list that truncated away every
-  // entry it names would be a disclosure contradicting its own record.
-  const modelDeferredKeys = new Set(
-    modelDeferred.map((e) => `${e.file} ${e.line ?? ''}`),
-  );
-  const freshEnforced = reroute.entries.filter(
-    (e) => !modelDeferredKeys.has(`${e.file} ${e.line ?? ''}`),
-  );
-  const deferredSuggestions = [...freshEnforced, ...modelDeferred];
+  // NO cross-channel dedup, deliberately. An anchor-keyed identity —
+  // (file, line) — cannot distinguish "the same finding riding both
+  // channels" from "a different finding drafted at an anchor the model
+  // also deferred", and collapsing the second loses a finding from every
+  // posted surface: its inline comment leaves the posting set and its
+  // constructed entry is absorbed by the collision. "A deferral silently
+  // dropped is a finding lost" — between the two failure modes, a
+  // duplicated public record (same finding listed once per channel,
+  // visible, count-honest) is the cheap one, so the merge keeps every
+  // entry from both channels. The enforced entries come FIRST: the
+  // rendered list is capped at MAX_DEFERRED_SUGGESTION_LINES, and an
+  // enforcement note pointing at a list that truncated away the entries
+  // it names would be a disclosure contradicting its own record.
+  const deferredSuggestions = [...reroute.entries, ...modelDeferred];
   for (const stray of relocatedCriticals) {
     bodyCriticals.push(stray);
   }
@@ -2253,17 +2274,28 @@ function composeReviewBody(
   // with the drafted set the orchestrator saw. Not a cap: the finding is
   // recorded two lines down; what changed is the posting surface, and the
   // policy that changed it is the operator's own floor.
-  // Counted by the moved COMMENTS (`indices`), not the constructed entries:
-  // a finding the model both deferred and left drafted was still moved out
-  // of the inline set, even though the dedup above kept only the model's
-  // richer record in the list — and the sentence stays true either way,
-  // which is why it does not assert the drafted set had failed to defer.
+  // One count basis end to end: every moved comment contributes exactly one
+  // constructed entry to the list (no dedup — see the merge comment), so
+  // the note's N, `floorEnforced.length`, and the entries this sentence
+  // points at can never disagree. The "below" claim turns cap-aware the
+  // moment the enforced entries themselves overflow the rendered line cap:
+  // the enforced-first ordering guarantees the first
+  // MAX_DEFERRED_SUGGESTION_LINES of them render, and past that the note
+  // must say where the rest went rather than assert a list that truncated
+  // them — the overflow identities survive in the run report, and a
+  // universal "listed below" over an absent entry is a false record on
+  // exactly the accuracy surface this disclosure exists for.
+  const enforcedShown = Math.min(
+    reroute.entries.length,
+    MAX_DEFERRED_SUGGESTION_LINES,
+  );
+  const enforcedOverflow = reroute.entries.length - enforcedShown;
   const floorEnforcedNote: Bi[] =
-    reroute.indices.length > 0
+    reroute.entries.length > 0
       ? [
           {
-            en: `${reroute.indices.length} Suggestion(s) were drafted inline past the resolved critical posting floor; the CLI moved them into the deferral list below (floor enforcement).`,
-            zh: `${reroute.indices.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论；CLI 已将其移入下方延后清单（下限强制执行）。`,
+            en: `${reroute.entries.length} Suggestion(s) were drafted inline past the resolved critical posting floor; the CLI moved them into the deferral list below (floor enforcement${enforcedOverflow > 0 ? ` — ${enforcedShown} listed, ${enforcedOverflow} more inside the overflow count` : ''}).`,
+            zh: `${reroute.entries.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论；CLI 已将其移入下方延后清单（下限强制执行${enforcedOverflow > 0 ? `——列出 ${enforcedShown} 条，其余 ${enforcedOverflow} 条计入溢出计数` : ''}）。`,
           },
         ]
       : [];
@@ -2978,6 +3010,9 @@ interface ComposeReviewCliArgs {
   out: string | undefined;
   /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
   host?: string;
+  /** Test seam for the recorded-floor recovery — same rule as `submit`'s:
+   * honoured only when no session id is present. */
+  skillArgs?: string;
 }
 
 /**
@@ -3059,9 +3094,17 @@ export const composeReviewCommand: CommandModule = {
         describe:
           'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
           'the bilingual body-language recovery has to fetch the PR description',
+      })
+      .option('skill-args', {
+        type: 'string',
+        describe:
+          "Path to the CLI-written record of the review's invocation " +
+          'arguments, for the recorded-floor recovery. Honoured only when no ' +
+          'session id is present (tests) — a real run reads the ' +
+          'session-scoped record, exactly as submit does.',
       }),
   handler: async (argv) => {
-    const { input, comments, out, host } =
+    const { input, comments, out, host, skillArgs } =
       argv as unknown as ComposeReviewCliArgs;
     // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
     // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
@@ -3114,6 +3157,25 @@ export const composeReviewCommand: CommandModule = {
           'to an inline comment, dropped the count on the way, and the ' +
           'verdict line read Approve over a blocker.)',
       );
+    }
+    // The operator's floor, from the CLI's verbatim record — resolved through
+    // the SAME function `submit`'s authorization gate uses, which is what
+    // keeps this boundary's archived composed JSON and terminal verdict
+    // describing the same review the posted body describes. Resolving the
+    // record at submit alone split the two: the archive kept the state's
+    // transcription while the post obeyed the record. Every failure mode of
+    // the recovery returns undefined and leaves the state's value standing.
+    const recorded = recordedSeverityFloor({
+      defaultSeverityFloor: operatorReviewSettings().severityFloor,
+      skillArgs,
+    });
+    if (recorded !== undefined && parsed.severityFloor !== recorded) {
+      writeStderrLine(
+        `Severity floor: using the recorded ${JSON.stringify(recorded)} ` +
+          `over the state's ${JSON.stringify(parsed.severityFloor ?? null)} ` +
+          `— the CLI's record of the invocation outranks the state JSON.`,
+      );
+      parsed.severityFloor = recorded;
     }
     const drafted = readDraftedComments(comments);
     const result = composeReview(

@@ -328,17 +328,25 @@ describe('saveReviewArtifact', () => {
     },
   );
 
-  it('reads an absent floorEnforced as empty — a pre-enforcement composed file must still save', () => {
+  it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
+    // Null rides the same absence semantics as the sibling deferredCount
+    // pair — an undefined-only check would refuse a composed file that
+    // wrote null, breaking the backward compatibility this field promises.
     const paths = fixture();
     const { floorEnforced: _absent, ...preEnforcement } = verdict;
-    writeJson(paths.composed, preEnforcement);
-    saveReviewArtifact({
-      ...paths,
-      target: 'local',
-      effort: 'medium',
-    });
-    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
-    expect(saved.verdict.floorEnforced).toEqual([]);
+    for (const composed of [
+      preEnforcement,
+      { ...verdict, floorEnforced: null },
+    ]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect(saved.verdict.floorEnforced).toEqual([]);
+    }
   });
 
   it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {

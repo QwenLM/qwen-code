@@ -2064,6 +2064,55 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ).toBe(true);
   });
 
+  it('resolves the recorded floor at THIS boundary too — the archive must match the post', async () => {
+    // The recorded-floor recovery lives in the shared lib helper; if only
+    // submit resolved it, the archived composed JSON and terminal verdict
+    // (this boundary's outputs) would describe a different review than the
+    // posted body whenever the override fired.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-recorded-floor-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    const argsPath = join(dir, 'skill-args.txt');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, severityFloor: 'suggestion' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 3, body: '**[Suggestion]** tidy this' },
+      ]),
+      'utf8',
+    );
+    writeFileSync(argsPath, '8255 --severity-floor critical\n', 'utf8');
+    const savedSession = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+        skillArgs: argsPath,
+      });
+    } finally {
+      if (savedSession === undefined)
+        delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const written = JSON.parse(
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0],
+    ) as ComposeReviewResult;
+    expect(written.floorEnforced).toEqual([0]);
+    expect(
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.some((c) =>
+        String(c[0]).includes('using the recorded'),
+      ),
+    ).toBe(true);
+  });
+
   it('honours review.attribution=false through the handler (wiring)', async () => {
     // Third wiring leg: deleting the attribution argument from the
     // composeReviewCommand call leaves the direct composeReview test and the
@@ -6077,7 +6126,13 @@ describe('floor enforcement — the posture, as code', () => {
     }
   });
 
-  it('keeps the model entry when the same finding rides both channels', () => {
+  it('keeps BOTH channels’ records when they share an anchor — no dedup, no lost finding', () => {
+    // An anchor-keyed identity cannot distinguish "the same finding riding
+    // both channels" from "a different finding drafted at an anchor the
+    // model also deferred" — and collapsing the second loses a finding from
+    // every posted surface. Between the failure modes, a duplicated public
+    // record is the cheap one, so both entries render and every count is
+    // honest about it.
     const r = compose({
       severityFloor: 'critical',
       criticalsInline: 0,
@@ -6095,12 +6150,80 @@ describe('floor enforcement — the posture, as code', () => {
         },
       ],
     });
-    // The inline comment still leaves the posting set…
+    // The inline comment leaves the posting set…
     expect(r.floorEnforced).toEqual([0]);
-    // …but the list holds ONE record for the finding — the model's.
-    expect(r.deferredCount).toBe(1);
+    // …and BOTH records survive — the constructed one and the model's.
+    expect(r.deferredCount).toBe(2);
     expect(r.body).toContain('model kept this record');
-    expect(r.body).not.toContain('rename the flag');
+    expect(r.body).toContain('rename the flag');
+    // The two disclosure surfaces count from the same basis: the moved
+    // count can never exceed its antecedent (a "2 of 1" verdict line was
+    // the observed self-contradiction under anchor-keyed dedup).
+    const line = verdictLine(r);
+    expect(line).toContain('2 non-Critical finding(s) deferred');
+    expect(line).toContain('1 of those moved by CLI floor enforcement');
+  });
+
+  it('turns the enforcement note cap-aware when the moved entries overflow the render cap', () => {
+    const manyDrafts = Array.from({ length: 21 }, (_, i) => ({
+      path: `f${i}.ts`,
+      line: i + 1,
+      body: `**[Suggestion]** enforced finding ${i}`,
+    }));
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 21,
+      draftedComments: manyDrafts,
+    });
+    expect(r.floorEnforced).toHaveLength(21);
+    // The universal "listed below" claim would be false for entry 20 — the
+    // note must say where the overflow went instead of asserting a list
+    // that truncated it.
+    expect(r.body).toContain('20 listed, 1 more inside the overflow count');
+    expect(r.body).toContain('and 1 more');
+  });
+
+  it('a tag outside the claim line does not exempt — the footer is not a kill-switch', () => {
+    // The deterministic carve-out reads the CLAIM LINE only. The body's
+    // tail is state-writable surface (the attribution footer is built from
+    // the model-written modelId and appended before the predicate runs at
+    // the submit boundary): matched over the whole body, one `[test]` in a
+    // footer disabled enforcement for the entire review.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        {
+          path: 'c.ts',
+          line: 9,
+          body: '**[Suggestion]** rename the flag\n\n_— qwen3.7-max [test] via Qwen Code /review (v0.21.2)_',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+  });
+
+  it('carries the whole marker-stripped body into the moved record, not just line one', () => {
+    // The skill mandates multi-line Suggestion bodies (failure scenario,
+    // suggested fix), and a moved comment's body leaves every posted
+    // surface — a first-line-only title silently dropped the proposed fix
+    // from the record.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        {
+          path: 'c.ts',
+          line: 9,
+          body: '**[Suggestion]** normalise the floor once.\n\nFailure scenario: drift.\n\nSuggested fix: parseFloor(raw)',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).toContain('parseFloor(raw)');
   });
 
   it('renders enforced entries ahead of the cap, never truncated behind model deferrals', () => {
