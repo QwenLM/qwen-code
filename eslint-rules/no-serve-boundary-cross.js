@@ -74,6 +74,23 @@ function staticTemplateValue(template) {
   return template.quasis.map((quasi) => quasi.value.cooked ?? '').join('');
 }
 
+function staticMemberPropertyName(memberExpr) {
+  if (!memberExpr.computed && memberExpr.property.type === 'Identifier') {
+    return memberExpr.property.name;
+  }
+  if (
+    memberExpr.computed &&
+    memberExpr.property.type === 'Literal' &&
+    typeof memberExpr.property.value === 'string'
+  ) {
+    return memberExpr.property.value;
+  }
+  if (memberExpr.computed && memberExpr.property.type === 'TemplateLiteral') {
+    return staticTemplateValue(memberExpr.property);
+  }
+  return undefined;
+}
+
 export default {
   meta: {
     type: 'problem',
@@ -107,8 +124,12 @@ export default {
 
   create(context) {
     const options = context.options[0] ?? {};
-    const serveDir = options.serveDir;
-    const baseUrlDir = options.baseUrlDir;
+    const serveDir = options.serveDir
+      ? resolvePath(options.serveDir)
+      : undefined;
+    const baseUrlDir = options.baseUrlDir
+      ? resolvePath(options.baseUrlDir)
+      : undefined;
     const filename = context.filename ?? context.getFilename();
     const fileDir = path.dirname(path.resolve(filename));
 
@@ -194,7 +215,7 @@ export default {
       // attributed to any package — fail closed.
       if (cleaned.includes('../')) return 'unknown';
       if (baseUrlDir) {
-        const resolved = path.resolve(baseUrlDir, cleaned);
+        const resolved = resolvePath(path.join(baseUrlDir, cleaned));
         if (isInServeDir(resolved, serveDir)) return 'inside';
       }
       return 'outside';
@@ -234,21 +255,12 @@ export default {
      *  ANY object identifier (alias-proof — the caller asserts safety). */
     function memberCall(node, objectNames, propertyPattern) {
       const callee = node.callee;
-      const property =
-        callee.type === 'MemberExpression' && !callee.computed
-          ? callee.property.type === 'Identifier'
-            ? callee.property.name
-            : undefined
-          : callee.type === 'MemberExpression' &&
-              callee.computed &&
-              callee.property.type === 'Literal' &&
-              typeof callee.property.value === 'string'
-            ? callee.property.value
-            : undefined;
+      if (callee.type !== 'MemberExpression') return false;
+      const property = staticMemberPropertyName(callee);
       return (
-        callee.type === 'MemberExpression' &&
-        callee.object.type === 'Identifier' &&
-        (objectNames === null || objectNames.includes(callee.object.name)) &&
+        (objectNames === null ||
+          (callee.object.type === 'Identifier' &&
+            objectNames.includes(callee.object.name))) &&
         property !== undefined &&
         propertyPattern.test(property)
       );
@@ -261,23 +273,39 @@ export default {
           node.object.type === 'Identifier' &&
           (node.object.name === 'globalThis' ||
             node.object.name === 'global') &&
-          ((node.property.type === 'Identifier' &&
-            node.property.name === 'process') ||
-            (node.computed &&
-              node.property.type === 'Literal' &&
-              node.property.value === 'process')))
+          staticMemberPropertyName(node) === 'process')
       );
     }
 
     /** getBuiltinModule as a property name — identifier or computed
      *  string-literal spelling. */
     function builtinModuleProperty(memberExpr) {
+      return staticMemberPropertyName(memberExpr) === 'getBuiltinModule';
+    }
+
+    function isImportMetaUrl(node) {
       return (
-        (memberExpr.property.type === 'Identifier' &&
-          memberExpr.property.name === 'getBuiltinModule') ||
-        (memberExpr.computed &&
-          memberExpr.property.type === 'Literal' &&
-          memberExpr.property.value === 'getBuiltinModule')
+        node?.type === 'MemberExpression' &&
+        node.object.type === 'MetaProperty' &&
+        staticMemberPropertyName(node) === 'url'
+      );
+    }
+
+    function hasWorkerEvalOption(node) {
+      const options = node.arguments[1];
+      return (
+        options?.type === 'ObjectExpression' &&
+        options.properties.some(
+          (property) =>
+            property.type === 'Property' &&
+            ((property.key.type === 'Identifier' &&
+              property.key.name === 'eval') ||
+              (property.computed &&
+                property.key.type === 'Literal' &&
+                property.key.value === 'eval')) &&
+            property.value.type === 'Literal' &&
+            property.value.value === true,
+        )
       );
     }
 
@@ -405,6 +433,20 @@ export default {
           return;
         }
 
+        // Function(...) is new Function(...) without `new`.
+        if (
+          ((callee.type === 'Identifier' && callee.name === 'Function') ||
+            (callee.type === 'MemberExpression' &&
+              callee.object.type === 'Identifier' &&
+              (callee.object.name === 'globalThis' ||
+                callee.object.name === 'global') &&
+              staticMemberPropertyName(callee) === 'Function')) &&
+          node.arguments.length > 0
+        ) {
+          reportUnknown(node);
+          return;
+        }
+
         // child_process.fork loads a module path (resolved relative to the
         // importing file as the best static approximation; the guarded
         // trees have no such calls today). spawn is deliberately NOT
@@ -430,8 +472,13 @@ export default {
         // import() anything — the body is visible but unresolvable, so
         // fail closed like computed sources (eval's sibling).
         if (
-          node.callee.type === 'Identifier' &&
-          node.callee.name === 'Function' &&
+          ((node.callee.type === 'Identifier' &&
+            node.callee.name === 'Function') ||
+            (node.callee.type === 'MemberExpression' &&
+              node.callee.object.type === 'Identifier' &&
+              (node.callee.object.name === 'globalThis' ||
+                node.callee.object.name === 'global') &&
+              staticMemberPropertyName(node.callee) === 'Function')) &&
           node.arguments.length > 0
         ) {
           reportUnknown(node);
@@ -463,9 +510,9 @@ export default {
             arg.callee.type === 'Identifier' &&
             arg.callee.name === 'URL' &&
             arg.arguments.length >= 2 &&
-            arg.arguments[1].type === 'MemberExpression' &&
-            arg.arguments[1].object.type === 'MetaProperty';
-          if (!handledByUrlArm) checkSource(arg);
+            isImportMetaUrl(arg.arguments[1]);
+          if (hasWorkerEvalOption(node)) reportUnknown(arg);
+          else if (!handledByUrlArm) checkSource(arg);
           return;
         }
 
@@ -480,7 +527,9 @@ export default {
           node.arguments[1].type === 'MemberExpression' &&
           node.arguments[1].object.type === 'MetaProperty'
         ) {
-          checkSource(node.arguments[0]);
+          if (isImportMetaUrl(node.arguments[1]))
+            checkSource(node.arguments[0]);
+          else reportUnknown(node.arguments[1]);
         }
       },
     };

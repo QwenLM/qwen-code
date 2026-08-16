@@ -31,6 +31,13 @@ const expectServeBoundaryError = async (filePath, code) => {
   );
 };
 
+const expectBoundaryMessage = async (filePath, code, messageId) => {
+  const [result] = await lintCliFile(filePath, code);
+  expect(
+    result.messages.some((message) => message.messageId === messageId),
+  ).toBe(true);
+};
+
 /** Assert the boundary rule produced NO diagnostics for `code`. Filters on
  *  the rule id (stricter than a 'serve' substring: also catches failClosed
  *  over-blocking from this rule). */
@@ -236,6 +243,14 @@ describe('eslint cli serve boundary rules', () => {
       acp,
       "vitest.mock('../serve/live/live-task-service.js');",
     );
+    await expectServeBoundaryError(
+      acp,
+      "globalThis.vi.mock('../serve/live/live-task-service.js');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "vi[`mock`]('../serve/live/live-task-service.js');",
+    );
 
     // A non-serve vi.mock stays silent on the boundary.
     const [result] = await lintCliFile(acp, "vi.mock('../utils/foo.js');");
@@ -401,6 +416,21 @@ describe('eslint cli serve boundary rules', () => {
     } finally {
       rmSync(link, { force: true });
     }
+
+    const bareLink = path.join(
+      repoRoot,
+      'packages/cli/src/acp-integration/serve-link.js',
+    );
+    rmSync(bareLink, { force: true });
+    try {
+      symlinkSync('../serve/index.ts', bareLink);
+      await expectServeBoundaryError(
+        ACP_FIXTURE,
+        "import 'src/acp-integration/serve-link.js';",
+      );
+    } finally {
+      rmSync(bareLink, { force: true });
+    }
   });
 
   // Codex self-review: vitest loaders reached through an alias evade the
@@ -557,6 +587,8 @@ describe('eslint cli serve boundary rules', () => {
       'eval("import(\'../serve/index.js\')");',
       '(0, eval)("import(\'../serve/index.js\')");',
       'globalThis.eval("import(\'../serve/index.js\')");',
+      'Function("return import(\'../serve/index.js\')");',
+      'globalThis.Function("return import(\'../serve/index.js\')");',
       'const load = new Function("return import(\'../serve/index.js\')");',
     ]) {
       await expectServeBoundaryError(ACP_FIXTURE, code);
@@ -684,6 +716,17 @@ describe('eslint cli serve boundary rules', () => {
     );
     expect(hits).toHaveLength(1);
     expect(hits[0].messageId).toBe('serveBoundary');
+
+    await expectBoundaryMessage(
+      RUNTIME_FIXTURE,
+      "const w = new Worker(new URL('./worker.js', import.meta.env));",
+      'failClosed',
+    );
+    await expectBoundaryMessage(
+      RUNTIME_FIXTURE,
+      'new Worker("import(\'../serve/worker.js\')", { eval: true });',
+      'failClosed',
+    );
   });
 
   // The outside-serve (allow) verdict of the checkSource arms had zero
