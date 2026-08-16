@@ -954,7 +954,7 @@ export interface ConfigParameters {
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
-  /** Directory where todo session files are stored. Must resolve inside targetDir. */
+/** Directory where todo session files are stored. Must resolve inside targetDir. */
   todosDirectory?: string;
   proxy?: string;
   cwd: string;
