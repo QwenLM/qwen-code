@@ -253,6 +253,14 @@ export interface DependencyFarm {
   failed: number;
   /** True when a farm was already in place, so this call had nothing to link. */
   alreadyPresent: boolean;
+  /**
+   * How many of the linked packages are the repo's OWN workspace members
+   * (`node_modules/@scope/pkg` → `../../packages/pkg`). Those links resolve
+   * back into the dependency root, so a mutation made in the disposable tree is
+   * invisible to any import that goes through the package NAME. Counted so the
+   * callers can say so rather than leave it as a property of the layout.
+   */
+  selfLinked: number;
 }
 
 /**
@@ -299,7 +307,12 @@ export function exposeDependencies(
   dependencyRoot: string,
   opts: { rebuild?: boolean } = {},
 ): DependencyFarm {
-  const done: DependencyFarm = { linked: 0, failed: 0, alreadyPresent: false };
+  const done: DependencyFarm = {
+    linked: 0,
+    failed: 0,
+    alreadyPresent: false,
+    selfLinked: 0,
+  };
   if (probeTree === dependencyRoot) return done;
   farmNodeModules(dependencyRoot, probeTree, done, opts.rebuild === true);
   let members: string[] = [];
@@ -383,6 +396,54 @@ function containedIn(root: string, dir: string): string | null {
 const FARM_MARKER = '.qwen-review-farm';
 
 /**
+ * Was this farm built by this code, for this dependency root?
+ *
+ * Existence alone is not provenance: `node_modules` is gitignored by
+ * convention, not by rule, so a pull request can force-add
+ * `node_modules/.qwen-review-farm` beside its own module stubs and `git
+ * worktree add` will check both out — PR CONTENT reaching the certification
+ * path with no execution at all. The marker therefore records the dependency
+ * root it was built from, and a marker that does not name this one is not ours.
+ * (The callers that reuse a tree across probe runs pass `rebuild` and never
+ * consult this at all.)
+ */
+/**
+ * Does this `node_modules` entry lead back into the dependency root's own
+ * source — an npm workspace SELF-link (`@scope/pkg` → `../../packages/pkg`)?
+ *
+ * Those are the links a disposable tree cannot make local: they resolve to the
+ * dependency root's copy, which is the tree the caller is trying to stay out
+ * of, so a mutation made in the disposable tree is invisible to any import that
+ * goes through the package NAME rather than a relative path. Re-pointing them
+ * at the disposable tree would break resolution outright for a package whose
+ * entry point is a build artifact the fresh checkout does not have — so they
+ * are counted and disclosed instead of silently mirrored.
+ */
+function resolvesInside(entry: string, root: string): boolean {
+  try {
+    const real = realpathSync(entry);
+    const base = realpathSync(resolve(root));
+    return (
+      (real === base || real.startsWith(base + sep)) &&
+      !real.startsWith(join(base, 'node_modules') + sep)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function marksOurFarm(target: string, sourceDir: string): boolean {
+  try {
+    return (
+      readFileSync(join(target, FARM_MARKER), 'utf8').trim() ===
+      resolve(sourceDir)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * One directory's `node_modules`, mirrored entry by entry.
  *
  * A directory that already has one is left alone — the reuse path of a scratch
@@ -408,11 +469,15 @@ function farmNodeModules(
     // farm the PREVIOUS probe installed there (a member whose source has no
     // `node_modules`, or a root the review worktree never installed) would
     // otherwise survive a reset the report calls pristine.
-    if (rebuild && existsSync(target)) {
+    if (rebuild) {
+      // `lstatSync`, not `existsSync`: the latter follows links, so a DANGLING
+      // symlink at the target read as absent and the wipe was skipped — while
+      // the link itself stayed to redirect whatever wrote there next.
       try {
+        lstatSync(target);
         rmSync(target, { recursive: true, force: true });
-      } catch {
-        done.failed++;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') done.failed++;
       }
     }
     return;
@@ -438,7 +503,7 @@ function farmNodeModules(
     // source tag on it. `rebuild` goes further and distrusts even a marked
     // farm — the caller that reuses a tree ACROSS probe runs cannot know what
     // ran in it, and re-linking costs a second where trusting costs a verdict.
-    if (!rebuild && existsSync(join(target, FARM_MARKER))) {
+    if (!rebuild && marksOurFarm(target, sourceDir)) {
       done.alreadyPresent = true;
       return;
     }
@@ -490,6 +555,9 @@ function farmNodeModules(
       try {
         if (!statSync(sourceEntry).isDirectory()) continue;
       } catch {
+        // A DANGLING link is a package the tree will not resolve, and the
+        // caller's whole contract is that what could not be linked is counted.
+        done.failed++;
         continue;
       }
     } else if (!sourceStats.isDirectory()) {
@@ -506,6 +574,7 @@ function farmNodeModules(
       }
       for (const pkg of pkgs) {
         const scopedSource = join(sourceEntry, pkg);
+        if (resolvesInside(scopedSource, sourceDir)) done.selfLinked++;
         // Same skip the top-level branch applies: a stray FILE under a scope
         // directory is not a package, and linking it as one is a link the
         // resolver will follow to something that cannot be imported.
@@ -523,6 +592,7 @@ function farmNodeModules(
         }
       }
     } else {
+      if (resolvesInside(sourceEntry, sourceDir)) done.selfLinked++;
       try {
         symlinkSync(sourceEntry, targetEntry, linkType);
         done.linked++;

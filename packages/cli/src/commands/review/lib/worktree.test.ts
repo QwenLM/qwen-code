@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  discardWorktree,
   exposeDependencies,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -194,7 +195,12 @@ describe('exposeDependencies', () => {
 
     const got = exposeDependencies(probe, root);
 
-    expect(got).toEqual({ linked: 2, failed: 0, alreadyPresent: false });
+    expect(got).toEqual({
+      linked: 2,
+      failed: 0,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
     expect(
       readdirSync(join(probe, 'node_modules'))
         .filter((e) => !e.startsWith('.'))
@@ -238,7 +244,12 @@ describe('exposeDependencies', () => {
 
     const got = exposeDependencies(probe, root);
 
-    expect(got).toEqual({ linked: 2, failed: 0, alreadyPresent: false });
+    expect(got).toEqual({
+      linked: 2,
+      failed: 0,
+      alreadyPresent: false,
+      selfLinked: 0,
+    });
     expect(existsSync(join(probe, 'node_modules', 'hoisted'))).toBe(true);
     expect(
       existsSync(join(probe, 'packages', 'cli', 'node_modules', 'nested')),
@@ -266,6 +277,7 @@ describe('exposeDependencies', () => {
       linked: 0,
       failed: 0,
       alreadyPresent: true,
+      selfLinked: 0,
     });
 
     // Now the planted shape: a `node_modules` this code did not build.
@@ -342,6 +354,7 @@ describe('exposeDependencies', () => {
       linked: 0,
       failed: 0,
       alreadyPresent: false,
+      selfLinked: 0,
     });
     expect(existsSync(join(root, 'node_modules', 'plain-pkg'))).toBe(true);
   });
@@ -380,6 +393,25 @@ describe('exposeDependencies', () => {
     ).toBe(false);
   });
 
+  it('skips a stray file under a scope directory, as it does at top level', () => {
+    const root = tmp('expose-scope-stray-');
+    const probe = tmp('expose-scope-probe-');
+    mkdirSync(join(root, 'node_modules', '@scope', 'real-pkg'), {
+      recursive: true,
+    });
+    writeFileSync(join(root, 'node_modules', '@scope', 'notes.md'), 'x');
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toMatchObject({ linked: 1, failed: 0 });
+    expect(existsSync(join(probe, 'node_modules', '@scope', 'real-pkg'))).toBe(
+      true,
+    );
+    expect(existsSync(join(probe, 'node_modules', '@scope', 'notes.md'))).toBe(
+      false,
+    );
+  });
+
   it('does not call an EMPTY farm dir a standing farm', () => {
     // The dir a previous call created when the source held nothing linkable —
     // gitignored, so a scratch tree's reset spares it. Counting it as
@@ -395,7 +427,64 @@ describe('exposeDependencies', () => {
       linked: 0,
       failed: 0,
       alreadyPresent: false,
+      selfLinked: 0,
     });
+  });
+});
+
+describe('discardWorktree', () => {
+  let repo: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'qwen-discard-'));
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t.t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'head');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it('clears a LOCKED leftover instead of wedging the path forever', () => {
+    // `worktree remove --force` refuses a locked entry and `prune` skips it, so
+    // without the unlock every later `add` at that path fatals "missing but
+    // locked" — for every disposable tree of that review, until a human
+    // intervenes. Probe code has a shell in these trees, so the lock is one
+    // `touch` away.
+    const tree = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '--detach', '-q', tree, 'HEAD');
+    git(repo, 'worktree', 'lock', tree);
+
+    discardWorktree(repo, tree);
+
+    // The path is free: a fresh add succeeds where it used to fatal.
+    git(repo, 'worktree', 'add', '--detach', '-q', tree, 'HEAD');
+    expect(existsSync(join(tree, 'a.ts'))).toBe(true);
+  });
+
+  it('drops only its OWN registration, never a sibling worktree', () => {
+    // The prune this replaced was repo-wide: it deregistered any entry whose
+    // directory was momentarily absent — another shard's `worktree add`
+    // mid-flight, or the user's worktree on an unmounted volume.
+    const mine = join(repo, 'mine');
+    const other = join(repo, 'other');
+    git(repo, 'worktree', 'add', '--detach', '-q', mine, 'HEAD');
+    git(repo, 'worktree', 'add', '--detach', '-q', other, 'HEAD');
+    // The sibling's directory is gone — exactly what a repo-wide prune eats.
+    rmSync(other, { recursive: true, force: true });
+
+    discardWorktree(repo, mine);
+
+    expect(git(repo, 'worktree', 'list')).toContain(other);
   });
 });
 

@@ -161,11 +161,16 @@ function git(cwd: string, ...args: string[]): void {
  * verdict with a deterministic source tag on it, which is the worst failure
  * this command could have. `checkout --force` reverts the tracked edits and
  * `clean -ffd` removes the probe files, nested repositories a probe cloned or
- * `git init`-ed included; ignored paths are deliberately spared,
+ * `git init`-ed included, and `-x` so the IGNORED state goes too — a probe's
+ * own `node_modules` at any depth, its build caches, a `dist/` it rebuilt;
  * because that is where the dependency farm lives and rebuilding it every call
  * is the whole cost this reuse path exists to avoid.
  */
-function resetScratchTree(tree: string, headSha: string): boolean {
+function resetScratchTree(
+  tree: string,
+  headSha: string,
+  worktree: string,
+): boolean {
   // The gate that makes the rest of this function safe to run. A LINKED
   // worktree has a `.git` file pointing at the common dir; a bare directory
   // left by a crashed `worktree add` (or by a cleanup whose `rmSync` failed)
@@ -189,6 +194,16 @@ function resetScratchTree(tree: string, headSha: string): boolean {
     ) {
       return false;
     }
+    // And it must be a worktree of THIS repository. `--show-toplevel` prints
+    // the directory the `.git` file sits in, whatever that file points at, so a
+    // gitfile naming another repository — or a whole repo planted at the
+    // predictable scratch path — passes the check above while every command
+    // below runs against someone else's objects, refs, hooks and config.
+    const commonOf = (dir: string) =>
+      realpathSync(
+        gitOut(dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
+      );
+    if (commonOf(tree) !== commonOf(worktree)) return false;
   } catch {
     return false;
   }
@@ -212,17 +227,22 @@ function resetScratchTree(tree: string, headSha: string): boolean {
       .split('\n')
       .some((line) => /^[a-zS]/.test(line));
     if (hidden) return false;
-    // Nor does any of it reach INSIDE an initialized submodule: `checkout
-    // --force` without `--recurse-submodules` leaves its working tree alone,
-    // `clean` never touches a tracked gitlink, and `rev-parse HEAD` is the
-    // superproject's. A probe that initialized one (to build) and mutated a
-    // file in it would hand the next probe that mutant under a pristine
-    // report. A fresh `worktree add` leaves submodules uninitialized, so
-    // rebuilding is both correct and cheap.
-    const initialized = gitOut(tree, 'submodule', 'status', '--recursive')
+    // Nor does any of it reach INSIDE a submodule: `checkout --force` without
+    // `--recurse-submodules` leaves its working tree alone, `clean` never
+    // touches a tracked gitlink, and `rev-parse HEAD` is the superproject's. A
+    // probe that initialized one (to build) and mutated a file in it would
+    // hand the next probe that mutant under a pristine report — and reading
+    // `submodule status` is not enough to notice, because `git submodule
+    // deinit` restores the uninitialized-looking `-` line while leaving the
+    // submodule's gitdir (its hooks, its config, its objects) standing under
+    // the common dir, where the next `submodule update --init` resurrects it.
+    // So the presence of ANY gitlink in the commit sends this tree down the
+    // rebuild path: a fresh `worktree add` starts them uninitialized, and a
+    // repo with submodules pays a rebuild per call rather than a wrong verdict.
+    const hasSubmodules = gitOut(tree, 'ls-files', '-s')
       .split('\n')
-      .some((line) => line.trim() !== '' && !line.startsWith('-'));
-    if (initialized) return false;
+      .some((line) => line.startsWith('160000'));
+    if (hasSubmodules) return false;
     return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
@@ -306,13 +326,13 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       : '';
 
   const tree = scratchWorktreePath(worktree, label);
-  if (existsSync(tree) && resetScratchTree(tree, headSha)) {
-    // The reset spares ignored paths — that is what keeps the farm cheap — and
-    // `node_modules` is exactly where a probe is told it may install. So the
-    // farm is the one ignored path that does NOT survive a reuse: anything a
-    // previous probe added there would otherwise resolve as a dependency for
-    // every later probe in this shard, which is a wrong verdict carrying a
-    // deterministic source tag. Re-linking costs a second; trusting it costs a
+  if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
+    // The reset clears the ignored state too, so the farm went with it: this
+    // re-links it. `rebuild` rather than trusting a marker, because
+    // `node_modules` is where a probe is told it may install, and anything a
+    // previous probe left there would otherwise resolve as a dependency for
+    // every later probe in this shard — a wrong verdict carrying a
+    // deterministic source tag. Re-linking costs a second; trusting costs a
     // verdict.
     // `rebuild` rather than deleting the root farm here: this tree also carries
     // a farm per workspace member, and those are ignored paths too — wiping
@@ -366,7 +386,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     };
   }
 
-  const dependencies = farmDependencies(tree, worktree);
+  // `rebuild` on the FRESH path too: `node_modules` is gitignored by convention,
+  // not by rule, so a pull request can commit one — marker and all — and
+  // `git worktree add` checks it out. Nothing a PR ships is the farm.
+  const dependencies = farmDependencies(tree, worktree, { rebuild: true });
   return {
     available: true,
     path: tree,
@@ -401,7 +424,9 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
  * built — workspace packages resolve through it to code the PR head produced.
  * (Those links point OUT of the scratch tree, which is why a cross-package
  * mutation is one this isolation cannot show flipping. Reads are unaffected,
- * and reads are all that leave the scratch tree.)
+ * and a write through one of those links lands in the review worktree, which
+ * is why the verifier's block says to replace a link with a copy before
+ * modifying a dependency.)
  */
 function farmDependencies(
   tree: string,

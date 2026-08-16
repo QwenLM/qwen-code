@@ -1662,6 +1662,7 @@ export function runOneHunkProbe(
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -1690,7 +1691,13 @@ export function runOneHunkProbe(
     };
   }
   try {
-    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
+    const { perFile } = runProbeSuite(
+      probeTree,
+      probes,
+      deadlineAt,
+      now,
+      dependencyRoot,
+    );
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
@@ -1738,6 +1745,7 @@ export function runControlMutant(
   probeFile: string,
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   let original: string;
@@ -1752,7 +1760,13 @@ export function runControlMutant(
       `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
       'utf8',
     );
-    const { perFile } = runProbeSuite(probeTree, [probeFile], deadlineAt, now);
+    const { perFile } = runProbeSuite(
+      probeTree,
+      [probeFile],
+      deadlineAt,
+      now,
+      dependencyRoot,
+    );
     // `gated` is the runner's "went red" verdict; anything else — still green,
     // collected nothing, crashed — means the control did NOT demonstrate a
     // working kill path.
@@ -2160,6 +2174,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               greenProbes[0],
               mutantDeadline,
               now,
+              // The dependency root, so this run re-links the farm like the
+              // others. Defaulting it to the probe tree made the farm rebuild
+              // a no-op here (`exposeDependencies` returns at once when the
+              // two are the same) — and the control is the run that decides
+              // whether ANY mutant verdict is trusted.
+              worktree,
             );
             if (harnessValidated === null) {
               // The probe file could not be read, so no test was injected and
@@ -2271,7 +2291,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               break;
             }
             hunkResults.push(
-              runOneHunkProbe(probeTree, h, greenProbes, mutantDeadline, now),
+              runOneHunkProbe(
+                probeTree,
+                h,
+                greenProbes,
+                mutantDeadline,
+                now,
+                worktree,
+              ),
             );
           }
         }

@@ -294,6 +294,42 @@ describe('runScratchTree', () => {
     expect(existsSync(join(second.path!, 'fixtures'))).toBe(false);
   });
 
+  it('rebuilds when the tree belongs to a DIFFERENT repository', () => {
+    // `rev-parse --show-toplevel` prints the directory the `.git` file sits in,
+    // whatever that file points at — so a gitfile naming another repository
+    // passes a self-consistency check while every command below would run
+    // against someone else's objects, refs, hooks and config.
+    // A CLONE, so the commit the reset checks out exists there too — otherwise
+    // the reset fails for the wrong reason and the test would pass without the
+    // guard it is meant to pin.
+    const other = join(repo, 'other-repo');
+    execFileSync('git', ['clone', '-q', repo, other]);
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: other });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: other });
+    writeFileSync(join(other, 'o.txt'), 'x\n');
+    execFileSync('git', ['add', '-A'], { cwd: other });
+    execFileSync('git', ['commit', '-qm', 'one'], { cwd: other });
+
+    const first = run();
+    writeFileSync(
+      join(first.path!, '.git'),
+      `gitdir: ${join(other, '.git')}\n`,
+    );
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false);
+    // The other repository is untouched: still on its branch, still holding its
+    // own file.
+    expect(
+      execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: other,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('main');
+    expect(existsSync(join(other, 'o.txt'))).toBe(true);
+  });
+
   it('rebuilds when a submodule was initialized in the tree', () => {
     // Nothing in the reset reaches inside an initialized submodule, and
     // `rev-parse HEAD` is the superproject's — so a mutant in there would ride
@@ -369,6 +405,7 @@ describe('runScratchTree', () => {
       linked: 1,
       failed: 0,
       alreadyPresent: false,
+      selfLinked: 0,
     });
 
     const second = run();
@@ -379,6 +416,7 @@ describe('runScratchTree', () => {
       linked: 1,
       failed: 0,
       alreadyPresent: false,
+      selfLinked: 0,
     });
     expect(existsSync(join(second.path!, 'node_modules', 'vitest'))).toBe(true);
   });
@@ -395,6 +433,7 @@ describe('runScratchTree', () => {
       linked: 0,
       failed: 0,
       alreadyPresent: false,
+      selfLinked: 0,
     });
     expect(r.note).toContain('held nothing linkable');
     expect(r.note).not.toContain('already in place');
@@ -420,6 +459,7 @@ describe('runScratchTree', () => {
           linked: 0,
           failed: 1,
           alreadyPresent: false,
+          selfLinked: 0,
         });
         expect(r.note).toContain('could not be');
         expect(r.note).not.toContain('has no `node_modules`');
@@ -551,6 +591,7 @@ describe('runScratchTree', () => {
       linked: 2,
       failed: 0,
       alreadyPresent: false,
+      selfLinked: 0,
     });
     expect(existsSync(join(r.path!, 'node_modules', 'vitest'))).toBe(true);
     expect(r.note).toContain('2 dependencies linked in');

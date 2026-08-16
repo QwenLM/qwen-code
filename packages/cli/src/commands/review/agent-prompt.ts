@@ -1373,9 +1373,10 @@ export function buildRoleBrief(
           'between findings: every call puts every tracked file back at the commit ' +
           "under review and deletes what you wrote, with the review worktree's " +
           '`node_modules` linked in so a unit harness starts without an install. ' +
-          'GITIGNORED paths are spared — that is what keeps the dependency farm, ' +
-          'and it means a build cache or a `dist/` from your last probe survives ' +
-          'the reset; clear those yourself when a probe turns on them.',
+          'Everything that is not in the commit goes with it: your probe files, ' +
+          'your edits, and the IGNORED state too — a build cache, a `dist/` you ' +
+          'rebuilt, a `node_modules` you installed at any depth — with the ' +
+          'dependency farm re-linked from the review worktree afterwards.',
         '',
         '```bash',
         // Quoted, like every other path this file prints into a command: an
