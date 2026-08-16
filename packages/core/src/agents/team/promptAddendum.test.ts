@@ -57,7 +57,7 @@ describe('buildTeammatePromptAddendum', () => {
     // Explicit reporting stays the recommended path — the fix describes a
     // fallback, it does not demote send_message.
     expect(prompt).toContain('call send_message(to: "leader"');
-    expect(prompt).not.toContain('ONLY way');
+    expect(prompt.toLowerCase()).not.toContain('only way');
   });
 
   it('tells plan-required teammates their final answer is delivered automatically', () => {
