@@ -1017,6 +1017,34 @@ describe('findings (command boundary)', () => {
     expect(readFileSync(anchors, 'utf8')).toBe(anchorsBefore);
   });
 
+  it("--to-anchors overwrites a previous run's anchors file on rerun", () => {
+    // The rerun is a designed case — the previous attempt's anchors.json is
+    // still on disk, and the write order exists to keep the pair consistent.
+    // Every other existing-anchor case in this suite expects a refusal; this
+    // one pins the success path, so a guard that refused ANY pre-existing
+    // anchor file turns red here instead of throwing at Step 6/7 of every
+    // pipeline rerun.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(anchors, '[]\n'); // a previous run's artifact
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'r2', source: 'probe', anchor: 'charge(amt);' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    expect(JSON.parse(readFileSync(anchors, 'utf8'))).toEqual([
+      { id: 'r2', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
+  });
+
   it('--to-anchors names the postable locations it cannot project', () => {
     // The projection skips anchorless locations, and nothing downstream
     // cross-checks the artifact against the resolver input — so the skip
@@ -1405,6 +1433,54 @@ describe('findings (command boundary)', () => {
         makeArgv(join(dir, 'real/shared.json'), join(dir, 'link/shared.json')),
       ),
     ).toThrow(/--to-anchors points at the same file/);
+  });
+
+  it('refuses a --to-anchors nested inside a sibling path, or containing one', () => {
+    // Identity does not cover containment: o.json and o.json/anchors.json
+    // are distinct files, but the write sequence creates whichever path is
+    // the directory prefix as a directory, the paired write dies at EISDIR,
+    // and the stray directory survives every rerun. Both nesting directions
+    // must be refused up front.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const out = join(dir, 'o.json'); // absent on purpose
+    const anchors = join(dir, 'o.json/anchors.json');
+    const makeArgv = (outArg: string, toAnchors: string) => ({
+      input,
+      out: outArg,
+      outcomes: undefined,
+      testDelta: undefined,
+      print: false,
+      toAnchors,
+    });
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(out, anchors)),
+    ).toThrow(/--to-anchors must not nest inside/);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(anchors, out)),
+    ).toThrow(/--to-anchors must not nest inside/);
+    // The refusal precedes every write: the prefix was never created.
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it('refuses a --to-anchors that is an existing directory', () => {
+    // A directory is not a symlink, so the link refusal does not see it, and
+    // the anchor write would die at a raw EISDIR — the up-front descriptive
+    // refusal is exactly what the guard exists for.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const anchors = join(dir, 'anchors-dir');
+    mkdirSync(anchors);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out: join(dir, 'findings.json'),
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: anchors,
+      }),
+    ).toThrow(/--to-anchors must not be a directory/);
   });
 
   it('parses --to-anchors into the field the handler actually reads', () => {
