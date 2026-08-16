@@ -601,6 +601,121 @@ describe('createChannelWorkerManager', () => {
     );
   });
 
+  describe('filterReloadSelection (R14)', () => {
+    // A names-mode dead-worker recovery reconciles from the committed
+    // selection; the filter drops names carrying a persisted `stopped`
+    // record so the recovery does not force-start an explicitly stopped
+    // SIBLING. setup() does not pass the option — build the manager with
+    // it here.
+    function setupWithFilter(
+      filterReloadSelection: (
+        selection: ServeChannelSelection,
+        groups: readonly ChannelWorkspaceGroup[],
+      ) => ServeChannelSelection,
+      group = fakeGroup(),
+    ) {
+      const reserveLease = vi.fn();
+      const releaseLease = vi.fn();
+      const resolveGroups = vi.fn(async (selection: ServeChannelSelection) =>
+        workspaceGroups(selection),
+      );
+      const createGroup = vi.fn(() => group);
+      const manager = createChannelWorkerManager({
+        resolveGroups,
+        createGroup,
+        reserveLease,
+        releaseLease,
+        filterReloadSelection,
+      });
+      return { manager, group, resolveGroups };
+    }
+
+    it('applies the filter to reload resolves only', async () => {
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      };
+      await test.manager.setSelection(selection);
+      // `set` resolves are UNFILTERED: explicit selections force-start
+      // regardless of persisted state (#8975).
+      expect(filter).not.toHaveBeenCalled();
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'set');
+
+      await test.manager.reload();
+
+      expect(filter).toHaveBeenCalledTimes(1);
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['feishu'] },
+        'reload',
+      );
+    });
+
+    it('applies the filter to reloadWorkspace resolves', async () => {
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      await test.manager.reloadWorkspace(PRIMARY, 'feishu');
+
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['feishu'] },
+        'reload',
+      );
+    });
+
+    it('passes the committed groups to the filter for workspace attribution', async () => {
+      const filter = vi.fn((selection: ServeChannelSelection) => selection);
+      const test = setupWithFilter(filter);
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram'],
+      };
+      await test.manager.setSelection(selection);
+
+      await test.manager.reload();
+
+      expect(filter).toHaveBeenCalledWith(selection, [
+        { workspaceCwd: PRIMARY, selection },
+      ]);
+    });
+
+    it('degrades to the unfiltered selection when the filter throws', async () => {
+      // Never-fails: the filter reads per-workspace state files in
+      // production; an unexpected error must not break recovery — the
+      // pre-R14 (unfiltered) reconcile is the degrade target.
+      const test = setupWithFilter(() => {
+        throw new Error('state read exploded');
+      });
+      const selection: ServeChannelSelection = {
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      };
+      await test.manager.setSelection(selection);
+
+      await expect(test.manager.reload()).resolves.toBeDefined();
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(selection, 'reload');
+    });
+  });
+
   it.each([
     {
       label: 'moves to another workspace',
@@ -974,7 +1089,7 @@ describe('createChannelWorkerManager', () => {
     expect(test.releaseLease).toHaveBeenCalledTimes(2);
   });
 
-  it('does not release the lease when stop cannot confirm child exit', async () => {
+  it('treats a stop-rejected group as lost so a per-channel start recovers (R14)', async () => {
     const group = fakeGroup();
     const test = setup(group);
     await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
@@ -983,8 +1098,49 @@ describe('createChannelWorkerManager', () => {
     await expect(test.manager.stopSelection()).rejects.toMatchObject({
       code: 'channel_worker_stop_failed',
     });
-    expect(test.manager.state()).toMatchObject({ enabled: true });
-    expect(test.releaseLease).not.toHaveBeenCalled();
+    // Pre-R14 kept the group latched mid-tear-down with the lease and the
+    // committed selection intact: a per-channel start for a torn-down
+    // channel early-returned 200 {changed:false} (nothing relaunched) and
+    // every reconcile rejected on the stopping latch — dead channels
+    // reporting success. The rejected group is unrecoverable, so drop it
+    // (and the lease/commitment) and let the next operation create a
+    // fresh one (R14).
+    expect(test.releaseLease).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({
+      enabled: false,
+      selection: null,
+      workers: [],
+    });
+
+    await expect(
+      test.manager.setChannelEnabled(
+        { name: 'telegram', workspaceCwd: PRIMARY },
+        true,
+      ),
+    ).resolves.toMatchObject({ changed: true });
+    expect(test.createGroup).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the lease when a stop-rejected group is lost to a persistent release failure (R14)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.stop).mockRejectedValueOnce(new Error('still alive'));
+    test.releaseLease.mockImplementation(() => {
+      throw new Error('lease owner changed');
+    });
+
+    await expect(test.manager.stopSelection()).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+    });
+    // The lost-group cleanup still ran (no stopping latch, no stale
+    // commitment); only the lease stays held because the release kept
+    // failing — enabled reports it until a later stop clears it (R14).
+    expect(test.manager.state()).toMatchObject({
+      enabled: true,
+      selection: null,
+      workers: [],
+    });
   });
 
   it('clears a confirmed-stopped group when lease release fails and retries', async () => {
@@ -1002,14 +1158,17 @@ describe('createChannelWorkerManager', () => {
       code: 'channel_worker_stop_failed',
       stoppedChannels: [{ workspaceCwd: PRIMARY, names: ['telegram'] }],
     });
+    // The lost-group cleanup retries the release in the catch (R14): the
+    // transient failure clears, so nothing stays latched on the lease.
+    expect(test.releaseLease).toHaveBeenCalledTimes(2);
     expect(test.manager.state()).toMatchObject({
-      enabled: true,
-      selection: { mode: 'names', names: ['telegram'] },
+      enabled: false,
+      selection: null,
       workers: [],
     });
 
     await expect(test.manager.stopSelection()).resolves.toMatchObject({
-      changed: true,
+      changed: false,
       state: { enabled: false },
     });
     expect(group.stop).toHaveBeenCalledTimes(1);

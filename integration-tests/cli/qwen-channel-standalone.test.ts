@@ -383,12 +383,29 @@ describePosix(
 
       const baseUrl = await waitForListeningUrl(child);
 
+      // The final pidfile-ABSENCE assertion is only meaningful if the
+      // pidfile existed in the first place: poll for its creation, or a
+      // serve that never writes the reservation ships green (R14).
+      {
+        const pidFileDeadline = Date.now() + 30000;
+        while (!existsSync(pidFile)) {
+          if (Date.now() > pidFileDeadline) {
+            throw new Error(`Timed out waiting for pidfile ${pidFile}`);
+          }
+          await sleep(250);
+        }
+      }
+
       await pollHttp(`${baseUrl}/health`, (status) => status === 200);
 
       interface ControlState {
         enabled?: boolean;
         transition?: string;
-        workers?: Array<{ state?: string; channels?: string[] }>;
+        workers?: Array<{
+          state?: string;
+          channels?: string[];
+          restartCount?: number;
+        }>;
       }
       const control = (await pollHttp(
         `${baseUrl}/workspace/channel`,
@@ -422,7 +439,10 @@ describePosix(
       // crash after that instant is crash-restarted by the supervisor
       // with the serve process staying alive — so the process-level
       // liveness check above cannot see a dead or crash-looping worker
-      // (#8975).
+      // (#8975). Requiring `restartCount === 0` closes the remaining
+      // hole: the pre-R14 predicate accepted the 'running' state a
+      // crash-restart restores, so even a crash during the window
+      // shipped green (R14).
       await pollHttp(`${baseUrl}/workspace/channel`, (_status, body) => {
         const state = body as ControlState;
         return (
@@ -430,7 +450,8 @@ describePosix(
           state.transition === 'idle' &&
           Array.isArray(state.workers) &&
           state.workers.length > 0 &&
-          state.workers[0]!.state === 'running'
+          state.workers[0]!.state === 'running' &&
+          state.workers[0]!.restartCount === 0
         );
       });
 
@@ -440,6 +461,15 @@ describePosix(
       }>((resolve) => {
         child!.once('exit', (code, signal) => resolve({ code, signal }));
       });
+      // Lost-exit-event guard: if the child already exited before the
+      // listener attached, the promise never settles and the suite hangs
+      // into the timeout — fail fast instead (R14).
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(
+          `serve child exited prematurely before SIGTERM ` +
+            `(code ${child.exitCode}, signal ${child.signalCode})`,
+        );
+      }
       child.kill('SIGTERM');
       const { code, signal } = await exited;
       expect(signal).toBeNull();
@@ -940,7 +970,11 @@ describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
     interface ControlState {
       enabled?: boolean;
       transition?: string;
-      workers?: Array<{ state?: string; channels?: string[] }>;
+      workers?: Array<{
+        state?: string;
+        channels?: string[];
+        restartCount?: number;
+      }>;
     }
 
     // Phase 1: serve boots with `--channel all` and the channel really
@@ -977,6 +1011,13 @@ describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
     }>((resolve) => {
       child!.once('exit', (code, signal) => resolve({ code, signal }));
     });
+    // Lost-exit-event guard, twin of the zero-channel test (R14).
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `serve child exited prematurely before SIGTERM ` +
+          `(code ${child.exitCode}, signal ${child.signalCode})`,
+      );
+    }
     child.kill('SIGTERM');
     const shutdown = await exited;
     // Graceful-exit semantics are POSIX-only: on Windows the kill
@@ -1015,6 +1056,22 @@ describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
     await sleep(2000);
     expect(child.exitCode).toBeNull();
     expect(child.signalCode).toBeNull();
+    // Post-window re-poll, twin of the zero-channel test: a crash-
+    // restart of the restored worker keeps the serve process alive, so
+    // the process-level liveness check above cannot see it. Requiring
+    // `restartCount === 0` makes even one crash-restart during the
+    // window fail the round trip (R14).
+    await pollAuthHttp(`${baseUrl}/workspace/channel`, (_status, body) => {
+      const state = body as ControlState;
+      return (
+        state.enabled === true &&
+        state.transition === 'idle' &&
+        Array.isArray(state.workers) &&
+        state.workers.length > 0 &&
+        state.workers[0]!.state === 'running' &&
+        state.workers[0]!.restartCount === 0
+      );
+    });
 
     const restartedExited = new Promise<{
       code: number | null;
@@ -1022,6 +1079,13 @@ describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
     }>((resolve) => {
       child!.once('exit', (code, signal) => resolve({ code, signal }));
     });
+    // Lost-exit-event guard, twin of the zero-channel test (R14).
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `restarted serve child exited prematurely before SIGTERM ` +
+          `(code ${child.exitCode}, signal ${child.signalCode})`,
+      );
+    }
     child.kill('SIGTERM');
     const restartedShutdown = await restartedExited;
     if (isPosix) {

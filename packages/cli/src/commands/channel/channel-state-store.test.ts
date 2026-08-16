@@ -787,6 +787,55 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
   });
 
+  it('honors a re-stop batched with a new stop in ONE setMany (R13-10)', () => {
+    // The production stop shape: `recordStoppedChannels` stops a
+    // service's WHOLE channel list in one `setMany` (stop.ts). A re-stop
+    // sharing that single write with a new stop used to bump the
+    // generation only once, making `delta > addedSinceSnapshot` false —
+    // the re-stop dropped and the explicitly re-stopped channel
+    // resurrected on the next `--channel all` (the R12-7 escape the
+    // round-12 fix's single-entry coverage missed). The per-entry
+    // generation bump gives the batched write per-entry identity: the
+    // counter moves by BOTH entries, more than the one added (R14).
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    // ONE batched stop of the service's whole channel list: the telegram
+    // re-stop plus the new feishu stop.
+    new ChannelStateStore(legacyPath).setMany(
+      ['telegram', 'feishu'],
+      'stopped',
+    );
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+      feishu: 'stopped',
+    });
+  });
+
+  it('does not mistake one batched pure-new-stop write for a re-stop (R13-10)', () => {
+    // Control twin of the pin above: a single `setMany` of TWO new stops
+    // bumps the generation by exactly the two entries added since the
+    // snapshot — no re-stop happened, so the snapshot-identical entries
+    // must NOT be re-applied over an explicit restart. The comparison
+    // cannot relax to `>=` without resurrecting the R9-3 direction.
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    adoptLegacyChannelState(workspace);
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    new ChannelStateStore(legacyPath).setMany(['feishu', 'slack'], 'stopped');
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
+      feishu: 'stopped',
+      slack: 'stopped',
+    });
+  });
+
   it('does not mistake a single new stop for a re-stop rewrite (#8975)', () => {
     // Control twin of the pin above: one rewrite adding exactly one entry
     // moves the generation by exactly the number of entries added since
@@ -1679,6 +1728,86 @@ describe('ChannelStateStore', () => {
         feishu: 'stopped',
       });
     });
+
+    it('throws on a transient READ failure so the caller fallback actually runs (R13-11)', () => {
+      // The initial load must be fail-closed: a transient non-ENOENT
+      // read failure means the content is UNKNOWN, not empty. Returning
+      // `{}` there (the tolerant readAll shape) let prune succeed on an
+      // empty view — selectActiveChannels then resurrected every
+      // explicitly stopped channel and the post-connect batched `active`
+      // write erased the records permanently, while the documented
+      // daemon-worker/start fallback catch stayed dead code for the very
+      // failure class it exists for. Driven through the store's
+      // `_testReadFileSync` seam (the real read-failure shape), not a
+      // mocked throw (R14).
+      writeFileSync(
+        filePath,
+        JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+        'utf-8',
+      );
+      const readError = new Error('EBUSY') as NodeJS.ErrnoException;
+      readError.code = 'EBUSY';
+      let failRead = true;
+      const store = new ChannelStateStore(filePath, {
+        onWarning: vi.fn(),
+        _testReadFileSync: (p) => {
+          if (failRead) throw readError;
+          return readFileSync(p, 'utf-8');
+        },
+      });
+
+      expect(() => store.prune(['telegram', 'feishu'])).toThrow(readError);
+      // The tolerant readAll fallback the callers take stays tolerant:
+      // it warns and reports the (unknown-as-empty) view instead of
+      // throwing, so startup degrades but never fails (#8975).
+      expect(store.readAll()).toEqual({});
+      failRead = false;
+      expect(store.prune(['telegram', 'feishu'])).toEqual({
+        telegram: 'stopped',
+      });
+    });
+
+    it('treats a CORRUPT file as empty in prune without throwing (R13-11)', () => {
+      // The never-fails class: a malformed file is discarded (with a
+      // warning) and behaves like an empty map — only transient READ
+      // failures throw, so prune's fail-closed load must not convert the
+      // corrupt-file contract into a startup failure (#8975).
+      writeFileSync(filePath, '{"channels": "garbage"', 'utf-8');
+      const onWarning = vi.fn();
+      const store = new ChannelStateStore(filePath, { onWarning });
+
+      expect(store.prune(['telegram'])).toEqual({});
+      expect(onWarning).toHaveBeenCalledWith(
+        expect.stringContaining('treating all channels as active'),
+      );
+    });
+  });
+
+  it('bumps the generation by the number of entries a write sets (R14)', () => {
+    // The adoption watermark arithmetic relies on per-entry identity:
+    // a batched write must move the counter by the entries written, not
+    // by 1, or a re-stop sharing one write with a new stop is invisible
+    // (R13-10). A delete-only prune rewrite keeps the monotonic bump.
+    // (File creation starts the counter at -1, so the first single-entry
+    // write lands at 0 — the pre-R14 shape a new file always showed.)
+    const store = new ChannelStateStore(filePath);
+    store.setMany(['telegram', 'feishu'], 'stopped');
+    let file = JSON.parse(readFileSync(filePath, 'utf-8')) as {
+      generation?: number;
+    };
+    expect(file.generation).toBe(1);
+
+    store.set('slack', 'stopped');
+    file = JSON.parse(readFileSync(filePath, 'utf-8')) as {
+      generation?: number;
+    };
+    expect(file.generation).toBe(2);
+
+    store.prune(['telegram']);
+    file = JSON.parse(readFileSync(filePath, 'utf-8')) as {
+      generation?: number;
+    };
+    expect(file.generation).toBe(3);
   });
 
   // The restrictive permissions are pinned elsewhere only for the adoption

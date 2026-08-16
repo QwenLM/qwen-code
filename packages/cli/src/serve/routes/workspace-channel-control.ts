@@ -291,10 +291,15 @@ function sendChannelControlError(
  * pre-stop snapshot of the control state can race an in-flight start.
  * Shared by the whole-selection DELETE route and the channel management
  * service's per-channel stop routes, which tear down through the same
- * manager and persist its torn-down set the same way. Returns whether
- * every group was persisted; a failed write must be surfaced to the
- * caller, or automation treats the stop as durable and the stopped
- * channels silently resurrect on the next restart.
+ * manager and persist its torn-down set the same way. Returns the
+ * workspaces whose state write FAILED (empty = every group persisted);
+ * a failed write must be surfaced to the caller, or automation treats
+ * the stop as durable and the stopped channels silently resurrect on the
+ * next restart. The per-workspace identity matters: a partial
+ * multi-workspace failure surfaced as a bare boolean gives the client no
+ * handle for a targeted retry, and a re-issued stop takes the
+ * `{changed: false}` single-name path that can never re-record the OTHER
+ * workspace's torn-down set (R14).
  */
 export function recordChannelsStopped(
   groups:
@@ -303,18 +308,18 @@ export function recordChannelsStopped(
         readonly names: readonly string[];
       }>
     | undefined,
-): boolean {
-  let persisted = true;
+): string[] {
+  const failedWorkspaces: string[] = [];
   for (const { workspaceCwd, names } of groups ?? []) {
     if (
       !new ChannelStateStore(
         daemonChannelRuntimeStatePath(workspaceCwd),
       ).trySetMany(names, 'stopped')
     ) {
-      persisted = false;
+      failedWorkspaces.push(workspaceCwd);
     }
   }
-  return persisted;
+  return failedWorkspaces;
 }
 
 export function registerWorkspaceChannelControlRoutes(
@@ -375,7 +380,9 @@ export function registerWorkspaceChannelControlRoutes(
         }
         try {
           const result = await deps.stopChannelWorker!();
-          const statePersisted = recordChannelsStopped(result.stoppedChannels);
+          const persistFailedWorkspaces = recordChannelsStopped(
+            result.stoppedChannels,
+          );
           // Strip the internal manager→route persistence plumbing before
           // responding: `stoppedChannels` (per-workspace tear-down
           // grouping) is not part of the documented response shape, and a
@@ -387,9 +394,15 @@ export function registerWorkspaceChannelControlRoutes(
             ...response,
             // Only on failure: the happy-path response shape stays
             // unchanged, but an API client must be able to tell that the
-            // stop record did not persist and the stop is not durable
-            // (#8975).
-            ...(statePersisted ? {} : { statePersisted: false }),
+            // stop record did not persist and the stop is not durable —
+            // and WHICH workspaces lost their records, so a retry can
+            // target the affected channels (#8975, R14).
+            ...(persistFailedWorkspaces.length === 0
+              ? {}
+              : {
+                  statePersisted: false,
+                  statePersistFailedWorkspaces: persistFailedWorkspaces,
+                }),
           });
         } catch (error) {
           // A failed stop can still have torn down workers (partial
@@ -397,12 +410,14 @@ export function registerWorkspaceChannelControlRoutes(
           // successful tear-down). The manager carries the captured set on
           // the error; persist it here too, or those channels resurrect on
           // the next `--channel all` start (#8975).
-          let statePersisted = true;
+          let persistFailedWorkspaces: string[] = [];
           if (
             error instanceof ChannelWorkerControlError &&
             error.stoppedChannels
           ) {
-            statePersisted = recordChannelsStopped(error.stoppedChannels);
+            persistFailedWorkspaces = recordChannelsStopped(
+              error.stoppedChannels,
+            );
           }
           if (
             sendChannelControlError(res, error, deps.getChannelWorkerControl, {
@@ -410,8 +425,14 @@ export function registerWorkspaceChannelControlRoutes(
               // gives the client no retry handle (a release() failure
               // clears the group before any retry could re-capture the
               // names), so the error body must carry the loss — mirroring
-              // the success path's statePersisted field (#8975).
-              ...(statePersisted ? {} : { statePersisted: false }),
+              // the success path's statePersisted field (#8975) and the
+              // failed workspaces (R14).
+              ...(persistFailedWorkspaces.length === 0
+                ? {}
+                : {
+                    statePersisted: false,
+                    statePersistFailedWorkspaces: persistFailedWorkspaces,
+                  }),
             })
           ) {
             return;

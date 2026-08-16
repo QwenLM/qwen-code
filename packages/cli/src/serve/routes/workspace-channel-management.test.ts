@@ -485,6 +485,7 @@ describe('workspace Channel management routes', () => {
       Object.assign(new Error('Stop failed after tear-down.'), {
         code: 'channel_worker_stop_failed',
         statePersisted: false,
+        statePersistFailedWorkspaces: ['/workspace/a'],
       }),
     );
 
@@ -495,6 +496,10 @@ describe('workspace Channel management routes', () => {
     expect(response.status).toBe(500);
     expect(response.body.code).toBe('channel_worker_stop_failed');
     expect(response.body.statePersisted).toBe(false);
+    // The error body mirrors the attribution the service carries (R14).
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+    ]);
   });
 
   it('keeps the failed stop body shape when the record persisted (#8975)', async () => {
@@ -512,6 +517,7 @@ describe('workspace Channel management routes', () => {
     expect(response.status).toBe(500);
     expect(response.body.code).toBe('channel_worker_stop_failed');
     expect(response.body).not.toHaveProperty('statePersisted');
+    expect(response.body).not.toHaveProperty('statePersistFailedWorkspaces');
   });
 
   it('carries statePersisted on the successful stop body when the record was lost (#8975)', async () => {
@@ -535,6 +541,7 @@ describe('workspace Channel management routes', () => {
         runtime: { state: 'stopped' },
       },
       statePersisted: false,
+      statePersistFailedWorkspaces: ['/workspace/a'],
     });
 
     const response = await auth(
@@ -543,6 +550,10 @@ describe('workspace Channel management routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.statePersisted).toBe(false);
+    // The success passthrough keeps the attribution too (R14).
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+    ]);
   });
 
   it('rejects requests with an invalid client ID', async () => {

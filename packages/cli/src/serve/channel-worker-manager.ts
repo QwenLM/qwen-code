@@ -97,6 +97,12 @@ export class ChannelWorkerControlError extends Error {
    */
   statePersisted?: boolean;
   /**
+   * Set alongside `statePersisted = false`: the workspaces whose state
+   * write failed, so the error body carries attribution for a targeted
+   * retry (R14).
+   */
+  statePersistFailedWorkspaces?: string[];
+  /**
    * Workspaces whose old worker entry the failed reconcile's rollback
    * restored: their channels are relaunching even though the aggregate
    * `rolledBack` is `false` (another workspace's restore failed). A
@@ -145,6 +151,27 @@ export interface CreateChannelWorkerManagerOptions {
     selection: ServeChannelSelection,
     operation: 'initial' | 'set' | 'reload',
   ) => Promise<readonly ChannelWorkspaceGroup[]>;
+  /**
+   * Optional filter applied to the committed selection before every
+   * `reload`-operation resolve (reload / reloadWorkspace /
+   * refreshWorkspaces). Drops names-mode entries that carry a persisted
+   * `stopped` record, so a dead-worker recovery reconcile does not
+   * force-start an explicitly stopped SIBLING channel: the mode-`all`
+   * worker's restore filter protects only mode-`all` selections, and a
+   * names-mode replacement worker reconciled from the full untrimmed
+   * committedSelection resurrects the stopped sibling and the ready
+   * `active` write erases its record (R14). `initial` and `set` resolves
+   * are deliberately UNFILTERED: explicit selections force-start
+   * regardless of persisted state (#8975), and explicit by-name
+   * start/restart clear the target's own record before the recovery
+   * reload, so the requested name survives the filter. Receives the
+   * committed groups for per-workspace state attribution. Never-fails:
+   * any error degrades to the unfiltered selection.
+   */
+  filterReloadSelection?: (
+    selection: ServeChannelSelection,
+    groups: readonly ChannelWorkspaceGroup[],
+  ) => ServeChannelSelection;
   createGroup: (groups: readonly ChannelWorkspaceGroup[]) => ChannelWorkerGroup;
   reserveLease: (selection: ServeChannelSelection) => void;
   releaseLease: () => void;
@@ -277,6 +304,24 @@ function assertRequiredOwner(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * A terminal-failed worker: restart budget exhausted, no restart
+ * scheduled — it will never connect anything again. ONE shared predicate
+ * for every guard layer that must classify it identically (the manager's
+ * committed-names exclusion and the management service's
+ * `workspaceWorkerStarting` / `terminalFailedWorkerFor` guards): a future
+ * change to terminal detection applied to one site but not all silently
+ * desyncs the layers — dead channels excluded from `committedChannelNames`
+ * while the service guard still classifies the worker as starting rejects
+ * every per-channel stop with `channel_worker_starting` (or the inverse) —
+ * the R8-18/R9-5 defect classes (R14).
+ */
+export function isTerminalFailedWorker(
+  worker: ChannelWorkerGroupSnapshot,
+): boolean {
+  return worker.state === 'failed' && worker.nextRestartAt === undefined;
 }
 
 /**
@@ -632,16 +677,27 @@ export function createChannelWorkerManager(
     }
   };
 
-  // A terminal-failed worker (restart budget exhausted, no restart
-  // scheduled) will never connect anything again. Reporting its names as
-  // committed makes a per-channel start early-return `{changed: false}` on
-  // the dead worker instead of relaunching it — silently swallowing the
-  // natural recovery command. Same predicate as the stop-side
-  // `workspaceWorkerStarting` guard in channel-management-service (#8975).
-  const isTerminalFailedWorker = (
-    worker: ChannelWorkerGroupSnapshot,
-  ): boolean => worker.state === 'failed' && worker.nextRestartAt === undefined;
+  // The committed selection for a `reload`-operation resolve, with the
+  // optional stopped-record filter applied (see the `filterReloadSelection`
+  // option doc): a dead-worker recovery reconcile must not force-start
+  // explicitly stopped names-mode siblings. Never-fails — a filter error
+  // degrades to the unfiltered selection (R14).
+  const reloadSelection = (
+    selection: ServeChannelSelection,
+  ): ServeChannelSelection => {
+    if (!opts.filterReloadSelection) return selection;
+    try {
+      return opts.filterReloadSelection(selection, committedGroups);
+    } catch {
+      return selection;
+    }
+  };
 
+  // Reporting a terminal-failed worker's names as committed makes a
+  // per-channel start early-return `{changed: false}` on the dead worker
+  // instead of relaunching it — silently swallowing the natural recovery
+  // command (#8975). Predicate shared with the service guards via the
+  // exported `isTerminalFailedWorker` (R14).
   const committedChannelNames = (): string[] => {
     if (!committedSelection) return [];
     if (committedSelection.mode === 'names') {
@@ -738,6 +794,28 @@ export function createChannelWorkerManager(
       // clears the group before any retry could re-capture the names. The
       // route persists this set even on the failure path, so the stopped
       // channels do not resurrect on the next `--channel all` (#8975).
+      //
+      // Treat a stop-REJECTED group as LOST: drop the handle and the
+      // committed selection here, or the group stays latched mid-tear-down
+      // forever — its stopping state only resets in group.start(), so every
+      // reconcile-based recovery rejects on the latch, and a per-channel
+      // start for an already torn-down channel early-returns 200
+      // `{changed: false}` (nothing relaunched) while the persisted
+      // `stopped` record removes even the daemon-restart self-heal: the
+      // channel is dead while start reports success. Clearing the group
+      // lets the next operation create a fresh one; the surviving workers
+      // of the rejected stop are orphaned by design — an unrecoverable
+      // half-stopped group is worse than a leaked child the standalone
+      // pidfile path can still signal (R14).
+      group = undefined;
+      try {
+        release();
+      } catch {
+        // The release failure may be exactly what rejected; the lost-group
+        // cleanup proceeds regardless (a stuck lease is recovered by the
+        // next reserve no-op, the latch is not).
+      }
+      commit(undefined, []);
       throw classifyFailure(error, 'channel_worker_stop_failed', {
         ...(stoppedChannels.length > 0 ? { stoppedChannels } : {}),
       });
@@ -826,7 +904,10 @@ export function createChannelWorkerManager(
         setTransition('reconciling', committedSelection);
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
-          targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+          targetGroups = await opts.resolveGroups(
+            reloadSelection(committedSelection),
+            'reload',
+          );
         } catch (error) {
           setTransition('idle');
           throw error;
@@ -864,7 +945,10 @@ export function createChannelWorkerManager(
         setTransition('reconciling', committedSelection);
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
-          targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+          targetGroups = await opts.resolveGroups(
+            reloadSelection(committedSelection),
+            'reload',
+          );
           assertRequiredOwner(targetGroups, { name, workspaceCwd });
           if (
             targetGroups.filter(
@@ -985,7 +1069,10 @@ export function createChannelWorkerManager(
         setTransition('reconciling', committedSelection);
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
-          targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+          targetGroups = await opts.resolveGroups(
+            reloadSelection(committedSelection),
+            'reload',
+          );
         } catch (error) {
           setTransition('idle');
           throw error;

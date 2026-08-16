@@ -788,6 +788,9 @@ describe('createChannelManagementService', () => {
     // The second group must still be attempted before reporting the loss.
     expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
     expect(result.statePersisted).toBe(false);
+    // Attribution names exactly the workspace whose write failed, so a
+    // retry can target the affected channels (R14).
+    expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
   });
 
   it('does not record state when the stop itself fails (#8975)', async () => {
@@ -916,6 +919,9 @@ describe('createChannelManagementService', () => {
     await expect(service.stop('bot')).rejects.toMatchObject({
       code: 'channel_worker_stop_failed',
       statePersisted: false,
+      // The rethrown error carries attribution too, so the management
+      // route's 500 body can name the failed workspace (R14).
+      statePersistFailedWorkspaces: [WORKSPACE],
     });
 
     expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
@@ -987,6 +993,9 @@ describe('createChannelManagementService', () => {
     await expect(service.stop('bot')).rejects.toMatchObject({
       code: 'channel_worker_start_failed',
       statePersisted: false,
+      // Single-name record: attribution names THIS workspace's canonical
+      // form, the one whose write failed (R14).
+      statePersistFailedWorkspaces: [path.resolve(WORKSPACE)],
     });
 
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
@@ -1452,6 +1461,187 @@ describe('createChannelManagementService', () => {
     }
 
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('builds the restart clear store from the canonical workspace under divergent forms (R14)', async () => {
+    // Divergent-canonical twin of the restart clear pin: with a
+    // symlinked workspace the daemon state file lives under the
+    // CANONICAL path's hash. Constructing the clear store from the raw
+    // opts path reads/writes a DIFFERENT file than the one the stop
+    // record was persisted under — the clear misses, the R14 reload
+    // filter (and a mode-`all` relaunch's restore filter) still sees
+    // `stopped`, and the recovery resolves while the channel stays down.
+    // The recovery test above pins the RECONCILE side; this pins the
+    // STORE derivation side of the same hazard (R9-17 doctrine:
+    // argument-sensitive path mocks make the split observable).
+    const { service, manager } = setup({ committedNames: [] });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: `/canonical${WORKSPACE}`,
+          primary: true,
+        },
+      ],
+    });
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === WORKSPACE ? `/canonical${WORKSPACE}` : path.resolve(p),
+    );
+    mockChannelStateStore.mockImplementation((filePath: string) => ({
+      readAll: vi.fn(() =>
+        filePath === daemonChannelRuntimeStatePath(`/canonical${WORKSPACE}`)
+          ? { bot: 'stopped' }
+          : {},
+      ),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: (name: string, state: 'active' | 'stopped') => {
+        try {
+          mockChannelStateStoreSet(name, state);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      trySetMany: mockChannelStateStoreTrySetMany,
+    }));
+
+    try {
+      await service.restart('bot');
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+
+    // The store is constructed with the CANONICAL-derived path, and the
+    // clear landed on the seeded file before the reconcile.
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(`/canonical${WORKSPACE}`),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'active');
+    expect(mockChannelStateStoreSet).toHaveBeenCalledBefore(
+      manager.reloadWorkspace,
+    );
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('clears the retained crash diagnostic when a crash-dead start recovers (R14)', async () => {
+    // The start/restart crash-dead routes retain a reconcile failure as
+    // the channel's runtime diagnostic; without lifecycle pins a
+    // delete/re-retain regression reads green through the error path
+    // alone. First attempt rejects and seeds the diagnostic; the second
+    // recovers and list() must report the channel connected again — a
+    // stale retained error would keep claiming a crash that is gone.
+    const { service, manager } = setup({ committedNames: [] });
+    const deadWorker = {
+      enabled: true,
+      state: 'failed' as const,
+      channels: ['bot'],
+      error: 'Channel worker restart budget exhausted.',
+      workspaceId: 'primary',
+      workspaceCwd: WORKSPACE,
+      primary: true,
+    };
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [deadWorker],
+    });
+    manager.reloadWorkspace.mockRejectedValueOnce(
+      Object.assign(new Error('workspace settings exploded'), {
+        code: 'channel_worker_start_failed',
+      }),
+    );
+
+    await expect(service.start('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+    expect((await service.list()).instances['bot']?.runtime).toMatchObject({
+      state: 'error',
+      lastError: expect.stringContaining('workspace settings exploded'),
+    });
+
+    // The worker recovers on the second attempt.
+    vi.mocked(manager.committedChannelNames).mockReturnValue(['bot']);
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          ...deadWorker,
+          state: 'running' as const,
+          error: undefined,
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+        },
+      ],
+    });
+
+    await service.start('bot');
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'connected',
+    });
+  });
+
+  it('replaces the retained diagnostic when a crash-dead recovery rejects again (R14)', async () => {
+    // A recovery that fails AGAIN must replace the retained diagnostic
+    // with the latest failure — a set-once regression leaves the stale
+    // first error as the only trace of the current state.
+    const { service, manager } = setup({ committedNames: [] });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+    manager.reloadWorkspace.mockRejectedValueOnce(
+      Object.assign(new Error('first failure'), {
+        code: 'channel_worker_start_failed',
+      }),
+    );
+
+    await expect(service.restart('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+    expect((await service.list()).instances['bot']?.runtime).toMatchObject({
+      state: 'error',
+      lastError: expect.stringContaining('first failure'),
+    });
+
+    manager.reloadWorkspace.mockRejectedValueOnce(
+      Object.assign(new Error('second failure'), {
+        code: 'channel_worker_start_failed',
+      }),
+    );
+
+    await expect(service.start('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+    expect((await service.list()).instances['bot']?.runtime).toMatchObject({
+      state: 'error',
+      lastError: expect.stringContaining('second failure'),
+    });
   });
 
   it('records a confirmed stop during a starting window (R9-27)', async () => {
@@ -1980,6 +2170,65 @@ describe('createChannelManagementService', () => {
 
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+  });
+
+  it('clears a persisted stopped record before a crash-dead start recovers (R14)', async () => {
+    // Start-door twin of the restart clear pin (#8975): the crash-dead
+    // start route shares the recovery branch, so the seeded-stopped-record
+    // shape must be pinned here too — without a twin, deleting the clear
+    // from start() alone (while restart() keeps it) ships green, and an
+    // explicitly stopped channel recovered through START reconnects
+    // against the recorded stop.
+    const { service, manager } = setup({ committedNames: [] });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+    mockChannelStateStore.mockImplementation((filePath: string) => ({
+      readAll: vi.fn(() =>
+        filePath === daemonChannelRuntimeStatePath(WORKSPACE)
+          ? { bot: 'stopped' }
+          : {},
+      ),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: (name: string, state: 'active' | 'stopped') => {
+        try {
+          mockChannelStateStoreSet(name, state);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      trySetMany: mockChannelStateStoreTrySetMany,
+    }));
+
+    await service.start('bot');
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(WORKSPACE),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'active');
+    // The clear must land BEFORE the reconcile, twin of the restart
+    // pin: the R14 reload-selection filter reads the record at resolve
+    // time, so a later write would drop the requested name from the
+    // recovery target (#8975, R14).
+    expect(mockChannelStateStoreSet).toHaveBeenCalledBefore(
+      manager.reloadWorkspace,
+    );
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
   });
 
   it('rejects an inactive cross-workspace start before lifecycle mutation', async () => {

@@ -9,7 +9,7 @@ import {
   channelRuntimeStatePath,
 } from './channel-state-store.js';
 import {
-  isProcessSignalable,
+  classifyProcessAccess,
   peekServiceInfo,
   readServiceInfo,
   signalService,
@@ -172,7 +172,39 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       return;
     }
 
-    if (!isProcessSignalable(info.pid)) {
+    const access = classifyProcessAccess(info.pid);
+    if (access === 'dead') {
+      // The service crashed in the window between readServiceInfo's
+      // liveness check (which kept the pidfile) and this probe: the same
+      // shape as the crashed-service path above — record the channels as
+      // stopped, clean up the pidfile, exit success. The old boolean
+      // guard misdiagnosed this ESRCH as "another user", exiting 1 with
+      // the wrong message, no stop record, and the stale pidfile left
+      // behind; a `set -e`/`&&` teardown then aborts and the next bare
+      // `qwen channel start` resurrects the channels (#8975, R14).
+      removeServiceInfo();
+      if (info.channels.length === 0) {
+        writeStdoutLine('No channel service is running.');
+      } else {
+        const recorded = recordStoppedChannels(
+          info.workspaceCwd,
+          info.channels,
+        );
+        if (recorded) {
+          writeStdoutLine(
+            'No channel service is running. Recorded the crashed service channels as stopped.',
+          );
+        } else {
+          // Loss notice on the best-effort sink (R11-13).
+          writeStdoutLineBestEffort(
+            'No channel service is running. Could not record the crashed service channels; --channel all may restart them.',
+          );
+        }
+      }
+      process.exit(0);
+      return;
+    }
+    if (access === 'other-user') {
       // Alive but owned by another user (EPERM — a service running under
       // a different account on a shared HOME/QWEN_HOME). We cannot signal
       // it, so stop it from that user's session: recording its RUNNING
@@ -199,8 +231,16 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     // workspace the service was started from AND the legacy global file,
     // so a restart from a DIFFERENT workspace (global singleton service,
     // commonly user-level config) honors the stop too; pidfiles from older
-    // releases carry no workspace and write the legacy file only.
-    const recorded = recordStoppedChannels(info.workspaceCwd, info.channels);
+    // releases carry no workspace and write the legacy file only. A LIVE
+    // zero-channel service records nothing and must not print the
+    // durable-stop guidance: the two empty `trySetMany` calls are
+    // disk-write-free no-ops returning true, so without this guard the
+    // 'stay stopped' promise prints with zero recorded stops — and a user
+    // who later adds channel config and runs a bare start gets everything
+    // started, contradicting it. Mirror the crashed-path guard (R14).
+    const hadChannels = info.channels.length > 0;
+    const recorded =
+      !hadChannels || recordStoppedChannels(info.workspaceCwd, info.channels);
 
     if (!signalService(info.pid, 'SIGTERM')) {
       // This branch exits before the recorded-conditional message below,
@@ -235,15 +275,19 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       writeStdoutLine('Service killed.');
     }
 
-    if (recorded) {
-      writeStdoutLine(
-        'Stopped channels stay stopped until started again by name: qwen channel start <name>.',
-      );
-    } else {
-      // Loss notice on the best-effort sink (R11-13).
-      writeStdoutLineBestEffort(
-        'Warning: could not persist the stopped record; --channel all may restart these channels.',
-      );
+    // Zero-channel stop: nothing was recorded, so neither the
+    // durable-stop guidance nor the loss warning applies (R14).
+    if (hadChannels) {
+      if (recorded) {
+        writeStdoutLine(
+          'Stopped channels stay stopped until started again by name: qwen channel start <name>.',
+        );
+      } else {
+        // Loss notice on the best-effort sink (R11-13).
+        writeStdoutLineBestEffort(
+          'Warning: could not persist the stopped record; --channel all may restart these channels.',
+        );
+      }
     }
     process.exit(0);
   },

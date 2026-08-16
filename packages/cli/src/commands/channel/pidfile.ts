@@ -181,22 +181,39 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
+ * Access classification for a stop probe: alive-and-signalable, alive
+ * under ANOTHER user (EPERM), or confirmed dead (ESRCH / invalid pid).
+ * A bare signalable boolean collapses ESRCH and EPERM into one `false`:
+ * a service crashing in the window between the pidfile liveness check
+ * and signal delivery would be misdiagnosed as "running under a
+ * different user" — exit 1 with the wrong message, no crash-path stop
+ * record, and the stale pidfile left behind (#8975, R14).
+ */
+export function classifyProcessAccess(
+  pid: number,
+): 'signalable' | 'other-user' | 'dead' {
+  if (!isValidPid(pid)) {
+    return 'dead';
+  }
+
+  try {
+    process.kill(pid, 0);
+    return 'signalable';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+      ? 'other-user'
+      : 'dead';
+  }
+}
+
+/**
  * True when the process is alive AND signalable by this user. A live pid
  * that raises EPERM belongs to another user (a shared HOME/QWEN_HOME):
  * callers must not signal it, must not unlink its pidfile, and must not
  * record its channels as stopped (#8975).
  */
 export function isProcessSignalable(pid: number): boolean {
-  if (!isValidPid(pid)) {
-    return false;
-  }
-
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return classifyProcessAccess(pid) === 'signalable';
 }
 
 /**

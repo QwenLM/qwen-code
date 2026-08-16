@@ -9,7 +9,7 @@ import {
   canonicalizeWorkspacePath,
   sanitizeLogText,
 } from '@qwen-code/channel-base';
-import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
+import { writeStderrLineBestEffort } from '../../utils/stdioHelpers.js';
 
 /**
  * Per-channel runtime state persisted by the channel service. `--channel all`
@@ -40,14 +40,21 @@ interface ChannelStateFile {
    * stored map on every stop — re-stopping an already-stopped channel
    * re-asserts the same entries. The snapshot matches, so the merge loop
    * would drop the re-stop and the explicitly re-stopped channel
-   * resurrects on `--channel all`. Every store rewrite bumps
-   * `generation`, so the watermark scopes the re-stop detection: when
-   * the generation moved MORE than the number of entries added since the
-   * snapshot, at least one content-preserving rewrite (a re-stop)
-   * happened, and snapshot-identical entries are re-applied even if a
-   * concurrent new stop also changed the entry set. A moved-but-content-
-   * equal generation is the zero-added-entries special case. Re-applying
-   * is limited to snapshot-identical entries, so an explicit restart
+   * resurrects on `--channel all`. Every store write bumps `generation`
+   * BY THE NUMBER OF ENTRIES WRITTEN (R14), so the watermark scopes the
+   * re-stop detection arithmetically: each entry added since the
+   * snapshot accounts for exactly one generation step, so when the
+   * generation moved MORE than the number of entries added, at least one
+   * write touched an entry that was NOT new — a re-stop — and
+   * snapshot-identical entries are re-applied even when a batched stop
+   * mixes the re-stop with a new entry in a single write (the production
+   * shape: `recordStoppedChannels` stops a service's whole channel list
+   * in ONE `setMany`; a per-rewrite bump of 1 made that mixed batch
+   * indistinguishable from a pure new stop, dropping the re-stop, R13-10).
+   * A pure new stop keeps `delta == added` (no rewrite detected — the
+   * comparison cannot relax to `>=`). A moved-but-content-equal
+   * generation is the zero-added-entries special case. Re-applying is
+   * limited to snapshot-identical entries, so an explicit restart
    * recorded since still wins over a stale adopted stop (the R9-3
    * direction stays closed). The mtime-based watermark this replaced
    * was unreliable in both directions: coarse-mtime filesystems
@@ -60,12 +67,15 @@ interface ChannelStateFile {
    */
   adoptedLegacyGeneration?: number;
   /**
-   * Monotonic rewrite counter stamped by every `applyChange` write:
-   * files created here start at 0, every rewrite bumps it (R11-14).
-   * Adoption diffs the legacy file's generation against the recorded
-   * `adoptedLegacyGeneration` watermark to see re-stops the content diff
-   * cannot. External mtime bumps cannot forge it and coarse filesystem
-   * granularity cannot hide it.
+   * Monotonic write counter stamped by every `applyChange` write: files
+   * created here start at 0, every write bumps it BY THE NUMBER OF
+   * ENTRIES THE WRITE SETS (a delete-only prune bumps by 1) (R11-14,
+   * R14). Adoption diffs the legacy file's generation against the
+   * recorded `adoptedLegacyGeneration` watermark to see re-stops the
+   * content diff cannot — the per-entry bump is what makes a batched
+   * re-stop-plus-new-stop write visible there (see
+   * `adoptedLegacyGeneration`). External mtime bumps cannot forge it and
+   * coarse filesystem granularity cannot hide it.
    */
   generation?: number;
 }
@@ -152,7 +162,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     // silently coerced to empty otherwise: the stops it carried are lost
     // with no trace, so warn like every other discard path (#8975).
     if (!parsed) {
-      writeStoreWarning(
+      writeStderrLineBestEffort(
         `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
       );
     }
@@ -166,7 +176,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     // open/read failure (EACCES/EIO/EISDIR on a shared ~/.qwen): the
     // unadopted stops may resurrect on the next start, so leave a trace
     // (#8975).
-    writeStoreWarning(
+    writeStderrLineBestEffort(
       `[Channel] Warning: could not read legacy channel state file ${legacyPath}; recorded stops may not be honored.`,
     );
     return;
@@ -187,7 +197,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       // Abort this sync with a trace; adoption runs on every start, so
       // the next one retries once the condition clears (#8975).
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        writeStoreWarning(
+        writeStderrLineBestEffort(
           `[Channel] Warning: could not read channel state file ${targetPath}; legacy adoption skipped for this start.`,
         );
         return;
@@ -200,7 +210,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   // it valid forever after — no later read/prune can warn about the
   // discarded records, so the discard itself must (#8975).
   if (targetExisted && target === undefined) {
-    writeStoreWarning(
+    writeStderrLineBestEffort(
       `[Channel] Warning: could not read channel state file ${targetPath}; treating all channels as active.`,
     );
   }
@@ -210,21 +220,26 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   const snapshot = target?.adoptedLegacy;
   // A rewrite of the legacy file re-asserts snapshot-identical entries:
   // the only legacy writer (this PR's own no-workspace stop fallback)
-  // echoes the WHOLE stored map on every write and bumps the generation,
-  // so a rewrite is a re-stop signal even when it also CHANGES the
-  // content. Scope the detection by the watermark: when the generation
-  // moved MORE than the number of entries added since the snapshot, at
-  // least one content-preserving rewrite happened in between — a re-stop
-  // of an adopted entry that the plain content diff cannot see (a
-  // concurrent new stop otherwise masks it, resurrecting the re-stopped
-  // channel on the next `--channel all` — the exact #8975 regression).
-  // An entry-set-UNCHANGED rewrite is the special case where the delta
-  // exceeds zero added entries. A negative recorded watermark predates
-  // generation recording: rewrites before the first stamped generation
-  // cannot be counted, so keep the content-only diff there (R11-14). The
-  // generation lives in the content, so external mtime bumps (touch,
-  // backup restore) cannot forge the signal and coarse-mtime filesystems
-  // cannot hide a real rewrite.
+  // echoes the WHOLE stored map on every write and bumps the generation
+  // BY THE NUMBER OF ENTRIES WRITTEN, so a re-stop is arithmetically
+  // visible even when it shares ONE batched write with a new stop. Scope
+  // the detection by the watermark: every entry added since the snapshot
+  // accounts for exactly one generation step, so when the generation
+  // moved MORE than the number of entries added, at least one write
+  // touched a non-new (snapshot-identical) entry in between — a re-stop
+  // that the plain content diff cannot see (a concurrent new stop in the
+  // same batched write otherwise masks it, resurrecting the re-stopped
+  // channel on the next `--channel all` — the exact #8975 regression,
+  // R13-10). A pure new stop keeps `delta == added` and is NOT a
+  // rewrite (the comparison cannot relax to `>=`, or a plain new stop
+  // would re-apply snapshot-identical entries over an explicit restart —
+  // the R9-3 direction). An entry-set-UNCHANGED rewrite is the special
+  // case where the delta exceeds zero added entries. A negative recorded
+  // watermark predates generation recording: rewrites before the first
+  // stamped generation cannot be counted, so keep the content-only diff
+  // there (R11-14). The generation lives in the content, so external
+  // mtime bumps (touch, backup restore) cannot forge the signal and
+  // coarse-mtime filesystems cannot hide a real rewrite.
   const addedSinceSnapshot = snapshot
     ? Object.keys(legacyChannels).filter((name) => snapshot[name] === undefined)
         .length
@@ -303,7 +318,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   } catch {
     // Best-effort migration; surface a failure so a later resurrection of
     // the unadopted stops has a traceable cause (#8975).
-    writeStoreWarning(
+    writeStderrLineBestEffort(
       `[Channel] Warning: could not adopt legacy channel state from ${legacyPath}; recorded stops may not be honored.`,
     );
   }
@@ -389,24 +404,6 @@ function sameChannelMaps(
 }
 
 /**
- * Default warning sink for the store: provably non-fatal. A failing
- * `process.stderr.write` (e.g. ENOSPC on a redirected log — the same disk
- * condition that fails the state write) does not throw; Node emits an
- * asynchronous `'error'` event on `process.stderr` that terminates the
- * process with exit 1 past any surrounding try/catch. Store warnings are
- * incidental diagnostics and must not defeat the store's never-fails
- * contract, so guard the async channel while nothing else listens (#8975).
- */
-function writeStoreWarning(message: string): void {
-  if (process.stderr.listenerCount('error') === 0) {
-    process.stderr.on('error', () => {
-      // The stderr target is gone; this diagnostic is already lost.
-    });
-  }
-  writeStderrLineSafe(message);
-}
-
-/**
  * Channel runtime state persisted by the channel service: the daemon's
  * per-workspace file for `qwen serve`, the standalone commands' own file
  * otherwise. The file is owned by the service (never user-edited), so reads
@@ -432,7 +429,15 @@ export class ChannelStateStore {
       _testReadFileSync?: (filePath: string) => string;
     } = {},
   ) {
-    this.warn = opts.onWarning ?? writeStoreWarning;
+    // Default warning sink: the shared best-effort stderr writer. Store
+    // warnings are incidental diagnostics that fire exactly when the disk
+    // is failing, so they must never terminate the process (a failing
+    // `process.stderr.write` raises an asynchronous `'error'` event past
+    // any try/catch) nor defeat the store's never-fails contract. The
+    // store previously carried a byte-for-byte private copy of this guard
+    // (`writeStoreWarning`); the shared helper keeps the async-crash
+    // defense in ONE place (R13-2).
+    this.warn = opts.onWarning ?? writeStderrLineBestEffort;
     this.readImpl = opts._testReadFileSync ?? ((p) => readFileSync(p, 'utf-8'));
   }
 
@@ -490,7 +495,7 @@ export class ChannelStateStore {
   set(name: string, state: ChannelRuntimeState): void {
     this.applyChange((channels) => {
       channels[name] = state;
-    });
+    }, 1);
   }
 
   setMany(names: readonly string[], state: ChannelRuntimeState): void {
@@ -499,7 +504,7 @@ export class ChannelStateStore {
       for (const name of names) {
         channels[name] = state;
       }
-    });
+    }, names.length);
   }
 
   /**
@@ -549,28 +554,47 @@ export class ChannelStateStore {
    * records `active`). Locally recorded entries are still pruned, keeping
    * the removed-and-re-added-starts-fresh semantic for this workspace's
    * own stops.
+   *
+   * The initial load reads via the fail-closed `readFileFull()`, NOT the
+   * tolerant `readAll()`: a transient non-ENOENT READ failure means the
+   * content is UNKNOWN, not empty. Returning `{}` there would let prune
+   * succeed on an empty view, so `selectActiveChannels` would resurrect
+   * every explicitly stopped channel and the post-connect batched `active`
+   * write would erase the records permanently — and the documented caller
+   * fallback (catch → tolerant `readAll()` + warning) would be dead code
+   * for the read-failure class it exists for (R13-11). Throwing lets that
+   * fallback actually run; a missing or CORRUPT file still behaves like an
+   * empty map (the never-fails class `readAll` documents) (#8975).
    */
   prune(
     configuredNames: readonly string[],
     opts: { preserveAdopted?: boolean } = {},
   ): Record<string, ChannelRuntimeState> {
-    const states = this.readAll();
+    const file = this.readFileFull();
+    const states = file?.channels ?? Object.create(null);
     if (configuredNames.length === 0) return states;
     const configured = new Set(configuredNames);
     let stale = Object.keys(states).filter((name) => !configured.has(name));
     if (stale.length === 0) return states;
     if (opts.preserveAdopted) {
-      const adopted = this.readFileFull()?.adoptedLegacy;
+      const adopted = file?.adoptedLegacy;
       if (adopted) {
         stale = stale.filter((name) => adopted[name] === undefined);
         if (stale.length === 0) return states;
       }
     }
-    this.applyChange((channels) => {
-      for (const name of stale) {
-        delete channels[name];
-      }
-    });
+    this.applyChange(
+      (channels) => {
+        for (const name of stale) {
+          delete channels[name];
+        }
+      },
+      // Delete-only rewrite: bumps the generation by 1 so the counter stays
+      // a monotonic per-rewrite watermark (prune only ever writes the
+      // workspace-scoped store, never the legacy file the adoption diff
+      // reads, so the exact bump here is not load-bearing) (#8975).
+      1,
+    );
     for (const name of stale) {
       delete states[name];
     }
@@ -579,6 +603,7 @@ export class ChannelStateStore {
 
   private applyChange(
     mutate: (channels: Record<string, ChannelRuntimeState>) => void,
+    entriesWritten: number,
   ): void {
     // Read via the full-file reader: the adoptedLegacy snapshot must
     // survive every production write, or the next adoption sync loses its
@@ -600,11 +625,15 @@ export class ChannelStateStore {
     }
     const data: ChannelStateFile = {
       version: STORE_VERSION,
-      // Every rewrite bumps the generation watermark (R11-14): a new file
-      // starts at 0, so the no-workspace stop fallback echoing the legacy
-      // map is always generation-distinguishable from the snapshot the
-      // next adoption recorded.
-      generation: (full?.generation ?? -1) + 1,
+      // Every write bumps the generation watermark BY THE NUMBER OF
+      // ENTRIES WRITTEN (R11-14, R14): a new file starts at 0, so the
+      // no-workspace stop fallback echoing the legacy map is always
+      // generation-distinguishable from the snapshot the next adoption
+      // recorded, and a batched stop mixing a re-stop with a new entry
+      // moves the counter more than the entry set grew — the adoption
+      // watermark arithmetic needs that per-entry identity to see the
+      // re-stop (see `adoptedLegacyGeneration`).
+      generation: (full?.generation ?? -1) + Math.max(1, entriesWritten),
       channels,
       // Preserve the snapshot (and its legacy-generation watermark) across
       // writes this store does not own. When no snapshot exists to

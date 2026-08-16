@@ -5,7 +5,7 @@ const mockPeekServiceInfo = vi.hoisted(() => vi.fn());
 const mockSignalService = vi.hoisted(() => vi.fn());
 const mockWaitForExit = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
-const mockIsProcessSignalable = vi.hoisted(() => vi.fn());
+const mockClassifyProcessAccess = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -65,7 +65,7 @@ vi.mock('./pidfile.js', () => ({
   signalService: mockSignalService,
   waitForExit: mockWaitForExit,
   removeServiceInfo: mockRemoveServiceInfo,
-  isProcessSignalable: mockIsProcessSignalable,
+  classifyProcessAccess: mockClassifyProcessAccess,
 }));
 
 vi.mock('./channel-state-store.js', () => ({
@@ -96,8 +96,9 @@ async function invokeStop(argv: Record<string, unknown> = {}): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   // The common case: the service runs as THIS user, so it is signalable.
-  // The EPERM other-user branch (R12-48) overrides this to false.
-  mockIsProcessSignalable.mockReturnValue(true);
+  // The EPERM other-user branch (R12-48) overrides this to 'other-user',
+  // the ESRCH-between-probes crash window (R14) to 'dead'.
+  mockClassifyProcessAccess.mockReturnValue('signalable');
 });
 
 afterEach(() => {
@@ -148,7 +149,7 @@ describe('stopCommand', () => {
       channels: ['telegram'],
       workspaceCwd: '/workspace/a',
     });
-    mockIsProcessSignalable.mockReturnValue(false);
+    mockClassifyProcessAccess.mockReturnValue('other-user');
     vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
     });
@@ -167,6 +168,104 @@ describe('stopCommand', () => {
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     // No signal may be sent to another user's process.
     expect(mockSignalService).not.toHaveBeenCalled();
+  });
+
+  it('records the crashed channels when the service dies between the liveness check and the signal probe (R14)', async () => {
+    // readServiceInfo's liveness check kept the pidfile (the process was
+    // alive), but the service crashed before the signal probe: ESRCH.
+    // The old boolean guard collapsed ESRCH into the same `false` as
+    // EPERM and misdiagnosed the dead pid as "running under a different
+    // user" — exit 1 with the wrong message, no crash-path stop record,
+    // and the stale pidfile left behind; a `set -e`/&& teardown then
+    // aborts and the next bare start resurrects the channels. The dead
+    // probe takes the crashed-service shape instead.
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram', 'feishu'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockClassifyProcessAccess.mockReturnValue('dead');
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Recorded the crashed service channels as stopped',
+      ),
+    );
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('running under a different user'),
+    );
+    // Scoped AND legacy writes, like every other explicit stop.
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      'stopped',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/standalone//workspace/a/channel-state.json',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
+    // The dead process's pidfile is cleaned up.
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
+    // No signal was sent.
+    expect(mockSignalService).not.toHaveBeenCalled();
+  });
+
+  it('prints only the bare notice when a zero-channel service dies between probes (R14)', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: [],
+      workspaceCwd: '/workspace/a',
+    });
+    mockClassifyProcessAccess.mockReturnValue('dead');
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'No channel service is running.',
+    );
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
+  });
+
+  it('surfaces the loss when the window-crash record fails to persist (R14)', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockClassifyProcessAccess.mockReturnValue('dead');
+    mockChannelStateStoreSetMany.mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    // Loss notice on the best-effort sink, twin of the crashed-path
+    // persistence-failure pin (R12-3).
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Recorded the crashed service channels'),
+    );
   });
 
   it('stops daemon-managed channels remotely without touching the pidfile', async () => {
@@ -205,8 +304,15 @@ describe('stopCommand', () => {
     ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
     // A response WITHOUT statePersisted (e.g. a long-running pre-#8975
     // daemon) must not print the durability warning: only an explicit
-    // `false` means the record was lost.
+    // `false` means the record was lost. Pin BOTH sinks (R12-3
+    // doctrine): production emits the loss warning on the best-effort
+    // sink, so a refactor emitting it alongside the success message
+    // there must fail — the loud-sink negative alone does not catch it
+    // (R14).
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
@@ -636,8 +742,14 @@ describe('stopCommand', () => {
     );
     // Mirror-pin the ternary's other half (R9-22): a refactor emitting
     // BOTH messages when the record persisted must fail here, like its
-    // failure-path twin below.
+    // failure-path twin below. Pin BOTH sinks (R12-3 doctrine): the
+    // failure path emits the loss notice on the best-effort sink, so a
+    // refactor emitting it there alongside the success message must fail
+    // — the loud-sink negative alone does not catch it (R14).
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
       expect.stringContaining('Could not record the crashed service channels'),
     );
     // The crashed-service stop is semantically successful (the record was
@@ -792,6 +904,19 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       'No channel service is running.',
     );
+    // Zero-channel stop records nothing and must NOT print the
+    // durable-stop guidance (the crashed path's channels.length > 0
+    // guard mirrored): the empty trySetMany no-ops return true, so the
+    // unguarded guidance printed a 'stay stopped' promise with zero
+    // recorded stops — a later bare start after adding config would
+    // contradict it. Loss warning is equally inapplicable (R14).
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
+    );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     expect(process.exit).toHaveBeenCalledWith(0);
     // The completion message must precede the exit, twin of the clean
     // stop's pin: under the no-op exit mock a relocated-below-exit write
@@ -830,6 +955,15 @@ describe('stopCommand', () => {
       ['telegram'],
       'stopped',
     );
+    // Write-COUNT pin (R14): without a workspace the scoped path IS the
+    // legacy file — dropping recordStoppedChannels' `!workspaceCwd`
+    // guard double-writes it, advancing the legacy generation watermark
+    // by 2 per stop and forging a rewrite signal that re-applies
+    // snapshot-identical entries over an explicit restart (R9-3 in
+    // reverse). The two-file tests pin call counts for exactly this
+    // reason; the one-file case must too.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
@@ -860,6 +994,9 @@ describe('stopCommand', () => {
       ['telegram'],
       'stopped',
     );
+    // Write-COUNT pin, twin of the crashed-path legacy test (R14).
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
@@ -997,6 +1134,26 @@ describe('stopCommand', () => {
     expect(mockSignalService).toHaveBeenNthCalledWith(2, 1234, 'SIGKILL');
     expect(mockWaitForExit).toHaveBeenNthCalledWith(1, 1234, 5000);
     expect(mockWaitForExit).toHaveBeenNthCalledWith(2, 1234, 2000);
+    // Presence AND ordering pin for the escalation notice (R14): the user
+    // of a hung service must see the graceful window closed before the
+    // kill — deleting the stderr write or relocating it below the
+    // SIGKILL/wait pair shipped green before (the signal-sequence pins
+    // alone do not observe it).
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Sending SIGKILL'),
+    );
+    const sigkillNoticeCall = mockWriteStderrLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Sending SIGKILL'),
+    );
+    expect(sigkillNoticeCall).toBeGreaterThanOrEqual(0);
+    const noticeOrder =
+      mockWriteStderrLine.mock.invocationCallOrder[sigkillNoticeCall]!;
+    expect(noticeOrder).toBeGreaterThan(
+      mockWaitForExit.mock.invocationCallOrder[0]!,
+    );
+    expect(noticeOrder).toBeLessThan(
+      mockSignalService.mock.invocationCallOrder[1]!,
+    );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service killed.');
     expect(mockRemoveServiceInfo).toHaveBeenCalled();
     // The record persisted, so the conditional tail takes the durable half

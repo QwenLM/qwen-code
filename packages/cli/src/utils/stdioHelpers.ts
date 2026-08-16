@@ -67,8 +67,8 @@ export const writeStderrLineSafe = (message: string): void => {
 };
 
 /**
- * `writeStdoutLine` that cannot terminate the process — the stdout analogue
- * of the channel state store's `writeStoreWarning`.
+ * `writeStdoutLine` that cannot terminate the process — the stdout twin of
+ * `writeStderrLineBestEffort`.
  *
  * A try/catch alone is not enough: when stdout is redirected to a failing
  * target (a dead pipe after `qwen … | head`, a full daemon-log disk), Node

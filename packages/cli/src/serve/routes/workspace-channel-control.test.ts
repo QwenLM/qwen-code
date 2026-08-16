@@ -141,8 +141,10 @@ describe('DELETE /workspace/channel', () => {
       'stopped',
     );
     // The record persisted, so the happy-path response shape stays
-    // unchanged (the flag only appears on failure) (#8975).
+    // unchanged (the flag only appears on failure) (#8975) — attribution
+    // included (R14).
     expect(response.body).not.toHaveProperty('statePersisted');
+    expect(response.body).not.toHaveProperty('statePersistFailedWorkspaces');
     // The internal manager→route persistence plumbing must not leak into
     // the HTTP body: the SDK types this response without it, and a raw
     // API client must not start depending on an undocumented field
@@ -226,6 +228,13 @@ describe('DELETE /workspace/channel', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.statePersisted).toBe(false);
+    // Attribution for the loss (R14): a bare boolean gives the client no
+    // retry handle — a re-issued stop takes the `{changed: false}` path
+    // and can never re-record the OTHER workspace's torn-down set, so
+    // the response must name the workspace whose write failed.
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+    ]);
     expect(mockChannelStateStoreInstances).toHaveLength(2);
     expect(mockChannelStateStoreInstances[1]!.path).toBe(
       daemonChannelRuntimeStatePath('/workspace/b'),
@@ -287,6 +296,7 @@ describe('DELETE /workspace/channel', () => {
     // statePersisted === false, and a defaulted flag would print a false
     // durability alarm on every ordinary stop failure (#8975).
     expect(response.body).not.toHaveProperty('statePersisted');
+    expect(response.body).not.toHaveProperty('statePersistFailedWorkspaces');
   });
 
   it('records nothing when no channels were running', async () => {
@@ -344,6 +354,8 @@ describe('DELETE /workspace/channel', () => {
     expect(response.status).toBe(200);
     expect(response.body.changed).toBe(true);
     expect(response.body.statePersisted).toBe(false);
+    // Attribution names the workspace whose write failed (R14).
+    expect(response.body.statePersistFailedWorkspaces).toEqual(['/workspace']);
   });
 
   it('surfaces a lost stop record on the failure path too (#8975)', async () => {
@@ -390,6 +402,10 @@ describe('DELETE /workspace/channel', () => {
     expect(response.status).toBe(500);
     expect(response.body.code).toBe('channel_worker_stop_failed');
     expect(response.body.statePersisted).toBe(false);
+    // The failure body carries attribution too (R14).
+    expect(response.body.statePersistFailedWorkspaces).toEqual([
+      '/workspace/a',
+    ]);
   });
 
   it('omits statePersisted from a failed stop whose record persisted (#8975)', async () => {
@@ -412,6 +428,7 @@ describe('DELETE /workspace/channel', () => {
     expect(response.status).toBe(500);
     // The torn-down record persisted, so the error body keeps its shape.
     expect(response.body).not.toHaveProperty('statePersisted');
+    expect(response.body).not.toHaveProperty('statePersistFailedWorkspaces');
     expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
       ['telegram'],
       'stopped',

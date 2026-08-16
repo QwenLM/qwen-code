@@ -242,6 +242,20 @@ function statePersistedFalse(error: unknown): boolean {
   }
 }
 
+function statePersistFailedWorkspaces(error: unknown): string[] | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  try {
+    const value = Reflect.get(error, 'statePersistFailedWorkspaces');
+    if (!Array.isArray(value)) return undefined;
+    const workspaces = value.filter(
+      (item): item is string => typeof item === 'string',
+    );
+    return workspaces.length > 0 ? workspaces : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const ERROR_STATUS = new Map<string, number>([
   ['invalid_channel_instance_name', 400],
   ['channel_settings_invalid_name', 400],
@@ -272,6 +286,7 @@ function sendManagementError(res: Response, error: unknown): void {
   const status = code ? ERROR_STATUS.get(code) : undefined;
   if (code && status !== undefined) {
     const raw = error instanceof Error ? error.message : String(error);
+    const failedWorkspaces = statePersistFailedWorkspaces(error);
     res.status(status).json({
       error: sanitizeLogText(redactLogCredentials(raw), MAX_ERROR_LENGTH),
       code,
@@ -279,8 +294,12 @@ function sendManagementError(res: Response, error: unknown): void {
       // the service marks the error when that record ALSO failed to
       // persist: the client has no retry handle, so the loss must ride
       // the error body — mirroring the DELETE route's statePersisted
-      // field (#8975).
+      // field (#8975) and carrying the failed workspaces for a targeted
+      // retry (R14).
       ...(statePersistedFalse(error) ? { statePersisted: false } : {}),
+      ...(failedWorkspaces
+        ? { statePersistFailedWorkspaces: failedWorkspaces }
+        : {}),
     });
     return;
   }

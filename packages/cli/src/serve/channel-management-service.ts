@@ -26,7 +26,10 @@ import type {
 import { isAllChannelSelectionName } from './channel-selection.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
-import { ChannelWorkerControlError } from './channel-worker-manager.js';
+import {
+  ChannelWorkerControlError,
+  isTerminalFailedWorker,
+} from './channel-worker-manager.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerManager,
@@ -83,6 +86,14 @@ export interface ChannelStopResult extends ChannelMutationResult {
    * failure. Absent on the happy path (#8975).
    */
   statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the workspaces whose
+   * state write failed. A bare boolean gives the client no retry handle
+   * — a re-issued stop takes the `{changed: false}` path and can never
+   * re-record another workspace's torn-down set, so the loss must be
+   * attributable for a targeted retry (R14).
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface ChannelPairingRequestsSnapshot {
@@ -287,16 +298,17 @@ export function createChannelManagementService(
   // "starting" and stops may be recorded against it.
   const workspaceWorkerStarting = (): boolean => {
     const target = canonicalForGuard(opts.workspaceCwd);
-    return opts.manager
-      .state()
-      .workers.some(
-        (worker) =>
-          canonicalForGuard(worker.workspaceCwd) === target &&
-          !(worker.state === 'failed' && worker.nextRestartAt === undefined) &&
-          (worker.requestedChannels === undefined ||
-            (worker.state === 'starting' &&
-              worker.channels.some(isAllChannelSelectionName))),
-      );
+    return opts.manager.state().workers.some(
+      (worker) =>
+        canonicalForGuard(worker.workspaceCwd) === target &&
+        // Shared predicate with the manager's committed-names exclusion
+        // and `terminalFailedWorkerFor` below — one definition, three
+        // sites (R14).
+        !isTerminalFailedWorker(worker) &&
+        (worker.requestedChannels === undefined ||
+          (worker.state === 'starting' &&
+            worker.channels.some(isAllChannelSelectionName))),
+    );
   };
 
   // A crash-dead worker in this workspace (restart budget exhausted, no
@@ -312,8 +324,7 @@ export function createChannelManagementService(
     return workerFor(name).find(
       (worker) =>
         canonicalForGuard(worker.workspaceCwd) === target &&
-        worker.state === 'failed' &&
-        worker.nextRestartAt === undefined,
+        isTerminalFailedWorker(worker),
     );
   };
 
@@ -685,16 +696,19 @@ export function createChannelManagementService(
           error instanceof ChannelWorkerControlError &&
           error.stoppedChannels
         ) {
-          // Aggregate the persistence boolean via the DELETE route's
+          // Aggregate the persistence result via the DELETE route's
           // recordChannelsStopped and surface the loss on the rethrown
           // error: under the same disk condition that failed the lease
           // release, the state write can also fail, and the client gets a
           // 500 with no retry handle (the group is already cleared) — the
           // management route's error body must carry the loss, or the
           // torn-down channels silently resurrect on `--channel all`
-          // (#8975).
-          if (!recordChannelsStopped(error.stoppedChannels)) {
+          // (#8975). Carry the failed workspaces too, so a retry can be
+          // targeted at the affected channels (R14).
+          const failedWorkspaces = recordChannelsStopped(error.stoppedChannels);
+          if (failedWorkspaces.length > 0) {
             error.statePersisted = false;
+            error.statePersistFailedWorkspaces = failedWorkspaces;
           }
         } else if (
           error instanceof ChannelWorkerControlError &&
@@ -740,6 +754,10 @@ export function createChannelManagementService(
             ).trySet(name, 'stopped')
           ) {
             error.statePersisted = false;
+            // Single-name record: the failed workspace is this one (R14).
+            error.statePersistFailedWorkspaces = [
+              canonicalForGuard(opts.workspaceCwd),
+            ];
           }
         }
         throw error;
@@ -766,19 +784,30 @@ export function createChannelManagementService(
       // this one name would leave the other torn-down workspaces
       // unrecorded, and they would resurrect on the next `--channel all`
       // start (#8975).
-      const statePersisted = result.stoppedChannels
+      const persistFailedWorkspaces = result.stoppedChannels
         ? recordChannelsStopped(result.stoppedChannels)
         : new ChannelStateStore(
-            daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
-          ).trySet(name, 'stopped');
+              daemonChannelRuntimeStatePath(
+                canonicalForGuard(opts.workspaceCwd),
+              ),
+            ).trySet(name, 'stopped')
+          ? []
+          : [canonicalForGuard(opts.workspaceCwd)];
       diagnostics.delete(name);
       return {
         ...(await resultFor(name, persisted)),
         // Only on failure: the happy-path response shape stays unchanged,
         // but the route's client must be able to tell that the stop record
         // did not persist and the stop is not durable — a persistence
-        // failure must never fail an already-succeeded stop (#8975).
-        ...(statePersisted ? {} : { statePersisted: false }),
+        // failure must never fail an already-succeeded stop (#8975) — and
+        // which workspaces lost their records, so a retry can be targeted
+        // (R14).
+        ...(persistFailedWorkspaces.length === 0
+          ? {}
+          : {
+              statePersisted: false,
+              statePersistFailedWorkspaces: persistFailedWorkspaces,
+            }),
       };
     },
     async restart(name) {

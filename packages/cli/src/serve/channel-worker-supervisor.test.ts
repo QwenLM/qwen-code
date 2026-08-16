@@ -1096,6 +1096,15 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'starting',
       channels: ['all'],
       requestedChannels: ['telegram', 'feishu'],
+      // Adapter pin (R14): the starting window reports every carried
+      // name as `starting` — a regression dropping adapters here (or
+      // reporting `connected` before the ready report) changes what the
+      // management list() shows during crash restarts without any
+      // existing pin noticing.
+      adapters: [
+        { name: 'telegram', state: 'starting' },
+        { name: 'feishu', state: 'starting' },
+      ],
     });
     // The CONNECTED set from the last ready report rides along too: the
     // window's `channels` is the placeholder, so the stop capture
@@ -1118,6 +1127,12 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 22222,
       requestedChannels: ['telegram', 'feishu'],
+      // Adapter pin (R14): the ready report flips the carried set to
+      // `connected` — the second half of the window lifecycle above.
+      adapters: [
+        { name: 'telegram', state: 'connected' },
+        { name: 'feishu', state: 'connected' },
+      ],
     });
     expect(supervisor.snapshot().lastConnectedChannels).toEqual([
       'telegram',

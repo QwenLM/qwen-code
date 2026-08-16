@@ -80,7 +80,14 @@ const mockSelectActiveChannels = vi.hoisted(
     ): string[] =>
       names.filter((name) => {
         if (states[name] === 'stopped') {
-          onSkipped?.(`[Channel] "${name}" skipped (stopped before restart)`);
+          // Route the name through the SAME sanitizer mock the module
+          // under test uses (R14): the real helper embeds
+          // sanitizeLogText(name, 128), so a hand-copied message here
+          // would keep asserting the old format if the production
+          // sanitization (or its arguments) ever changed.
+          onSkipped?.(
+            `[Channel] "${mockSanitizeLogText(name, 128)}" skipped (stopped before restart)`,
+          );
           return false;
         }
         return true;

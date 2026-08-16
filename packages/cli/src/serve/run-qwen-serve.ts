@@ -837,6 +837,8 @@ type ChannelWorkerRuntime = {
   ): ChannelWorkerSupervisor;
   channelServicePidfile: ChannelServicePidfile;
   loadChannelsConfig: (typeof import('../commands/channel/runtime.js'))['loadChannelsConfig'];
+  daemonChannelRuntimeStatePath: (typeof import('../commands/channel/runtime.js'))['daemonChannelRuntimeStatePath'];
+  ChannelStateStore: (typeof import('../commands/channel/channel-state-store.js'))['ChannelStateStore'];
   createChannelWorkerGroup: (typeof import('./channel-worker-group.js'))['createChannelWorkerGroup'];
   createChannelWorkerManager: (
     opts: CreateChannelWorkerManagerOptions,
@@ -853,6 +855,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
     import('../commands/channel/cli-entry-path.js'),
     import('./channel-worker-group.js'),
     import('./channel-worker-manager.js'),
+    import('../commands/channel/channel-state-store.js'),
   ])
     .then(
       ([
@@ -862,10 +865,14 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
         cliEntryPath,
         workerGroup,
         workerManager,
+        channelStateStore,
       ]) => ({
         createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
         channelServicePidfile: pidfile,
         loadChannelsConfig: channelRuntime.loadChannelsConfig,
+        daemonChannelRuntimeStatePath:
+          channelRuntime.daemonChannelRuntimeStatePath,
+        ChannelStateStore: channelStateStore.ChannelStateStore,
         createChannelWorkerGroup: workerGroup.createChannelWorkerGroup,
         createChannelWorkerManager: workerManager.createChannelWorkerManager,
         findCliEntryPath: cliEntryPath.findCliEntryPath,
@@ -6853,6 +6860,53 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          // R14: a names-mode recovery reconcile from the full untrimmed
+          // committedSelection force-starts explicitly stopped SIBLING
+          // channels — the mode-`all` worker's restore filter protects only
+          // mode-`all` selections. Drop names carrying a persisted
+          // `stopped` record before every reload-operation resolve;
+          // explicit by-name start/restart clear the target's own record
+          // before the recovery reload, so the requested name survives.
+          // Never-fails: unreadable state degrades to keeping the name
+          // (the pre-R14 behavior) (#8975).
+          const filterReloadSelection = (
+            selection: ServeChannelSelection,
+            groups: readonly ChannelWorkspaceGroup[],
+          ): ServeChannelSelection => {
+            if (selection.mode !== 'names') return selection;
+            const stateByWorkspace = new Map<string, Record<string, unknown>>();
+            const stoppedIn = (workspaceCwd: string, name: string): boolean => {
+              let states = stateByWorkspace.get(workspaceCwd);
+              if (!states) {
+                // Throw-safe canonical form: the state path is derived from
+                // the canonical workspace (matching clearStoppedRecord /
+                // recordChannelsStopped); canonicalizeWorkspace rethrows
+                // non-ENOENT fs errors, degrade to the resolved form.
+                let canonical: string;
+                try {
+                  canonical = canonicalizeWorkspace(workspaceCwd);
+                } catch {
+                  canonical = path.resolve(workspaceCwd);
+                }
+                states = new workerRuntime.ChannelStateStore(
+                  workerRuntime.daemonChannelRuntimeStatePath(canonical),
+                ).readAll();
+                stateByWorkspace.set(workspaceCwd, states);
+              }
+              return states[name] === 'stopped';
+            };
+            const kept = selection.names.filter((name) => {
+              const owner = groups.find(
+                (group) =>
+                  group.selection.mode === 'names' &&
+                  group.selection.names.includes(name),
+              );
+              return owner ? !stoppedIn(owner.workspaceCwd, name) : true;
+            });
+            return kept.length === selection.names.length
+              ? selection
+              : { mode: 'names', names: kept };
+          };
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             workerRuntime.createChannelWorkerSupervisor;
@@ -6912,6 +6966,7 @@ async function runQwenServeImpl(
           channelWorkerManager = workerRuntime.createChannelWorkerManager({
             resolveGroups: (selection, operation) =>
               resolveRuntimeChannelGroups(selection, candidateApp, operation),
+            filterReloadSelection,
             createGroup,
             reserveLease: reserveChannelServicePidfile,
             releaseLease: () => {
