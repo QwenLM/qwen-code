@@ -138,6 +138,7 @@ describe('fetchDiffCommand handler', () => {
       out: OUT,
     });
     expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
     expect(writeStdoutLineMock).toHaveBeenCalledWith(
       JSON.stringify({
         diffPath: resolve(OUT),
@@ -165,6 +166,10 @@ describe('fetchDiffCommand handler', () => {
     // status`), so the ordering must hold against it too, not just the
     // data call.
     expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
+    // The other half of the invariant (#9194): the data fetch must not
+    // precede authentication — a gh call that beats `gh auth status` races
+    // the very credential it depends on.
+    expect(authOrder).toBeLessThan(ghOrder);
   });
 
   it('exits 1 when the fetch fails', () => {

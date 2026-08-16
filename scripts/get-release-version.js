@@ -180,7 +180,7 @@ function detectRollbackAndGetBaseline(npmDistTag) {
  * All packages that share the same release version. A version is considered
  * "taken" if it exists on *any* of them — not just the main package.
  */
-const PUBLISHED_PACKAGES = [
+export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
   '@qwen-code/audio-capture',
   '@qwen-code/channel-base',
@@ -193,23 +193,63 @@ const PUBLISHED_PACKAGES = [
   '@qwen-code/channel-weixin',
 ];
 
-function doesVersionExist(version) {
+function doesVersionExist(version, { strict = false, shippedTo } = {}) {
   // Check NPM across all published packages
+  const shippedPackages = [];
   for (const pkg of PUBLISHED_PACKAGES) {
     try {
-      const command = `npm view ${pkg}@${version} version 2>/dev/null`;
+      // The best-effort path silences npm's expected E404 noise; strict
+      // mode needs that stderr to tell "absent" from a failed probe.
+      const command = strict
+        ? `npm view ${pkg}@${version} version`
+        : `npm view ${pkg}@${version} version 2>/dev/null`;
       const output = execSync(command).toString().trim();
       if (output === version) {
-        console.error(`Version ${version} already exists on NPM (${pkg}).`);
-        return true;
+        if (!strict) {
+          console.error(`Version ${version} already exists on NPM (${pkg}).`);
+          return true;
+        }
+        shippedPackages.push(pkg);
       }
-    } catch (_error) {
-      // This is expected if the version doesn't exist on this package.
+    } catch (error) {
+      // E404 means the version is absent from this package. Strict mode
+      // guards the force push, so any other probe failure is "cannot
+      // verify" and must throw instead of passing — but once a package
+      // has shipped the refusal is decided, and a throw would mask its
+      // recovery guidance with a probe-failure exit.
+      if (
+        strict &&
+        shippedPackages.length === 0 &&
+        !error.message?.includes('E404')
+      ) {
+        throw new Error(
+          `Failed to verify ${pkg}@${version} on npm: ${error.message}`,
+        );
+      }
     }
   }
+  // Strict mode scans every package instead of stopping at the first hit
+  // so a partial publish's refusal can name everything that shipped. A hit
+  // ends the check: the remaining probes can no longer change the outcome,
+  // and a failed one would mask the refusal's recovery guidance.
+  if (shippedPackages.length > 0) {
+    console.error(
+      `Version ${version} already exists on NPM (${shippedPackages.join(', ')}).`,
+    );
+    shippedTo?.push(...shippedPackages);
+    return true;
+  }
 
-  // Check Git tags
+  // Check Git tags. Push-time callers pass strict: the checkout at job
+  // start can only know tags that existed when the job began, and the
+  // version may ship between that fetch and this push — check origin.
   try {
+    if (strict) {
+      execSync(`git ls-remote --exit-code origin "refs/tags/v${version}"`);
+      console.error(`Git tag v${version} already exists on origin.`);
+      shippedTo?.push(`origin tag v${version}`);
+      return true;
+    }
     const command = `git tag -l 'v${version}'`;
     const tagOutput = execSync(command).toString().trim();
     if (tagOutput === `v${version}`) {
@@ -217,7 +257,18 @@ function doesVersionExist(version) {
       return true;
     }
   } catch (error) {
-    console.error(`Failed to check git tags for conflicts: ${error.message}`);
+    if (strict) {
+      // ls-remote exits 2 when no ref matches; that is "tag absent". Any
+      // other failure means the check could not run — fail the push
+      // instead of reading a failed check as "unreleased".
+      if (error.status !== 2) {
+        throw new Error(
+          `Failed to verify tag v${version} on origin: ${error.message}`,
+        );
+      }
+    } else {
+      console.error(`Failed to check git tags for conflicts: ${error.message}`);
+    }
   }
 
   // Check GitHub releases
@@ -226,10 +277,16 @@ function doesVersionExist(version) {
     const output = execSync(command).toString().trim();
     if (output === `v${version}`) {
       console.error(`GitHub release v${version} already exists.`);
+      shippedTo?.push(`GitHub release v${version}`);
       return true;
     }
   } catch (error) {
     if (!isExpectedMissingGitHubRelease(error)) {
+      if (strict) {
+        throw new Error(
+          `Failed to verify release v${version} on GitHub: ${error.message}`,
+        );
+      }
       console.error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
@@ -237,6 +294,28 @@ function doesVersionExist(version) {
   }
 
   return false;
+}
+
+/**
+ * Push-time re-validation of prepare's doesVersionExist invariant, for the
+ * release branch force push. Throws when the version has shipped anywhere
+ * (an error coded VERSION_SHIPPED, naming where it was found), or when a
+ * probe cannot run — a failed probe must not read as "unreleased".
+ */
+export function assertVersionUnreleased(version) {
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(
+      'assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
+    );
+  }
+  const shippedTo = [];
+  if (doesVersionExist(version, { strict: true, shippedTo })) {
+    const error = new Error(
+      `Version ${version} has already shipped; refusing to force-push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`,
+    );
+    error.code = 'VERSION_SHIPPED';
+    throw error;
+  }
 }
 
 function getAndVerifyTags(npmDistTag, _gitTagPattern) {
@@ -508,6 +587,34 @@ export function getVersion(options = {}) {
   return result;
 }
 
+/**
+ * CLI dispatch, exported for tests: `--assert-unreleased=<version>` runs
+ * the push-time guard; anything else prints the version JSON. Returns the
+ * exit code. Guard codes: 0 = unreleased, 3 = already shipped (a decisive,
+ * benign refusal the workflow marks to skip the release-failed
+ * notification), 2 = probe or usage failure. 1 is never returned on
+ * purpose: node exits 1 on uncaught errors, and those must stay on the
+ * real-failure path.
+ */
+export function runCli(args) {
+  if (args['assert-unreleased'] !== undefined) {
+    try {
+      assertVersionUnreleased(args['assert-unreleased']);
+    } catch (error) {
+      // stdout, not stderr: the runner parses workflow commands from
+      // stdout only, so ::error:: on stderr would never annotate.
+      console.log(`::error::${error.message}`);
+      return error.code === 'VERSION_SHIPPED' ? 3 : 2;
+    }
+    return 0;
+  }
+  console.log(JSON.stringify(getVersion(args), null, 2));
+  return 0;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  console.log(JSON.stringify(getVersion(getArgs()), null, 2));
+  const exitCode = runCli(getArgs());
+  if (exitCode !== 0) {
+    process.exit(exitCode);
+  }
 }
