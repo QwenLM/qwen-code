@@ -304,8 +304,14 @@ export class ModelsConfig {
     if (uniqueAuthTypes.includes(AuthType.QWEN_OAUTH)) {
       orderedAuthTypes.push(AuthType.QWEN_OAUTH);
     }
+    if (uniqueAuthTypes.includes(AuthType.USE_COPILOT)) {
+      orderedAuthTypes.push(AuthType.USE_COPILOT);
+    }
     for (const authType of uniqueAuthTypes) {
-      if (authType !== AuthType.QWEN_OAUTH) {
+      if (
+        authType !== AuthType.QWEN_OAUTH &&
+        authType !== AuthType.USE_COPILOT
+      ) {
         orderedAuthTypes.push(authType);
       }
     }
@@ -524,6 +530,7 @@ export class ModelsConfig {
           : undefined;
       const canReusePreviousApiKey =
         authType !== AuthType.QWEN_OAUTH &&
+        authType !== AuthType.USE_COPILOT &&
         !isAuthTypeChange &&
         !!rollbackSnapshot.generationConfig.apiKey &&
         !!model.envKey &&
@@ -859,6 +866,14 @@ export class ModelsConfig {
       this.generationConfigSources['apiKey'] = {
         kind: 'computed',
         detail: 'Qwen OAuth placeholder token',
+      };
+      this._generationConfig.apiKeyEnvKey = undefined;
+      delete this.generationConfigSources['apiKeyEnvKey'];
+    } else if (this.currentAuthType === AuthType.USE_COPILOT) {
+      this._generationConfig.apiKey = 'COPILOT_DYNAMIC_TOKEN';
+      this.generationConfigSources['apiKey'] = {
+        kind: 'computed',
+        detail: 'Copilot placeholder token',
       };
       this._generationConfig.apiKeyEnvKey = undefined;
       delete this.generationConfigSources['apiKeyEnvKey'];
