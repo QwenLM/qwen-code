@@ -11912,7 +11912,9 @@ exit 1
       "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
     );
     expect(pushAndReportStep).toContain('gate-advisories.md');
-    expect(reviewAddressJob).toContain('gate-advisories.md agent-api-error');
+    expect(reviewAddressJob).toContain(
+      'gate-advisories.md growth-audit.json agent-api-error',
+    );
     const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
     expect(skill).toContain('Verification is SOURCE-BLIND');
     expect(skill).toContain('changed tests against the pre-round branch');
