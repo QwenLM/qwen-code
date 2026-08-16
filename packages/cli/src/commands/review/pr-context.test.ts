@@ -65,6 +65,7 @@ import {
   type RawComment,
   type RawReview,
   latestOwnLedger,
+  recoverOwnLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -1057,7 +1058,7 @@ describe('latestOwnLedger', () => {
   });
 
   it('takes the LATEST marker from the reviewing account only', () => {
-    const ledger = latestOwnLedger(
+    const recovered = latestOwnLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', marker(1)),
         review('bot', '2026-01-03T00:00:00Z', marker(3)),
@@ -1067,7 +1068,7 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(3);
+    expect(recovered?.ledger.round).toBe(3);
   });
 
   it('breaks a submitted_at tie on the review id, not on array order', () => {
@@ -1075,14 +1076,14 @@ describe('latestOwnLedger', () => {
     // ordered only by id. Keeping the earlier one hands the next round the
     // older work list — the one failure the whole recovery exists to prevent.
     const at = '2026-01-01T00:00:00Z';
-    const ledger = latestOwnLedger(
+    const recovered = latestOwnLedger(
       [
         { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
         { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(4);
+    expect(recovered?.ledger.round).toBe(4);
   });
 
   it('carries the anchor sha through the recovery seam intact', () => {
@@ -1107,7 +1108,116 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(recovered).toEqual(anchored);
+    expect(recovered?.ledger).toEqual(anchored);
+  });
+
+  it('recovers the winning review’s own commit_id as the age reference', () => {
+    // The reference must come from the SAME review the ledger came from — a
+    // recovery that took the newest ledger but another review's commit_id
+    // would date old code against the wrong head. The fixture must be able
+    // to refute that mutant: the account's NEWEST review is marker-less with
+    // a different commit_id (the bot's follow-up comment posted against a
+    // later head), so "take commitId from the latest review regardless of
+    // ledger" fails here instead of passing by coincidence. An invalid or
+    // missing commit_id yields null, never a truncated or garbage reference.
+    // 64 hex chars: COMMIT_SHA_RE's deliberate {40,64} breadth exists for
+    // SHA-256 heads, and no fixture pinned it (round-8 finding) — narrowing
+    // to {40} would silently drop the age reference on such repos.
+    const head = 'a'.repeat(64);
+    const recovered = latestOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'b'.repeat(40),
+        },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
+          id: 77,
+          commit_id: head,
+        },
+        {
+          ...review('bot', '2026-01-03T00:00:00Z', 'marker-less follow-up'),
+          commit_id: 'c'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.commitId).toBe(head);
+    // The winning review's own id rides along: Step 6's not-reviewed check
+    // must know WHICH body's disclosures bind the age rule.
+    expect(recovered?.reviewId).toBe(77);
+    const invalid = latestOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'abc123',
+        },
+      ],
+      'bot',
+    );
+    expect(invalid?.ledger.round).toBe(1);
+    expect(invalid?.commitId).toBeNull();
+  });
+
+  it('distinguishes "no own review" from "own review without a parseable ledger"', () => {
+    // Round-8 finding (two auditors independently): the deletion arm read
+    // "recovery returned null although reviews were read" as proof of no
+    // prior round, but an own review whose marker fails to parse (edited or
+    // damaged bot body, marker-less follow-up) also yields null — a
+    // persistent state, not absence. Deleting the side file there stamped
+    // the next round "round 1" mid-PR and reset the posture clock.
+    const damaged = recoverOwnLedger(
+      [review('bot', '2026-01-01T00:00:00Z', 'edited body, marker gone')],
+      'bot',
+    );
+    expect(damaged.recovered).toBeNull();
+    expect(damaged.sawOwnReview).toBe(true);
+    const absent = recoverOwnLedger(
+      [review('stranger', '2026-01-01T00:00:00Z', marker(3))],
+      'bot',
+    );
+    expect(absent.recovered).toBeNull();
+    expect(absent.sawOwnReview).toBe(false);
+    // Logins compare case-insensitively (GitHub's rule): a case mismatch
+    // would read "own review exists" as "proven absence" and delete the
+    // counter (self-audit finding).
+    const cased = recoverOwnLedger(
+      [review('Bot', '2026-01-01T00:00:00Z', marker(2))],
+      'bot',
+    );
+    expect(cased.sawOwnReview).toBe(true);
+    expect(cased.recovered?.ledger.round).toBe(2);
+    // A PENDING draft is not "seen" either — it is not a submitted review.
+    const draftOnly = recoverOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          state: 'PENDING',
+        },
+      ],
+      'bot',
+    );
+    expect(draftOnly.sawOwnReview).toBe(false);
+  });
+
+  it('never selects a PENDING draft — an unsubmitted review is not a previous round', () => {
+    // The API serves the caller's own drafts in the reviews list; a run that
+    // crashed between creating and submitting one must not hand the next
+    // round a round number, an age reference and a reviewId from state the
+    // PR never showed anyone.
+    const recovered = latestOwnLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(9)),
+          state: 'PENDING',
+          commit_id: 'd'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(1);
   });
 
   it('yields nothing with no login, no marker, or a malformed one', () => {

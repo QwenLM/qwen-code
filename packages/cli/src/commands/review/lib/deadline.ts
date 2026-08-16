@@ -9,8 +9,9 @@
 // The iterative reverse audit (Step 5) is the one stage of a review whose cost
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
-// two consecutive dry rounds or the plan's round cap (5, or 3 for a huge
-// diff). On a PR where every round
+// two consecutive dry rounds or the plan's round cap (one value per topology:
+// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only where a deadline
+// exists, since that reduction answers a ceiling; 5 when huge without one). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -368,6 +369,25 @@ function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
   const deadline = Number(raw);
   if (!Number.isFinite(deadline) || deadline <= 0) return null;
   return deadline;
+}
+
+/**
+ * Does this run have a clock at all?
+ *
+ * The budget's huge-diff round reduction is a *finishability* ruling — five
+ * ~90-minute rounds do not fit a six-hour CI ceiling — and a ruling about
+ * fitting inside a wall is meaningless where there is no wall. This is how the
+ * capture commands ask, and it deliberately reuses the same parse both gates
+ * read from, so "has a deadline" and "the gate will enforce a deadline" cannot
+ * come apart: a malformed value leaves the review ungated here exactly as it
+ * leaves it ungated there.
+ *
+ * The env, not `process.env`, for the reason every other function in this file
+ * takes it: a test must be able to ask the question without editing the
+ * process it runs in.
+ */
+export function hasReviewDeadline(env: NodeJS.ProcessEnv): boolean {
+  return readDeadlineSeconds(env) !== null;
 }
 
 /**

@@ -50,10 +50,23 @@ on:
 
 concurrency:
   # PR lifecycle events share a PR-scoped group so new pushes restart the delay
-  # and closed PRs stop any in-flight lifecycle review.
-  # Comment/review events use per-run groups to avoid cancelling active reviews.
+  # and closed PRs stop any in-flight lifecycle review. Every review_requested
+  # run — the bot-directed one included — gets a per-run group: membership is
+  # decided here, before `authorize` runs, but whether a bot request reviews
+  # anything is `authorize`'s call on the REQUESTER's write permission. A
+  # requester without write produces a guaranteed all-skipped run, and as a
+  # shared-group member that no-op can supersede a lifecycle run sitting
+  # PENDING behind a still-terminating review — a pending run is replaced by
+  # any newer run in the group, cancel-in-progress notwithstanding. That is
+  # the exact race that lost the automatic review on PR #9091, left open for
+  # anyone who can request the bot without write permission. The per-run group
+  # costs only an occasional duplicate review when an authorized bot request
+  # lands while the lifecycle run for the same head still queues: compute,
+  # never a lost review. Comment/review events use per-run groups to avoid
+  # cancelling active reviews.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
+    github.event.action != 'review_requested' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
@@ -1983,31 +1996,40 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          # coreTools specifiers (e.g. `run_shell_command(git add)`) are advisory:
+          # The input name is `settings` — this action version has no
+          # `settings_json` input, and an unknown input is silently dropped.
+          # That is exactly what happened to this block: every /resolve run so
+          # far ignored it, and the agent ran without the turn cap, toolset
+          # allowlist, or the sandbox the runs-on comment above assumes.
+          # tools.core specifiers (e.g. `run_shell_command(git add)`) are advisory:
           # the permission manager keys on the tool name and drops the parenthesised
           # command. Real containment = sandbox + write authorization + no agent token.
-          settings_json: |-
+          settings: |-
             {
-              "maxSessionTurns": 400,
-              "coreTools": [
-                "read_file",
-                "read_many_files",
-                "glob",
-                "search_file_content",
-                "write_file",
-                "run_shell_command(cat)",
-                "run_shell_command(git add)",
-                "run_shell_command(git checkout)",
-                "run_shell_command(git commit)",
-                "run_shell_command(git diff)",
-                "run_shell_command(git log)",
-                "run_shell_command(git merge)",
-                "run_shell_command(git status)",
-                "run_shell_command(ls)",
-                "run_shell_command(mkdir)",
-                "run_shell_command(pwd)"
-              ],
-              "sandbox": true
+              "model": {
+                "maxSessionTurns": 400
+              },
+              "tools": {
+                "core": [
+                  "read_file",
+                  "read_many_files",
+                  "glob",
+                  "search_file_content",
+                  "write_file",
+                  "run_shell_command(cat)",
+                  "run_shell_command(git add)",
+                  "run_shell_command(git checkout)",
+                  "run_shell_command(git commit)",
+                  "run_shell_command(git diff)",
+                  "run_shell_command(git log)",
+                  "run_shell_command(git merge)",
+                  "run_shell_command(git status)",
+                  "run_shell_command(ls)",
+                  "run_shell_command(mkdir)",
+                  "run_shell_command(pwd)"
+                ],
+                "sandbox": true
+              }
             }
           prompt: |-
             ## Role

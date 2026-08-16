@@ -1014,11 +1014,11 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported image file(s) were skipped.`,
+    `${v?.count ?? 0} unsupported file(s) were skipped.`,
   'editor.imagesReadFailed': (v) =>
-    `${v?.count ?? 0} image file(s) could not be read.`,
+    `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
-    `${v?.count ?? 0} image file(s) exceeded the attachment size limit.`,
+    `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1424,6 +1424,7 @@ const EN: Messages = {
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
+  'queue.fileCount': (v) => `(+${v?.count ?? 0} files)`,
   'queue.more': (v) => `... (+${v?.count ?? 0} more)`,
   'midTurn.inserted': (v) => `Inserted message: ${v?.message ?? ''}`,
   'help.builtIn': 'Built-in commands',
@@ -3968,10 +3969,9 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的图片文件。`,
-  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个图片文件读取失败。`,
-  'editor.imagesTooLarge': (v) =>
-    `${v?.count ?? 0} 个图片文件超过附件大小限制。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
+  'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -4351,6 +4351,7 @@ const ZH: Messages = {
   'queue.editFailed': '编辑排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
+  'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
   'queue.more': (v) => `...（还有 ${v?.count ?? 0} 条）`,
   'midTurn.inserted': (v) => `已插入消息：${v?.message ?? ''}`,
   'help.builtIn': '内置命令',

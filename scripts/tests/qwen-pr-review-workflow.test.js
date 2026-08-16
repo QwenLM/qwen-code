@@ -31,6 +31,13 @@ const workflowFiles = readdirSync(workflowsDir).filter((f) =>
   /\.ya?ml$/.test(f),
 );
 
+// Single shared recipe for the review-config bot login; every suite that pins
+// it reads this constant so the extraction cannot drift between call sites.
+const botLogin =
+  parse(workflow)
+    .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
+    ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');
@@ -2631,9 +2638,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     // review; pinned the same way as the sibling triage/autofix reads).
     expect(r.ghCalls).toContain('issues/4242/labels?per_page=100 --paginate');
     expect(r.ghCalls).toContain('pulls/4242');
-    expect(r.ghCalls).toContain(
-      'issues/4242/comments?per_page=100 --paginate',
-    );
+    expect(r.ghCalls).toContain('issues/4242/comments?per_page=100 --paginate');
     // Pin the filter EXPRESSION, not just its substring: the stub does its
     // own author filtering, so a mutated jq that merely contains
     // '.user.login' (e.g. select(.user.login != "")) would otherwise pass
@@ -2811,17 +2816,13 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(writerMatch).not.toBeNull();
     const writerPrefix = writerMatch[1];
     // The marker template in the same doc leads with the same prefix.
-    expect(skillDoc).toContain(
-      '<!-- ' + writerPrefix + '<HEAD_SHA> -->',
-    );
+    expect(skillDoc).toContain('<!-- ' + writerPrefix + '<HEAD_SHA> -->');
     // The gate matches that exact prefix, keyed to the live head.
     const doc = parse(workflow);
     const step = doc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Resolve PR context',
     );
-    expect(step.run).toContain(
-      '*"' + writerPrefix + '${HEAD_SHA}"*',
-    );
+    expect(step.run).toContain('*"' + writerPrefix + '${HEAD_SHA}"*');
   });
 
   it('never skips an explicit /review ask, whatever the labels say', () => {
@@ -2847,6 +2848,50 @@ describe('qwen pr review triage-only skip (#7411)', () => {
   });
 });
 
+describe('qwen pr review concurrency routing', () => {
+  // A PENDING run in a concurrency group is replaced by any newer run of the
+  // same group — cancel-in-progress does not protect it. On PR #9091 a push
+  // and three human review requests landed in the same minute: the
+  // synchronize run cancelled the in-flight review but queued behind it while
+  // it terminated, and the review_requested runs — no-ops, since review-pr
+  // only runs when the bot itself is the requested reviewer — superseded it
+  // while pending. The sole survivor skipped review-pr, so the push was never
+  // reviewed. Routing only the human-requested siblings to a per-run group
+  // leaves the race open: group membership is fixed here, before `authorize`
+  // runs, but whether a bot-directed request reviews anything is `authorize`'s
+  // call on the REQUESTER's write permission — a requester without write
+  // produces a guaranteed all-skipped run, and as a shared-group member that
+  // no-op can supersede the pending lifecycle run, losing the review the same
+  // way. Every review_requested run therefore gets a per-run group; an
+  // authorized bot request still reviews immediately, it just can no longer
+  // supersede the lifecycle run for the same head.
+  const group = parse(workflow).concurrency.group;
+
+  it('keeps every review_requested run out of the shared PR group', () => {
+    // Verbatim, like the cancel-in-progress pin in the resolve suite: the
+    // shape IS the fix — `&&` binds tighter than `||`, so exactly the
+    // lifecycle actions reach the PR group and every review_requested (bot
+    // included) falls through to the per-run group. Any requested_reviewer
+    // clause here re-admits the unauthorized-requester no-op and silently
+    // re-ships the race.
+    expect(group).toBe(
+      "${{ github.event_name == 'pull_request_target' && " +
+        "github.event.action != 'review_requested' && " +
+        "format('qwen-pr-review-pr-{0}', github.event.pull_request.number) || " +
+        "format('qwen-pr-review-run-{0}', github.run_id) }}",
+    );
+  });
+
+  it('gates the review_requested jobs on the published bot login', () => {
+    // The group expression no longer names the requested reviewer; the
+    // job-level gates still must. Pin the surviving literal against the
+    // review-config constant so a bot rename cannot desync the sites.
+    expect(parse(workflow).jobs['precheck-pr'].if).toContain(
+      `github.event.requested_reviewer.login == '${botLogin}'`,
+    );
+  });
+});
+
 describe('review_requested burst coalescing (#8945)', () => {
   // Opening a same-repo PR that touches CODEOWNERS-covered paths auto-requests
   // every owner individually, so one PR open emits one `review_requested` run
@@ -2856,11 +2901,6 @@ describe('review_requested burst coalescing (#8945)', () => {
   // before no-op exiting. `authorize` and `review-config` must filter those
   // siblings at the job level so they complete as instant all-skipped runs.
   const doc = parse(workflow);
-
-  const botLoginMatch = doc.jobs['review-config'].steps[0].run.match(
-    /bot_login=([A-Za-z0-9-]+)/,
-  );
-  const botLogin = botLoginMatch ? botLoginMatch[1] : '';
 
   const botRequestedClause = new RegExp(
     [
