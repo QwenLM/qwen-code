@@ -5696,6 +5696,62 @@ hello
       expect(mockTurnRunFn).not.toHaveBeenCalled();
     });
 
+    it('attributes blocked Goal finalization failures separately from hook failures', async () => {
+      const owner = {};
+      const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+      const finishTurn = vi.fn().mockResolvedValue(undefined);
+      const goalRuntime = {
+        getSnapshot: () => emptyGoalSnapshot(),
+        permitForTurn: vi.fn(() => permit),
+        subscribe: vi.fn(() => vi.fn()),
+        finishTurn,
+      } as unknown as GoalRuntime;
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by hook' },
+        }),
+        response: vi.fn(),
+      };
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        flush: vi.fn().mockRejectedValue(new Error('recording unavailable')),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+        messageBus as unknown as ReturnType<Config['getMessageBus']>,
+      );
+      vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+        (event: string) => event === 'UserPromptSubmit',
+      );
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'continue the goal' }],
+            new AbortController().signal,
+            'prompt-goal-finalization-failure',
+            {
+              type: SendMessageType.UserQuery,
+              goalPermit: permit,
+              goalTurnKey: 'goal-runtime:turn-1',
+            },
+          ),
+        ),
+      ).rejects.toThrow('recording unavailable');
+
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-goal-finalization-failure',
+          errorMessage: 'Goal turn finalization failed',
+          errorType: 'Error',
+        },
+      );
+      expect(finishTurn).toHaveBeenCalledWith(permit);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
     it('captures only the final physical response for an agent invocation', async () => {
       const owner = {};
       mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
@@ -5801,7 +5857,7 @@ hello
       expect(capture.commitResponse).toHaveBeenCalledWith(false);
     });
 
-    it('starts Goal as a fresh agent invocation', async () => {
+    it('starts Goal as a fresh invocation without assigning the session structured-output contract', async () => {
       const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
       const finishTurn = vi.fn().mockResolvedValue(undefined);
       const goalRuntime = {
@@ -5811,6 +5867,7 @@ hello
         finishTurn,
       } as unknown as GoalRuntime;
       mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
+      vi.mocked(mockConfig.getJsonSchema).mockReturnValue({ type: 'object' });
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: GeminiEventType.Content, value: 'goal progress' };
@@ -5847,6 +5904,8 @@ hello
     });
 
     it('keeps a Steer continuation in the original invocation', async () => {
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
       mockTurnRunFn.mockImplementation(() =>
         (async function* () {
           yield { type: GeminiEventType.Content, value: 'response' };
@@ -5873,6 +5932,11 @@ hello
       expect(
         mockInteractionTelemetry.startInteractionSpan,
       ).toHaveBeenCalledTimes(1);
+      expect(getSteerInput).toHaveBeenCalledTimes(2);
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(
+        mockInteractionTelemetry.outputCaptures[1]?.writeToSpan,
+      ).toHaveBeenCalledWith(owner);
       expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
         'ok',
         { promptId: 'prompt-steer-continuation' },
@@ -5907,6 +5971,120 @@ hello
         },
       );
     });
+
+    it.each([
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])(
+      'does not assign the session structured-output contract to a %s invocation',
+      async (messageType) => {
+        vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+          type: 'object',
+        });
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'drain complete' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'automatic work' }],
+            new AbortController().signal,
+            `prompt-${messageType}`,
+            { type: messageType },
+          ),
+        );
+
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).toHaveBeenCalledWith('ok', {
+          promptId: `prompt-${messageType}`,
+        });
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).not.toHaveBeenCalledWith(
+          'error',
+          expect.objectContaining({ errorType: 'structured_output_missing' }),
+        );
+      },
+    );
+
+    it.each([
+      [SendMessageType.UserQuery, 'error'],
+      [SendMessageType.Notification, 'ok'],
+    ] as const)(
+      'preserves the %s structured-output ownership across a tool continuation',
+      async (messageType, expectedStatus) => {
+        const promptId = `prompt-schema-tool-${messageType}`;
+        const owner = {};
+        mockInteractionTelemetry.getActiveInteractionSpan.mockImplementation(
+          (id?: string) =>
+            id === undefined || id === promptId ? owner : undefined,
+        );
+        vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+          type: 'object',
+        });
+        mockTurnRunFn
+          .mockReturnValueOnce(
+            (async function* () {
+              yield {
+                type: GeminiEventType.ToolCallRequest,
+                value: {
+                  callId: `call-${messageType}`,
+                  name: 'read_file',
+                  args: {},
+                  isClientInitiated: false,
+                  prompt_id: promptId,
+                },
+              };
+            })(),
+          )
+          .mockReturnValueOnce(
+            (async function* () {
+              yield { type: GeminiEventType.Content, value: 'plain text' };
+            })(),
+          );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start' }],
+            new AbortController().signal,
+            promptId,
+            { type: messageType },
+          ),
+        );
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { ok: true },
+                },
+              },
+            ],
+            new AbortController().signal,
+            promptId,
+            { type: SendMessageType.ToolResult },
+          ),
+        );
+
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).toHaveBeenCalledWith(
+          expectedStatus,
+          expectedStatus === 'error'
+            ? {
+                promptId,
+                errorMessage: 'model did not produce structured output',
+                errorType: 'structured_output_missing',
+              }
+            : { promptId },
+        );
+      },
+    );
 
     it('should discard pending prefetch with no_safe_delivery_point on a no-tool turn', async () => {
       // Recall stays pending — never settles before the turn completes.
@@ -9023,6 +9201,177 @@ Other open files:
           errorType: 'api_error',
         },
       );
+    });
+
+    it('reports a safe actionable Arena category for API errors', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi.fn().mockResolvedValue(undefined),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.Error,
+            value: {
+              error: {
+                message: 'Bearer secret-token in /private/user/path',
+                status: 429,
+              },
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+        'prompt-id-arena-error',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(arenaAgentClient.reportError).toHaveBeenCalledWith(
+        'Rate limit exceeded',
+      );
+      expect(
+        JSON.stringify(arenaAgentClient.reportError.mock.calls),
+      ).not.toContain('secret-token');
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-arena-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
+    });
+
+    it('preserves the provider error outcome when Arena reporting fails', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi
+          .fn()
+          .mockRejectedValue(new Error('status write failed')),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.Error,
+            value: {
+              error: { message: 'provider failed', status: 500 },
+            },
+          };
+        })(),
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-id-arena-reporting-error',
+        ),
+      );
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Error,
+          value: {
+            error: { message: 'provider failed', status: 500 },
+          },
+        },
+      ]);
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-arena-reporting-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
+    });
+
+    it('reports authentication failures to Arena when Turn rethrows them', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi.fn().mockResolvedValue(undefined),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockImplementationOnce(async function* () {
+        yield* [];
+        throw new UnauthorizedError('Bearer secret-token');
+      });
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-id-arena-auth-error',
+          ),
+        ),
+      ).rejects.toThrow(UnauthorizedError);
+
+      expect(arenaAgentClient.reportError).toHaveBeenCalledWith(
+        'Authentication failed',
+      );
+      expect(
+        JSON.stringify(arenaAgentClient.reportError.mock.calls),
+      ).not.toContain('secret-token');
+    });
+
+    it('rethrows authentication failures when Arena reporting fails', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi
+          .fn()
+          .mockRejectedValue(new Error('status write failed')),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockImplementationOnce(async function* () {
+        yield* [];
+        throw new UnauthorizedError('Bearer secret-token');
+      });
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-id-arena-auth-reporting-error',
+          ),
+        ),
+      ).rejects.toThrow(UnauthorizedError);
     });
 
     it('should not call checkNextSpeaker when turn.run() yields a value then an error', async () => {

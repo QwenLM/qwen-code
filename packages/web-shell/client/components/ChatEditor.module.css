@@ -1939,6 +1939,69 @@
   opacity: 0;
 }
 
+.files {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px 0 0;
+  flex-wrap: wrap;
+}
+
+.fileChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--chat-editor-text-primary);
+}
+
+.fileChipIcon {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-secondary, currentColor);
+}
+
+.fileChipName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipSize {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-secondary, currentColor);
+  opacity: 0.75;
+}
+
+.fileChipRemove {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+  background: transparent;
+  color: var(--error-color);
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0;
+}
+
+.fileChipRemove:not(:disabled):hover {
+  background: var(--error-color);
+  color: var(--chat-editor-text-primary);
+}
+
+.fileChipRemove:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .searchPanel {
   display: flex;
   flex-direction: column;

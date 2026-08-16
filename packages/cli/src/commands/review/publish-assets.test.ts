@@ -204,6 +204,27 @@ describe('publish-assets', () => {
     expect(why).toContain('not authorised');
   });
 
+  it('refuses an all-whitespace --host — the write must not retarget (exit 3)', () => {
+    // The round-6 Critical: a whitespace-only --host resolves to '' (falsy),
+    // which would skip the routing setGhHost and silently write to the
+    // env/default host while authorisation bound another. The raw-flag
+    // validation must refuse it before any gh call. setGhHost's documented
+    // TypeError fires for the whitespace value (mocked here as in the
+    // malformed-GH_HOST test).
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    run({ files: [pngFile('a.png')], host: ' ' });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('(from --host)');
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
   it('binds authorisation to the target PR, not to a mood', () => {
     writeFileSync(argsFile, '999 --comment\n');
     run({ files: [pngFile('a.png')] });
