@@ -358,11 +358,6 @@ describe('fetch-pr report assembly', () => {
         body: '',
       }),
     );
-    producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: null,
-      baseFetchFailed: false,
-    });
   });
 
   async function reportFor(extraArgs: Record<string, unknown>) {
