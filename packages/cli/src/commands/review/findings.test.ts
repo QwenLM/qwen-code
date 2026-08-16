@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Argv } from 'yargs';
 import yargs from 'yargs';
 import {
+  existsSync,
+  linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -1303,6 +1306,105 @@ describe('findings (command boundary)', () => {
     expect(() =>
       (findingsCommand.handler as (a: unknown) => void)(makeArgv(dangling)),
     ).toThrow(/--to-anchors must not be a symlink/);
+  });
+
+  it('refuses a --to-anchors hardlinked to a sibling file', () => {
+    // realpathSync never resolves hard links: two names of one inode compare
+    // as different path strings, so a string-identity guard admits them and
+    // both writes hit the same file — the exact destruction the guard exists
+    // to refuse. Filesystem identity (dev/ino) is the check that sees it.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const out = join(dir, 'findings.json');
+    writeFileSync(out, JSON.stringify([base])); // a previous run's artifact
+    const anchors = join(dir, 'anchors.json');
+    linkSync(out, anchors);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: anchors,
+      }),
+    ).toThrow(/--to-anchors points at the same file/);
+    // The refusal must precede every write: the previous run's file is intact.
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual([base]);
+  });
+
+  it('refuses a dangling-symlink sibling that can alias the anchor target', () => {
+    // realpathSync fails on a dangling link, and the catch used to label
+    // every such failure "absent" — so a --out dangling onto the
+    // not-yet-created --to-anchors target passed the guard, the handler
+    // created the target with the resolver input, and the artifact write
+    // followed the link and truncated that same file.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const anchors = join(dir, 'anchors.json'); // the run would create it
+    const out = join(dir, 'findings.json');
+    symlinkSync(anchors, out);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: anchors,
+      }),
+    ).toThrow(/must not be a dangling symlink/);
+    expect(existsSync(anchors)).toBe(false);
+  });
+
+  it('refuses a collision spelled through a symlinked directory', () => {
+    // With neither file on disk yet, no realpath reaches either side — the
+    // aliasing lives in a DIRECTORY component. Canonicalising the deepest
+    // existing ancestor sees it; lexical resolve() does not. The shared.json
+    // pair pins the same shape with the file already there, across the
+    // rewrite from string identity to dev/ino.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    mkdirSync(join(dir, 'real'));
+    symlinkSync(join(dir, 'real'), join(dir, 'link'));
+    const makeArgv = (out: string, toAnchors: string) => ({
+      input,
+      out,
+      outcomes: undefined,
+      testDelta: undefined,
+      print: false,
+      toAnchors,
+    });
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(
+          join(dir, 'link/findings.json'),
+          join(dir, 'real/findings.json'),
+        ),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(
+          join(dir, 'real/findings.json'),
+          join(dir, 'link/findings.json'),
+        ),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+    // The refusal precedes every write — the anchor target was never created.
+    expect(existsSync(join(dir, 'real/findings.json'))).toBe(false);
+
+    writeFileSync(join(dir, 'real/shared.json'), JSON.stringify([base]));
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(join(dir, 'link/shared.json'), join(dir, 'real/shared.json')),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(join(dir, 'real/shared.json'), join(dir, 'link/shared.json')),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
   });
 
   it('parses --to-anchors into the field the handler actually reads', () => {

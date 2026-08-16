@@ -17,6 +17,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
+import { isSameFile } from './lib/same-file.js';
 import {
   isSafeRepositoryRelativePath,
   MAX_IDENTITY_BYTES,
@@ -47,14 +48,6 @@ interface MutablePlan {
 
 export const REPOSITORY_CONTEXT_PROVIDERS: readonly RepositoryContextProvider[] =
   [manifestRepositoryContextProvider];
-
-function sameFile(left: string, right: string): boolean {
-  if (left === right) return true;
-  if (!existsSync(left) || !existsSync(right)) return false;
-  const leftStat = statSync(left);
-  const rightStat = statSync(right);
-  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
-}
 
 function recordedWorktreeMatches(
   recordedPath: string,
@@ -359,7 +352,7 @@ export function runRepoContext(
 ): void {
   const planPath = resolve(args.plan);
   const outPath = resolve(args.out);
-  if (sameFile(planPath, outPath)) {
+  if (isSameFile(planPath, outPath)) {
     throw new Error('repo-context: --out must differ from --plan');
   }
   const worktree = realpathSync(resolve(args.worktree));

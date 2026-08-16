@@ -44,6 +44,7 @@ import type { Stats } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AnchorRequest } from './lib/anchors.js';
+import { isSameFile } from './lib/same-file.js';
 
 // These four lists have a second consumer: the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
@@ -1025,10 +1026,11 @@ export const findingsCommand: CommandModule = {
     // reads or writes: a --to-anchors that lands on one of them destroys its
     // counterpart while stderr reports every write as successful, and Step 7
     // joins the pair by id — a silently destroyed member poisons the join.
-    // resolve() is lexical, so a link alias of a sibling argument spells
-    // differently and passes any string compare: refuse links outright (a
-    // dangling one realpath cannot even see) and compare real paths where a
-    // file already exists.
+    // Identity is filesystem identity — dev/ino where a side exists, the
+    // canonicalised deepest ancestor where it does not: path strings miss
+    // hard links, case-variant spellings, and symlinked directory
+    // components. A link realpath cannot see through is refused where it can
+    // still alias — the anchor side outright, a sibling side when it dangles.
     if (toAnchors !== undefined) {
       const anchorTarget = resolve(toAnchors);
       let anchorStat: Stats | undefined;
@@ -1043,9 +1045,6 @@ export const findingsCommand: CommandModule = {
             'a link can alias a file this command also reads or writes, and no path compare would see the collision',
         );
       }
-      const anchorIdentity = anchorStat
-        ? realpathSync(anchorTarget)
-        : anchorTarget;
       const others: Array<[string, string | undefined]> = [
         ['--input', input],
         ['--out', out],
@@ -1054,13 +1053,26 @@ export const findingsCommand: CommandModule = {
       ];
       for (const [flag, p] of others) {
         if (p === undefined) continue;
-        let identity = resolve(p);
+        const sibling = resolve(p);
         try {
-          identity = realpathSync(identity);
+          realpathSync(sibling);
         } catch {
-          // Absent file — the lexical resolve() is its only identity.
+          // realpath failed — distinguish a dangling link (which can still
+          // alias the resolver input) from a truly absent file.
+          let siblingStat: Stats | undefined;
+          try {
+            siblingStat = lstatSync(sibling);
+          } catch {
+            // Absent file — spelling is all it has.
+          }
+          if (siblingStat?.isSymbolicLink()) {
+            throw new Error(
+              `findings: ${flag} must not be a dangling symlink (${p}); ` +
+                'it could alias the resolver input, and no path compare would see the collision',
+            );
+          }
         }
-        if (identity === anchorIdentity) {
+        if (isSameFile(anchorTarget, sibling)) {
           throw new Error(
             `findings: --to-anchors points at the same file as ${flag} (${p}); the resolver input would overwrite it`,
           );
