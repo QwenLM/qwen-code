@@ -1112,6 +1112,127 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.byBucket.repost).toBe(0);
     });
 
+    it('keeps an author-less carried id out of the repost gate when the login is unknown (#9212)', async () => {
+      // The unknown-login test above covers id-LESS bodies; this one pins
+      // the gate itself: with no authenticated login, a comment whose
+      // author is absent (`user` undefined, e.g. a deleted account) must
+      // not ride its carried id into the repost bucket. If the
+      // `currentUserLogin !== ''` guard were forced true, the author-less
+      // comparison degenerates to `'' === ''` and WOULD match — nothing
+      // may be vouched as own-account while the login is unknown, id
+      // match or not (R2-7, #9212 review).
+      currentUserMock.mockReturnValue('');
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            user: undefined,
+            body: '**[Critical]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('counts only current-SHA own comments for the id-less fallback (#9212)', async () => {
+      // The ambiguity count must ignore this account's comments at OTHER
+      // SHAs: a stale same-location comment of the same account inflates
+      // the count to 2 and disables the fallback if the commit filter in
+      // the counting loop is dropped (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            id: 10,
+            body: '**[Critical]** current claim without an id',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 11,
+            commit_id: 'stale-sha',
+            body: '**[Critical]** stale claim without an id',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(10);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('counts only own-account comments for the id-less fallback (#9212)', async () => {
+      // Another Qwen account's comment at the same location must not
+      // inflate the ambiguity count: dropping the login filter in the
+      // counting loop reaches 2 and disables the fallback for a genuinely
+      // unambiguous own-account original (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            id: 10,
+            body: '**[Critical]** own claim without an id',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 11,
+            user: { login: 'qwen-other-bot' },
+            body: '**[Critical]** other-account claim without an id _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(10);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('matches authorship case-insensitively through gate and count (#9212)', async () => {
+      // The login comparison lowercases both sides at BOTH sites — the
+      // repost gate and the ambiguity-count loop. This fixture rides the
+      // id-less FALLBACK, which passes through both comparisons, so
+      // dropping `.toLowerCase()` at either site breaks it: the case
+      // variant of the same account must still count as own-account
+      // (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            user: { login: 'Qwen-Code-CI-Bot' },
+            body: '**[Critical]** case-variant claim without an id',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('extracts the carried id when the claim line starts past the 80-char summary slice (#9212)', async () => {
+      // Extraction reads the FULL body, not the 80-char `CommentSummary.body`
+      // excerpt: padding after the marker can push the id-led claim line
+      // past char 80, where reading the excerpt would find no id, drop the
+      // strict match, and — the body still carries an id token — the id-less
+      // fallback cannot rescue it either (#9212 review).
+      const padding = ' '.repeat(70);
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: `**[Critical]**${padding}R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_`,
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
     it('exempts the carried finding when a fresh id-less finding shares the location (#9212)', async () => {
       // The findings file carries ids on carried-forward findings only; the
       // fresh finding of this round omits it. The exemption must still fire
