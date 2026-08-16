@@ -3986,6 +3986,42 @@ describe('runBuildTest', () => {
           timedOut: [],
           run: { root: '' },
         }),
+        // The fields the continuation walks beyond the arrays: a non-iterable
+        // `affected` crashed the ordering seed, a string `notBuilt` crashed
+        // the refusal's join — and `notBuilt: true`, worst of all, SKIPPED
+        // the unbuilt-tree refusal silently and ran suites against packages
+        // never compiled.
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          affected: {},
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          affected: ['packages/core'],
+          notBuilt: 'packages/core',
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          affected: ['packages/core'],
+          notBuilt: true,
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          affected: ['packages/core'],
+          testScope: { workspaces: ['packages/core'], caveat: 42 },
+        }),
       ]) {
         writeFileSync(outPath, corrupt);
         expect(() =>

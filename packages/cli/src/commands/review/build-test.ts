@@ -513,7 +513,12 @@ function previousReport(out: string | undefined): BuildTestReport {
             typeof (tree as { birth?: unknown }).birth === 'number')
         );
       })());
-  const scope = shape.testScope;
+  // The other fields the continuation walks: `affected` seeds the
+  // affected-first ordering (`new Set(...)` throws on a non-iterable),
+  // `notBuilt` gates the unbuilt-tree refusal (`.length` on `true` skips the
+  // refusal SILENTLY and runs suites against packages that were never
+  // compiled — the worst direction), and the two caveat strings are coerced
+  // into prose the agent's brief quotes.
   // Element shapes too, not only the lists: `notRun` entries become shell
   // commands (`npm test --workspace=<dir>`), so a `[null]` that cleared an
   // arrays-only check crashed in the escaper instead of refusing here.
@@ -522,17 +527,27 @@ function previousReport(out: string | undefined): BuildTestReport {
   // different measurement wearing the requested one's name.
   const strings = (v: unknown): boolean =>
     Array.isArray(v) && v.every((e) => typeof e === 'string' && e.length > 0);
+  const affectedOk = strings((parsed as { affected?: unknown }).affected);
+  const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
+  const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
+  const scope = shape.testScope;
   const scopeOk =
     scope === undefined ||
     (typeof scope === 'object' &&
       scope !== null &&
       !Array.isArray(scope) &&
       strings(scope.workspaces) &&
-      (scope.notRun === undefined || strings(scope.notRun)));
+      (scope.notRun === undefined || strings(scope.notRun)) &&
+      ((scope as { caveat?: unknown }).caveat === undefined ||
+        typeof (scope as { caveat?: unknown }).caveat === 'string') &&
+      ((scope as { liveCaveat?: unknown }).liveCaveat === undefined ||
+        typeof (scope as { liveCaveat?: unknown }).liveCaveat === 'string'));
   if (
     !commandsOk(shape.test) ||
     !commandsOk(shape.build) ||
     !strings(shape.timedOut) ||
+    !affectedOk ||
+    !notBuiltOk ||
     !scopeOk ||
     !runOk
   ) {

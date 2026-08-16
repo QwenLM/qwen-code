@@ -33,7 +33,12 @@ import {
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
-import { parseLedger, stripLedgerMarker, type Ledger } from './lib/ledger.js';
+import {
+  LEDGER_MAX_FINDINGS,
+  parseLedger,
+  stripLedgerMarker,
+  type Ledger,
+} from './lib/ledger.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -669,7 +674,6 @@ function blockerSection(
 }
 
 /**
-/**
  * A full object id, as the API serves `commit_id`. Deliberately stricter than
  * the ledger marker's abbreviated-anchor check: this value comes from the API
  * response, not from an untrusted body, and a full sha is what it always is.
@@ -700,12 +704,15 @@ export interface RecoveredLedger {
  * forever, compose's capped stamp pins the counter AT the cap, and every
  * subsequent round re-issues the same ids against different findings — the
  * cross-round id continuity Step 6's rulings key on, destroyed by one
- * comment. Inside the bound an attacker can still win one recovery's WORK
- * LIST — round-first selection prefers the higher round — but a work list is
- * re-ruled entry by entry against the code before anything is repeated or
- * retired, exactly like the foreign inline comments this pipeline already
- * ingests; what the bound removes is the permanent, unrepairable part: the
- * counter can only inflate by a bounded step per hostile post.
+ * comment. Inside the bound an attacker can still win one recovery's round
+ * number — round-first selection prefers the higher round — but never the
+ * work list: a foreign winner is MERGED over this account's own latest
+ * findings (own entries authoritative on id collision), so a displaced or
+ * doctored marker cannot retire a certified entry from view, and what
+ * survives is re-ruled entry by entry against the code exactly like the
+ * foreign inline comments this pipeline already ingests. What the bound
+ * removes is the permanent, unrepairable part: the counter can only inflate
+ * by a bounded step per hostile post.
  *
  * Under a FAILED identity lookup (null login) every marker is foreign and the
  * base is zero, so recovery is bounded to rounds ≤ the headroom — a real
@@ -771,13 +778,26 @@ export function recoverLedger(
   // lifecycle's proof-of-absence input).
   let ownMax = 0;
   let sawOwnReview = false;
+  /** The own marker whose findings a foreign winner is merged OVER. */
+  let bestOwn: { ledger: Ledger; at: string; id: number } | null = null;
   if (me) {
     for (const r of reviews) {
       if (r.user?.login?.toLowerCase() !== me) continue;
       if (r.state === 'PENDING') continue;
       sawOwnReview = true;
       const l = parseLedger(r.body);
-      if (l && l.round > ownMax) ownMax = l.round;
+      if (!l) continue;
+      if (l.round > ownMax) ownMax = l.round;
+      const at = r.submitted_at ?? '';
+      const id = typeof r.id === 'number' ? r.id : 0;
+      if (
+        !bestOwn ||
+        l.round > bestOwn.ledger.round ||
+        (l.round === bestOwn.ledger.round &&
+          (at > bestOwn.at || (at === bestOwn.at && id > bestOwn.id)))
+      ) {
+        bestOwn = { ledger: l, at, id };
+      }
     }
   }
   let best: {
@@ -835,7 +855,38 @@ export function recoverLedger(
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
   // no consumer downstream has to remember the rule.
-  const ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  let ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  // A FOREIGN winner never DISPLACES this account's own findings — it is
+  // merged over them. Round-first selection alone handed a drive-by poster a
+  // one-comment suppression: a marker at `ownMax + 1` (deep inside the
+  // headroom) with empty findings won the recovery, this account's certified
+  // entries were in no work list, owed no ruling, and exited the marker chain
+  // for every later round — and the doctored variant copies the own list
+  // minus the one entry to suppress. So the own latest marker's findings
+  // always ride: on an id collision the OWN entry is authoritative (a foreign
+  // body must not rewrite a claim under this account's id), foreign entries
+  // with new ids join after, and the merged list re-caps with an honest
+  // `dropped` count. The foreign round number still wins — the counter is a
+  // shared id space — and the union is exactly what makes the headroom doc's
+  // "re-ruled entry by entry" true for entries a displacement would have
+  // removed from view.
+  if (best.foreign && bestOwn) {
+    const ownIds = new Set(bestOwn.ledger.findings.map((f) => f.id));
+    const merged = [
+      ...bestOwn.ledger.findings,
+      ...ledger.findings.filter((f) => !ownIds.has(f.id)),
+    ];
+    const capped = merged.slice(0, LEDGER_MAX_FINDINGS);
+    const dropped =
+      (ledger.dropped ?? 0) +
+      (bestOwn.ledger.dropped ?? 0) +
+      (merged.length - capped.length);
+    ledger = {
+      ...ledger,
+      findings: capped,
+      ...(dropped > 0 ? { dropped } : {}),
+    };
+  }
   return {
     recovered: {
       ledger,

@@ -337,13 +337,17 @@ function resumeNpmToolchain(
     // agent trusts the prose it is handed. The structured fields (`install`,
     // `build`, `notBuilt`, `testScope`) carry everything the old note
     // summarised; this one describes the run as it now stands.
-    note: resumedNote(
-      previous,
-      mergedTest,
-      timedOut,
-      [...stillPending, ...unattemptedRetries],
-      stillClamped,
-    ),
+    // The caveat splice mirrors the fresh path: the brief reads the note,
+    // and a scope limitation absent from it is a limitation the agent never
+    // quotes.
+    note:
+      resumedNote(
+        previous,
+        mergedTest,
+        timedOut,
+        [...stillPending, ...unattemptedRetries],
+        stillClamped,
+      ) + (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
     ...(testScope ? { testScope } : {}),
   };
   return merged;
@@ -357,7 +361,13 @@ function resumedNote(
   stillPending: string[],
   stillClamped: string[],
 ): string {
-  const failures = test.filter((r) => !succeeded(r) && !r.timedOut);
+  // Build failures count too: the merged `ok` reads previous.build, and a
+  // note that says "everything passed" beside a carried build failure is the
+  // prose-contradicts-evidence shape this branch keeps paying for.
+  const failures = [
+    ...previous.build.filter((r) => !succeeded(r) && !r.timedOut),
+    ...test.filter((r) => !succeeded(r) && !r.timedOut),
+  ];
   const parts = [
     // The install framing rides through the merge. A continuation that drops
     // it hands the agent `install.exitCode: 1` with no reading of it, against
