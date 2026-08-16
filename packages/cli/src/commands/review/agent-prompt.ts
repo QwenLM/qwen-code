@@ -49,6 +49,7 @@ import {
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
+  claimRetirementDegradeNote,
   expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
@@ -2108,13 +2109,43 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
 }
 
 /**
- * Rounds whose retirement-degradation NOTE this process already printed,
- * keyed `plan::round` (#9259): the per-chunk builds of a round share one
- * schedule failure, and the note earns its place exactly once per round —
- * keyed on the PRINT, never on the admission stamp, which lands whether
- * or not that build's schedule read failed.
+ * The schedule read shared by the round builder and the per-chunk path
+ * (#9272 — hand-rolled at both sites and edited in lockstep across three
+ * consecutive PRs: the naming, the repair suppression, the deferral): a
+ * throwing read degrades to "everything is due" — never to fewer
+ * auditors — and composes the round's degrade NOTE, which the caller
+ * prints only once the round is admitted (#9259: printed before the
+ * gate, it promised an audit the gate then refused). `noteTail` names
+ * the build's own scope.
  */
-const retirementDegradeNotesPrinted = new Set<string>();
+function reverseAuditScheduleOrNote(
+  planPath: string,
+  chunkIds: number[],
+  round: number,
+  env: NodeJS.ProcessEnv,
+  diffPathAbsolute: unknown,
+  noteTail: string,
+): { schedule: RoundSchedule | null; scheduleNote: string | null } {
+  try {
+    return {
+      schedule: scheduleReverseAuditRound(
+        planPath,
+        chunkIds,
+        round,
+        env,
+        typeof diffPathAbsolute === 'string' ? diffPathAbsolute : undefined,
+      ),
+      scheduleNote: null,
+    };
+  } catch (err) {
+    return {
+      schedule: null,
+      scheduleNote:
+        `NOTE: reverse-audit retirement unavailable this round — ` +
+        `${(err as Error).message ?? String(err)} — ${noteTail}`,
+    };
+  }
+}
 
 /**
  * Topology anomaly note (#9242): the plan's own size fields decide the
@@ -2184,28 +2215,16 @@ function runAllChunks(
     round !== undefined &&
     round >= retirementReadsFrom
   ) {
-    try {
-      schedule = scheduleReverseAuditRound(
-        planPath,
-        chunks.map((c) => c.id),
-        round,
-        process.env,
-        typeof report.diffPathAbsolute === 'string'
-          ? report.diffPathAbsolute
-          : undefined,
-      );
-    } catch (err) {
-      // Transcripts unavailable, an unreadable plan stat, anything: the
-      // schedule is an optimization, and a broken optimizer must degrade to
-      // today's behaviour — every territory audited — never to fewer
-      // auditors. `null` below means "everything is due". But not SILENTLY
-      // (#9206): a schedule that dies here retires nothing for the rest of
-      // the run, and the round's own output is where the reader can see it.
-      schedule = null;
-      scheduleNote =
-        `NOTE: reverse-audit retirement unavailable this round — ` +
-        `${(err as Error).message ?? String(err)} — auditing every chunk.`;
-    }
+    const read = reverseAuditScheduleOrNote(
+      planPath,
+      chunks.map((c) => c.id),
+      round,
+      process.env,
+      report.diffPathAbsolute,
+      'auditing every chunk.',
+    );
+    schedule = read.schedule;
+    scheduleNote = read.scheduleNote;
   }
 
   if (schedule !== null && schedule.converged) {
@@ -2244,8 +2263,10 @@ function runAllChunks(
     return;
   }
   // The admission succeeded, so the round IS being built — now the
-  // deferred catch NOTE tells the truth (#9259).
-  if (scheduleNote !== null) {
+  // deferred catch NOTE tells the truth (#9259), claimed cross-process
+  // so a dead-schedule round's per-chunk builds print it exactly once
+  // (#9272).
+  if (scheduleNote !== null && claimRetirementDegradeNote(planPath, round)) {
     writeStderrLineSafe(scheduleNote);
   }
 
@@ -2727,34 +2748,25 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       .filter((id): id is number => typeof id === 'number');
     // The catch NOTE is deferred past the admission gate (#9259 — a note
     // printed before it promises an audit the gate can then refuse) and
-    // keyed on having been PRINTED this process, not on the stamp: the
-    // stamp lands on the admission build whether or not that build's
-    // schedule read failed, so a stamp-keyed suppression silenced a round
-    // whose admission build read cleanly and whose LATER builds began to
-    // throw — the never-retire shape with no word (#9259). The set is
-    // per-process, so a retried headless run re-prints — the safe side.
+    // claimed cross-process via the record-dir sidecar, never keyed on
+    // the stamp: the stamp lands on the admission build whether or not
+    // that build's schedule read failed, so stamp-keyed suppression
+    // silenced a round whose admission build read cleanly and whose
+    // LATER builds began to throw — the never-retire shape with no word
+    // (#9259). The sidecar is run-epoch fenced, so a retried headless
+    // run re-prints — the safe side.
     let scheduleNote: string | null = null;
     if (args.round !== undefined) {
-      let schedule: RoundSchedule | null = null;
-      try {
-        schedule = scheduleReverseAuditRound(
-          args.plan,
-          planChunkIds,
-          args.round,
-          process.env,
-          typeof report.diffPathAbsolute === 'string'
-            ? report.diffPathAbsolute
-            : undefined,
-        );
-      } catch (err) {
-        // Same degradation as the round builder: an unreadable history must
-        // fall back to building the auditor, never to refusing it — named,
-        // as the round builder names it (#9206).
-        schedule = null;
-        scheduleNote =
-          `NOTE: reverse-audit retirement unavailable this round — ` +
-          `${(err as Error).message ?? String(err)} — auditing the chunk.`;
-      }
+      const read = reverseAuditScheduleOrNote(
+        args.plan,
+        planChunkIds,
+        args.round,
+        process.env,
+        report.diffPathAbsolute,
+        'auditing the chunk.',
+      );
+      const schedule = read.schedule;
+      scheduleNote = read.scheduleNote;
       if (!roundAdmitted && schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
         return;
@@ -2783,13 +2795,13 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       return;
     // Admitted (or a stamped repair): the audit IS happening, so the
     // deferred NOTE tells the truth now (#9259) — once per round per
-    // process, repair builds included.
-    if (scheduleNote !== null) {
-      const noteKey = `${args.plan}::${args.round}`;
-      if (!retirementDegradeNotesPrinted.has(noteKey)) {
-        retirementDegradeNotesPrinted.add(noteKey);
-        writeStderrLineSafe(scheduleNote);
-      }
+    // RUN, across the per-chunk processes, via the sidecar claim
+    // (#9272).
+    if (
+      scheduleNote !== null &&
+      claimRetirementDegradeNote(args.plan, args.round)
+    ) {
+      writeStderrLineSafe(scheduleNote);
     }
     // The note belongs to the round's ADMISSION — a stamped rebuild
     // was ruled on when the round was admitted, so it stays silent.

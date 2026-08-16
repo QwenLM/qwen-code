@@ -151,6 +151,52 @@ interface RoundStamp {
 
 const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
+const DEGRADE_NOTES_FILE = 'retirement-degrade-notes.json';
+
+/**
+ * Claim the retirement-degradation NOTE's slot for `round`, this run:
+ * `true` exactly once per round per run, across PROCESSES — Step 3B
+ * builds each chunk in its own CLI process, so an in-memory Set dedupes
+ * nothing in production and a dead-schedule round printed one identical
+ * NOTE per chunk build (#9272). The sidecar rides the stamps file's
+ * pattern: run-epoch fenced (a previous run's claim must not silence this
+ * run's channel), read-modify-write, and every failure fails toward
+ * PRINTING — a lost or corrupt claim re-prints next time; the note is the
+ * diagnostic, and silence is the only wrong answer here (#9206).
+ */
+export function claimRetirementDegradeNote(
+  planPath: string,
+  round: number | undefined,
+): boolean {
+  const dir = promptRecordDir(planPath);
+  const file = join(dir, DEGRADE_NOTES_FILE);
+  let entries: RoundStamp[] = [];
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    if (Array.isArray(parsed)) {
+      const epoch = runEpochMs(planPath);
+      entries = parsed.filter(
+        (e): e is RoundStamp =>
+          typeof e === 'object' &&
+          e !== null &&
+          typeof (e as RoundStamp).atMs === 'number' &&
+          (e as RoundStamp).atMs >= epoch,
+      );
+    }
+  } catch {
+    // Missing or unreadable bookkeeping: nothing has claimed the slot.
+  }
+  const key = round ?? null;
+  if (entries.some((e) => e.round === key)) return false;
+  entries.push({ round: key, atMs: Date.now() });
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, JSON.stringify(entries));
+  } catch {
+    // A lost write re-prints on the next build — the verbose side.
+  }
+  return true;
+}
 
 // The run-epoch fence is shared with every other per-run artifact (the
 // prompt records, the transcripts, the session ledger) — one definition in

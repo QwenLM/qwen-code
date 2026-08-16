@@ -27,6 +27,7 @@ import {
   TOOL_CONCURRENCY_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
+  claimRetirementDegradeNote,
   clearBudgetStop,
   expectedAdmissionSeconds,
   expectedRoundSeconds,
@@ -251,6 +252,21 @@ describe('the round-cost estimate — measured when it can be', () => {
     stampRound(p, 1, NOW_MS - 100);
     stampRound(p, 1, NOW_MS);
     expect(readRoundStamps(p)).toEqual([{ round: 1, atMs: NOW_MS - 100 }]);
+  });
+
+  it('claimRetirementDegradeNote claims once per round, per run (#9272)', () => {
+    // The per-chunk builds of a round are separate CLI processes, so the
+    // claim lives on disk beside the stamps: first claim prints, later
+    // builds of the same round stay silent, a different round speaks, and
+    // a NEW run (the plan re-captured at the same path) re-arms the note —
+    // the retry's channel must not be silenced by the killed run's claim.
+    const p = plan();
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(false);
+    expect(claimRetirementDegradeNote(p, 4)).toBe(true);
+    const later = new Date(Date.now() + 3_600_000);
+    utimesSync(p, later, later);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
   });
 
   it('ignores stamps older than the plan — a previous run of the same PR', () => {

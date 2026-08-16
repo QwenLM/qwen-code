@@ -661,6 +661,15 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       'a zh absence-of-problems clause (没有回归)',
       '未发现问题——重新走查了重连状态机与调用点，确认没有回归。',
     ],
+    [
+      'the remaining excepted en nouns (no problems, no bugs)',
+      'No issues found — re-walked the retry cap and its callers; no ' +
+        'problems surfaced and no bugs turned up anywhere.',
+    ],
+    [
+      'a zh absence-of-problems clause (没有问题)',
+      '未发现问题——重新走查了重连状态机与全部调用点，没有问题遗留。',
+    ],
   ])(
     'an honest receipt the bare markers used to refuse now retires: %s (#9259)',
     (_label, receipt) => {
@@ -690,6 +699,58 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.diagnostics).toEqual([
       'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
     ]);
+  });
+
+  it.each([
+    [
+      'a passive no+noun admission (no regressions were verified)',
+      'No issues found — re-walked the reconnect path; no regressions ' +
+        'were verified.',
+    ],
+    [
+      'the incapacity compound 未来得及',
+      '未发现问题——走查了解析器，未来得及检查生成的文件。',
+    ],
+    [
+      'a limiter before the walk verb (没有回归，只走查了X)',
+      '未发现问题——没有回归，只走查了解析器与调用点。',
+    ],
+    [
+      'an un-examined admission past bounded fail- jargon',
+      'No issues found — re-walked the scheduler; the fail-open path ' +
+        'went unexamined.',
+    ],
+  ])(
+    'an admission the first exception form licensed is refused: %s (#9272)',
+    (_label, leaked) => {
+      // The first exception form's impossibility claim was falsified on
+      // these four entrances — each names a walk (clearing the walk gate
+      // and the floors), so polarity was the only text gate, and the
+      // exceptions disarmed it. The narrowed forms keep the witnessed
+      // honest shapes retired-able while these stay marked.
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([13]);
+      expect(r3.skipped).toEqual([]);
+      expect(r3.diagnostics).toEqual([
+        'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
+      ]);
+    },
+  );
+
+  it('a 未来 honest mention still retires — only 未来得及 is marked (#9272)', () => {
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        '未发现问题——走查了重连状态机与全部调用点，未来可能的扩展点也已核对。',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
   });
 
   it('a Chinese receipt separated by a full-width colon is dry', () => {

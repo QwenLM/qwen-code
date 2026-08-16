@@ -111,8 +111,15 @@ describe('runCleanup', () => {
     vi.clearAllMocks();
     mocks.existsSync.mockReturnValue(false);
     // Implementations survive clearAllMocks — restore the fail-open throw
-    // so one retention test's mtimes cannot leak into the next test.
+    // so one retention test's mtimes cannot leak into the next test. The
+    // readFileSync default is the same story (#9272): a leaked
+    // marker-returning implementation short-circuits the retention `||`
+    // on the marker signal, and the mtime/plan-missing branches under
+    // test never even evaluate.
     mocks.statSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     mocks.refExists.mockReturnValue(true);

@@ -3663,11 +3663,25 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     utimesSync(plan, old, old);
     findings = join(dir, 'findings.md');
     writeFileSync(findings, '');
-    for (const k of ['QWEN_CODE_PROJECT_DIR', 'QWEN_CODE_SESSION_ID']) {
+    for (const k of [
+      'QWEN_CODE_PROJECT_DIR',
+      'QWEN_CODE_SESSION_ID',
+      // The budget gate reads these three straight from process.env on
+      // every admission the tests below drive (#9272): an ambient value
+      // inherited from a concurrent review makes admission
+      // environment-dependent — the same isolation the repro harness
+      // carries (#9259), on the describe that actually needs it.
+      'QWEN_REVIEW_DEADLINE_EPOCH',
+      'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS',
+      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
+    ]) {
       SAVED[k] = process.env[k];
     }
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    delete process.env['QWEN_REVIEW_DEADLINE_EPOCH'];
+    delete process.env['QWEN_REVIEW_DEADLINE_RESERVE_SECONDS'];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
   afterEach(() => {
@@ -4955,6 +4969,11 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(safe).toContain('reverse-audit retirement unavailable');
     expect(safe).toContain('auditing the chunk');
+    // The NOTE's middle carries the WHY — the underlying failure's own
+    // message, not an empty dash (#9272): the constant prefix and suffix
+    // alone would print `unavailable this round — — auditing the chunk.`
+    // and name nothing.
+    expect(safe).toMatch(/unavailable this round — .+ — auditing the chunk\./);
 
     (writeStderrLineSafe as unknown as Mock).mockClear();
     (agentPromptCommand.handler as (a: unknown) => void)({
@@ -4970,6 +4989,23 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(safe).not.toContain('reverse-audit retirement unavailable');
     // Every repair still builds its chunk — the safe direction stands.
     expect(keysOf(3)).toHaveLength(3);
+
+    // The claim is per ROUND (#9272): the same failure beginning in a
+    // LATER round of the same run earns its own NOTE — a plan-only key
+    // would silence it forever. Round 4 is under the default cap, and
+    // the history is still unreadable.
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 4,
+    });
+    safe = (writeStderrLineSafe as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(safe).toContain('reverse-audit retirement unavailable');
   });
 
   it('the #9242 note stays below the convergence gate — a converged round notes nothing', () => {

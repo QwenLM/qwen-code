@@ -372,6 +372,28 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
     }
   }
 
+  /**
+   * Whether a round's output says something about chunk `id` — a
+   * retirement note naming it, or a certification-failure diagnostic
+   * naming it and the fallen bar. One predicate at describe scope
+   * (#9272): the two tests below assert on the same oracle, and a
+   * production-wording change must not pay a double edit (a stale inline
+   * copy reads green while asserting the old wording).
+   */
+  function mentionsChunk(out: string, id: number): boolean {
+    return (
+      new RegExp(`chunk ${id} — retired`).test(out) ||
+      new RegExp(
+        `chunk ${id}[^\\n]*(?:certif|receipt|territory|transcript)`,
+        'i',
+      ).test(out) ||
+      new RegExp(
+        `(?:certif|receipt|territory|transcript)[^\\n]*chunk ${id}\\b`,
+        'i',
+      ).test(out)
+    );
+  }
+
   it('wiring control: the canonical receipt retires its chunk at round 3', () => {
     twiceDry(DRY_CANONICAL);
     const out = runRound(3);
@@ -398,46 +420,22 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
       // cover the other's silent re-audit, the asymmetric shape real runs
       // show (#9206 hit 4 of 12 chunks, not all).
       for (const id of [13, 14]) {
-        const retired = new RegExp(`chunk ${id} — retired`).test(r3);
-        const diagnosed =
-          // A diagnostic naming the chunk and the failed condition (no
-          // matching transcript / receipt not matched / territory read
-          // missing).
-          new RegExp(
-            `chunk ${id}[^\\n]*(?:certif|receipt|territory|transcript)`,
-            'i',
-          ).test(r3) ||
-          new RegExp(
-            `(?:certif|receipt|territory|transcript)[^\\n]*chunk ${id}\\b`,
-            'i',
-          ).test(r3);
-
         // A twice-dry chunk may stay under audit, but never silently: the
         // round-3 output must carry EITHER a retirement note naming it OR a
         // certification-failure diagnostic. Today it carries neither.
-        expect(retired || diagnosed).toBe(true);
+        expect(mentionsChunk(r3, id)).toBe(true);
       }
     },
   );
 
   it('the silence is not one round: across rounds 3-5 the twice-dry chunks are retired or diagnosed at least once', () => {
     twiceDry(DRY_EN_PERIOD);
-    const mentions = (out: string, id: number): boolean =>
-      new RegExp(`chunk ${id} — retired`).test(out) ||
-      new RegExp(
-        `chunk ${id}[^\\n]*(?:certif|receipt|territory|transcript)`,
-        'i',
-      ).test(out) ||
-      new RegExp(
-        `(?:certif|receipt|territory|transcript)[^\\n]*chunk ${id}\\b`,
-        'i',
-      ).test(out);
     const mentioned = new Set<number>();
     for (const round of [3, 4, 5]) {
       const out = runRound(round);
       // Today every one of these reads `3 auditors required this round`.
       for (const id of [13, 14]) {
-        if (mentions(out, id)) mentioned.add(id);
+        if (mentionsChunk(out, id)) mentioned.add(id);
       }
       // The hot control stays honest (#9259): chunk 15's finding is fresh
       // each round, so it classifies yielded and never produces the
