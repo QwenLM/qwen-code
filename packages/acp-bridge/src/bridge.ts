@@ -2521,6 +2521,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       entry.spawnOwnerWantedKill &&
       entry.attachCount === 0
     ) {
+      writeStderrLine(
+        `qwen serve: completing deferred kill of session ${JSON.stringify(entry.sessionId)} (${reason})`,
+      );
       await bridgeApi.killSession(entry.sessionId).catch(() => {
         /* best-effort; channel.exited will eventually reap anyway */
       });
@@ -11192,6 +11195,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           timeoutMs: initTimeoutMs,
         });
       } catch (error) {
+        // A definitive refusal means the child is alive and kept the session:
+        // it already holds its own close gate (a cd or restore in progress —
+        // child-side state the daemon cannot see). Escalating that to a
+        // channel kill would take every sibling session down for a close
+        // that is already proceeding. Leave the kill pending instead; the
+        // deferred tombstone completes it on the next settle event.
+        if (isDefinitiveAcpRequestError(error)) {
+          entry.closing = false;
+          return false;
+        }
         if (ci) {
           await killChannelWithLog(
             ci,

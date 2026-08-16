@@ -134,6 +134,21 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+describe('sessionCloseDrainBudgetMs', () => {
+  it('stays strictly under the outer wait and clamps to >=1ms', () => {
+    // Literal pin: the documented invariants must not drift with the
+    // implementation — a ratio at or above 1.0 lets the daemon's outer wait
+    // fire first (unknown close outcome), and a missing clamp yields 0,
+    // which the child rejects as invalidParams.
+    expect(sessionCloseDrainBudgetMs(10_000)).toBe(8_000);
+    expect(sessionCloseDrainBudgetMs(1)).toBe(1);
+    for (const outer of [2, 3, 7, 100, 1_000, 30_000]) {
+      expect(sessionCloseDrainBudgetMs(outer)).toBeGreaterThanOrEqual(1);
+      expect(sessionCloseDrainBudgetMs(outer)).toBeLessThan(outer);
+    }
+  });
+});
+
 /**
  * Test-local fake of the daemon-wide growth aggregator `runQwenServe` wires
  * every bridge to: one shared provider set plus the register/read pair.
@@ -528,6 +543,45 @@ describe('createAcpSessionBridge', () => {
 
         closeGate.resolve({ closed: true, holds: [] });
         await close;
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('spares the channel when a kill meets a definitive close refusal', async () => {
+      // A child holding its own close gate (cd/restore in flight — child-side
+      // state the daemon cannot see) answers the kill's forced close with a
+      // definitive RequestError. Escalating that to a channel kill would take
+      // every sibling session down for a close that is already proceeding.
+      let refuseClose = true;
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (refuseClose) {
+            throw new RequestError(
+              -32603,
+              'Session close is already in progress',
+            );
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      try {
+        const owner = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(bridge.killSession(owner.sessionId)).resolves.toBe(false);
+        expect(handle.killed).toBe(false);
+        expect(bridge.sessionCount).toBe(1);
+
+        // The refusal resets `closing`, so the kill completes once the
+        // child-side gate is gone instead of latching the entry closed.
+        refuseClose = false;
+        await expect(bridge.killSession(owner.sessionId)).resolves.toBe(true);
         expect(bridge.sessionCount).toBe(0);
       } finally {
         await bridge.shutdown();
