@@ -153,28 +153,46 @@ trail marker never posts and the park never engages).
 
 ### D. Verdict routing and the audit trail (qwen-autofix.yml report step)
 
-The report never re-reads `growth-audit.json`: the gate records the
-verdict it VALIDATED as a step output (`audit_verdict`), and both
-report steps consume the FIRST pass's if it ran (the repair pass
-re-reads the branch-writable file after the first pass's build had a
-write window, so its re-read can only ever lose). The branch's own
-build/tests run as the runner user on a predictable WORKDIR after the
-gate looks, so a re-read could be overwritten in between — a forged
-re-arm, or a conflict verdict flipped back to sound, defeating the
-park. The gate-validated verdict is the only verdict that may reach
-the trail marker and the re-arm. The check subprocesses that run the
-branch's build/tests are stripped of the runner injection channels
-(`GITHUB_OUTPUT`/`GITHUB_ENV`/`GITHUB_PATH`), so branch code cannot
-append its own `audit_verdict` after the gate's write (step outputs
-are last-write-wins).
+The report never re-reads `growth-audit.json`: each gate records the
+verdict it VALIDATED as a step output (`audit_verdict`), 'Finalize
+verification' surfaces the verdict of the pass whose OUTCOME was
+selected (a repair pass legitimately re-audits — its feedback rebuild
+keeps the audit section and the SKILL mandates audit-first — so its
+gate-validated verdict is the one the round's code was judged by; a
+repair that validated nothing falls back to the first pass's validated
+verdict), and both report steps consume that single output. The
+gate-validated verdict is the only verdict that may reach the trail
+marker and the re-arm.
+
+Residual, shared trust domain: the verdict file is written during the
+agent step, where branch code runs on a predictable WORKDIR, and the
+gate's first read necessarily comes AFTER that — the gate validates
+shape, taxonomy, and routing, but can never prove the file's
+provenance against code that ran before its read (a planted
+shape-valid `sound` replacing an honest `drift`/`conflict`). Blast
+radius is control-plane forgery bounded by the window caps: the verify
+step holds no token, so a forgery cannot push — it can re-arm/re-anchor
+the window or park the PR. The channels that ARE closed: check
+subprocesses are stripped of the runner injection channels
+(`GITHUB_OUTPUT`/`GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_STEP_SUMMARY`),
+the gate re-records its validated verdict on every exit (step outputs
+are last-write-wins, so an append to the output file discovered via
+`$RUNNER_TEMP` loses), and the inherited execution knobs with no
+legitimate setter (`BASH_ENV`, `BITE_RUNNER`) are unset in the gate's
+preamble.
 
 Every audit round posts its verdict in the round report comment with a
 machine-readable marker
 (`<!-- autofix-growth-audit verdict=V win=WINDOW_KEY -->`), so later
 rounds' audits can read the trail — a second audit after a prior
-`sound` sees that its predecessor already blessed the approach and must
-bring new evidence to repeat the verdict. The marker's `win` must be
-`steps.prepare.outputs.growth_base_win` (the key the baseline was READ
+`sound` IN THE SAME WINDOW sees that its predecessor already blessed
+the approach and must bring new evidence to repeat the verdict. The
+trail and its new-evidence obligation are per-window: the feedback
+reader filters on the live window key, and a completed `sound` verdict
+re-arms, which moves the key past the marker — so a `sound`→re-arm
+chain is invisible from inside each round in it, and the
+human-greppable comment stream is the only cross-window bound. The
+marker's `win` must be `steps.prepare.outputs.growth_base_win` (the key the baseline was READ
 under), for the same reason the growth-now marker uses it: a conflict
 round is exempt from supersede discard and can run with a stale window
 after a re-arm, so a marker written under the dead key would be
@@ -195,7 +213,9 @@ per-window round counter and the suggestion valve reset too. Continuing
 to solve the problem includes suggestions; if the regenerated
 suggestions reproduce the bloat, the brake re-trips after another full
 budget of growth and re-audits with the trail visible.
-`TAKEOVER_MAX_ROUNDS` bounds the whole thing.
+`TAKEOVER_MAX_ROUNDS` bounds each window individually; a chain of
+`sound` re-arms is bounded only by the public audit trail and
+milestone prompts, not by any global cap.
 
 On `verdict=drift` there is no re-arm: the simplification is expected
 to shrink the diff, and the brake re-measures naturally next round.
@@ -273,8 +293,10 @@ converges and the label releases with zero human rounds.
 
 ## Failure modes and bounds
 
-- **Audit wrongly blesses real drift.** Bounded: the next breach
-  re-audits with the prior verdict marker visible, and repeated
+- **Audit wrongly blesses real drift.** Bounded: the next breach in
+  the SAME window re-audits with the prior verdict marker visible
+  (across a `sound` re-arm the marker sits under the old window key —
+  the cross-window bound is the public comment stream), and repeated
   `sound` verdicts against monotonically growing diffs are a public,
   greppable pattern for maintainers.
 - **Audit wrongly condemns a sound design.** Cost is one extra

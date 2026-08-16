@@ -4977,6 +4977,15 @@ jobs:
           # /retry remains the sanctioned lift. A /retry re-arm moves
           # LIVE_REARM_KEY past the marker's win= and lifts the park on its
           # own.
+          # Two more loop-generated events must not wake: a stale-base
+          # auto-update is the loop's OWN head move — the red checks it
+          # REACTS to completed before its marker (they are the condition it
+          # handles, not human feedback), so the checks leg counts only
+          # failures completing after BOTH the conflict marker and the
+          # latest base update; and CANCELLED never wakes — an
+          # update-branch push cancels in-flight runs on the old head (and a
+          # close/reopen does the same), which the loop produces without any
+          # human.
           CONFLICT_SINCE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-audit verdict=conflict win=([^ ]+) -->") ] | .[]
@@ -4984,7 +4993,8 @@ jobs:
             | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
           if [[ -n "${CONFLICT_SINCE}" && "${STALE}" != 'true' ]]; then
             CONFLICT_WAKE="$(jq -rs \
-              --arg since "${CONFLICT_SINCE}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --arg since "${CONFLICT_SINCE}" --arg baseupd "${BASE_UPD_AT}" \
+              --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               (.[0] | map(select((.submitted_at // "") > $since)
                 | select((.user.login // "") != $ab and (.user.login // "") != $rb)
@@ -4998,9 +5008,10 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])))
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
-              + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
                 | select((.workflowName // "") != "Qwen Autofix")
-                | select((.completedAt // .updatedAt // "") > $since)) | length)' \
+                | select((.completedAt // .updatedAt // "") > $since)
+                | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
               "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json" 2> /dev/null || echo 0)"
             [[ "${CONFLICT_WAKE}" =~ ^[0-9]+$ ]] || CONFLICT_WAKE=0
             if [[ "${CONFLICT_WAKE}" == "0" ]]; then
@@ -5793,10 +5804,13 @@ jobs:
           REPAIR_VERIFIED_HEAD: '${{ steps.verify_repair.outputs.verified_head }}'
           FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'
           REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'
+          FIRST_AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict }}'
+          REPAIR_AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
+          AUDIT_VERDICT="${FIRST_AUDIT_VERDICT}"
           # The flag travels WITH the attempt whose outcome is selected: the
           # first pass can fail a round-caused check, the repair fixes it, and
           # the repair verification can then hit a pre-existing failure — that
@@ -5814,6 +5828,15 @@ jobs:
             OUTCOME="${REPAIR_OUTCOME}"
             COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
             VERIFIED_HEAD="${REPAIR_VERIFIED_HEAD}"
+            # The verdict travels WITH the attempt whose outcome is
+            # selected: a repair pass legitimately re-audits (its feedback
+            # rebuild keeps the audit section; the SKILL mandates
+            # audit-first), and the verdict its gate validated is the one
+            # the round's code was judged by — binding the first pass
+            # unconditionally dropped it. The :- fallback mirrors COMMITTED:
+            # a repair that validated nothing leaves the first pass's
+            # validated verdict as the record.
+            AUDIT_VERDICT="${REPAIR_AUDIT_VERDICT:-${FIRST_AUDIT_VERDICT}}"
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${COMMITTED}" ]]; then
@@ -5821,6 +5844,9 @@ jobs:
           fi
           if [[ -n "${VERIFIED_HEAD}" ]]; then
             echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${AUDIT_VERDICT}" ]]; then
+            echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
             fixed|noop) ;;
@@ -5897,15 +5923,14 @@ jobs:
           # report carries the audit's verdict marker (and a sound verdict
           # additionally re-arms the window at the current size).
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
-          # The verdict the verification GATE validated — never a re-read of
-          # the branch-writable growth-audit.json. FIRST PASS preferred: its
-          # read happens before any branch code runs in the verify step (and
-          # the checks no longer inherit the output channel), while the
-          # repair pass re-reads the file after the first pass's build had a
-          # write window — a forged rewrite must lose to the first pass's
-          # validated verdict. Empty when the gate rejected the verdict
-          # itself or never ran; the marker then stays absent.
-          AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict || steps.verify_repair.outputs.audit_verdict }}'
+          # The verdict Finalize verification selected WITH the outcome —
+          # never a re-read of the branch-writable growth-audit.json. The
+          # pass whose outcome was selected wins (a repair pass legitimately
+          # re-audits, and its gate-validated verdict is the one the round's
+          # code was judged by); a repair that validated nothing falls back
+          # to the first pass's validated verdict. Empty when no gate
+          # validated a verdict; the marker then stays absent.
+          AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
         run: |-
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
@@ -6601,10 +6626,10 @@ jobs:
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
-          # Gate-validated verdict (see 'Push and report'): never a re-read
-          # of the branch-writable file; first pass preferred over the
-          # repair pass's re-read for the same forgery reason.
-          AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict || steps.verify_repair.outputs.audit_verdict }}'
+          # The verdict Finalize verification selected WITH the outcome —
+          # see 'Push and report' for the selection rule. Never a re-read of
+          # the branch-writable file.
+          AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
           UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-

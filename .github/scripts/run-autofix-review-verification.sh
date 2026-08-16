@@ -45,6 +45,15 @@ git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
 if [ -s /etc/gitconfig ]; then
   echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
 fi
+# Two more inherited knobs steer EXECUTION itself, and neither has a
+# legitimate setter: BASH_ENV names a file every non-interactive bash
+# child sources at startup — a $GITHUB_ENV plant from an earlier step
+# would run inside the trusted helpers this gate spawns, past the channel
+# strip below (it covers their environment, not bash's startup file) —
+# and BITE_RUNNER selects the bite check's runner command, which executes
+# unwrapped with the gate's full environment. Strip them with the GIT_*
+# class.
+unset BASH_ENV BITE_RUNNER
 
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
@@ -76,6 +85,9 @@ reject_fix() {
   # step means the gate itself crashed, so losing the detail file must not turn
   # a deterministic rejection into an infrastructure retry.
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   if [[ "${preexisting}" == 'true' ]]; then
     # NOT retryable: the repair agent is only allowed to amend this round's
     # fix, and a failure that exists without the fix is outside that boundary
@@ -108,6 +120,16 @@ reject_fix() {
     echo "::warning::could not write the gate rejection detail; the verdict stands."
   exit 1
 }
+# Last-writer binding for the audit verdict: the record below happens
+# BEFORE the branch's build/tests run, and a check can still discover the
+# step-output FILE through the inherited $RUNNER_TEMP (the strip removes
+# the variable, not the backing file) and append its own audit_verdict —
+# step outputs are last-write-wins. Every exit past the record therefore
+# re-appends the validated verdict INLINE (no function call: gate snippets
+# extracted by the contract suite must stay executable standalone), so
+# the gate's copy outwrites any forged append. The flag gates it: a
+# verdict rejected BEFORE its record (missing, malformed, or a routing
+# violation) never surfaces.
 # Growth-audit verdict gate: a round tagged KISS_AUDIT (its counting window
 # is over the growth budget) must carry the audit's machine-readable verdict
 # — the audit IS the round's judgment of the over-budget approach, and a
@@ -124,19 +146,24 @@ reject_fix() {
 if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
   AUDIT_VERDICT=''
   if [[ -f "${WORKDIR}/growth-audit.json" ]]; then
-    AUDIT_VERDICT="$(jq -r '
-        select((.verdict // "") | IN("sound", "drift", "conflict"))
+    # Slurp so the document COUNT is part of validation: the per-document
+    # parse accepted a valid first document followed by one jq errors on
+    # (or shape-filters out) on the FIRST document's verdict — the gate's
+    # contract is a single JSON document, so reject every multi-document
+    # stream.
+    AUDIT_VERDICT="$(jq -rs '
+        if length != 1 then empty else .[0]
+        | select((.verdict // "") | IN("sound", "drift", "conflict"))
         | select((.kiss.result // "") | IN("pass", "fail"))
         | select((.minimal_change.result // "") | IN("pass", "fail"))
         | select((.verdict != "sound")
             or ((.kiss.result == "pass") and (.minimal_change.result == "pass")))
         | select((.verdict != "drift")
             or ((.kiss.result == "fail") or (.minimal_change.result == "fail")))
-        | .verdict' "${WORKDIR}/growth-audit.json" 2> /dev/null || true)"
+        | .verdict end' "${WORKDIR}/growth-audit.json" 2> /dev/null || true)"
   fi
-  # Anchor the parsed value: jq applies the shape check per input document
-  # and happily parses a *stream* of concatenated verdict objects, which
-  # would otherwise surface as a multi-line AUDIT_VERDICT.
+  # Anchor the parsed value (defense in depth now that slurp rejects
+  # multi-document streams outright).
   [[ "${AUDIT_VERDICT}" =~ ^(sound|drift|conflict)$ ]] || AUDIT_VERDICT=''
   if [[ -z "${AUDIT_VERDICT}" ]]; then
     {
@@ -152,15 +179,21 @@ if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
   # sound/drift, push the contested code, and park the next scan on a
   # handoff question that was never asked. NON-retryable: re-audit, don't
   # repair.
-  if [[ "${AUDIT_VERDICT}" == 'conflict' && ! -f "${WORKDIR}/failure.md" && ! -f "${WORKDIR}/handoff.md" ]]; then
+  if [[ "${AUDIT_VERDICT}" == 'conflict' && ! -f "${WORKDIR}/failure.md" && ! -s "${WORKDIR}/handoff.md" ]]; then
     reject_fix 'growth-audit verdict is conflict but the round did not stop with a handoff; conflict must STOP BLOCKED (no push)' 'false' 'false'
   fi
+  # The no-push half of this routing is enforced at the success exit
+  # below: a repair pass re-auditing to conflict LEGITIMATELY runs behind
+  # the first pass's commit (committed_rc=1), so the push shape cannot be
+  # refused here without refusing it — the refusal sits at the push
+  # boundary itself.
   # Record the verdict the GATE validated, for the report step to consume
   # via the step output. The report must NOT re-read the file itself: the
   # branch's own build/tests run as the runner user after this point and
   # WORKDIR is a predictable path they can write — the validated verdict is
   # the only verdict that may reach the trail marker and the re-arm.
   echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  AUDIT_VERDICT_RECORDED='true'
 fi
 
 if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
@@ -251,6 +284,9 @@ baseline_also_fails() {
       tail -c 3000 "${GATE_LOG}" 2> /dev/null
       echo '````'
     } > "${WORKDIR}/gate-rejection.md" || true
+    if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+      echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+    fi
     exit 1
   fi
   # Every retryable exit below hands the tree to the repair agent with
@@ -329,12 +365,15 @@ seed_dist_note() {
 # their lifecycle children) with this step's inherited environment. Strip
 # the runner injection channels first: a check appending to GITHUB_OUTPUT
 # would overwrite the gate's own outputs last-write-wins (a forged
-# audit_verdict=sound after the gate's write), and GITHUB_ENV/GITHUB_PATH
-# plant environment for the PAT-bearing steps that follow. Same class the
+# audit_verdict=sound after the gate's write), GITHUB_ENV/GITHUB_PATH
+# plant environment for the PAT-bearing steps that follow, and
+# GITHUB_STEP_SUMMARY lets branch code forge the job summary styled as
+# gate output (the display-channel sibling; qwen-triage strips it when
+# running external-author branch code for the same reason). Same class the
 # deferred-upsert child closes with env -i; targeted -u here because the
 # checks need the ordinary environment (PATH, HOME, …) to run at all.
 strip_runner_channels() {
-  env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH "$@"
+  env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY "$@"
 }
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's. The
@@ -425,6 +464,9 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
     cat "${WORKDIR}/no-action.md"
     echo "verified_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
     echo "outcome=noop" >> "${GITHUB_OUTPUT}"
+    if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+      echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+    fi
     exit 0
   fi
   echo "❌ Branch unchanged and no no-action.md — agent produced nothing"
@@ -1073,6 +1115,9 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
           tail -c 3000 "${GATE_LOG}" 2> /dev/null
           echo '````'
         } > "${WORKDIR}/gate-rejection.md" || true
+        if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+          echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+        fi
         exit 1
       }
       git reset --quiet 2>> "${GATE_LOG}" || true
@@ -1123,5 +1168,16 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
   fi
 fi
 assert_verification_tree
+# A conflict verdict must STOP BLOCKED: completing as fixed would push the
+# contested code under the PAT while the report posts the park marker —
+# the exact outcome the routing check above exists to prevent. The routing
+# check cannot see this shape (a planted handoff.md satisfies it), so
+# refuse at the push boundary. NON-retryable: re-audit, don't repair.
+if [[ "${AUDIT_VERDICT:-}" == 'conflict' ]]; then
+  reject_fix 'growth-audit verdict is conflict but the round completed as fixed; conflict must STOP BLOCKED (no push)' 'false' 'false'
+fi
 echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
+if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+  echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+fi
