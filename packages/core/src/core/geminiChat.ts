@@ -1281,21 +1281,36 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
       i++;
     } else {
       const modelOutput: Content[] = [];
-      let isValid = true;
+      let hasInvalidContent = false;
+      let hasPlaceholder = false;
       while (i < length && comprehensiveHistory[i].role === 'model') {
-        modelOutput.push(comprehensiveHistory[i]);
-        if (
-          isValid &&
-          (!isValidContent(comprehensiveHistory[i]) ||
-            isDegradedPlaceholderTurn(comprehensiveHistory[i]))
-        ) {
-          isValid = false;
+        const turn = comprehensiveHistory[i];
+        modelOutput.push(turn);
+        if (!isValidContent(turn)) {
+          hasInvalidContent = true;
+        } else if (isDegradedPlaceholderTurn(turn)) {
+          hasPlaceholder = true;
         }
         i++;
       }
-      if (isValid) {
-        curatedHistory.push(...modelOutput);
+      if (hasInvalidContent) {
+        // Pre-existing semantics: an invalid (empty/safety-filtered) turn
+        // invalidates the whole consecutive model run.
+        continue;
       }
+      if (hasPlaceholder) {
+        // A degraded placeholder invalidates only ITSELF, not the run:
+        // dropping the whole run would also drop sibling turns carrying a
+        // functionCall while the following user(functionResponse) turn
+        // survives — shipping an orphaned functionResponse, exactly the
+        // invalid pairing the continuation gate and the MAX_TOKENS
+        // hasFunctionCall check exist to avoid (R16-1, #8938 review).
+        curatedHistory.push(
+          ...modelOutput.filter((turn) => !isDegradedPlaceholderTurn(turn)),
+        );
+        continue;
+      }
+      curatedHistory.push(...modelOutput);
     }
   }
   return curatedHistory;
@@ -1564,6 +1579,13 @@ interface ScanResult {
   expected: Map<string, string>;
   matched: Map<string, FrLocation[]>;
   scanEnd: number;
+  /**
+   * Index of the first turn after `modelIdx` that is not a degraded
+   * placeholder model turn — the turn an fr must sit in to count as
+   * adjacent. Placeholders are dropped by curation, so they must not
+   * split the pairing adjacency here either (R16-1, #8938 review).
+   */
+  adjacentIdx: number;
 }
 
 /** Decision-phase output: exact mutations the next phase will apply. */
@@ -1591,6 +1613,17 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
 
   const matched = new Map<string, FrLocation[]>();
   let scanIdx = modelIdx + 1;
+  // Degraded placeholder turns cannot split the pairing adjacency: they
+  // are dropped by curation, so an fr landing right after a placeholder
+  // sibling still answers the call (R16-1, #8938 review).
+  while (
+    scanIdx < history.length &&
+    history[scanIdx]?.role === 'model' &&
+    isDegradedPlaceholderTurn(history[scanIdx])
+  ) {
+    scanIdx++;
+  }
+  const adjacentIdx = scanIdx;
   while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
     const parts = history[scanIdx].parts ?? [];
     for (let pIdx = 0; pIdx < parts.length; pIdx++) {
@@ -1605,7 +1638,7 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
     scanIdx++;
   }
 
-  return { modelIdx, expected, matched, scanEnd: scanIdx };
+  return { modelIdx, expected, matched, scanEnd: scanIdx, adjacentIdx };
 }
 
 /**
@@ -1619,7 +1652,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   const removalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
 
-  const adjacentIdx = scan.modelIdx + 1;
+  const adjacentIdx = scan.adjacentIdx;
   for (const [id, name] of scan.expected) {
     const locations = scan.matched.get(id);
     if (!locations || locations.length === 0) {

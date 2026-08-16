@@ -3092,11 +3092,13 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
-    it('drops the whole run when a placeholder sits inside consecutive model turns', async () => {
-      // Run-grouping semantics: a placeholder inside a run of consecutive
-      // model turns invalidates the WHOLE run, so the valid sibling model
-      // turn is dropped from the request too. Pin the intended behavior in
-      // both directions (#8938 review).
+    it('drops only the placeholder turn when it sits inside consecutive model turns', async () => {
+      // Run-grouping semantics (revised by R16-1): a placeholder inside a
+      // run of consecutive model turns invalidates only ITSELF. Dropping
+      // the whole run would also drop a sibling turn carrying a
+      // functionCall while the following user(functionResponse) survives —
+      // shipping an orphaned functionResponse, the invalid pairing
+      // providers reject outright (#8938 review).
       chat.setHistory([
         { role: 'user', parts: [{ text: 'question' }] },
         { role: 'model', parts: [{ text: 'real answer' }] },
@@ -3130,9 +3132,167 @@ describe('GeminiChat', async () => {
 
       const request = vi.mocked(mockContentGenerator.generateContentStream).mock
         .calls[0]?.[0];
-      // The whole model run (valid turn + placeholder) is dropped.
+      // Only the placeholder is dropped; the valid sibling survives.
       expect(request?.contents).toEqual([
-        { role: 'user', parts: [{ text: 'question' }, { text: 'again' }] },
+        { role: 'user', parts: [{ text: 'question' }] },
+        { role: 'model', parts: [{ text: 'real answer' }] },
+        { role: 'user', parts: [{ text: 'again' }] },
+      ]);
+    });
+
+    it('keeps the functionCall sibling of a placeholder so its functionResponse is not orphaned (#8938)', async () => {
+      // R16-1 witness: the run [placeholder, functionCall] must keep the
+      // functionCall turn — with the whole run dropped, the following
+      // user(functionResponse) ships without its matching functionCall.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'do the thing' }] },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'fc1',
+                name: 'someTool',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: { parts: [{ text: 'response' }], role: 'model' },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'response',
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-placeholder-curation-fc-after-placeholder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        { role: 'user', parts: [{ text: 'do the thing' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'fc1',
+                name: 'someTool',
+                response: { output: 'ok' },
+              },
+            },
+            { text: 'next' },
+          ],
+        },
+      ]);
+    });
+
+    it('keeps a functionCall turn whose placeholder sibling is dropped (#8938)', async () => {
+      // Mirror direction: the run [functionCall, placeholder] keeps the
+      // functionCall and drops only the placeholder, so the following
+      // functionResponse stays paired either way (#8938 review).
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'do the thing' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
+          ],
+        },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'fc1',
+                name: 'someTool',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: { parts: [{ text: 'response' }], role: 'model' },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'response',
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-placeholder-curation-fc-before-placeholder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        { role: 'user', parts: [{ text: 'do the thing' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'fc1', name: 'someTool', args: { q: 1 } } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'fc1',
+                name: 'someTool',
+                response: { output: 'ok' },
+              },
+            },
+            { text: 'next' },
+          ],
+        },
       ]);
     });
 
