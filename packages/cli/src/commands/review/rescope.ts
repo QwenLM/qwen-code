@@ -43,7 +43,11 @@ import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { fileLineCount, gitOpt, gitRaw } from './lib/git.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
-import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
+import {
+  LITERAL_PATHSPECS,
+  PINNED_DIFF_CONFIG,
+  PINNED_DIFF_FLAGS,
+} from './lib/diff-flags.js';
 import {
   buildDiffPlan,
   parseDiff,
@@ -316,8 +320,28 @@ function runRescope(args: RescopeArgs): void {
   // excluded from the delta readers for having no section, and excluded from
   // the widening candidates for being in `delta`. It is a CANDIDATE.
   const restored = (p: string): boolean => {
-    const at = (ref: string) =>
-      gitOpt('-C', worktreePath, 'rev-parse', `${ref}:${p}`);
+    // The whole TREE ENTRY, not the blob: `rev-parse <ref>:<path>` yields the
+    // oid alone, so a fix round that reverts the content and keeps `chmod +x`
+    // — or swaps a file for a symlink with the same text — compared equal and
+    // was dropped as "restored". Its mode-only section IS in the PR's diff
+    // (parseDiff emits one, planChunks gives it a chunk), so dropping it
+    // narrowed the incremental scope BELOW the full-range floor and exited 3
+    // "nothing new" over a change nobody reviewed.
+    const at = (ref: string) => {
+      const line = gitOpt(
+        '-C',
+        worktreePath,
+        LITERAL_PATHSPECS,
+        'ls-tree',
+        ref,
+        '--',
+        p,
+      );
+      if (line === null || line === '') return null;
+      const tab = line.indexOf('\t');
+      const meta = (tab < 0 ? line : line.slice(0, tab)).split(' ');
+      return meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null;
+    };
     const b = at(mergeBaseSha);
     const h = at(fetchedSha);
     // Absent on BOTH sides is deliberately NOT a restoration. Two shapes
@@ -526,6 +550,15 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
+  // NOTHING past the plan write may end the process. Two shapes, and the
+  // try/catch below only ever caught the first: `write` can throw
+  // synchronously, and it can also surface EPIPE as an ASYNC 'error' event on
+  // the stream — unhandled, that terminates the process with exit 1 no
+  // catch block can intercept. A persistent no-op listener is what makes the
+  // async shape inert (measured: it flips the dead-pipe arm back to exit 0).
+  const swallow = () => {};
+  process.stdout.on('error', swallow);
+  process.stderr.on('error', swallow);
   // NOTHING past the plan write may throw. "Only exit 0 rewrites the plan" is
   // the invariant the skill branches on, and its contrapositive has to hold
   // too: a non-zero exit must mean the plan is untouched. A dead stdout (the
