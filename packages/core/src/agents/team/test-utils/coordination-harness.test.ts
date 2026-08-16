@@ -9,9 +9,11 @@ import * as path from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
+import { ApprovalMode } from '../../../config/config.js';
+import { TaskUpdateTool } from '../../../tools/task-update.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
-import { createTask, listTasks } from '../tasks.js';
+import { createTask, getTask, listTasks, updateTask } from '../tasks.js';
 import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
 
 // Mock Storage so all file I/O uses the harness's temp dir.
@@ -339,7 +341,317 @@ describe('TeamCoordinationHarness', () => {
     });
   });
 
-  // ─── 3. Message priority ───────────────────────────────────
+  // ─── 3. Leader task assignment ─────────────────────────────
+
+  describe('leader task assignment', () => {
+    it('delivers an explicit leader assignment only to its eligible named owner', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Assigned work',
+        description: 'Only target should receive this.',
+        owner: 'target',
+      });
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const other = await h.spawnTeammate('other');
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      const result = await tool
+        .build({
+          taskId: task.id,
+          status: 'in_progress',
+          owner: 'target',
+        })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      await target.waitForMessageCount(1);
+      expect(target.getReceivedMessages()[0]).toContain('Assigned work');
+      expect(other.getReceivedMessages()).toEqual([]);
+      const persisted = await getTask(h.teamName, task.id);
+      expect(persisted).toEqual(
+        expect.objectContaining({ status: 'in_progress', owner: 'target' }),
+      );
+    });
+
+    it('delivers a busy owner’s persisted assignment on its next idle transition', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Resume assigned work',
+        description: 'Deliver after the existing turn.',
+        owner: 'target',
+      });
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+
+      const result = await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(target.getReceivedMessages()).toHaveLength(1);
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      expect(target.getReceivedMessages()[1]).toContain('Resume assigned work');
+      expect(await getTask(h.teamName, task.id)).toEqual(
+        expect.objectContaining({ status: 'in_progress', owner: 'target' }),
+      );
+    });
+
+    it('delivers multiple persisted assignments in task order without repeating one', async () => {
+      const h = await createHarness();
+      const first = await createTask(h.teamName, {
+        subject: 'First assigned task',
+        description: 'Deliver first.',
+        owner: 'target',
+      });
+      const second = await createTask(h.teamName, {
+        subject: 'Second assigned task',
+        description: 'Deliver second.',
+        owner: 'target',
+      });
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      for (const task of [first, second]) {
+        await tool
+          .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+          .execute(new AbortController().signal);
+      }
+
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      target.goIdle();
+      await target.waitForMessageCount(3);
+      const messages = target.getReceivedMessages();
+      expect(messages[1]).toContain('First assigned task');
+      expect(messages[2]).toContain('Second assigned task');
+    });
+
+    it('delivers a leader assignment to a read-only teammate', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Read-only investigation',
+        description: 'Inspect and report evidence.',
+        owner: 'reader',
+      });
+      await h.teamManager.spawnTeammate({
+        name: 'reader',
+        cwd: h.tmpDir,
+        readOnly: true,
+      });
+      const reader = h.getAgent('reader');
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      const result = await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'reader' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      await reader.waitForMessageCount(1);
+      expect(reader.getReceivedMessages()[0]).toContain(
+        'Read-only investigation',
+      );
+    });
+
+    it('delivers a reopened task once to the same owner after completion', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Repeat assignment',
+        description: 'Deliver for each assignment generation.',
+      });
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+      await target.waitForMessageCount(1);
+
+      await tool
+        .build({ taskId: task.id, status: 'completed' })
+        .execute(new AbortController().signal);
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+
+      target.goIdle();
+      await vi.waitFor(
+        () => expect(target.getReceivedMessages()).toHaveLength(2),
+        { timeout: 1000 },
+      );
+      expect(target.getReceivedMessages()[1]).toContain('Repeat assignment');
+
+      await tool
+        .build({ taskId: task.id, description: 'Clarified details.' })
+        .execute(new AbortController().signal);
+      target.goIdle();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(target.getReceivedMessages()).toHaveLength(2);
+    });
+
+    it('delivers an owner-only reassignment to an idle owner', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Reassigned work',
+        description: 'Deliver without repeating status.',
+        owner: 'former-owner',
+      });
+      await updateTask(h.teamName, task.id, { status: 'in_progress' });
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      const result = await tool
+        .build({ taskId: task.id, owner: 'target' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      await target.waitForMessageCount(1);
+      expect(target.getReceivedMessages()[0]).toContain('Reassigned work');
+      expect(await getTask(h.teamName, task.id)).toEqual(
+        expect.objectContaining({ status: 'in_progress', owner: 'target' }),
+      );
+    });
+
+    it('delivers an owner-only reassignment after a busy owner becomes idle', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Deferred reassignment',
+        description: 'Deliver after the existing turn.',
+        owner: 'former-owner',
+      });
+      await updateTask(h.teamName, task.id, { status: 'in_progress' });
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+
+      const result = await tool
+        .build({ taskId: task.id, owner: 'target' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(target.getReceivedMessages()).toHaveLength(1);
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      expect(target.getReceivedMessages()[1]).toContain(
+        'Deferred reassignment',
+      );
+      expect(await getTask(h.teamName, task.id)).toEqual(
+        expect.objectContaining({ status: 'in_progress', owner: 'target' }),
+      );
+    });
+
+    it('rejects owner-only reassignments to unavailable owners before persisting', async () => {
+      const h = await createHarness();
+      const terminal = await h.spawnTeammate('terminal');
+      terminal.setStatus(AgentStatus.COMPLETED);
+      await h.spawnTeammate('shutting-down');
+      h.teamManager.markShutdownRequested('shutting-down');
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      for (const owner of ['missing', 'terminal', 'shutting-down']) {
+        const task = await createTask(h.teamName, {
+          subject: `${owner} reassignment`,
+          description: 'Must not persist.',
+          owner: 'former-owner',
+        });
+        await updateTask(h.teamName, task.id, { status: 'in_progress' });
+
+        const result = await tool
+          .build({ taskId: task.id, owner })
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeDefined();
+        expect(await getTask(h.teamName, task.id)).toEqual(
+          expect.objectContaining({
+            status: 'in_progress',
+            owner: 'former-owner',
+          }),
+        );
+      }
+    });
+
+    it('rejects unavailable assignment owners before persisting', async () => {
+      const h = await createHarness();
+      const terminal = await h.spawnTeammate('terminal');
+      terminal.setStatus(AgentStatus.COMPLETED);
+      await h.spawnTeammate('shutting-down');
+      h.teamManager.markShutdownRequested('shutting-down');
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      for (const owner of ['missing', 'terminal', 'shutting-down']) {
+        const task = await createTask(h.teamName, {
+          subject: `${owner} assignment`,
+          description: 'Must not persist.',
+          owner,
+        });
+        const result = await tool
+          .build({ taskId: task.id, status: 'in_progress', owner })
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeDefined();
+        expect(await getTask(h.teamName, task.id)).toEqual(
+          expect.objectContaining({ status: 'pending', owner }),
+        );
+      }
+    });
+  });
+
+  // ─── 4. Message priority ───────────────────────────────────
 
   describe('message priority', () => {
     it('prioritizes shutdown over peer messages', async () => {

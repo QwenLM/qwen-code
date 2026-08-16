@@ -187,6 +187,26 @@ describe('tasks', () => {
       expect(updated!.owner).toBeUndefined();
     });
 
+    it('requeues a prior claim when a blank owner update follows it', async () => {
+      // Model a blank-owner update that reached the store after another
+      // caller claimed the task. The store must not persist ownerless
+      // in-progress work regardless of that stale caller's prior view.
+      const task = await createTask('team', {
+        subject: 'Test',
+        description: 'Desc',
+      });
+      await claimTask('team', task.id, 'worker@team');
+
+      const updated = await updateTask('team', task.id, { owner: '' });
+
+      expect(updated).toEqual(
+        expect.objectContaining({ status: 'pending', owner: undefined }),
+      );
+      const persisted = await getTask('team', task.id);
+      expect(persisted?.status).toBe('pending');
+      expect(persisted?.owner).toBeUndefined();
+    });
+
     it('updates subject and description', async () => {
       const task = await createTask('team', {
         subject: 'Old',

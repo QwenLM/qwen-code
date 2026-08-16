@@ -9,7 +9,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TaskUpdateTool } from './task-update.js';
-import { createTask, getTask } from '../agents/team/tasks.js';
+import {
+  createTask,
+  getTask,
+  onTasksUpdated,
+  updateTask,
+} from '../agents/team/tasks.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
@@ -73,6 +78,130 @@ describe('TaskUpdateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('completed');
+  });
+
+  it('requeues an in-progress task when its owner is cleared', async () => {
+    const teamManager = {
+      assertAssignableTaskOwner: vi.fn(() => {
+        throw new Error('blank owner must not be validated');
+      }),
+      dispatchAssignedTask: vi.fn(),
+      invalidateTaskAssignmentDelivery: vi.fn(),
+    };
+    const leaderTool = new TaskUpdateTool({
+      ...makeConfig(),
+      getTeamManager: () => teamManager,
+    } as unknown as Config);
+    const task = await createTask(TEAM, {
+      subject: 'Unassign',
+      description: 'desc',
+      owner: 'worker',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+
+    const result = await leaderTool
+      .build({ taskId: task.id, owner: '' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const updated = await getTask(TEAM, task.id);
+    expect(updated?.status).toBe('pending');
+    expect(updated).not.toHaveProperty('owner');
+    expect(teamManager.assertAssignableTaskOwner).not.toHaveBeenCalled();
+    expect(teamManager.dispatchAssignedTask).not.toHaveBeenCalled();
+    expect(teamManager.invalidateTaskAssignmentDelivery).toHaveBeenCalledOnce();
+    expect(teamManager.invalidateTaskAssignmentDelivery).toHaveBeenCalledWith(
+      task.id,
+    );
+  });
+
+  it('rejects an explicit in-progress update with a blank owner', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Unassign',
+      description: 'desc',
+      owner: 'worker',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+
+    const result = await tool
+      .build({ taskId: task.id, status: 'in_progress', owner: '' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(await getTask(TEAM, task.id)).toEqual(
+      expect.objectContaining({ status: 'in_progress', owner: 'worker' }),
+    );
+  });
+
+  it('clears an owner without changing a pending task status', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Unassign pending',
+      description: 'desc',
+      owner: 'worker',
+    });
+
+    const result = await tool
+      .build({ taskId: task.id, owner: '' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const updated = await getTask(TEAM, task.id);
+    expect(updated?.status).toBe('pending');
+    expect(updated).not.toHaveProperty('owner');
+  });
+
+  it('clears an owner without changing a completed task status', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Unassign completed',
+      description: 'desc',
+      owner: 'worker',
+    });
+    await updateTask(TEAM, task.id, { status: 'completed' });
+
+    const result = await tool
+      .build({ taskId: task.id, owner: '' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const updated = await getTask(TEAM, task.id);
+    expect(updated?.status).toBe('completed');
+    expect(updated).not.toHaveProperty('owner');
+  });
+
+  it('releases an assignment when its owner becomes unavailable after persistence', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Release unavailable owner',
+      description: 'desc',
+    });
+    const teamManager = {
+      assertAssignableTaskOwner: vi.fn(),
+      dispatchAssignedTask: vi.fn(() => 'unavailable'),
+    };
+    const leaderTool = new TaskUpdateTool({
+      ...makeConfig(),
+      getTeamManager: () => teamManager,
+    } as unknown as Config);
+    const taskUpdates = vi.fn();
+    const unsubscribe = onTasksUpdated((teamName) => {
+      if (teamName === TEAM) taskUpdates();
+    });
+
+    try {
+      const result = await leaderTool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'worker' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('status: pending');
+      expect(teamManager.dispatchAssignedTask).toHaveBeenCalledWith(
+        expect.objectContaining({ id: task.id, owner: 'worker' }),
+      );
+      expect((await getTask(TEAM, task.id))?.status).toBe('pending');
+      expect((await getTask(TEAM, task.id))?.owner).toBeUndefined();
+      expect(taskUpdates).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('deletes a task with status "deleted"', async () => {

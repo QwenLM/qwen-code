@@ -450,6 +450,13 @@ export async function updateTask(
         // stored "" verbatim, so the model following the schema
         // ended up with `owner: ""` instead of unassigned.
         task.owner = updates.owner ? updates.owner : undefined;
+        if (
+          updates.owner === '' &&
+          updates.status === undefined &&
+          task.status === 'in_progress'
+        ) {
+          task.status = 'pending';
+        }
       }
       if (updates.subject !== undefined) {
         task.subject = updates.subject;
