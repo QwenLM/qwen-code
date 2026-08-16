@@ -60,6 +60,14 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['tools/win/build.bat', true],
     ['tools/win/setup.cmd', true],
     ['.github/scripts/label-pr.mjs', true],
+    // py/rb/pl are governed by the scripts arm alone — no lane rule
+    // reaches them — so each spelling is pinned here; the composite-action
+    // rows pin the same extension filter under .github/actions/.
+    ['.github/scripts/triage.py', true],
+    ['.github/scripts/hook.rb', true],
+    ['.github/scripts/tool.pl', true],
+    ['.github/actions/setup/entrypoint.sh', true],
+    ['.github/actions/setup/README.md', false],
     // A document under .github/scripts has no lanes and no shell.
     ['.github/scripts/README.md', false],
     ['scripts/tests/install-script.test.js', true],
@@ -68,17 +76,30 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // The suite config decides which lanes collect the script tests, and it
     // carries a live platform gate — the lane-inventory question applies.
     ['scripts/tests/vitest.config.ts', true],
+    // The scripts-test branch is anchored to a scripts/ directory, not to a
+    // directory that merely ends in the word.
+    ['myscripts/install.test.ts', false],
+    ['prescripts/tests/vitest.config.ts', false],
     // A Dockerfile's RUN lines are shell in the image's userland; every
     // spelling pathTool's hadolint branch recognises is governed.
     ['Dockerfile', true],
     ['docker/build.dockerfile', true],
     ['ci/Dockerfile.alpine', true],
     ['src/mydockerfile', false],
+    // The lane rule composes pathTool's basename-based hadolint branch: a
+    // file UNDER a directory merely named Dockerfile.* is not a Dockerfile.
+    ['Dockerfile.d/README.md', false],
+    ['docker/Dockerfile.prod/app.conf', false],
     // A test outside the script layer is not handed a shell syllabus, and a
     // document that merely talks about one is not code.
     ['src/pay.test.ts', false],
     ['scripts/build.js', false],
     ['docs/how-to-run.sh.md', false],
+    // Extensionless hooks are shellchecked by toolFor's shebang branch,
+    // which reads content; matches() sees the path alone and cannot tell a
+    // hook from a README, so it declines to guess — a visible decision.
+    ['.husky/pre-commit', false],
+    ['hooks/prepush', false],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -188,11 +209,26 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     );
   });
 
-  it('pairs both checklists on a script-only diff', () => {
+  it.each([
+    '.github/scripts/pr-safety-precheck.mjs',
+    '.github/scripts/cleanup.sh',
+    '.github/scripts/deploy.ps1',
+  ])('pairs both checklists on a script-only diff (%s)', (path) => {
     // The security checklist says the scripts a workflow calls are part of
     // the workflow, so a diff touching only such a script needs the
-    // expression-injection eyes and the lane eyes together.
-    const out = pathRulesFor(['.github/scripts/pr-safety-precheck.mjs']);
+    // expression-injection eyes and the lane eyes together — in every
+    // extension the arm admits, not just .mjs: the .sh variant pins the
+    // shell family and the .ps1 variant the Windows lane.
+    const out = pathRulesFor([path]);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('pairs both checklists on a composite-action script', () => {
+    // A script under a composite action is as much "a script the workflow
+    // calls" as one under .github/scripts — the action's shell invokes it
+    // with the same interpolated arguments — so it draws the same pairing.
+    const out = pathRulesFor(['.github/actions/setup/entrypoint.sh']);
     expect(out).toContain('GitHub Actions workflows');
     expect(out).toContain('Shell and CI scripts — the lanes that run them');
   });

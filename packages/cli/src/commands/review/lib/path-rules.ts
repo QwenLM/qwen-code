@@ -33,6 +33,8 @@
 // pays a cost: the checklist rides in the brief of every matching agent, so a rule
 // that does not earn its tokens on the median matching diff is not a rule.
 
+import { pathTool } from '../script-lint.js';
+
 export interface PathRule {
   /** Named in the brief, so an agent can say which rule it applied. */
   title: string;
@@ -44,12 +46,14 @@ export interface PathRule {
 
 const GITHUB_ACTIONS: PathRule = {
   title: 'GitHub Actions workflows',
-  // `.github/scripts/**` is included — with a script-extension filter, so a
-  // README or data file there is not governed — because the checklist's
-  // "scripts the workflow calls are part of the workflow" paragraph is owed
-  // to a script-only diff just as much as to the workflow that calls it.
+  // Scripts the workflow calls are included — under `.github/scripts/**`
+  // and under the composite actions that invoke them, with one
+  // script-extension class for both so a README or data file there is not
+  // governed — because the checklist's "scripts the workflow calls are
+  // part of the workflow" paragraph is owed to a script-only diff just as
+  // much as to the workflow that calls it.
   matches: (p) =>
-    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/action\.ya?ml|scripts\/.+\.(?:[cm]?[jt]sx?|py|sh|bash|rb|pl))$/i.test(
+    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/(?:action\.ya?ml|.+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))|scripts\/.+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))$/i.test(
       p,
     ),
   checklist: `A workflow is not configuration. It is code that runs on the project's own runners, with the repository's credentials, and some of its inputs come from strangers. The classes below are invisible to a reader looking for "bugs" in YAML.
@@ -78,16 +82,27 @@ const GITHUB_ACTIONS: PathRule = {
 
 const SHELL_LANES: PathRule = {
   title: 'Shell and CI scripts — the lanes that run them',
-  // Composes GITHUB_ACTIONS.matches instead of re-spelling its regex: a
-  // workflow diff must stack both checklists, and composing keeps that
-  // invariant structural rather than two literals kept identical by hand.
-  matches: (p) =>
-    /\.(sh|bash|zsh|ksh|dash|ps1|bat|cmd)$/i.test(p) ||
-    GITHUB_ACTIONS.matches(p) ||
-    /(?:^|\/)dockerfile$|\.dockerfile$|(?:^|\/)dockerfile\./i.test(p) ||
-    /(?:^|\/)scripts\/(?:.+\.(?:test|spec)\.[cm]?[jt]sx?|tests\/vitest\.config\.[cm]?[jt]sx?)$/i.test(
-      p,
-    ),
+  // Composes pathTool's executable-script detectors and
+  // GITHUB_ACTIONS.matches instead of re-spelling them: a workflow diff
+  // must stack both checklists, and composing keeps that invariant
+  // structural rather than literals kept identical by hand. Precondition:
+  // every path class GITHUB_ACTIONS governs runs shell, so it is owed the
+  // lane syllabus too — only add such classes there. The zsh/PowerShell
+  // extensions stay a deliberate superset of pathTool: shellcheck refuses
+  // zsh, but the lanes that run these files are what this syllabus exists
+  // for.
+  matches: (p) => {
+    const tool = pathTool(p);
+    return (
+      tool === 'shellcheck' ||
+      tool === 'hadolint' ||
+      /\.(zsh|ps1|bat|cmd)$/i.test(p) ||
+      GITHUB_ACTIONS.matches(p) ||
+      /(?:^|\/)scripts\/(?:.+\.(?:test|spec)\.[cm]?[jt]sx?|tests\/vitest\.config\.[cm]?[jt]sx?)$/i.test(
+        p,
+      )
+    );
+  },
   checklist: `A shell script's behaviour is a property of the **host** that runs it, and a test's greenness is a property of the **lanes** that run it. Neither is in the diff, and neither is in your own shell: you are one host, and this pull request's checks are a subset of the lanes. No dimension asks which lanes exist, so a change that is green everywhere you can see it lands red where nobody looked.
 
 **You are reviewing this diff, not auditing this file.** A portability weakness on a line this change does not touch is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a lane this diff **newly reaches**.
