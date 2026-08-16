@@ -75,6 +75,7 @@ export const legacyFilenames = [
   'costCalculator',
   'cpuProfiler',
   'crawlCache',
+  'createCopilotContentGenerator',
   'cronDisplay',
   'cronParser',
   'cronScheduler',

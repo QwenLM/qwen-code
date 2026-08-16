@@ -60,6 +60,7 @@ export enum AuthType {
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
   USE_ANTHROPIC = 'anthropic',
+  USE_COPILOT = 'copilot',
 }
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
@@ -303,6 +304,11 @@ export function validateModelConfig(
 
   // Qwen OAuth doesn't need validation - it uses dynamic tokens
   if (config.authType === AuthType.QWEN_OAUTH) {
+    return { valid: true, errors: [] };
+  }
+
+  // Copilot uses dynamic device-flow tokens resolved at request time
+  if (config.authType === AuthType.USE_COPILOT) {
     return { valid: true, errors: [] };
   }
 
@@ -562,6 +568,13 @@ export async function createContentGenerator(
           './geminiContentGenerator/index.js'
         );
         return createGeminiContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.USE_COPILOT) {
+      loadBaseGenerator = async () => {
+        const { createCopilotContentGenerator } = await import(
+          '../copilot/createCopilotContentGenerator.js'
+        );
+        return createCopilotContentGenerator(generatorConfig, config);
       };
     } else {
       throw new Error(
