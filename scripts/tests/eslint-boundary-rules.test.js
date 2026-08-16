@@ -17,6 +17,11 @@ const repoRoot = path.resolve(
 
 const eslint = new ESLint({ cwd: repoRoot });
 
+const RULE_ID = 'qwen-boundary/no-serve-boundary-cross';
+const ACP_FIXTURE = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+const RUNTIME_FIXTURE = 'packages/cli/src/runtime/boundary-fixture.ts';
+const UTILS_FIXTURE = 'packages/cli/src/utils/boundary-fixture.ts';
+
 const lintCliFile = (filePath, code) =>
   eslint.lintText(code, { filePath: path.join(repoRoot, filePath) });
 
@@ -25,6 +30,17 @@ const expectServeBoundaryError = async (filePath, code) => {
   expect(result.messages.map((message) => message.message)).toEqual(
     expect.arrayContaining([expect.stringContaining('serve')]),
   );
+};
+
+/** Assert the boundary rule produced NO diagnostics for `code`. Filters on
+ *  the rule id (stricter than a 'serve' substring: also catches failClosed
+ *  over-blocking from this rule). */
+const expectNoBoundaryHits = async (filePath, code) => {
+  const [result] = await lintCliFile(filePath, code);
+  const boundaryHits = result.messages.filter(
+    (message) => message.ruleId === RULE_ID,
+  );
+  expect(boundaryHits).toEqual([]);
 };
 
 describe('eslint cli serve boundary rules', () => {
@@ -121,9 +137,10 @@ describe('eslint cli serve boundary rules', () => {
     );
   });
 
-  // R5-5: the override blocks restate restrictedStringThrow; flat config's
-  // last-wins semantics mean dropping the restatement would silently legalize
-  // string throws in exactly these trees. This probe pins it.
+  // R5-5: the general packages/**/src/** block supplies
+  // restrictedStringThrow; the guarded-tree override blocks only ADD the
+  // boundary rule. This probe pins that the general block's rule still
+  // applies inside the guarded trees despite those overrides.
   it('still rejects string throws inside the guarded overrides', async () => {
     const [result] = await lintCliFile(
       'packages/cli/src/acp-integration/boundary-fixture.ts',
@@ -435,19 +452,11 @@ describe('eslint cli serve boundary rules', () => {
       "import sub from '@scope/serve/handler.js';",
       '',
     ].join('\n');
-    const [result] = await lintCliFile(
-      'packages/cli/src/acp-integration/boundary-fixture.ts',
-      code,
-    );
     // R10-3: filter on the rule itself, not the serveBoundary text — a
     // regression routing serve-named bare specifiers to failClosed must
     // also turn this pin red ('serve/ internals' is absent from the
     // failClosed message).
-    const boundaryHits = result.messages.filter(
-      (message) =>
-        message.ruleId === 'qwen-boundary/no-serve-boundary-cross',
-    );
-    expect(boundaryHits).toEqual([]);
+    await expectNoBoundaryHits(ACP_FIXTURE, code);
   });
 
   // R9-5: the re-export / Worker / fork / require visitors had no fixture
@@ -464,7 +473,10 @@ describe('eslint cli serve boundary rules', () => {
       runtime,
       "export { x } from '../serve/index.js';",
     );
-    await expectServeBoundaryError(runtime, "new Worker('../serve/worker.js');");
+    await expectServeBoundaryError(
+      runtime,
+      "new Worker('../serve/worker.js');",
+    );
     await expectServeBoundaryError(runtime, "require('../serve/index.js');");
     await expectServeBoundaryError(
       runtime,
@@ -486,15 +498,10 @@ describe('eslint cli serve boundary rules', () => {
   // concatenation — a pure template literal resolving OUTSIDE serve must
   // stay allowed (breaking the concatenation fail-closes legitimate code).
   it('allows pure template-literal imports that resolve outside serve', async () => {
-    const [result] = await lintCliFile(
-      'packages/cli/src/acp-integration/boundary-fixture.ts',
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
       'export async function load() { await import(`../utils/boundary-fixture.ts`); }',
     );
-    const boundaryHits = result.messages.filter(
-      (message) =>
-        message.ruleId === 'qwen-boundary/no-serve-boundary-cross',
-    );
-    expect(boundaryHits).toEqual([]);
   });
 
   // R13-2: resolution-based detections must report via the serveBoundary
@@ -502,17 +509,204 @@ describe('eslint cli serve boundary rules', () => {
   // rejection the substring-based positive helper stays green, so pin the
   // messageId directly.
   it('reports resolution detections via the serveBoundary messageId', async () => {
-    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
     for (const code of [
       "import '../serve/index.js';",
       "export async function load() { return import('src/serve/index.js'); }",
     ]) {
-      const [result] = await lintCliFile(acp, code);
+      const [result] = await lintCliFile(ACP_FIXTURE, code);
       expect(
         result.messages.some(
           (message) => message.messageId === 'serveBoundary',
         ),
       ).toBe(true);
     }
+  });
+
+  // ── Round-11 review pins ─────────────────────────────────────────────
+
+  // R12-2 (round-9 ledger): the '#' fail-closed check used to sit AFTER
+  // stripUrlSuffixes, which splits on '#' — '#name' collapsed to '' and
+  // classified outside, so package-imports specifiers sailed through. The
+  // check now precedes suffix stripping; pin both entrances.
+  it('fails closed on package-imports (#) specifiers', async () => {
+    await expectServeBoundaryError(ACP_FIXTURE, "import '#s';");
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "export async function load() { return import('#serve-internals'); }",
+    );
+  });
+
+  // C0 controls at the specifier edges are stripped before Node's scheme
+  // detection — '\x01data:…' still loads a data: URL. Scheme detection
+  // must see the same edge-stripped form.
+  it('fails closed on C0-control-prefixed URL schemes', async () => {
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "export async function load() { await import('\\u0001data:text/javascript,export default 1'); }",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "import '\\u0001file:///repo/packages/cli/src/serve/index.js';",
+    );
+  });
+
+  // String-code execution entrances embed import('…') the rule cannot
+  // resolve — fail closed like computed sources (eval/new Function have
+  // no shared no-eval guard in the config).
+  it('fails closed on string-code execution entrances', async () => {
+    for (const code of [
+      'eval("import(\'../serve/index.js\')");',
+      '(0, eval)("import(\'../serve/index.js\')");',
+      'globalThis.eval("import(\'../serve/index.js\')");',
+      'const load = new Function("return import(\'../serve/index.js\')");',
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+  });
+
+  // file: URLs are "special", so Node's URL-based resolution normalizes
+  // backslashes to '/' — a specifier VALUE containing '\' resolves like
+  // the slash form even on posix.
+  it('rejects backslash-separated serve specifiers', async () => {
+    await expectServeBoundaryError(
+      RUNTIME_FIXTURE,
+      "import '..\\\\serve\\\\index.js';",
+    );
+  });
+
+  // Every getBuiltinModule arm: global.process, destructured bare
+  // identifier, Reflect.apply — plus the computed object-side and
+  // property-side spellings.
+  it('pins every getBuiltinModule spelling', async () => {
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const mod = global.process.getBuiltinModule('node:module');",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const { getBuiltinModule } = process;\nconst mod = getBuiltinModule('node:module');",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const mod = Reflect.apply(process.getBuiltinModule, null, ['node:module']);",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const mod = globalThis['process'].getBuiltinModule('module');",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const mod = Reflect.apply(process['getBuiltinModule'], null, ['module']);",
+    );
+  });
+
+  // The root-absolute and file: branches must reach isInServeDir —
+  // 'inside' verdicts (serveBoundary), not just the fail-closed path.
+  it('reports absolute-path and file: imports into serve via serveBoundary', async () => {
+    const serveEntry = `${repoRoot}/packages/cli/src/serve/index.ts`;
+    for (const code of [
+      `import '${serveEntry}';`,
+      `import 'file://${serveEntry}';`,
+    ]) {
+      const [result] = await lintCliFile(ACP_FIXTURE, code);
+      expect(
+        result.messages.some(
+          (message) => message.messageId === 'serveBoundary',
+        ),
+      ).toBe(true);
+    }
+  });
+
+  // The child_process.fork MEMBER arm and the template cooked-value
+  // choice each had zero pins (mutants survived).
+  it('pins the fork member arm and template cooked values', async () => {
+    await expectServeBoundaryError(
+      RUNTIME_FIXTURE,
+      "import * as child_process from 'node:child_process';\nchild_process.fork('../serve/index.js');",
+    );
+    await expectServeBoundaryError(
+      RUNTIME_FIXTURE,
+      'export async function load() { await import(`../\\x73erve/index.js`); }',
+    );
+  });
+
+  // fork/Worker arms are object-agnostic: namespace and default-import
+  // spellings must not evade the guard.
+  it('rejects namespace and default-import fork/Worker spellings into serve', async () => {
+    await expectServeBoundaryError(
+      RUNTIME_FIXTURE,
+      "import cp from 'node:child_process';\ncp.fork('../serve/index.js');",
+    );
+    await expectServeBoundaryError(
+      RUNTIME_FIXTURE,
+      "import wt from 'node:worker_threads';\nnew wt.Worker('../serve/worker.js');",
+    );
+  });
+
+  // Bare destructured vitest loader names (member forms were pinned in
+  // R8-2; bare mock/doMock/importMock had no pin).
+  it('pins bare destructured vitest loader spellings', async () => {
+    for (const name of ['mock', 'doMock', 'importMock']) {
+      await expectServeBoundaryError(
+        ACP_FIXTURE,
+        `import { ${name} } from 'vitest';\n${name}('../serve/live/live-task-service.js');`,
+      );
+    }
+  });
+
+  // The bare-'module' disjunct had no dynamic-entrance coverage (static
+  // import is intercepted earlier by the ImportDeclaration regex arm).
+  it('fails closed on dynamic bare-module specifiers', async () => {
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "export async function load() { return import('module'); }",
+    );
+    await expectServeBoundaryError(ACP_FIXTURE, "require('module');");
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "export { createRequire } from 'module';",
+    );
+  });
+
+  // new Worker(new URL(spec, import.meta.url)) belongs to the URL arm:
+  // boundary-clean targets produce ZERO diagnostics (no fail-closed on a
+  // fully static construct), serve targets exactly ONE serveBoundary.
+  it('lets the URL arm own new Worker(new URL(spec, import.meta.url))', async () => {
+    await expectNoBoundaryHits(
+      RUNTIME_FIXTURE,
+      "const w = new Worker(new URL('./worker.js', import.meta.url));",
+    );
+    const [result] = await lintCliFile(
+      RUNTIME_FIXTURE,
+      "const w = new Worker(new URL('../serve/worker.js', import.meta.url));",
+    );
+    const hits = result.messages.filter(
+      (message) => message.ruleId === RULE_ID,
+    );
+    expect(hits).toHaveLength(1);
+    expect(hits[0].messageId).toBe('serveBoundary');
+  });
+
+  // The outside-serve (allow) verdict of the checkSource arms had zero
+  // negative pins — mutating any arm to unconditional fail-closed stayed
+  // green.
+  it('allows URL/Worker/fork/require targets that resolve outside serve', async () => {
+    for (const code of [
+      "const u = new URL('../utils/foo.js', import.meta.url);",
+      "new Worker('../utils/worker.js');",
+      "require('../utils/foo.js');",
+      "import cp from 'node:child_process';\ncp.fork('../utils/foo.js');",
+    ]) {
+      await expectNoBoundaryHits(RUNTIME_FIXTURE, code);
+    }
+  });
+
+  // import x = require('../serve/…') — tsc under NodeNext emits a working
+  // createRequire shim, so the spelling loads at runtime.
+  it('rejects import-equals-require into serve', async () => {
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "import x = require('../serve/index.js');",
+    );
   });
 });

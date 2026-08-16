@@ -47,6 +47,9 @@ function stripUrlSuffixes(specifier) {
   return specifier.split(/[?#]/)[0];
 }
 
+/** vitest module-loading method names (member and destructured spellings). */
+const vitestLoaderNames = /^(?:mock|doMock|importActual|importMock)$/;
+
 /** Decode percent-encoded segments (Node decodes when mapping to fs). */
 function decodeSpecifier(specifier) {
   try {
@@ -119,29 +122,41 @@ export default {
     function classifySpecifier(raw) {
       if (typeof raw !== 'string' || raw.length === 0) return 'unknown';
 
-      // URL schemes are case-insensitive, and the URL parser strips
-      // leading/trailing whitespace (`import(' DATA:...')` still loads) —
-      // detect schemes on the trimmed, lowercased form. Non-URL specifiers
-      // (relative/bare) are NOT trimmed: Node resolves those verbatim.
-      const normalized = raw.replace(/[\t\n\r]/g, '');
-      const lower = normalized.trim().toLowerCase();
+      // Node preprocesses every specifier the way the WHATWG URL parser
+      // does before scheme detection: ASCII tab/LF/CR are removed ANYWHERE,
+      // C0 controls and space are removed at the edges (`import(' DATA:…')`
+      // and `import('\x01data:…')` still load), and backslashes normalize
+      // to '/' — file: URLs are "special", so '..\\serve\\x.js' resolves
+      // exactly like '../serve/x.js'. Scheme detection must use the same
+      // normalized form or C0-prefixed data:/file: URLs slip past it.
+      const normalized = raw.replace(/[\t\n\r]/g, '').replace(/\\/g, '/');
+      const trimmed = normalized.replace(
+        /^[\u0000-\u0020]+|[\u0000-\u0020]+$/g,
+        '',
+      );
+      const lower = trimmed.toLowerCase();
 
       if (lower === 'module' || lower === 'node:module') return 'unknown';
 
       // Other node: builtins never touch serve/.
       if (lower.startsWith('node:')) return 'outside';
 
+      // Node package-imports specifiers ('#name') need the package.json
+      // "imports" map to resolve — fail closed. Must precede
+      // stripUrlSuffixes, which splits on '#' and would eat the marker.
+      if (trimmed.startsWith('#')) return 'unknown';
+
       // data: URLs can embed imports of arbitrary files — a guarded tree
       // has no legitimate use for them.
       if (lower.startsWith('data:')) return 'unknown';
 
-      // file: URLs resolve to a concrete path; anything not provably
-      // outside serve is fail-closed (a guarded tree does not import by
-      // URL).
+      // file: URLs resolve to a concrete path, but a guarded tree does not
+      // import by URL — fail closed unconditionally (even outside serve,
+      // matching the fileoverview contract).
       if (lower.startsWith('file:')) {
         try {
           const resolved = resolvePath(
-            fileURLToPath(stripUrlSuffixes(normalized.trim())),
+            fileURLToPath(stripUrlSuffixes(trimmed)),
           );
           return isInServeDir(resolved, serveDir) ? 'inside' : 'unknown';
         } catch {
@@ -150,16 +165,17 @@ export default {
       }
 
       // Root-absolute paths map straight to the filesystem — fail closed
-      // unless provably outside serve.
-      if (normalized.startsWith('/')) {
-        const decoded = decodeSpecifier(stripUrlSuffixes(normalized));
+      // unconditionally; guarded trees have no legitimate absolute-path
+      // imports.
+      if (trimmed.startsWith('/')) {
+        const decoded = decodeSpecifier(stripUrlSuffixes(trimmed));
         if (decoded === undefined) return 'unknown';
         return isInServeDir(resolvePath(decoded), serveDir)
           ? 'inside'
           : 'unknown';
       }
 
-      const cleaned = decodeSpecifier(stripUrlSuffixes(normalized));
+      const cleaned = decodeSpecifier(stripUrlSuffixes(trimmed));
       if (cleaned === undefined) return 'unknown';
 
       // Relative specifiers resolve against the importing file.
@@ -167,8 +183,6 @@ export default {
         const resolved = resolvePath(path.join(fileDir, cleaned));
         return isInServeDir(resolved, serveDir) ? 'inside' : 'outside';
       }
-
-      if (cleaned.startsWith('#')) return 'unknown';
 
       // Bare specifiers: real packages resolve elsewhere, but a tsconfig
       // baseUrl (packages/cli) makes `src/serve/...` resolve into serve/
@@ -240,10 +254,26 @@ export default {
       return (
         (node.type === 'Identifier' && node.name === 'process') ||
         (node.type === 'MemberExpression' &&
-          node.property.type === 'Identifier' &&
-          node.property.name === 'process' &&
           node.object.type === 'Identifier' &&
-          (node.object.name === 'globalThis' || node.object.name === 'global'))
+          (node.object.name === 'globalThis' ||
+            node.object.name === 'global') &&
+          ((node.property.type === 'Identifier' &&
+            node.property.name === 'process') ||
+            (node.computed &&
+              node.property.type === 'Literal' &&
+              node.property.value === 'process')))
+      );
+    }
+
+    /** getBuiltinModule as a property name — identifier or computed
+     *  string-literal spelling. */
+    function builtinModuleProperty(memberExpr) {
+      return (
+        (memberExpr.property.type === 'Identifier' &&
+          memberExpr.property.name === 'getBuiltinModule') ||
+        (memberExpr.computed &&
+          memberExpr.property.type === 'Literal' &&
+          memberExpr.property.value === 'getBuiltinModule')
       );
     }
 
@@ -272,8 +302,41 @@ export default {
         const literal = node.argument?.literal;
         if (literal) checkSource(literal);
       },
+      // import x = require('../serve/x.js') — tsc under NodeNext emits a
+      // working createRequire shim for this spelling, so it loads at
+      // runtime despite looking type-ish (sibling of the require visitor).
+      TSImportEqualsDeclaration(node) {
+        if (node.moduleReference?.type === 'TSExternalModuleReference') {
+          checkSource(node.moduleReference.expression);
+        }
+      },
       CallExpression(node) {
         const callee = node.callee;
+
+        // eval("import('...')") executes string code that can load any
+        // module — the source is visible but unresolvable, so fail closed
+        // like computed sources. Covers the `(0, eval)(...)` and
+        // `globalThis.eval(...)` spellings; no-eval is not enabled in the
+        // shared config and the guarded trees contain no eval calls.
+        const evalCallee =
+          callee.type === 'SequenceExpression'
+            ? callee.expressions[callee.expressions.length - 1]
+            : callee;
+        if (
+          (evalCallee.type === 'Identifier' && evalCallee.name === 'eval') ||
+          (evalCallee.type === 'MemberExpression' &&
+            evalCallee.object.type === 'Identifier' &&
+            (evalCallee.object.name === 'globalThis' ||
+              evalCallee.object.name === 'global') &&
+            ((evalCallee.property.type === 'Identifier' &&
+              evalCallee.property.name === 'eval') ||
+              (evalCallee.computed &&
+                evalCallee.property.type === 'Literal' &&
+                evalCallee.property.value === 'eval')))
+        ) {
+          if (node.arguments.length > 0) reportUnknown(node);
+          return;
+        }
 
         // vi.mock / vi.doMock / vi.importActual / vi.importMock — vitest
         // resolves (and, without a factory, loads) the real module. The
@@ -284,7 +347,7 @@ export default {
         // method names. Only specifiers resolving INTO serve/ report, so
         // this cannot false-positive on other packages' modules.
         if (
-          memberCall(node, null, /^(?:mock|doMock|importActual|importMock)$/) &&
+          memberCall(node, null, vitestLoaderNames) &&
           node.arguments.length > 0
         ) {
           checkSource(node.arguments[0]);
@@ -308,7 +371,7 @@ export default {
         // is never flagged.
         if (
           callee.type === 'Identifier' &&
-          /^(?:mock|doMock|importActual|importMock)$/.test(callee.name) &&
+          vitestLoaderNames.test(callee.name) &&
           node.arguments.length > 0
         ) {
           checkSource(node.arguments[0]);
@@ -317,22 +380,22 @@ export default {
 
         // process.getBuiltinModule(...) hands out module objects
         // (createRequire) without any import statement (round-8 entrance).
+        // isProcessObject covers `process`, `globalThis.process` and
+        // `global.process` including the computed property spellings;
+        // builtinModuleProperty covers identifier and computed property
+        // names; the bare identifier is the destructured spelling;
+        // Reflect.apply(process.getBuiltinModule, ...) unwraps to the
+        // same member shape.
         if (
-          memberCall(node, ['process'], /^getBuiltinModule$/) ||
           (callee.type === 'MemberExpression' &&
             isProcessObject(callee.object) &&
-            ((callee.property.type === 'Identifier' &&
-              callee.property.name === 'getBuiltinModule') ||
-              (callee.computed &&
-                callee.property.type === 'Literal' &&
-                callee.property.value === 'getBuiltinModule'))) ||
+            builtinModuleProperty(callee)) ||
           (callee.type === 'Identifier' &&
             callee.name === 'getBuiltinModule') ||
           (memberCall(node, ['Reflect'], /^apply$/) &&
             node.arguments[0]?.type === 'MemberExpression' &&
             isProcessObject(node.arguments[0].object) &&
-            node.arguments[0].property.type === 'Identifier' &&
-            node.arguments[0].property.name === 'getBuiltinModule')
+            builtinModuleProperty(node.arguments[0]))
         ) {
           reportUnknown(node, 'moduleBuiltin');
           return;
@@ -343,13 +406,14 @@ export default {
         // trees have no such calls today). spawn is deliberately NOT
         // checked: its first argument is an executable resolved via
         // PATH/cwd, not a module — flagging it would false-positive on
-        // legitimate code like spawn(process.execPath, [...]). The bare
-        // identifier covers the destructured spelling
-        // (`import { fork } from 'node:child_process'`); only specifiers
-        // resolving INTO serve/ report, so a non-serve fork target is
-        // never flagged.
+        // legitimate code like spawn(process.execPath, [...]). The member
+        // match is object-agnostic (same tradeoff as the vitest loaders:
+        // `import cp from 'node:child_process'; cp.fork(...)` and the
+        // namespace form must not evade the guard), and the bare
+        // identifier covers destructured `fork`; only specifiers resolving
+        // INTO serve/ report, so a non-serve fork target is never flagged.
         if (
-          (memberCall(node, ['child_process'], /^fork$/) ||
+          (memberCall(node, null, /^fork$/) ||
             (callee.type === 'Identifier' && callee.name === 'fork')) &&
           node.arguments.length > 0
         ) {
@@ -358,14 +422,46 @@ export default {
         }
       },
       NewExpression(node) {
-        // new Worker('../serve/...') — string-literal module paths resolve
-        // relative to the importing module.
+        // new Function(body) compiles arbitrary string code that can
+        // import() anything — the body is visible but unresolvable, so
+        // fail closed like computed sources (eval's sibling).
         if (
           node.callee.type === 'Identifier' &&
-          node.callee.name === 'Worker' &&
+          node.callee.name === 'Function' &&
           node.arguments.length > 0
         ) {
-          checkSource(node.arguments[0]);
+          reportUnknown(node);
+          return;
+        }
+
+        // new Worker('../serve/...') / new wt.Worker('...') — string
+        // module paths resolve relative to the importing module
+        // (worker_threads does the same). Object-agnostic member match
+        // covers namespace/default-import spellings.
+        if (
+          (node.callee.type === 'Identifier'
+            ? node.callee.name === 'Worker'
+            : node.callee.type === 'MemberExpression' &&
+              (node.callee.property.type === 'Identifier'
+                ? node.callee.property.name === 'Worker'
+                : node.callee.computed &&
+                  node.callee.property.type === 'Literal' &&
+                  node.callee.property.value === 'Worker')) &&
+          node.arguments.length > 0
+        ) {
+          // new Worker(new URL(spec, import.meta.url)) is resolved by the
+          // new-URL arm below; checking it here too would fail-close a
+          // fully static, boundary-clean construct and double-report the
+          // serve-targeting form.
+          const arg = node.arguments[0];
+          const handledByUrlArm =
+            arg.type === 'NewExpression' &&
+            arg.callee.type === 'Identifier' &&
+            arg.callee.name === 'URL' &&
+            arg.arguments.length >= 2 &&
+            arg.arguments[1].type === 'MemberExpression' &&
+            arg.arguments[1].object.type === 'MetaProperty';
+          if (!handledByUrlArm) checkSource(arg);
           return;
         }
 
