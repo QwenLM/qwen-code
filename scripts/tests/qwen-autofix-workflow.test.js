@@ -6250,7 +6250,7 @@ exit 1
       for (const verifyLine of [
         'echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null',
         'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null',
-        'GATE_HELPERS_NOW="$(cat ',
+        'GATE_HELPERS_NOW="$(sha256sum ',
       ]) {
         expect(gate.indexOf(verifyLine)).toBeGreaterThan(-1);
         expect(gate.indexOf(verifyLine)).toBeLessThan(
@@ -6284,6 +6284,19 @@ exit 1
     expect(runBodyOf(repairVerificationGateStep)).toBe(
       runBodyOf(verificationGateSteps[1]),
     );
+    // …and the env blocks, which the comment above claims but the run-body
+    // comparison does not cover. An env entry changed in one step only (a
+    // FOOTPRINT_ENFORCE default, the source of a digest variable) would let
+    // the repair pass — the LAST gate before the push, running after branch
+    // code already ran — enforce a different posture with the suite green.
+    const envBodyOf = (step) =>
+      (step.match(/\n {8}env:\n([\s\S]*?)(?=\n {8}\w[\w-]*:)/)?.[1] ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    expect(envBodyOf(verificationGateSteps[1]).length).toBeGreaterThan(100);
+    expect(envBodyOf(repairVerificationGateStep)).toBe(
+      envBodyOf(verificationGateSteps[1]),
+    );
     expect(workflow).toContain(
       'cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
     );
@@ -6293,6 +6306,20 @@ exit 1
     // itself, not just the consumer string.
     expect(workflow).toMatch(
       /- name: 'Resolve sandbox image'\n[^\n]*\n[\s\S]{0,400}?id: 'sandbox'/,
+    );
+    // What makes that image TRUSTED is the ordering: the resolve step runs
+    // before the PR branch is checked out, so the package.json it reads (and
+    // the resolve script it runs) are still the trusted base. Reordered below
+    // 'Prepare branch and feedback' it would take the image from the PR's own
+    // package.json — validateRequestedImage only trims and rejects empty — and
+    // an attacker-chosen runtime voids every guarantee downstream of the wall.
+    expect(
+      reviewAddressJob.indexOf("- name: 'Resolve sandbox image'"),
+    ).toBeGreaterThan(-1);
+    expect(
+      reviewAddressJob.indexOf("- name: 'Resolve sandbox image'"),
+    ).toBeLessThan(
+      reviewAddressJob.indexOf("- name: 'Prepare branch and feedback'"),
     );
     // The three helpers the gate EXECUTES are staged in the same writable
     // RUNNER_TEMP, so they are digested at staging and verified before the
@@ -6304,15 +6331,26 @@ exit 1
     // recorded at staging time' — the review autofix loop fail-closed-broken
     // for every PR, with the whole suite green. Compare them directly.
     const helperBlob = workflow.match(
-      /echo "gate_helpers_sha256=\$\(cat (.*?) \| sha256sum/,
+      /echo "gate_helpers_sha256=\$\(sha256sum (.*?) \| sha256sum/,
     )?.[1];
     expect(helperBlob).toBeTruthy();
     for (const gate of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(gate).toContain(
-        `GATE_HELPERS_NOW="$(cat ${helperBlob} | sha256sum`,
+        `GATE_HELPERS_NOW="$(sha256sum ${helperBlob} | sha256sum`,
       );
     }
-    expect(workflow.match(/GATE_HELPERS_NOW="\$\(cat /g) ?? []).toHaveLength(2);
+    expect(
+      workflow.match(/GATE_HELPERS_NOW="\$\(sha256sum /g) ?? [],
+    ).toHaveLength(2);
+    // The digest must cover the three files INDIVIDUALLY: `cat a b c |
+    // sha256sum` is invariant under file-boundary shifts, so a writer with
+    // access to the staged copies could repartition them — the contracts body
+    // prepended to the resolver, which then emits no CHANGED_PKGS and the
+    // package tests are silently skipped — with the digest unchanged (proven:
+    // the concatenation digest is byte-identical across such a repartition,
+    // the per-file digest is not).
+    expect(workflow).not.toMatch(/gate_helpers_sha256=\$\(cat /);
+    expect(workflow).not.toMatch(/GATE_HELPERS_NOW="\$\(cat /);
     // The container env is an explicit ALLOWLIST: everything unnamed is
     // absent inside, which is the isolation. The PAT, the host $GITHUB_ENV
     // and the runner's real $GITHUB_OUTPUT must never appear in it.
@@ -6429,14 +6467,45 @@ exit 1
         'if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]',
       ),
     ).toBeLessThan(wrapper.indexOf('OUTCOME="$(verdict_value'));
-    for (const f of [
+    // Pin the LOOP, not the filenames: `no-action.md` and
+    // `resolved-comments.txt` also appear in the comment above it, so a
+    // contains-check on the names passes even when they are dropped from the
+    // loop — and a dropped `no-action.md` is exactly the plant that publishes
+    // attacker text as the bot's "no changes needed" rationale.
+    // rc.json/rv.json feed the bite check AFTER the build legs (truncating
+    // rc.json flips BITE_ENFORCE off, so the bogus-fix round the bite check
+    // exists to reject exits 0 as `fixed`), and failure.md is read back by the
+    // host's report step. The gate writes none of these — gate-advisories.md
+    // and gate-rejection.md, which it does write, must stay out.
+    const fingerprinted = (wrapper.match(/for f in ([\s\S]*?); do/)?.[1] ?? '')
+      .replace(/\\\s+/g, ' ')
+      .trim()
+      .split(/\s+/);
+    expect(fingerprinted).toEqual([
       'no-action.md',
       'address-summary.md',
       'resolved-comments.txt',
       'comment-replies.json',
-    ]) {
-      expect(wrapper).toContain(f);
-    }
+      'rc.json',
+      'rv.json',
+      'failure.md',
+    ]);
+    // Type-aware, and non-regular paths are refused before anything hashes
+    // them: a symlink to gate-verdict makes the gate's own verdict writes trip
+    // the compare (exit 125 every round, so a deterministic rejection never
+    // lands), and a FIFO blocks sha256sum's open() until the step's timeout
+    // with no diagnostic. Neither needs a capability on the rw mount.
+    expect(wrapper).toContain("stat -c '%F'");
+    expect(wrapper).toMatch(/NONREGULAR/);
+    expect(wrapper).toMatch(
+      /if \[\[ "\$\{INPUTS_BEFORE\}" == \*':NONREGULAR:'\* \]\]; then[\s\S]{0,240}?exit 125/,
+    );
+    // The empty-GATE_IMAGE refusal is load-bearing (docker would otherwise
+    // take `bash` as the image name and every round becomes an opaque
+    // crash-retry with no ::error:: diagnostic), and it was pinned nowhere.
+    expect(wrapper).toMatch(
+      /if \[\[ -z "\$\{GATE_IMAGE:-\}" \]\]; then[\s\S]{0,300}?exit 125\nfi/,
+    );
     // --rm only fires on a normal exit: a step timeout / job cap / cancel
     // kills the docker CLIENT and would leave the container running as the
     // runner uid with rw mounts on the shared workspace. Name it so the
@@ -6539,6 +6608,20 @@ exit 1
     expect(runTranslate(0, [])).toBe('');
     // A docker/infra failure (125) leaves outcome unset too.
     expect(runTranslate(125, ['outcome=fixed'])).toBe('');
+    // The `^` anchor in verdict_value's grep is load-bearing and every case
+    // above is blind to it (they all feed exact key names): without it,
+    // `tail -n 1` picks up an attacker-appended `xoutcome=fixed`, OUTCOME
+    // reads `fixed` at exit 1 and a genuine evaluated rejection is rerouted
+    // into the crash-retry loop.
+    expect(runTranslate(1, ['outcome=failed', 'xoutcome=fixed'])).toBe(
+      'outcome=failed',
+    );
+    // preexisting and retryable are mutually exclusive at the source, so an
+    // appended `retryable=true` must not ride a genuine preexisting rejection
+    // into a repair leg the repair agent is forbidden to act on.
+    expect(
+      runTranslate(1, ['retryable=true', 'outcome=failed', 'preexisting=true']),
+    ).toBe('outcome=failed\npreexisting=true');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -10423,9 +10506,18 @@ exit 1
       'packages/desktop-shell/.npmrc',
       'eslint.legacy-filenames.mjs',
       '.github/workflows/qwen-pr-safety-precheck.yml',
+      '.github/scripts/run-autofix-gate-container.sh',
     ]);
     expect(classes).toContain('.github/actions/a/action.yml=ci-workflows');
     expect(classes).toContain('.github/scripts/x.sh=ci-scripts');
+    // The wrapper defines the container wall, so it must class as
+    // autofix-loop, not fall through to the `.github/scripts/*` catch-all:
+    // the class gate only rejects round classes absent from the PR's own, so
+    // as ci-scripts ANY PR touching ANY .github/scripts file would license a
+    // steered round to rewrite it — committed and PAT-pushed.
+    expect(classes).toContain(
+      '.github/scripts/run-autofix-gate-container.sh=autofix-loop',
+    );
     expect(classes).toContain('.husky/pre-commit=git-hooks');
     expect(classes).toContain('.npmrc=toolchain-config');
     expect(classes).toContain('.nvmrc=toolchain-config');

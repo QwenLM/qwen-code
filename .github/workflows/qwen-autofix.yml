@@ -3995,9 +3995,12 @@ jobs:
           # writable by the branch/agent code later steps run on this host: a
           # neutered schema/contracts/resolver helper lets a fix that should be
           # rejected exit 0 honestly, and the wrapper would carry that exit code
-          # to the push. Digest them as one blob (they are staged and verified
-          # together, so a single value is enough and cannot drift apart).
-          echo "gate_helpers_sha256=$(cat "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          # to the push. One value covers all three, but it must be the digest
+          # of the PER-FILE digests: hashing the concatenation is invariant
+          # under file-boundary shifts, so a writer could repartition the three
+          # (contracts body prepended to the resolver, which then emits no
+          # CHANGED_PKGS and skips the package tests) with the digest unchanged.
+          echo "gate_helpers_sha256=$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -5274,7 +5277,7 @@ jobs:
           # The helpers the gate executes are staged in the same writable
           # RUNNER_TEMP, so verify them as one blob before the wrapper copies
           # them across the container wall.
-          GATE_HELPERS_NOW="$(cat "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
+          GATE_HELPERS_NOW="$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
           if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
             exit 1
@@ -5414,7 +5417,7 @@ jobs:
           # The helpers the gate executes are staged in the same writable
           # RUNNER_TEMP, so verify them as one blob before the wrapper copies
           # them across the container wall.
-          GATE_HELPERS_NOW="$(cat "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
+          GATE_HELPERS_NOW="$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
           if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
             exit 1

@@ -88,13 +88,35 @@ done
 # `resolved-comments.txt` to close human review threads. The gate never
 # writes these four, so fingerprint them before the run and refuse the
 # verdict if they moved.
+# rc.json/rv.json are the bite check's inputs, read AFTER the build legs:
+# truncating rc.json flips BITE_ENFORCE to false, so the bogus-fix round the
+# bite check exists to reject exits 0 as `fixed`. failure.md is read back by
+# the host's report step, so a plant publishes attacker text as the bot's
+# rejection. The gate writes none of these (only gate-advisories.md and
+# gate-rejection.md, which is why those are absent here).
+# The type is part of the fingerprint, and non-regular paths are never
+# hashed: a symlink to gate-verdict would make the gate's own verdict writes
+# trip the compare (exit 125 every round, suppressing the rejection), and a
+# FIFO would block sha256sum's open() until the step's 60-minute timeout with
+# no diagnostic. Neither needs a capability on the rw mount.
 verdict_inputs_digest() {
-  local f
-  for f in no-action.md address-summary.md resolved-comments.txt comment-replies.json; do
-    printf '%s:%s\n' "${f}" "$(sha256sum "${WORKDIR}/${f}" 2> /dev/null | cut -d' ' -f1)"
+  local f type
+  for f in no-action.md address-summary.md resolved-comments.txt \
+    comment-replies.json rc.json rv.json failure.md; do
+    type="$(stat -c '%F' "${WORKDIR}/${f}" 2> /dev/null || true)"
+    case "${type}" in
+      '' | 'regular file' | 'regular empty file')
+        printf '%s:%s\n' "${f}" "$(sha256sum "${WORKDIR}/${f}" 2> /dev/null | cut -d' ' -f1)"
+        ;;
+      *) printf '%s:NONREGULAR:%s\n' "${f}" "${type}" ;;
+    esac
   done
 }
 INPUTS_BEFORE="$(verdict_inputs_digest)"
+if [[ "${INPUTS_BEFORE}" == *':NONREGULAR:'* ]]; then
+  echo "::error::a verdict input in ${WORKDIR} is not a regular file — refusing to run the gate."
+  exit 125
+fi
 
 # --network none: the gate only runs build/typecheck/lint/test against
 # node_modules already installed on the host side, so it needs no egress —
@@ -173,8 +195,14 @@ case "${GATE_RC}" in
     # so here it leaves the outcome unset and the round retries.
     if [[ "${OUTCOME}" == 'failed' ]]; then
       echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+      # preexisting and retryable are mutually exclusive at the source
+      # (reject_fix: a pre-existing failure is NOT retryable — the repair
+      # agent may only amend this round's fix). Forwarding them independently
+      # admits a pair the gate never emits: an appended `retryable=true` rides
+      # a genuine preexisting rejection into an 18-minute repair leg the
+      # repair agent is forbidden to act on, burned every round.
       [[ "${PREEXISTING}" == 'true' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
-      [[ "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
+      [[ "${PREEXISTING}" != 'true' && "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
     else
       echo "::warning::gate container exited 1 without a deterministic verdict (outcome='${OUTCOME}') — reporting as a gate crash so the next scan retries."
     fi
