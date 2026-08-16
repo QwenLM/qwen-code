@@ -145,22 +145,41 @@ const assertUnconditional = (jobSteps, step, label) => {
   );
 };
 
+// Unknown action inputs are dropped without error — that is how the
+// settings_json bug survived in three workflows. Every agent step must pass
+// this contract before its settings are even read; callers pin their own
+// values on the returned object.
+const assertSettingsContract = (step, label) => {
+  assert.ok(step, `${label} must keep its agent step`);
+  assert.ok(
+    typeof step.with?.settings === 'string',
+    `${label} must pass a \`settings\` string`,
+  );
+  assert.equal(
+    step.with.settings_json,
+    undefined,
+    `${label}: \`settings_json\` is silently ignored by the action — never use it`,
+  );
+  const settings = JSON.parse(step.with.settings);
+  // v1 top-level keys only work through runtime migration; write the native
+  // v2 shape (the qwen-triage.yml convention).
+  for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
+    assert.equal(
+      settings[key],
+      undefined,
+      `${label}: v1 top-level \`${key}\` is a legacy key — use the v2 shape`,
+    );
+  }
+  return settings;
+};
+
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assert.ok(triageStep, 'triage step (id: triage) must exist');
-    assert.ok(
-      typeof triageStep.with.settings === 'string',
-      'triage step must pass a `settings` string',
-    );
-    assert.equal(
-      triageStep.with.settings_json,
-      undefined,
-      '`settings_json` is silently ignored by the action — never use it',
-    );
+    assertSettingsContract(triageStep, 'triage step (id: triage)');
   });
 
   it('settings is valid JSON that restricts the toolset', () => {
-    const settings = JSON.parse(triageStep.with.settings);
+    const settings = assertSettingsContract(triageStep, 'triage settings');
     const core = settings.tools?.core;
     assert.ok(
       Array.isArray(core),
@@ -189,7 +208,8 @@ describe('qwen-triage: agent tool/permission settings', () => {
   });
 
   it('settings denies interpreters, network, and PR-code-materializing git/gh', () => {
-    const deny = JSON.parse(triageStep.with.settings).permissions?.deny ?? [];
+    const settings = assertSettingsContract(triageStep, 'triage settings');
+    const deny = settings.permissions?.deny ?? [];
     for (const d of [
       'run_shell_command(node)',
       'run_shell_command(npm)',
@@ -204,7 +224,7 @@ describe('qwen-triage: agent tool/permission settings', () => {
     // No sandbox key: the ECS pool ships no container runtime, and adding one
     // would silently disable the step.
     assert.equal(
-      JSON.parse(triageStep.with.settings).sandbox,
+      settings.sandbox,
       undefined,
       'settings must not set a sandbox key',
     );
@@ -219,23 +239,14 @@ describe('qwen-triage: agent tool/permission settings', () => {
 // These blocks were therefore never validated by anything; parse them here.
 describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assert.ok(
-      resolveConflictsStep,
-      'resolve-pr job must keep its resolve_conflicts agent step',
-    );
-    assert.ok(
-      typeof resolveConflictsStep.with.settings === 'string',
-      'resolve_conflicts must pass a `settings` string',
-    );
-    assert.equal(
-      resolveConflictsStep.with.settings_json,
-      undefined,
-      '`settings_json` is silently ignored by the action — never use it',
-    );
+    assertSettingsContract(resolveConflictsStep, 'resolve_conflicts');
   });
 
   it('settings is valid JSON pinning the turn cap, allowlist, and sandbox', () => {
-    const settings = JSON.parse(resolveConflictsStep.with.settings);
+    const settings = assertSettingsContract(
+      resolveConflictsStep,
+      'resolve_conflicts',
+    );
     assert.equal(
       settings.model?.maxSessionTurns,
       400,
@@ -248,6 +259,9 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     );
     for (const t of [
       'read_file',
+      'read_many_files',
+      'glob',
+      'search_file_content',
       'write_file',
       'run_shell_command(git merge)',
     ]) {
@@ -260,33 +274,26 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       true,
       'tools.sandbox must stay true — the runs-on routing depends on it',
     );
-    // v1 top-level keys only work through runtime migration; write the native
-    // v2 shape (qwen-triage.yml convention).
-    assert.equal(settings.coreTools, undefined);
-    assert.equal(settings.maxSessionTurns, undefined);
-    assert.equal(settings.sandbox, undefined);
+  });
+
+  it('keeps resolve-pr on hosted runners (sandbox: true needs docker)', () => {
+    // The routing half of the sandbox coupling: the ECS pool ships no
+    // container runtime, so an ECS-routed sandboxed agent dies at startup.
+    assert.equal(
+      resolvePrJob['runs-on'],
+      'ubuntu-latest',
+      'resolve-pr must stay on hosted runners — sandbox: true needs docker, absent on the ECS pool',
+    );
   });
 });
 
 describe('qwen-issue-followup-bot.yml: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assert.ok(
-      followupStep,
-      'follow-up-issues job must keep its "Run Qwen issue follow-up" step',
-    );
-    assert.ok(
-      typeof followupStep.with.settings === 'string',
-      'the follow-up step must pass a `settings` string',
-    );
-    assert.equal(
-      followupStep.with.settings_json,
-      undefined,
-      '`settings_json` is silently ignored by the action — never use it',
-    );
+    assertSettingsContract(followupStep, 'the follow-up step');
   });
 
   it('settings is valid JSON pinning the turn cap and gh allowlist', () => {
-    const settings = JSON.parse(followupStep.with.settings);
+    const settings = assertSettingsContract(followupStep, 'the follow-up step');
     assert.equal(
       settings.model?.maxSessionTurns,
       50,
@@ -303,9 +310,14 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
     ]) {
       assert.ok(core.includes(t), `tools.core must include ${t}`);
     }
-    assert.equal(settings.coreTools, undefined);
-    assert.equal(settings.maxSessionTurns, undefined);
-    assert.equal(settings.sandbox, undefined);
+    // follow-up-issues routes to the self-hosted ECS pool by default, which
+    // ships no container runtime; sandbox: true would kill the agent at
+    // startup (exit 44) on every ECS-routed run.
+    assert.equal(
+      settings.tools?.sandbox,
+      false,
+      'tools.sandbox must stay false — the ECS pool has no container runtime',
+    );
   });
 });
 
