@@ -380,6 +380,28 @@ describe('parseReviewArgs', () => {
     expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
+  it('a /pull/ URL on an AONE host is refused — Aone serves no /pull/ pages', () => {
+    // The Aone CR grammar is …/codereview/<global-id>; a /pull/<n> URL on
+    // an Aone host is a fabrication and must fail closed, not become a live
+    // target routed at the Aone host.
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/pull/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('the trailing-dot FQDN spelling of an Aone host is refused too', () => {
+    // `code.alibaba-inc.com.` is DNS-identical to the plain host and the
+    // URL grammar admits the dot — isAoneHost normalizes it, so the /pull/
+    // refusal and the CR-form refusal treat both spellings alike.
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com./maxcompute/odps_src/pull/5',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',

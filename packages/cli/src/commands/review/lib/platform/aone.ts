@@ -78,13 +78,18 @@ interface AoneWorkitem {
  * scheme is never swallowed by the scp branch.
  */
 export function parseRemoteUrl(url: string): RepoIdentity | null {
-  // Strip an optional `.git` suffix AND any trailing slash (`…/project.git/`
-  // — a pasted browser URL keeps the slash and git accepts it; without this
-  // the repo coordinate becomes `project.git`).
+  // Strip (in order) a query string / fragment, any trailing slashes, and an
+  // optional `.git` suffix. The query/fragment strip comes first because
+  // query-string credentials (`?private_token=…`, a real CI pattern) would
+  // otherwise become part of the repo coordinate and echo unredacted into
+  // meta's stdout and the refusal messages. Slashes go before `.git` so two
+  // or more trailing slashes after `.git` (`…/p.git//`) cannot defeat the
+  // suffix strip. Git accepts both shapes as remote URLs.
   const cleaned = url
     .trim()
-    .replace(/\.git\/?$/, '')
-    .replace(/\/+$/, '');
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '');
   const take = (host: string, path: string): RepoIdentity | null => {
     const parts = path.split('/').filter(Boolean);
     if (parts.length < 2) return null;
@@ -94,8 +99,11 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
       repo: parts[parts.length - 1],
     };
   };
-  // URL form first: scheme://[user@]host/group[/subgroup]/project
-  let m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)[:/](.+)$/i.exec(cleaned);
+  // URL form first: scheme://[user@]host[:port]/group[/subgroup]/project.
+  // The port is matched explicitly and discarded — without `(?::\d+)?` the
+  // host capture stops at the port colon and the port number folds into the
+  // path segments (`https://h:8443/solo` would parse as owner `8443`).
+  let m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/](.+)$/i.exec(cleaned);
   if (m) return take(m[1], m[2]);
   // scp-like: [user@]host:group[/subgroup]/project. `(?!\/\/)` keeps a
   // scheme URL out of this branch; user@ is optional.
@@ -134,6 +142,14 @@ function mrView(
   return view.mergeRequest;
 }
 
+/** The MR-head refspec, stated ONCE for the provider: `fetchDiff` fetches
+ *  it for the diff evidence and `fetchHeadRefSpec` hands it to fetch-pr for
+ *  the worktree checkout — two copies would silently disagree if the Aone
+ *  ref namespace ever changed. */
+function mrHeadRefSpec(prNumber: number): string {
+  return `refs/merge-requests/${prNumber}/head`;
+}
+
 export const aoneReader: ReviewPlatformReader = {
   kind: 'aone',
 
@@ -147,9 +163,19 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       url = git('remote', 'get-url', 'origin').trim();
     } catch (err) {
+      // execFileSync failure messages BEGIN with the fixed preamble
+      // "Command failed: git remote get-url origin"; git's actual error is
+      // the first NON-empty line after it (same pitfall aone-client
+      // documents). `.split('\n')[0]` would render only the preamble.
+      const cause =
+        (err as Error).message
+          .split('\n')
+          .slice(1)
+          .map((l) => l.trim())
+          .find(Boolean) ?? '';
       throw new Error(
-        `cannot resolve the repository: no \`origin\` remote ` +
-          `(${(err as Error).message.split('\n')[0]})`,
+        `cannot resolve the repository: no \`origin\` remote` +
+          (cause ? ` (${cause})` : ''),
       );
     }
     const identity = parseRemoteUrl(url);
@@ -249,19 +275,31 @@ export const aoneReader: ReviewPlatformReader = {
     // a throwaway ref, merge-base it against the target branch, and diff.
     const view = mrView(prNumber, ownerRepo);
     const target = view.targetBranch ?? 'master';
+    // The target branch is SERVER-controlled metadata reaching git's argv.
+    // A dash-leading branch name is creatable by full-refname push, and
+    // `git fetch origin --upload-pack=<payload>` would execute the
+    // attacker-named program on the remote host with the reviewer's own
+    // credentials. Refuse it outright; the `--` below also ends option
+    // parsing for whatever reaches the fetch.
+    if (target.startsWith('-')) {
+      throw new Error(
+        `refusing target branch ${JSON.stringify(target)} from the MR ` +
+          `metadata — a branch name must not start with '-'`,
+      );
+    }
     const ref = `__qwen-review-diff-${prNumber}`;
     try {
       // Force-fetch (`+`): a stale throwaway ref left by an interrupted
       // earlier run would otherwise make this fetch fail whenever the MR head
       // was rewritten — the normal AGit-Flow iteration shape.
-      git('fetch', 'origin', `+refs/merge-requests/${prNumber}/head:${ref}`);
+      git('fetch', 'origin', `+${mrHeadRefSpec(prNumber)}:${ref}`);
       // Fetch the target branch so the merge-base is current. If the fetch
       // fails (transient network, expired credential), DISCLOSE it: merge-base
       // then resolves against a possibly-stale local ref, and the diff may
       // carry every commit merged into the target since the clone. Mirrors
       // fetch-pr's `baseFetchFailed` → WARNING.
       try {
-        git('fetch', 'origin', target);
+        git('fetch', 'origin', '--', target);
       } catch {
         process.stderr.write(
           `WARNING: could not fetch origin/${target} — the merge-base is ` +
@@ -337,7 +375,7 @@ export const aoneReader: ReviewPlatformReader = {
   },
 
   fetchHeadRefSpec(prNumber: number): string {
-    return `refs/merge-requests/${prNumber}/head`;
+    return mrHeadRefSpec(prNumber);
   },
 
   getFetchMeta(prNumber: number, ownerRepo: string): FetchMeta {

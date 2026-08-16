@@ -156,7 +156,12 @@ function fileLineCount(ref: string, path: string): number {
 
 /** The real git surface `resolveMergeBase` runs against. */
 const gitProbe: GitProbe = {
-  fetch: (remote, ref) => gitOpt('fetch', remote, ref) !== null,
+  // `--` ends option parsing: the base ref is server-controlled platform
+  // metadata (GitHub `baseRefName`, Aone `targetBranch`), and a dash-leading
+  // value must never reach git as an option (`git fetch origin
+  // --upload-pack=<payload>` executes the attacker-named program on the
+  // remote host with the reviewer's credentials).
+  fetch: (remote, ref) => gitOpt('fetch', remote, '--', ref) !== null,
   refExists,
   mergeBase: (a, b) => gitOpt('merge-base', a, b),
 };
@@ -187,9 +192,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
   // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
   // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
-  // the caller's label. The skill path is guarded by parse-args' digit grammar;
-  // this is the direct-CLI surface.
-  if (!/^\d+$/.test(prNumber)) {
+  // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
+  // promises a POSITIVE integer, and admitting it ran detection, auth, and a
+  // worktree lease before dying at the fetch) and leading zeros (the label
+  // would not round-trip through Number). The skill path is guarded by
+  // parse-args' digit grammar; this is the direct-CLI surface.
+  if (!/^[1-9]\d*$/.test(prNumber)) {
     throw new Error(
       `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
     );
@@ -255,6 +263,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       isCrossRepository: fetchMeta.isCrossRepository,
       body: fetchMeta.body,
     };
+    // The base ref is server-controlled metadata reaching git's argv through
+    // the base fetch below. The fetch probe passes `--`, but refuse a
+    // dash-leading name outright — like aone.fetchDiff's target branch — so
+    // a hostile platform value dies here with the metadata rolled back, not
+    // inside a git invocation.
+    if (meta.baseRefName.startsWith('-')) {
+      throw new Error(
+        `refusing base ref ${JSON.stringify(meta.baseRefName)} from the ` +
+          `platform metadata — a branch name must not start with '-'`,
+      );
+    }
   } catch (err) {
     // Roll back the fetched ref so the next run starts clean.
     tryRemove(() =>
@@ -644,7 +663,7 @@ export const fetchPrCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on — it selects the platform, i.e. whether the fetch uses pull/<n>/head or refs/merge-requests/<id>/head. An Aone host (*.alibaba-inc.com) selects the Aone backend; omitted: detected from the remote under review, else the clone's origin, else GitHub.",
       })
       .option('max-chunk-lines', {
         type: 'number',

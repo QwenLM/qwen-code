@@ -121,7 +121,7 @@ export const commentBodyCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'The PR host (GitHub Enterprise). Omitted: inherit GH_HOST, else github.com.',
+          "The host the target lives on. An Aone host (*.alibaba-inc.com) selects the a1 backend; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       })
       .option('out', {
         type: 'string',

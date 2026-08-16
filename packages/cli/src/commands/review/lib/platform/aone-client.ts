@@ -113,9 +113,15 @@ export function ensureAoneAuthenticated(): void {
         .slice(1)
         .map((l) => l.trim())
         .find(Boolean) ?? '';
+    // Neutral on purpose: this fall-through covers MORE than a missing login
+    // — a persistent network failure whose message TRANSIENT_RE does not
+    // match (ENOTFOUND, a proxy 403) lands here too, and `a1 auth login`
+    // cannot fix that class. Lead with the cause, offer the login only as a
+    // conditional remedy.
     throw new Error(
-      `a1 CLI is not authenticated — run \`a1 auth login\` first.` +
-        (cause ? ` (${cause})` : ''),
+      `a1 auth check failed` +
+        (cause ? ` — ${cause}` : '') +
+        ` (if you have not logged in, run \`a1 auth login\`)`,
     );
   }
 }

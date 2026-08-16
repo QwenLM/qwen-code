@@ -402,20 +402,6 @@ export function runSubmit(
   const { attribution = true, defaultComment = false } = opts;
   setGhHost(args.host);
 
-  // Posting is GitHub-only in this phase. On an Aone target the Create
-  // Review API does not exist — refuse before touching gh, clearly. The
-  // findings are not lost: they are in the terminal output and the saved
-  // report. Detected from the target host when present, else the cwd clone.
-  // Trim the host: isAoneHost does not trim, so a padded `--host` would
-  // detect as GitHub and this refusal would silently not fire.
-  if (getPlatformReader({ host: args.host?.trim() }).kind === 'aone') {
-    throw new Error(
-      'posting review comments to Aone Code is not supported yet ' +
-        '(read-only phase) — the findings are in the terminal output and ' +
-        'the saved report; post them manually or wait for the write phase.',
-    );
-  }
-
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
   if (!isOwnerRepo(args.repo)) {
@@ -474,6 +460,40 @@ export function runSubmit(
     );
     writeStdoutLine(
       JSON.stringify({ posted: false, reason: auth.why }, null, 2),
+    );
+    process.exitCode = 3;
+    return;
+  }
+
+  // Posting is GitHub-only in this phase. On an Aone target the Create
+  // Review API does not exist — refuse with the SAME shape as an
+  // unauthorised refusal (stderr explanation, stdout `{"posted": false}`,
+  // exit 3): the skill's Step 7 treats that shape as a complete, correct
+  // outcome, and a throw instead would surface as a failed command an agent
+  // might retry or route around. The refusal sits BELOW the authorisation
+  // gate on purpose — an unauthorised Aone run takes the normal exit-3
+  // path above, and the command no longer dies with a throw before the gate
+  // can rule (an authorised Aone `--dry-run` lands on this same exit-3
+  // refusal: a payload that can never post has no posting-consistency to
+  // validate). Detected from the EFFECTIVE host: the flag, else GH_HOST
+  // (ghEnv inherits the operator's export when no module host is set, so a
+  // GH_HOST pointing at an Aone host must hit this refusal, not an opaque
+  // gh failure), else the cwd clone. resolveGhHost trims, so a padded
+  // `--host` cannot slip past detection. The findings are not lost: they
+  // are in the terminal output and the saved report.
+  if (getPlatformReader({ host: resolveGhHost(args.host) }).kind === 'aone') {
+    writeStderrLine(
+      `REFUSED to post to ${args.repo}#${args.pr}: posting review comments ` +
+        `to Aone Code is not supported yet (read-only phase). The findings ` +
+        `are in the terminal output and the saved report; post them ` +
+        `manually or wait for the write phase.`,
+    );
+    writeStdoutLine(
+      JSON.stringify(
+        { posted: false, reason: 'aone-read-only-phase' },
+        null,
+        2,
+      ),
     );
     process.exitCode = 3;
     return;

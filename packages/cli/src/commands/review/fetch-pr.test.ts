@@ -339,6 +339,40 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
+  it('refuses a dash-leading baseRefName from the platform metadata', async () => {
+    // The base ref is server-controlled and reaches git's argv through the
+    // base fetch — a dash-leading name (`--upload-pack=<payload>` is
+    // creatable by full-refname push) must die here, never inside git.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: '--upload-pack=/tmp/evil',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    await expect(reportFor({})).rejects.toThrow(
+      /refusing base ref "--upload-pack=\/tmp\/evil"/,
+    );
+    const reportCall = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    expect(reportCall).toBeUndefined();
+  });
+
+  it('refuses a non-positive pr_number before any side effect', async () => {
+    // `/^\d+$/` once admitted '0'; the guard promises a POSITIVE integer
+    // and must reject before detection, auth, and the worktree lease.
+    await expect(reportFor({ pr_number: '0' })).rejects.toThrow(
+      /pr_number must be a positive integer, got "0"/,
+    );
+    expect(producerMocks.git).not.toHaveBeenCalled();
+  });
+
   it('preserves the earliest window opening across drift restarts of the same PR', async () => {
     // A drift restart reruns fetch-pr and overwrites this report; the audit
     // boundary must keep reaching back to the abandoned attempt's opening.

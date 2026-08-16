@@ -11,7 +11,7 @@
 // throws — an unreadable origin simply falls through to GitHub. (There is no
 // `--platform` flag; an explicit `--host` is the practical override.)
 
-import { execFileSync } from 'node:child_process';
+import { gitOpt } from '../git.js';
 import { aoneReader } from './aone.js';
 import { githubReader } from './github.js';
 import type { PlatformKind, ReviewPlatformReader } from './types.js';
@@ -27,7 +27,11 @@ export interface PlatformHint {
 /** Hosts that identify Aone Code (web host + git host). */
 export function isAoneHost(host: string | undefined): boolean {
   if (!host) return false;
-  const h = host.toLowerCase().replace(/:\d+$/, '');
+  // Strip a port and one trailing dot: the trailing-dot FQDN spelling
+  // (`code.alibaba-inc.com.`) is DNS-identical to the plain host, and the
+  // URL grammar admits it — without this it slips past every guard that
+  // keys on isAoneHost while its CR-form twin is refused fail-closed.
+  const h = host.toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
   return (
     h === 'gitlab.alibaba-inc.com' ||
     h === 'code.alibaba-inc.com' ||
@@ -50,19 +54,12 @@ function hostOfRemoteUrl(url: string | undefined): string | undefined {
   return undefined;
 }
 
-/** The cwd clone's origin URL, or undefined when unreadable / not a repo. */
+/** The cwd clone's origin URL, or undefined when unreadable / not a repo.
+ *  Delegates to lib/git's `gitOpt` — the subsystem's shared git policy
+ *  (`GIT_TERMINAL_PROMPT=0`, the shared timeout, fresh per call) — instead
+ *  of forking its own probe options. */
 function cwdOriginUrl(): string | undefined {
-  try {
-    return execFileSync('git', ['remote', 'get-url', 'origin'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 10_000,
-    })
-      .toString()
-      .trim();
-  } catch {
-    return undefined;
-  }
+  return gitOpt('remote', 'get-url', 'origin') ?? undefined;
 }
 
 export function detectPlatformKind(hint?: PlatformHint): PlatformKind {

@@ -105,7 +105,9 @@ const PR_URL_RE =
 // Aone Code CR URLs: `https://code.alibaba-inc.com/<group>[/subgroup…]/<project>/codereview/<global-id>`.
 // The trailing number is the global MR id (what the Aone refspec and `a1 mr
 // view` key on), carried as the target's `number` exactly like a GitHub PR
-// number; the platform itself is detected from the clone's remote, not the URL.
+// number; when this host is passed on to the subcommands as `--host`, it
+// decides the platform (the hint beats the cwd probe) — only WITHOUT a hint
+// does detection fall back to the clone's origin remote.
 // The group path may be nested (`group/subgroup/project`) — the repo identity
 // keeps the last two segments, mirroring aone.parseRemoteUrl. Unlike
 // `…/pull/<n>` (which any GHE host legitimately serves), the host is

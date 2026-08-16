@@ -51,7 +51,6 @@ export function runMeta(args: MetaArgs): MetaResult {
     );
   }
   const platform = getPlatformReader({ host: args.host });
-  platform.ensureAuthenticated();
 
   let host: string;
   let ownerRepo: string;
@@ -61,18 +60,25 @@ export function runMeta(args: MetaArgs): MetaResult {
     // emitting `platform: 'aone'` beside `host: 'github.com'` would hand a
     // consumer a contradiction (feeding the host back flips detection to
     // GitHub and retargets at the same-named repo), so require `--host`.
+    // The gate is the FLAG, not the resolved value: `resolveGhHost` also
+    // inherits the GH_HOST env, and counting that fallback as a host source
+    // off GitHub would leave the contradiction intact (an operator's
+    // standard GHE export beside an Aone target). Everything here is pure
+    // resolution and validation, so it all runs before the auth gate —
+    // detection is read-only, and `a1 auth login` cannot fix a missing
+    // `--host` either.
     ownerRepo = args.repo;
-    const resolvedHost = resolveGhHost(args.host);
-    if (resolvedHost === undefined) {
-      if (platform.kind !== 'github') {
-        throw new TypeError(
-          `--repo on a ${platform.kind} target needs --host — there is no default host off GitHub`,
-        );
-      }
-      host = 'github.com';
-    } else {
-      host = resolvedHost;
+    // An empty-string flag is a missing flag: resolveGhHost treats it as
+    // unset and falls through to the env, which must not bypass the guard.
+    if (
+      (args.host === undefined || args.host.trim() === '') &&
+      platform.kind !== 'github'
+    ) {
+      throw new TypeError(
+        `--repo on a ${platform.kind} target needs --host — there is no default host off GitHub`,
+      );
     }
+    host = resolveGhHost(args.host) ?? 'github.com';
     // Gate it the same way the discovery branch does: `resolveGhHost` also
     // reads the GH_HOST env and never validates, so an unroutable env value
     // (underscore intranet alias) must not be emitted as the host label while
@@ -86,7 +92,9 @@ export function runMeta(args: MetaArgs): MetaResult {
         } ${JSON.stringify(host)} — not a hostname the review subcommands accept`,
       );
     }
+    platform.ensureAuthenticated();
   } else {
+    platform.ensureAuthenticated();
     const id = platform.resolveRepo();
     ownerRepo = `${id.owner}/${id.repo}`;
     host = id.host;
@@ -139,7 +147,7 @@ export const metaCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'The PR host (GitHub Enterprise). Omitted: inherit GH_HOST, else github.com.',
+          "The host the target lives on. An Aone host (*.alibaba-inc.com) selects the a1 backend; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       }),
   handler: (argv) => {
     const prNumber = argv['pr_number'] as number | undefined;

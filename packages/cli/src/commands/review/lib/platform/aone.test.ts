@@ -24,8 +24,60 @@ vi.mock('../git.js', () => ({
   gitRaw: gitRawMock,
 }));
 
-import { aoneReader } from './aone.js';
+import { aoneReader, parseRemoteUrl } from './aone.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
+
+describe('parseRemoteUrl hardening', () => {
+  it('discards an explicit port instead of folding it into the path', () => {
+    expect(
+      parseRemoteUrl('https://gitlab.alibaba-inc.com:8443/solo'),
+    ).toBeNull();
+    expect(
+      parseRemoteUrl('https://gitlab.alibaba-inc.com:8443/g/p.git'),
+    ).toEqual({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+    });
+  });
+
+  it('strips a query string / fragment (credential-bearing channel)', () => {
+    expect(
+      parseRemoteUrl('https://h.example/g/p?private_token=SECRET'),
+    ).toEqual({ host: 'h.example', owner: 'g', repo: 'p' });
+    expect(parseRemoteUrl('https://h.example/g/p.git#frag')).toEqual({
+      host: 'h.example',
+      owner: 'g',
+      repo: 'p',
+    });
+  });
+
+  it('strips TWO OR MORE trailing slashes after .git', () => {
+    expect(parseRemoteUrl('https://h.example/g/p.git//')).toEqual({
+      host: 'h.example',
+      owner: 'g',
+      repo: 'p',
+    });
+  });
+});
+
+describe('aoneReader.resolveRepo', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("quotes git's real error line, not the execFileSync preamble", () => {
+    gitMock.mockImplementation(() => {
+      throw new Error(
+        'Command failed: git remote get-url origin\n' +
+          "error: No such remote 'origin'\n",
+      );
+    });
+    expect(() => aoneReader.resolveRepo()).toThrow(
+      /no `origin` remote \(error: No such remote 'origin'\)/,
+    );
+  });
+});
 
 describe('aoneReader.getCommentBody', () => {
   beforeEach(() => {
@@ -126,13 +178,37 @@ describe('aoneReader.fetchDiff', () => {
       'origin',
       '+refs/merge-requests/7/head:__qwen-review-diff-7',
     );
-    expect(gitMock).toHaveBeenCalledWith('fetch', 'origin', 'master');
+    // `--` ends option parsing: the target branch is server-controlled MR
+    // metadata and must never reach git as an option.
+    expect(gitMock).toHaveBeenCalledWith('fetch', 'origin', '--', 'master');
     // The throwaway ref is cleaned up.
     expect(gitMock).toHaveBeenCalledWith(
       'branch',
       '-D',
       '__qwen-review-diff-7',
     );
+  });
+
+  it('refuses a dash-leading target branch from the MR metadata', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'sha',
+        targetBranch: '--upload-pack=/tmp/evil',
+      },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
+      return '';
+    });
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+      /refusing target branch "--upload-pack=\/tmp\/evil"/,
+    );
+    expect(gitMock).not.toHaveBeenCalledWith(
+      'fetch',
+      'origin',
+      expect.stringContaining('--upload-pack'),
+    );
+    expect(gitRawMock).not.toHaveBeenCalled();
   });
 
   it('falls back to the head first-parent when merge-base fails', () => {

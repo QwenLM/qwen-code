@@ -38,6 +38,12 @@ describe('detectPlatformKind', () => {
     );
   });
 
+  it('detects Aone from the trailing-dot FQDN spelling of the same host', () => {
+    // DNS-identical to the plain host, admitted by the URL grammar — both
+    // spellings must hit the same guards.
+    expect(detectPlatformKind({ host: 'code.alibaba-inc.com.' })).toBe('aone');
+  });
+
   it('detects Aone from an Aone remote URL', () => {
     expect(
       detectPlatformKind({
