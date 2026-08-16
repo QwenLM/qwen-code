@@ -71,6 +71,46 @@ describe('auto-minimize-spam: credential scoping', () => {
   });
 });
 
+describe('auto-minimize-spam: event fast path', () => {
+  it('handles new comments and blocklist changes with an hourly fallback', () => {
+    assert.equal(doc.on.schedule[0].cron, '30 * * * *');
+    assert.deepEqual(doc.on.issue_comment.types, ['created']);
+    assert.deepEqual(doc.on.pull_request_review_comment.types, ['created']);
+    assert.deepEqual(doc.on.push, {
+      branches: ['main'],
+      paths: ['.github/spam-blocklist.txt'],
+    });
+    assert.match(String(minimizeJob.if), /github\.event_name == 'push'/);
+  });
+
+  it('processes the triggering comment without dropping bursts', () => {
+    const jobGuard = String(minimizeJob.if);
+    assert.match(jobGuard, /comment\.user\.type != 'Bot'/);
+    assert.match(jobGuard, /OWNER/);
+    assert.match(jobGuard, /MEMBER/);
+    assert.match(jobGuard, /COLLABORATOR/);
+    assert.match(jobGuard, /head\.repo\.full_name == github\.repository/);
+    assert.match(String(doc.concurrency.group), /comment\.node_id/);
+    assert.equal(
+      checkoutStep.with.ref,
+      '${{ github.event.repository.default_branch }}',
+    );
+    assert.equal(
+      minimizeStep.env?.EVENT_COMMENT_LOGIN,
+      '${{ github.event.comment.user.login }}',
+    );
+    assert.equal(
+      minimizeStep.env?.EVENT_COMMENT_NODE_ID,
+      '${{ github.event.comment.node_id }}',
+    );
+    assert.match(minimizeStep.run, /\[ -n "\$EVENT_COMMENT_NODE_ID" \]/);
+    assert.match(
+      minimizeStep.run,
+      /ALL_CANDIDATES=.*EVENT_COMMENT_LOGIN.*EVENT_COMMENT_NODE_ID/,
+    );
+  });
+});
+
 describe('auto-minimize-spam: comment coverage', () => {
   it('scans inline PR review comments without re-minimizing them', () => {
     assert.ok(minimizeStep, 'minimize step must exist');
