@@ -9,7 +9,7 @@ import { ProviderConfigurationError } from './provider.js';
 
 export function installEnvironmentProxy(): EnvHttpProxyAgent {
   try {
-    const dispatcher = new EnvHttpProxyAgent();
+    const dispatcher = new EnvHttpProxyAgent({ proxyTunnel: false });
     setGlobalDispatcher(dispatcher);
     return dispatcher;
   } catch {

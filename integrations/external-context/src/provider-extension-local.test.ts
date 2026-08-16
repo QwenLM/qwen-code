@@ -11,6 +11,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { getGlobalDispatcher, setGlobalDispatcher } from 'undici';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   normalizeQuery,
@@ -18,6 +19,7 @@ import {
   renderResult,
 } from '../examples/provider-extension-local/src/profile.js';
 import { searchProvider } from '../examples/provider-extension-local/src/provider.js';
+import { installEnvironmentProxy } from '../examples/provider-extension-local/src/proxy.js';
 
 const execFileAsync = promisify(execFile);
 const packageRoot = new URL('..', import.meta.url);
@@ -213,6 +215,63 @@ describe('local provider extension example', () => {
         signal,
       }),
     );
+  });
+
+  it('uses forward-proxy semantics for HTTP providers', async () => {
+    const forwardedRequests: string[] = [];
+    const tunnelRequests: string[] = [];
+    const proxyServer = createServer((request, response) => {
+      forwardedRequests.push(`${request.method} ${request.url}`);
+      request.resume();
+      request.once('end', () => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ items: [] }));
+      });
+    });
+    proxyServer.on('connect', (request, socket) => {
+      tunnelRequests.push(request.url ?? '');
+      socket.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n');
+    });
+    await new Promise<void>((resolve, reject) => {
+      proxyServer.once('error', reject);
+      proxyServer.listen(0, '127.0.0.1', resolve);
+    });
+    const address = proxyServer.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Proxy test server did not bind a TCP port.');
+    }
+    const providerUrl = `http://127.0.0.1:${address.port}`;
+    vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', providerUrl);
+    vi.stubEnv('PROVIDER_CONTEXT_TOKEN', 'secret');
+    vi.stubEnv('http_proxy', providerUrl);
+    vi.stubEnv('HTTP_PROXY', providerUrl);
+    vi.stubEnv('https_proxy', '');
+    vi.stubEnv('HTTPS_PROXY', '');
+    vi.stubEnv('no_proxy', '');
+    vi.stubEnv('NO_PROXY', '');
+
+    const previousDispatcher = getGlobalDispatcher();
+    let dispatcher: ReturnType<typeof installEnvironmentProxy> | undefined;
+    try {
+      dispatcher = installEnvironmentProxy();
+      await expect(
+        searchProvider({
+          query: 'policy',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual([]);
+      expect(forwardedRequests).toEqual([
+        `POST ${providerUrl}/v1/context/search`,
+      ]);
+      expect(tunnelRequests).toEqual([]);
+    } finally {
+      setGlobalDispatcher(previousDispatcher);
+      await dispatcher?.destroy();
+      proxyServer.closeAllConnections();
+      await new Promise<void>((resolve) => {
+        proxyServer.close(() => resolve());
+      });
+    }
   });
 
   it.each([
