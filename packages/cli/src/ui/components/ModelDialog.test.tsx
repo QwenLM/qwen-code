@@ -6,6 +6,9 @@
 
 import { render, cleanup, act } from '@testing-library/react';
 import process from 'node:process';
+import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -17,12 +20,8 @@ import {
   UIActionsContext,
   type UIActions,
 } from '../contexts/UIActionsContext.js';
-import type { Config ,
-  AuthType,
-  DEFAULT_QWEN_MODEL,
-  CopilotTokenNotFoundError,
-  type DiscoveredToken,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getFilteredQwenModels } from '../models/availableModels.js';
@@ -35,18 +34,6 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
   DescriptiveRadioButtonSelect: vi.fn(() => null),
 }));
-
-// Mock discoverGithubToken so the Copilot auto-switch tests can control
-// whether a cached GitHub token is found without touching the filesystem.
-const { mockDiscoverGithubToken } = vi.hoisted(() => ({
-  mockDiscoverGithubToken:
-    vi.fn<(opts?: { overridePath?: string }) => Promise<DiscoveredToken>>(),
-}));
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  return { ...actual, discoverGithubToken: mockDiscoverGithubToken };
-});
 
 // Helper to create getAvailableModelsForAuthType mock
 const createMockGetAvailableModelsForAuthType = () =>
@@ -1893,9 +1880,18 @@ describe('<ModelDialog />', () => {
   it('opens AuthDialog instead of switching when a non-Copilot user picks a Copilot model with no cached token', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const openAuthDialog = vi.fn();
-    mockDiscoverGithubToken.mockRejectedValue(
-      new CopilotTokenNotFoundError('no token'),
-    );
+
+    // Force discoverGithubToken to throw CopilotTokenNotFoundError by pointing
+    // COPILOT_GITHUB_TOKEN_PATH at a temp file with no ghu_/gho_ token, and
+    // clearing GITHUB_TOKEN so the env-var fast path doesn't fire.
+    const prevGithubToken = process.env['GITHUB_TOKEN'];
+    const prevCopilotPath = process.env['COPILOT_GITHUB_TOKEN_PATH'];
+    const tmpDir = join(tmpdir(), `copilot-no-token-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const tmpTokenFile = join(tmpDir, 'hosts.json');
+    writeFileSync(tmpTokenFile, JSON.stringify({}));
+    delete process.env['GITHUB_TOKEN'];
+    process.env['COPILOT_GITHUB_TOKEN_PATH'] = tmpTokenFile;
 
     const { props, mockHistoryManager } = renderComponent(
       {},
@@ -1926,38 +1922,53 @@ describe('<ModelDialog />', () => {
       } as unknown as Partial<UIActions>,
     );
 
-    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await act(async () => {
-      await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
-    });
+    try {
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await act(async () => {
+        await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
+      });
 
-    // Proactively checked for a cached GitHub token.
-    expect(mockDiscoverGithubToken).toHaveBeenCalledTimes(1);
-    // No token → must NOT switch the model.
-    expect(switchModel).not.toHaveBeenCalled();
-    // Instead, open AuthDialog so the user can complete device flow.
-    expect(openAuthDialog).toHaveBeenCalledTimes(1);
-    // The model dialog closes so AuthDialog is the only dialog visible.
-    expect(props.onClose).toHaveBeenCalledTimes(1);
-    // A history item explains why the dialog closed.
-    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'info',
-        text: expect.stringContaining('Copilot'),
-      }),
-      expect.any(Number),
-    );
+      // No token → must NOT switch the model.
+      expect(switchModel).not.toHaveBeenCalled();
+      // Instead, open AuthDialog so the user can complete device flow.
+      expect(openAuthDialog).toHaveBeenCalledTimes(1);
+      // The model dialog closes so AuthDialog is the only dialog visible.
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+      // A history item explains why the dialog closed.
+      expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('Copilot'),
+        }),
+        expect.any(Number),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (prevGithubToken === undefined) {
+        delete process.env['GITHUB_TOKEN'];
+      } else {
+        process.env['GITHUB_TOKEN'] = prevGithubToken;
+      }
+      if (prevCopilotPath === undefined) {
+        delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+      } else {
+        process.env['COPILOT_GITHUB_TOKEN_PATH'] = prevCopilotPath;
+      }
+    }
   });
 
   it('auto-switches to Copilot auth when a non-Copilot user picks a Copilot model and a GitHub token is cached', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const openAuthDialog = vi.fn();
-    mockDiscoverGithubToken.mockResolvedValue({
-      token: 'ghu_test-token',
-      source: 'test',
-    });
 
-    const { props, mockConfig } = renderComponent(
+    // Force discoverGithubToken to succeed via the GITHUB_TOKEN env-var fast
+    // path (ghu_ prefix is recognised as a Copilot token).
+    const prevGithubToken = process.env['GITHUB_TOKEN'];
+    const prevCopilotPath = process.env['COPILOT_GITHUB_TOKEN_PATH'];
+    process.env['GITHUB_TOKEN'] = 'ghu_test-token';
+    delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+
+    const { props } = renderComponent(
       {},
       {
         getModel: vi.fn(() => 'gpt-4'),
@@ -1986,26 +1997,35 @@ describe('<ModelDialog />', () => {
       } as unknown as Partial<UIActions>,
     );
 
-    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await act(async () => {
-      await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
-    });
+    try {
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await act(async () => {
+        await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
+      });
 
-    // Proactively checked for a cached GitHub token.
-    expect(mockDiscoverGithubToken).toHaveBeenCalledTimes(1);
-    // Token found → switchModel proceeds (it triggers refreshAuth internally,
-    // which recreates the content generator with the Copilot wrapper).
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.USE_COPILOT,
-      'claude-opus-4.7',
-      { baseUrl: undefined },
-    );
-    // AuthDialog must NOT open — the switch succeeded.
-    expect(openAuthDialog).not.toHaveBeenCalled();
-    // Dialog closes after the successful switch.
-    expect(props.onClose).toHaveBeenCalledTimes(1);
-    // Verify mockConfig is the one we passed (for type safety).
-    expect(mockConfig).toBeDefined();
+      // Token found → switchModel proceeds (it triggers refreshAuth internally,
+      // which recreates the content generator with the Copilot wrapper).
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_COPILOT,
+        'claude-opus-4.7',
+        { baseUrl: undefined },
+      );
+      // AuthDialog must NOT open — the switch succeeded.
+      expect(openAuthDialog).not.toHaveBeenCalled();
+      // Dialog closes after the successful switch.
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prevGithubToken === undefined) {
+        delete process.env['GITHUB_TOKEN'];
+      } else {
+        process.env['GITHUB_TOKEN'] = prevGithubToken;
+      }
+      if (prevCopilotPath === undefined) {
+        delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+      } else {
+        process.env['COPILOT_GITHUB_TOKEN_PATH'] = prevCopilotPath;
+      }
+    }
   });
 });
 
