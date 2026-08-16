@@ -188,6 +188,12 @@ describe('runCleanup', () => {
     mocks.reviewLeaseHeldByAnotherSession.mockImplementationOnce(
       (l: unknown) => l === lease,
     );
+    // Populate the tmp dir so the per-target side-file sweep actually runs
+    // once past the skip gate: a refactor that moves the sweep above the
+    // gate would reach for the holder's side files and trip the
+    // rmSync-not-called assertion below.
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-diff.txt']);
 
     runCleanup('pr-123');
 

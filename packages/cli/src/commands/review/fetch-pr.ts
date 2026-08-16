@@ -31,7 +31,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
-  clearReviewWorktreeLease,
+  clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
@@ -219,6 +219,22 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // (drift restarts, later rounds of a multi-prompt review) pass: ownership
   // is per session, not per prompt.
   const leaseTarget = `pr-${prNumber}`;
+  const sessionId = process.env['QWEN_CODE_SESSION_ID'];
+  const promptId = process.env['QWEN_CODE_PROMPT_ID'];
+  // The lease write no-ops without both ids, and a lease-less run builds
+  // the whole review state unprotected — a later session passes the empty
+  // gate and destroys it mid-run (#9205 again). Refuse before touching
+  // anything: the fail-closed rule the gate applies to taking over a
+  // lease applies to acquiring one too.
+  if (!sessionId || !promptId) {
+    throw new Error(
+      `fetch-pr: QWEN_CODE_SESSION_ID and QWEN_CODE_PROMPT_ID must both ` +
+        `be set to register the review worktree lease. Run fetch-pr from ` +
+        `a Qwen Code session (the /review skill sets both); without the ` +
+        `lease nothing locks the shared worktree path against a ` +
+        `concurrent session.`,
+    );
+  }
   const holder = readReviewWorktreeLease(process.cwd(), leaseTarget);
   if (reviewLeaseHeldByAnotherSession(holder)) {
     throw new Error(
@@ -232,21 +248,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     );
   }
 
-  createReviewWorktreeLease({
-    sessionId: process.env['QWEN_CODE_SESSION_ID'],
-    promptId: process.env['QWEN_CODE_PROMPT_ID'],
-    target: leaseTarget,
-    repositoryRoot: process.cwd(),
-    worktreePath: wt,
-    branch: ref,
-  });
-
   // The lock above refuses any later session that finds another
   // session's lease, so one left behind by ANY failure after this point
   // would block every later review of this PR until deleted by hand.
   // Roll it back on every throw; the branch rollbacks stay where the
   // ref they remove is created.
   try {
+    // 0. Register the lease. Inside the rollback so a failed write
+    //    (ENOSPC, lost acquire race) cannot escape the catch; the
+    //    rollback's removal is safe when nothing was written.
+    createReviewWorktreeLease({
+      sessionId,
+      promptId,
+      target: leaseTarget,
+      repositoryRoot: process.cwd(),
+      worktreePath: wt,
+      branch: ref,
+    });
+
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);
 
@@ -510,10 +529,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
   } catch (err) {
-    // Best-effort, like the branch rollbacks: `clearReviewWorktreeLease` can
-    // itself throw on an un-removable lease file, and that must not mask the
-    // original failure cause.
-    tryRemove(() => clearReviewWorktreeLease(process.cwd(), leaseTarget));
+    // Roll back only a lease THIS run created: a re-fetch enters holding
+    // its own earlier lease, and deleting that would expose the session's
+    // live worktree the moment a refused session retries. Compare before
+    // deleting so a lease another session wrote during this run (the
+    // manual-recovery path for a stuck one) survives too. Best-effort,
+    // like the branch rollbacks: a failure here must not mask the
+    // original cause.
+    if (holder === null) {
+      tryRemove(() =>
+        clearReviewWorktreeLeaseIfOwned(process.cwd(), leaseTarget, {
+          sessionId,
+          promptId,
+        }),
+      );
+    }
     throw err;
   }
 }

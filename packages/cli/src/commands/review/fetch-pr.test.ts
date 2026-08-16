@@ -14,12 +14,13 @@ import {
 } from './fetch-pr.js';
 import {
   clearReviewWorktreeLease,
+  clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
-import { PARSE_ARGS_REPORT } from './lib/paths.js';
+import { PARSE_ARGS_REPORT, worktreePath } from './lib/paths.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -265,6 +266,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
   clearReviewWorktreeLease: vi.fn(),
+  clearReviewWorktreeLeaseIfOwned: vi.fn(),
   createReviewWorktreeLease: vi.fn(),
   readReviewWorktreeLease: vi.fn((): unknown => null),
   reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
@@ -291,6 +293,8 @@ vi.mock('./lib/merge-base.js', () => ({
 }));
 
 describe('fetch-pr report assembly', () => {
+  const savedEnv: { sessionId?: string; promptId?: string } = {};
+
   beforeEach(() => {
     vi.clearAllMocks();
     // clearAllMocks resets call history but NOT implementations, so a
@@ -317,6 +321,26 @@ describe('fetch-pr report assembly', () => {
         body: '',
       }),
     );
+    // fetch-pr refuses to run without the lease identity (a lease-less run
+    // would build the review state with no lock against concurrent
+    // sessions), so every path this suite drives starts registered.
+    savedEnv.sessionId = process.env['QWEN_CODE_SESSION_ID'];
+    savedEnv.promptId = process.env['QWEN_CODE_PROMPT_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
+    process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
+  });
+
+  afterEach(() => {
+    if (savedEnv.sessionId === undefined) {
+      delete process.env['QWEN_CODE_SESSION_ID'];
+    } else {
+      process.env['QWEN_CODE_SESSION_ID'] = savedEnv.sessionId;
+    }
+    if (savedEnv.promptId === undefined) {
+      delete process.env['QWEN_CODE_PROMPT_ID'];
+    } else {
+      process.env['QWEN_CODE_PROMPT_ID'] = savedEnv.promptId;
+    }
   });
 
   async function reportFor(extraArgs: Record<string, unknown>) {
@@ -388,7 +412,7 @@ describe('fetch-pr report assembly', () => {
       );
       // Nothing was touched on the way out.
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
-      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();
       expect(producerMocks.gh).not.toHaveBeenCalled();
       expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
@@ -418,7 +442,36 @@ describe('fetch-pr report assembly', () => {
       expect(producerMocks.git).not.toHaveBeenCalled();
       expect(producerMocks.gh).not.toHaveBeenCalled();
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
-      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).not.toHaveBeenCalled();
+    });
+
+    it('refuses a zero pr_number the regex disjunct alone accepts', async () => {
+      // `'0'` matches `\d+`; only `Number(prNumber) <= 0` rejects it.
+      // Unpinned, fetch-pr engages the gate for `pr-0` and stale-cleans
+      // `review-pr-0` lease-less before the fetch fails.
+      await expect(reportFor({ pr_number: '0' })).rejects.toThrow(
+        'fetch-pr: pr_number must be a positive integer, got "0"',
+      );
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).not.toHaveBeenCalled();
+    });
+
+    it('refuses to run when the lease cannot register for lack of identity', async () => {
+      // A bare-terminal fetch-pr has neither id; the lease write no-ops on
+      // them, and a lease-less run builds the whole review state with no
+      // lock against concurrent sessions (#9205). Fail closed like the
+      // takeover rule does.
+      delete process.env['QWEN_CODE_SESSION_ID'];
+      delete process.env['QWEN_CODE_PROMPT_ID'];
+
+      await expect(reportFor({})).rejects.toThrow('QWEN_CODE_SESSION_ID');
+
+      expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(producerMocks.gh).not.toHaveBeenCalled();
     });
 
     it('lets the holding session re-fetch its own lease', async () => {
@@ -431,27 +484,7 @@ describe('fetch-pr report assembly', () => {
       });
       vi.mocked(reviewLeaseHeldByAnotherSession).mockReturnValueOnce(false);
 
-      // The service also no-ops when sessionId/promptId are missing, and this
-      // suite never sets the env vars — set both, and pin them below, or the
-      // assertion stays green on the very inputs that void the lock.
-      const prevSessionId = process.env['QWEN_CODE_SESSION_ID'];
-      const prevPromptId = process.env['QWEN_CODE_PROMPT_ID'];
-      process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
-      process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
-      try {
-        await reportFor({});
-      } finally {
-        if (prevSessionId === undefined) {
-          delete process.env['QWEN_CODE_SESSION_ID'];
-        } else {
-          process.env['QWEN_CODE_SESSION_ID'] = prevSessionId;
-        }
-        if (prevPromptId === undefined) {
-          delete process.env['QWEN_CODE_PROMPT_ID'];
-        } else {
-          process.env['QWEN_CODE_PROMPT_ID'] = prevPromptId;
-        }
-      }
+      await reportFor({});
 
       expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledTimes(1);
       // Pin the lease's ARGUMENTS — the service silently no-ops on a malformed
@@ -463,14 +496,17 @@ describe('fetch-pr report assembly', () => {
           promptId: 'prompt-now',
           target: 'pr-42',
           repositoryRoot: process.cwd(),
-          worktreePath: '.qwen/tmp/review-pr-42',
+          // Through the REAL (unmocked) path helper, so the expectation
+          // tracks the platform separator instead of pinning a POSIX
+          // literal against it.
+          worktreePath: worktreePath('42'),
           branch: 'qwen-review/pr-42',
         }),
       );
       // Success must NOT clear the lease: it persists so a concurrent session
       // cannot stale-clean this run's live worktree. A catch→finally refactor
       // would delete it here while every rollback test stays green.
-      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).not.toHaveBeenCalled();
     });
 
     it('writes the lease before the stale-clean and the first git call', async () => {
@@ -511,10 +547,36 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to fetch PR #42 from remote "origin"',
       );
-      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
+        { sessionId: 'session-self', promptId: 'prompt-now' },
       );
+    });
+
+    it('keeps a pre-existing same-session lease when a re-fetch fails', async () => {
+      // A drift restart enters holding its own earlier lease. A failure
+      // must not delete it: the session is still mid-review, and dropping
+      // the lock lets a session refused minutes earlier through the
+      // emptied gate to stale-clean the live worktree (#9205).
+      vi.mocked(readReviewWorktreeLease).mockReturnValueOnce({
+        sessionId: 'session-self',
+        promptId: 'prompt-earlier',
+        target: 'pr-42',
+        repositoryRoot: process.cwd(),
+        worktreePath: worktreePath('42'),
+        branch: 'qwen-review/pr-42',
+      });
+      vi.mocked(reviewLeaseHeldByAnotherSession).mockReturnValueOnce(false);
+      producerMocks.git.mockImplementation(() => {
+        throw new Error('network down');
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        'Failed to fetch PR #42 from remote "origin"',
+      );
+      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).not.toHaveBeenCalled();
     });
 
     it('clears the lease when the metadata fetch fails', async () => {
@@ -530,9 +592,10 @@ describe('fetch-pr report assembly', () => {
         ['branch', '-D', 'qwen-review/pr-42'],
         { stdio: 'pipe' },
       );
-      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
+        { sessionId: 'session-self', promptId: 'prompt-now' },
       );
       // Teardown mirrors the acquisition window: the destructive branch
       // rollback first, the lease released LAST — a clear that lands before
@@ -542,7 +605,7 @@ describe('fetch-pr report assembly', () => {
       expect(
         producerMocks.execFileSync.mock.invocationCallOrder[0]!,
       ).toBeLessThan(
-        vi.mocked(clearReviewWorktreeLease).mock.invocationCallOrder[0]!,
+        vi.mocked(clearReviewWorktreeLeaseIfOwned).mock.invocationCallOrder[0]!,
       );
     });
 
@@ -555,9 +618,10 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to create worktree at',
       );
-      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
+        { sessionId: 'session-self', promptId: 'prompt-now' },
       );
     });
 
@@ -571,9 +635,10 @@ describe('fetch-pr report assembly', () => {
       });
 
       await expect(reportFor({})).rejects.toThrow('ENOSPC');
-      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
+        { sessionId: 'session-self', promptId: 'prompt-now' },
       );
     });
 
@@ -585,7 +650,7 @@ describe('fetch-pr report assembly', () => {
       producerMocks.git.mockImplementation(() => {
         throw new Error('network down');
       });
-      vi.mocked(clearReviewWorktreeLease).mockImplementationOnce(() => {
+      vi.mocked(clearReviewWorktreeLeaseIfOwned).mockImplementationOnce(() => {
         throw new Error('EACCES: permission denied, unlink lease');
       });
 

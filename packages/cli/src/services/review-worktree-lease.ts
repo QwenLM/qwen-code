@@ -83,6 +83,29 @@ export function clearReviewWorktreeLease(
   rmSync(leasePath(resolve(repositoryRoot), target), { force: true });
 }
 
+/**
+ * Remove the lease only when the caller wrote it. fetch-pr's failure-path
+ * rollback must never erase a lease another session acquired DURING the run —
+ * the documented manual-recovery shape: an operator deletes a stuck run's
+ * lease, a new session acquires, then the stuck run un-sticks, fails, and
+ * would blind-delete the new holder's lock.
+ */
+export function clearReviewWorktreeLeaseIfOwned(
+  repositoryRoot: string,
+  target: string,
+  owner: { sessionId: string; promptId: string },
+): void {
+  const lease = readReviewWorktreeLease(repositoryRoot, target);
+  if (
+    !lease ||
+    lease.sessionId !== owner.sessionId ||
+    lease.promptId !== owner.promptId
+  ) {
+    return;
+  }
+  clearReviewWorktreeLease(repositoryRoot, target);
+}
+
 export function createReviewWorktreeLease(params: {
   sessionId: string | undefined;
   promptId: string | undefined;
@@ -104,12 +127,31 @@ export function createReviewWorktreeLease(params: {
     worktreePath: resolve(repositoryRoot, params.worktreePath),
     branch: params.branch,
   };
+  const data = `${JSON.stringify(lease, null, 2)}\n`;
+  const path = leasePath(repositoryRoot, params.target);
   mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
-  writeFileSync(
-    leasePath(repositoryRoot, params.target),
-    `${JSON.stringify(lease, null, 2)}\n`,
-    'utf8',
-  );
+  try {
+    // `flag: 'wx'` fails EEXIST instead of overwriting: two concurrent
+    // fetch-prs can both pass the gate's read, and a plain write would let
+    // the second clobber the winner's lease — after which the loser's
+    // rollback deletes a lock it never owned. Same atomic-create shape as
+    // `ensureWorktreesGitignored` in core's gitWorktreeService.
+    writeFileSync(path, data, { encoding: 'utf8', flag: 'wx' });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const existing = readLease(path);
+    if (existing && existing.sessionId !== params.sessionId) {
+      throw new Error(
+        `review worktree lease for ${params.target} is held by another ` +
+          `session (session ${existing.sessionId}); it was acquired ` +
+          `between the gate read and the lease write — retry`,
+      );
+    }
+    // Same-session re-fetch refreshes the lease (ownership is per session,
+    // not per prompt). An unreadable file is already read as no lease by
+    // every reader, so rewriting it heals a torn write instead of wedging.
+    writeFileSync(path, data, 'utf8');
+  }
 }
 
 function readLease(path: string): ReviewWorktreeLease | null {
