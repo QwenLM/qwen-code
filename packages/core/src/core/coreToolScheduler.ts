@@ -4575,6 +4575,8 @@ export class CoreToolScheduler {
           toolName: canonicalName,
           args: invocation.params as Record<string, unknown>,
           signal,
+          sessionId: this.config.getSessionId(),
+          cwd: this.config.getTargetDir(),
           ...(invocationContext ? { invocationContext } : {}),
         },
       );

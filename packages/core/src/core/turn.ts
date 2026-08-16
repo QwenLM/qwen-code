@@ -26,6 +26,7 @@ import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
+  getErrorStatus,
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
@@ -687,6 +688,7 @@ export class Turn {
         return;
       }
 
+      const originalStatus = getErrorStatus(e);
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
         throw error;
@@ -714,16 +716,9 @@ export class Turn {
         'Turn.run-sendMessageStream',
         { contextAlreadySummarized: true },
       );
-      const status =
-        typeof error === 'object' &&
-        error !== null &&
-        'status' in error &&
-        typeof (error as { status: unknown }).status === 'number'
-          ? (error as { status: number }).status
-          : undefined;
       const structuredError: StructuredError = {
         message: getErrorMessage(error),
-        status,
+        status: getErrorStatus(error) ?? originalStatus,
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
       yield { type: GeminiEventType.Error, value: { error: structuredError } };

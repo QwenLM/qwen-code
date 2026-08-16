@@ -27,6 +27,11 @@
 import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
 import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
+// The topology gate lives in `budget.ts` — it is a size ruling, and the round
+// cap needs the same one. Re-exported here because this file was its home and
+// the roster is where a reader looks for "which fan-out was owed".
+export { isTerritoryFanOut } from './budget.js';
+import { isTerritoryFanOut } from './budget.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -94,20 +99,6 @@ export function reviewMode(plan: RosterPlan): ReviewMode {
   }
   if (Array.isArray(plan.untrackedFiles)) return 'local';
   return 'diff-only';
-}
-
-/**
- * The topology gate, in code.
- *
- * The same two numbers the skill's prose turns on. It is here so the roster and
- * the reader cannot disagree about which fan-out was owed — a disagreement that
- * would show up as a review being told it forgot eleven agents it was never
- * supposed to launch.
- */
-export function isTerritoryFanOut(plan: RosterPlan): boolean {
-  const src = Number(plan.srcDiffLines ?? 0);
-  const total = Number(plan.diffLines ?? 0);
-  return !(src <= 500 && total <= 3200);
 }
 
 /** Does the diff remove or replace anything? If not, 1b has nothing to audit. */

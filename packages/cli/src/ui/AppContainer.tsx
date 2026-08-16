@@ -158,7 +158,7 @@ import {
   formatSessionWindowTitle,
   titleStatusPrefix,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -2600,12 +2600,12 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            onAdmissionFailed: () => {
+              addMessage(submittedValue, true, submittedPrompt);
+            },
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit /btw submission', error);
         });
