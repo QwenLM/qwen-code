@@ -1669,6 +1669,11 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
+        acpPreAttachMaxFramesPerStream: null,
+        acpPreAttachMaxFramesPerConnection: null,
+        acpPreAttachMaxFramesGlobal: null,
+        acpPreAttachMaxPayloadBytesPerConnection: null,
+        acpPreAttachMaxPayloadBytesGlobal: null,
         // No child-heap policy during bootstrap: it is built with the
         // runtime, so `enforced` is correctly false and `childHeap` null in
         // this window even when the flag says `enforce`.
@@ -1717,6 +1722,16 @@ function createBootstrapServeApp(input: {
             sseStreams: 0,
             wsStreams: 0,
             pendingClientRequests: 0,
+            preAttach: {
+              bufferedConnectionFrames: 0,
+              bufferedSessionFrames: 0,
+              pendingDeliveryFrames: 0,
+              usedFrames: 0,
+              usedBytes: 0,
+              highWaterFrames: 0,
+              highWaterBytes: 0,
+              guardFailures: 0,
+            },
           },
         },
         rateLimit: {
@@ -1740,6 +1755,7 @@ function createBootstrapServeApp(input: {
         ? {
             full: {
               sessions: [],
+              acpMounts: [],
               acpConnections: [],
               workspace: {},
               auth: {

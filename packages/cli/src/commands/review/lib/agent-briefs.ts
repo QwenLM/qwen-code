@@ -756,7 +756,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
 - **Report only Critical or Suggestion.** Do not report Nice to have.
 - A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
 
-If you find no new gap in your scope, say so **and name what you re-examined** — \`${REVERSE_AUDIT_EXAMPLE_RECEIPT}\`. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
+If you find no new gap in your scope, your WHOLE return is the receipt — exactly one line, the no-issues phrase, a dash, and a clause that names what you re-examined, opening with the walk (\`re-walked\` / \`verified\` / \`traced\` — 走查 / 复核 / 核对), as in \`${REVERSE_AUDIT_EXAMPLE_RECEIPT}\`. Nothing else may ride in the return but the \`Budget gap:\` and \`Layer walked:\` lines this brief already mandates: any other prose — before the receipt line, after it, or hedged inside its clause — reads as "not dry", because prose has no last hedge and the tooling will not guess which ones are harmless. If any part of your scope went unexamined — a file you could not open, a walk the ceiling cut short — do NOT emit the receipt: say what you did not walk. That keeps the territory under audit, which is the honest outcome; the receipt certifies only a walk that happened. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
   },
 };
 

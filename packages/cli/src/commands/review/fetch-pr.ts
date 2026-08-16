@@ -27,6 +27,7 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -54,6 +55,9 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
+import { appendRunSession } from './lib/run-ledger.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -129,6 +133,17 @@ type FetchPrResult = PlanReport & {
   diffPath: string | null;
   /** Absolute path — `read_file` rejects relative paths. Agents use this. */
   diffPathAbsolute: string | null;
+  /**
+   * SHA-256 of the captured diff's raw bytes — the identity of WHAT this run
+   * reviews, hashed from the same buffer the diff file was written from (the
+   * `diffHashOf` discipline: one read, no TOCTOU window). Groundwork for the
+   * stack's `--resume` (the next PR): its ruling will compare this against
+   * the diff file on disk — a mismatch means the input changed, and changed
+   * input re-runs; the checkpoint key is content, never a path or a
+   * timestamp. No reader exists at THIS commit. Null when no diff was
+   * captured.
+   */
+  diffSha256: string | null;
   /**
    * True when the PR description contains Han characters — the author writes
    * Chinese. `compose-review` reads it from this report (its `planPath`) and
@@ -269,6 +284,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');
   let diffPath: string | null = null;
   let diffPathAbsolute: string | null = null;
+  let diffSha256: string | null = null;
   let diffText = '';
   if (mergeBaseSha) {
     try {
@@ -285,6 +301,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       diffText = buf.toString('utf8');
       diffPath = diffRel;
       diffPathAbsolute = resolve(diffRel);
+      diffSha256 = createHash('sha256').update(buf).digest('hex');
     } catch (err) {
       writeStderrLine(`Failed to capture diff: ${(err as Error).message}`);
     }
@@ -309,6 +326,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     );
     diffPath = null;
     diffPathAbsolute = null;
+    diffSha256 = null;
     plan = buildDiffPlan('', args.maxChunkLines);
   }
 
@@ -429,12 +447,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseFetchFailed,
     diffPath,
     diffPathAbsolute,
+    diffSha256,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    }),
     ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
+  // Record this session against the plan just written: a later `--resume`
+  // reads the ledger to find this attempt's transcripts. After the plan
+  // write, so the entry sits inside the run-epoch fence it is read through.
+  appendRunSession(out);
   writeStdoutLine(`Wrote fetch-pr report to ${out}`);
   if (diffPath) writeStdoutLine(`Wrote review diff to ${diffPath}`);
   // Surface diff stats to stderr so a human running the command interactively

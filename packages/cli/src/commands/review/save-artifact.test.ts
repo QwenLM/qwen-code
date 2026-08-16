@@ -64,6 +64,9 @@ const verdict = {
   downgraded: true,
   downgradedFrom: 'Request changes',
   remediation: ['Run verification again.'],
+  // Non-zero on purpose: the copy test then proves passthrough, not just
+  // the validator's absent-means-zero default.
+  deferredCount: 2,
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -278,6 +281,44 @@ describe('saveReviewArtifact', () => {
       }),
     ).toThrow(/verdictLine/);
     expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it.each(['two', -1, 1.5] as const)(
+    'refuses a present deferredCount of the wrong shape (%s)',
+    (bad) => {
+      // The absent-means-zero default must not swallow a PRESENT malformed
+      // value: a mutant deleting the refuse arm saved `deferredCount: -1`
+      // into the durable artifact with the suite fully green.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, deferredCount: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/deferredCount/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
+    // Null rides the same absence semantics compose-review's own toCount
+    // boundary gives this field's siblings.
+    const paths = fixture();
+    const { deferredCount: _absent, ...prePosture } = verdict;
+    for (const composed of [prePosture, { ...verdict, deferredCount: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
+      ).toBe(0);
+    }
   });
 
   it.each(['findings', 'composed', 'report'] as const)(
