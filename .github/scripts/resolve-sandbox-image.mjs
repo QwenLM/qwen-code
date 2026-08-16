@@ -109,6 +109,60 @@ function pullImage(command, image) {
   });
 }
 
+// Resolve a PULLED image to its content digest (repo@sha256:…). The tag
+// alone is a mutable local handle: `docker run <tag>` resolves against the
+// local store without re-pull, and a co-resident process with daemon access
+// can `docker tag` different content under the same name between resolve
+// and gate. A digest reference cannot be moved by `docker tag`/`docker build`.
+export function repoDigestOf(command, image) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      command,
+      ['image', 'inspect', '--format', '{{index .RepoDigests 0}}', image],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stdout = '';
+    let settled = false;
+    let timer;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      console.error(
+        `::error::Timed out inspecting ${image} after ${FETCH_TIMEOUT_MS / 1000}s.`,
+      );
+      child.kill('SIGKILL');
+      finish('');
+    }, FETCH_TIMEOUT_MS);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.on('error', (error) => {
+      console.error(
+        `::error::Failed to start '${command} image inspect ${image}': ${error.message}`,
+      );
+      finish('');
+    });
+    child.on('close', (code) => {
+      finish(code === 0 ? stdout.trim() : '');
+    });
+  }).then((digest) => {
+    // `<no value>` is what the Go template prints for an image without
+    // RepoDigests (a locally built one); empty means the inspect failed.
+    // Either way the mutable tag is exactly what must not be exported.
+    if (!digest.includes('@sha256:')) {
+      throw new Error(
+        `Pulled image ${image} resolved to no repository digest ('${digest}'); refusing to export a mutable tag.`,
+      );
+    }
+    return digest;
+  });
+}
+
 export function exportImage(image) {
   if (process.env.GITHUB_ENV) {
     appendFileSync(process.env.GITHUB_ENV, `QWEN_SANDBOX_IMAGE=${image}\n`);
@@ -127,7 +181,7 @@ async function main() {
 
   const command = process.env.SANDBOX_COMMAND || 'docker';
   if (await pullImage(command, requestedImage)) {
-    exportImage(requestedImage);
+    exportImage(await repoDigestOf(command, requestedImage));
     return;
   }
 
@@ -145,7 +199,7 @@ async function main() {
   if (!(await pullImage(command, fallbackImage))) {
     throw new Error(`Fallback sandbox image failed to pull: ${fallbackImage}`);
   }
-  exportImage(fallbackImage);
+  exportImage(await repoDigestOf(command, fallbackImage));
 }
 
 if (

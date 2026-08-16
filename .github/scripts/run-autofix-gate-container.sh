@@ -21,7 +21,11 @@ set -uo pipefail
 # a host-created verdict file plus the container's EXIT CODE — the exit code
 # is the unforgeable half (branch code can append to the mounted verdict file,
 # but it cannot make a failing gate exit 0), so a passing verdict is accepted
-# only on exit 0.
+# only on exit 0. The container wall does not, by itself, make the HOST-side
+# translation shell trusted: the agent steps therefore sever the runner's
+# $GITHUB_ENV/$GITHUB_PATH/$GITHUB_OUTPUT channels before the branch-code-
+# bearing process tree starts (see 'Triage and address'), because a planted
+# BASH_ENV is sourced by every later step shell before line 1.
 #
 # Invoked as a child `bash` from the host verify step, which digest-verifies
 # both this script and the gate script first. Inherits its environment from
@@ -54,6 +58,9 @@ CRW="${CTEMP}/rw"
 # running leftover the trap exists to remove, which no janitor reaps (they
 # skip RUNNING containers).
 GATE_CONTAINER="qwen-code-gate-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+# Referenced only through `trap` below, which shellcheck's reachability scan
+# does not resolve (SC2317, visible under --enable=all).
+# shellcheck disable=SC2317
 teardown() { timeout 30 docker rm -f "${GATE_CONTAINER}" > /dev/null 2>&1 || true; }
 trap teardown EXIT INT TERM
 
@@ -62,10 +69,24 @@ if [[ -z "${GATE_IMAGE:-}" ]]; then
   exit 125
 fi
 
+# Explicit unlink before the truncation: the verdict file is the one path
+# this wrapper opens pre-run AND post-run, and WORKDIR persists within the
+# round — a pre-planted FIFO blocks the truncation's write-open until the
+# step timeout (a one-line per-round DoS of the verification loop), and a
+# symlink to a fingerprinted input (e.g. rc.json) would truncate the target
+# THROUGH the link before the baseline capture below records it, hiding the
+# damage from the compare.
+rm -f "${VERDICT}"
 : > "${VERDICT}" || {
   echo "::error::could not create the gate verdict file at ${VERDICT}"
   exit 125
 }
+# Single host-side reset for the gate-authored rejection detail: the gate
+# writes it only on rejection paths, so a copy surviving a run that never
+# rejected was planted, and the report steps would publish it as the bot's
+# own rejection rationale. (The other gate-authored file resets itself: the
+# gate rm -f's gate-advisories.md at its own start.)
+rm -f "${WORKDIR}/gate-rejection.md"
 rm -rf "${CTEMP}"
 mkdir -p "${CBIN}" "${CRW}" || exit 125
 for staged in run-autofix-review-verification.sh check-settings-schema.sh \
@@ -81,19 +102,21 @@ done
 # root-owned files — the same failure the job's ownership-restore step exists
 # for. --env is an explicit allowlist: anything not named here is simply
 # absent inside, which is the whole point.
-# The gate reads agent-authored verdict INPUTS from the rw WORKDIR mount
-# after its build legs — branch code in the container can plant
-# `no-action.md` to manufacture a `noop` (published as the bot's own "no
-# changes needed" rationale, advancing the watermark) or plant
-# `resolved-comments.txt` to close human review threads. The gate never
-# writes these four, so fingerprint them before the run and refuse the
-# verdict if they moved.
-# rc.json/rv.json are the bite check's inputs, read AFTER the build legs:
-# truncating rc.json flips BITE_ENFORCE to false, so the bogus-fix round the
-# bite check exists to reject exits 0 as `fixed`. failure.md is read back by
-# the host's report step, so a plant publishes attacker text as the bot's
-# rejection. The gate writes none of these (only gate-advisories.md and
-# gate-rejection.md, which is why those are absent here).
+# The WORKDIR mount is rw, and everything fingerprinted below is a file the
+# gate NEVER writes yet some consumer reads after the run — so branch code
+# in the container, awake for the whole run, can plant them to steer what
+# the host publishes or routes: no-action.md manufactures a noop published
+# as the bot's own "no changes needed" rationale, resolved-comments.txt
+# closes human review threads, handoff.md is picked by the report step's
+# detail chain AHEAD of the fingerprinted summary files, agent-api-error
+# forces the model-error retry sentinel and injects its text into the
+# published headline, rc.json truncated flips the bite check's BITE_ENFORCE
+# off so the bogus-fix round it exists to reject exits 0 as `fixed`, and
+# deferred-findings.json feeds the post-gate upsert. Fingerprint them
+# before the run and refuse the verdict if they moved. The two gate-
+# authored files stay out of the set for the opposite reason (see the
+# resets above): fingerprinting them would make the gate's own writes trip
+# the compare.
 # The type is part of the fingerprint, and non-regular paths are never
 # hashed: a symlink to gate-verdict would make the gate's own verdict writes
 # trip the compare (exit 125 every round, suppressing the rejection), and a
@@ -102,7 +125,9 @@ done
 verdict_inputs_digest() {
   local f type
   for f in no-action.md address-summary.md resolved-comments.txt \
-    comment-replies.json rc.json rv.json failure.md; do
+    comment-replies.json rc.json rv.json failure.md handoff.md \
+    deferred-feedback.md agent-api-error agent-api-error-kind \
+    agent-timeout deferred-findings.json deferred-findings.carry.json; do
     type="$(stat -c '%F' "${WORKDIR}/${f}" 2> /dev/null || true)"
     case "${type}" in
       '' | 'regular file' | 'regular empty file')
@@ -155,6 +180,20 @@ if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]; then
   exit 125
 fi
 
+# Mirror the inputs' type discipline on the verdict file itself BEFORE
+# anything opens it: the container can swap it after the run — rm + mkfifo
+# while holding a reader fd (the gate's appends succeed inside, then the
+# grep below blocks its read-open until the step timeout) or a symlink,
+# whose target the extraction would then read with host permissions.
+VERDICT_TYPE="$(stat -c '%F' "${VERDICT}" 2> /dev/null || true)"
+case "${VERDICT_TYPE}" in
+  'regular file' | 'regular empty file') : ;;
+  *)
+    echo "::error::the gate verdict file at ${VERDICT} is not a regular file (${VERDICT_TYPE:-missing}) after the run — refusing to read it."
+    exit 125
+    ;;
+esac
+
 # Verdict translation. Only these keys are forwarded, last value wins (the
 # gate appends its final verdict last), and `outcome` is gated on the exit
 # code — the file alone is not authority.
@@ -185,6 +224,19 @@ case "${GATE_RC}" in
     fi
     ;;
   1)
+    # preexisting and retryable are mutually exclusive at the source
+    # (reject_fix: a pre-existing failure is NOT retryable — the repair
+    # agent may only amend this round's fix). Both present is therefore
+    # proof of an append the gate never made, so refuse the verdict BEFORE
+    # forwarding any of it: a planted `preexisting=true` overriding a
+    # genuine `retryable=true` would otherwise skip the repair the round is
+    # entitled to and permanently misclassify a fixable rejection as a
+    # terminal pre-existing failure. The crash path retries with a fresh
+    # checkout instead.
+    if [[ "${PREEXISTING}" == 'true' && "${RETRYABLE}" == 'true' ]]; then
+      echo "::error::verdict carries both preexisting and retryable — the gate never emits both; refusing the verdict as tampered."
+      exit 125
+    fi
     # A deterministic rejection: reject_fix writes outcome=failed to the file
     # and exits 1. Take `failed` only from the FILE — the gate also has
     # exit-1 paths that deliberately write NO verdict (the baseline-A/B and
@@ -195,14 +247,8 @@ case "${GATE_RC}" in
     # so here it leaves the outcome unset and the round retries.
     if [[ "${OUTCOME}" == 'failed' ]]; then
       echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-      # preexisting and retryable are mutually exclusive at the source
-      # (reject_fix: a pre-existing failure is NOT retryable — the repair
-      # agent may only amend this round's fix). Forwarding them independently
-      # admits a pair the gate never emits: an appended `retryable=true` rides
-      # a genuine preexisting rejection into an 18-minute repair leg the
-      # repair agent is forbidden to act on, burned every round.
       [[ "${PREEXISTING}" == 'true' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
-      [[ "${PREEXISTING}" != 'true' && "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
+      [[ "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
     else
       echo "::warning::gate container exited 1 without a deterministic verdict (outcome='${OUTCOME}') — reporting as a gate crash so the next scan retries."
     fi

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   latestSemverTag,
   validateRequestedImage,
   exportImage,
+  repoDigestOf,
 } from './resolve-sandbox-image.mjs';
 
 test('latestSemverTag returns the highest stable semver tag', () => {
@@ -74,4 +75,53 @@ test('exportImage publishes the resolved image as a step output', () => {
     else process.env.GITHUB_ENV = saved.env;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function withDockerStub(scriptBody, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'sandbox-image-stub-'));
+  const stub = join(dir, 'docker-stub');
+  try {
+    writeFileSync(stub, `#!/bin/sh\n${scriptBody}\n`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    return fn(stub);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('repoDigestOf resolves a pulled image to its content digest', async () => {
+  await withDockerStub(
+    'printf "%s\\n" "ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef"',
+    async (stub) => {
+      // The exported reference must be pinned by CONTENT: `docker tag` and
+      // `docker build` cannot move a digest reference, while the tag the
+      // image was pulled under can be retagged by any co-resident process
+      // with daemon access before the gate runs.
+      assert.equal(
+        await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+        'ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef',
+      );
+    },
+  );
+});
+
+test('repoDigestOf refuses an image without a repository digest', async () => {
+  // `<no value>` is what `docker image inspect --format
+  // {{index .RepoDigests 0}}` prints for a locally built image; exporting
+  // the mutable tag in that state is exactly what the pin exists to block.
+  await withDockerStub('printf "%s\\n" "<no value>"', async (stub) => {
+    await assert.rejects(
+      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+      /no repository digest/,
+    );
+  });
+});
+
+test('repoDigestOf fails closed when the inspect fails', async () => {
+  await withDockerStub('exit 1', async (stub) => {
+    await assert.rejects(
+      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+      /no repository digest/,
+    );
+  });
 });

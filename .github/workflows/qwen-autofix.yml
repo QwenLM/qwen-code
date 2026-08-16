@@ -4591,6 +4591,19 @@ jobs:
             --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
             2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
 
+          # The gate reads rc.json/rv.json AFTER its build legs (the bite
+          # check), but the wrapper's verdict-input baseline is captured at
+          # gate start — AFTER the agent step, whose sandbox mounts WORKDIR
+          # (/tmp) rw at the same path as the runner uid. A truncation
+          # planted during the agent step would therefore BECOME the
+          # baseline and stay invisible to the compare. Digest these two
+          # host-authored files at creation time into expression context —
+          # the same shape as the staged-script digests — for the gate
+          # steps to verify before the wrapper's baseline runs. Per-file
+          # digests, so a boundary shift between the two files cannot keep
+          # the value stable.
+          echo "verdict_inputs_sha256=$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
           # Includes reviews, inline review comments, and issue-level PR comments
@@ -5532,6 +5545,22 @@ jobs:
             QWEN_TIMEOUT_MS="${BUDGET_CAP_MS}"
           fi
           export QWEN_TIMEOUT_MS
+          # Sever the runner's mutation channels before the branch-code-
+          # bearing process tree starts (#9089): MCP stdio servers from a
+          # branch-committed .mcp.json spawn as HOST processes in this
+          # step's env (run-agent.mjs runs --yolo, which waives the
+          # .mcp.json approval gate) and inherit GITHUB_ENV/GITHUB_PATH/
+          # GITHUB_OUTPUT. An append there reaches every later step of
+          # this job: bash sources a planted BASH_ENV before line 1 of the
+          # gate steps — before the PATH pin, the digest checks and the
+          # wrapper — and a planted EXIT trap appends a forged verdict to
+          # the runner-provided output file AFTER the wrapper's honest
+          # write; runner output parsing is last-wins, so the forgery
+          # would displace it. The container wall does not cover this —
+          # the forgery lands host-side, outside the container. This step
+          # writes no outputs of its own, so the channels are dropped for
+          # the whole agent process tree.
+          unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT
           # Trusted staged copy in the mirrored layout — resolves
           # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
@@ -5560,6 +5589,11 @@ jobs:
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           GATE_CONTAINER_SHA256: '${{ steps.stage.outputs.gate_container_sha256 }}'
           GATE_HELPERS_SHA256: '${{ steps.stage.outputs.gate_helpers_sha256 }}'
+          # The bite check's inputs, digested at prepare time (see
+          # 'Prepare branch and feedback'): verified below before the
+          # wrapper's baseline runs, so a plant during the agent step
+          # cannot become the baseline itself.
+          VERDICT_INPUTS_SHA256: '${{ steps.prepare.outputs.verdict_inputs_sha256 }}'
           # The image the gate runs in, from the resolve step's OUTPUT rather
           # than $GITHUB_ENV: branch code must not be able to choose it.
           GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'
@@ -5587,6 +5621,17 @@ jobs:
           GATE_HELPERS_NOW="$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
           if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
+            exit 1
+          fi
+          # rc.json/rv.json are host-authored in prepare but read by the
+          # gate AFTER its build legs, and the wrapper's baseline is
+          # captured only at gate start — after the agent step, whose
+          # sandbox mounts WORKDIR rw at the same path as the runner uid.
+          # Verify the prepare-time digest first, so a plant during the
+          # agent step fails here instead of becoming the baseline.
+          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d' ' -f1)"
+          if [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
+            echo "::error::verdict inputs rc.json/rv.json no longer match the digest recorded at prepare time; refusing to run the gate."
             exit 1
           fi
           bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"
@@ -5730,6 +5775,11 @@ jobs:
           mkdir -p .qwen "${QWEN_HOME}"
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           git config core.hooksPath .husky
+          # Same severing as 'Triage and address': the repair agent runs
+          # branch code again, and its attempted= output was already
+          # written above, so the runner's mutation channels are dropped
+          # for the whole agent process tree.
+          unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
@@ -5750,6 +5800,11 @@ jobs:
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           GATE_CONTAINER_SHA256: '${{ steps.stage.outputs.gate_container_sha256 }}'
           GATE_HELPERS_SHA256: '${{ steps.stage.outputs.gate_helpers_sha256 }}'
+          # The bite check's inputs, digested at prepare time (see
+          # 'Prepare branch and feedback'): verified below before the
+          # wrapper's baseline runs, so a plant during the agent step
+          # cannot become the baseline itself.
+          VERDICT_INPUTS_SHA256: '${{ steps.prepare.outputs.verdict_inputs_sha256 }}'
           # The image the gate runs in, from the resolve step's OUTPUT rather
           # than $GITHUB_ENV: branch code must not be able to choose it.
           GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'
@@ -5777,6 +5832,17 @@ jobs:
           GATE_HELPERS_NOW="$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
           if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
+            exit 1
+          fi
+          # rc.json/rv.json are host-authored in prepare but read by the
+          # gate AFTER its build legs, and the wrapper's baseline is
+          # captured only at gate start — after the agent step, whose
+          # sandbox mounts WORKDIR rw at the same path as the runner uid.
+          # Verify the prepare-time digest first, so a plant during the
+          # agent step fails here instead of becoming the baseline.
+          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d' ' -f1)"
+          if [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
+            echo "::error::verdict inputs rc.json/rv.json no longer match the digest recorded at prepare time; refusing to run the gate."
             exit 1
           fi
           bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"

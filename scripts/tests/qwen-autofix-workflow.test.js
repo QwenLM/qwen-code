@@ -6844,6 +6844,40 @@ exit 1
     ).toBeLessThan(
       reviewAddressJob.indexOf("- name: 'Prepare branch and feedback'"),
     );
+    // The image is pinned by CONTENT, not just by name: after the pull the
+    // resolve script exports repo@sha256:…, which `docker tag`/`docker
+    // build` cannot move. A mutable tag lets a co-resident process with
+    // daemon access retag different content under the resolved name
+    // between resolve and gate, and `docker run` follows the swapped tag
+    // without re-pull — the gate would execute the doctored runtime.
+    expect(sandboxImageResolverScript).toContain(
+      'exportImage(await repoDigestOf(command, requestedImage))',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      'exportImage(await repoDigestOf(command, fallbackImage))',
+    );
+    // The container wall does not, by itself, make the host-side
+    // translation shell trusted: MCP stdio servers from a branch-committed
+    // .mcp.json spawn as HOST processes during the agent steps (run-agent
+    // runs --yolo, waiving the approval gate) and can append BASH_ENV to
+    // the job's $GITHUB_ENV — sourced by every later step shell before
+    // line 1, an EXIT trap appending a forged verdict AFTER the wrapper's
+    // honest write (runner output parsing is last-wins). The agent steps
+    // therefore sever the runner's mutation channels before the
+    // branch-code-bearing process tree starts.
+    for (const agentStep of [
+      triageAndAddressStep,
+      repairDeterministicRejectionStep,
+    ]) {
+      expect(agentStep).toContain('unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT');
+      expect(
+        agentStep.indexOf('unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT'),
+      ).toBeLessThan(
+        agentStep.indexOf(
+          'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"',
+        ),
+      );
+    }
     // The three helpers the gate EXECUTES are staged in the same writable
     // RUNNER_TEMP, so they are digested at staging and verified before the
     // wrapper copies them across the wall.
@@ -6874,6 +6908,33 @@ exit 1
     // the per-file digest is not).
     expect(workflow).not.toMatch(/gate_helpers_sha256=\$\(cat /);
     expect(workflow).not.toMatch(/GATE_HELPERS_NOW="\$\(cat /);
+    // rc.json/rv.json are host-authored in prepare but read by the gate
+    // AFTER its build legs, and the wrapper's verdict-input baseline is
+    // captured only at gate start — AFTER the agent step, whose sandbox
+    // mounts WORKDIR rw at the same path as the runner uid. A truncation
+    // planted during the agent step would therefore BECOME the baseline
+    // and stay invisible to the compare, so prepare digests the two files
+    // at creation time and BOTH gate steps verify the digest before the
+    // wrapper runs. Writer and reader must digest the same files in the
+    // same order, as with the helpers above.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'echo "verdict_inputs_sha256=$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" | sha256sum | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
+    );
+    const verdictInputsBlob = prepareBranchAndFeedbackStep.match(
+      /echo "verdict_inputs_sha256=\$\(sha256sum (.*?) \| sha256sum/,
+    )?.[1];
+    expect(verdictInputsBlob).toBeTruthy();
+    for (const gate of [verificationGateSteps[1], repairVerificationGateStep]) {
+      expect(gate).toContain(
+        "VERDICT_INPUTS_SHA256: '${{ steps.prepare.outputs.verdict_inputs_sha256 }}'",
+      );
+      expect(gate).toContain(
+        `VERDICT_INPUTS_NOW="$(sha256sum ${verdictInputsBlob} | sha256sum`,
+      );
+      expect(gate.indexOf('VERDICT_INPUTS_NOW="$(sha256sum ')).toBeLessThan(
+        gate.indexOf('bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"'),
+      );
+    }
     // The container env is an explicit ALLOWLIST: everything unnamed is
     // absent inside, which is the isolation. The PAT, the host $GITHUB_ENV
     // and the runner's real $GITHUB_OUTPUT must never appear in it.
@@ -6887,6 +6948,13 @@ exit 1
     // assertion here green while the container stops executing the gate.
     expect(wrapper).toMatch(
       /"\$\{GATE_IMAGE\}" \\\n\s*bash "\$\{CBIN\}\/run-autofix-review-verification\.sh"\s*$/m,
+    );
+    // The exit-code capture is the unforgeable half of the verdict, and it
+    // sits in the seam between the command pin above and the translation
+    // extraction below — pin the adjacency: a mutant hardcoding GATE_RC=0
+    // forwards a planted outcome=fixed from a failing gate.
+    expect(wrapper).toMatch(
+      /bash "\$\{CBIN\}\/run-autofix-review-verification\.sh"\nGATE_RC=\$\?/,
     );
     // What the loop stages into CBIN must be exactly the gate plus the three
     // helpers the workflow digests. Dropping one (e.g. check-autofix-
@@ -6990,6 +7058,12 @@ exit 1
         'if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]',
       ),
     ).toBeLessThan(wrapper.indexOf('OUTCOME="$(verdict_value'));
+    // …and the refusal must actually ABORT: deleting this exit leaves every
+    // pin above green while a tampered run sails into the translation and
+    // forwards outcome=fixed derived from planted inputs.
+    expect(wrapper).toMatch(
+      /refusing the verdict; the next scan retries\."\n {2}exit 125/,
+    );
     // Pin the LOOP, not the filenames: `no-action.md` and
     // `resolved-comments.txt` also appear in the comment above it, so a
     // contains-check on the names passes even when they are dropped from the
@@ -6997,9 +7071,16 @@ exit 1
     // attacker text as the bot's "no changes needed" rationale.
     // rc.json/rv.json feed the bite check AFTER the build legs (truncating
     // rc.json flips BITE_ENFORCE off, so the bogus-fix round the bite check
-    // exists to reject exits 0 as `fixed`), and failure.md is read back by the
-    // host's report step. The gate writes none of these — gate-advisories.md
-    // and gate-rejection.md, which it does write, must stay out.
+    // exists to reject exits 0 as `fixed`), and the host's post-gate report
+    // and upsert steps consume the rest: failure.md and handoff.md are the
+    // report step's detail chain (a planted handoff.md is picked AHEAD of
+    // the agent's own summary), agent-api-error/-kind/agent-timeout steer
+    // the retry sentinel and the published headline, deferred-feedback.md
+    // rides the push comment, and deferred-findings.json feeds the
+    // post-gate upsert. The gate writes none of these — gate-advisories.md
+    // and gate-rejection.md, which it does write, must stay out (the
+    // wrapper resets gate-rejection.md before the run; a surviving copy
+    // from a run that never rejected was planted).
     const fingerprinted = (wrapper.match(/for f in ([\s\S]*?); do/)?.[1] ?? '')
       .replace(/\\\s+/g, ' ')
       .trim()
@@ -7012,6 +7093,13 @@ exit 1
       'rc.json',
       'rv.json',
       'failure.md',
+      'handoff.md',
+      'deferred-feedback.md',
+      'agent-api-error',
+      'agent-api-error-kind',
+      'agent-timeout',
+      'deferred-findings.json',
+      'deferred-findings.carry.json',
     ]);
     // Type-aware, and non-regular paths are refused before anything hashes
     // them: a symlink to gate-verdict makes the gate's own verdict writes trip
@@ -7022,6 +7110,18 @@ exit 1
     expect(wrapper).toMatch(/NONREGULAR/);
     expect(wrapper).toMatch(
       /if \[\[ "\$\{INPUTS_BEFORE\}" == \*':NONREGULAR:'\* \]\]; then[\s\S]{0,240}?exit 125/,
+    );
+    // …and mirrored on the verdict file itself BEFORE anything reads it:
+    // the container can swap it post-run — rm + mkfifo while holding a
+    // reader fd (the gate's appends succeed inside, then verdict_value's
+    // grep blocks its read-open until the step timeout) or a symlink,
+    // whose target the extraction would then read with host permissions.
+    expect(wrapper).toMatch(/VERDICT_TYPE="\$\(stat -c '%F' "\$\{VERDICT\}"/);
+    expect(wrapper).toMatch(
+      /is not a regular file \(\$\{VERDICT_TYPE:-missing\}\)[\s\S]{0,120}?exit 125/,
+    );
+    expect(wrapper.indexOf('VERDICT_TYPE="$(stat')).toBeLessThan(
+      wrapper.indexOf('OUTCOME="$(verdict_value'),
     );
     // The empty-GATE_IMAGE refusal is load-bearing (docker would otherwise
     // take `bash` as the image name and every round becomes an opaque
@@ -7069,9 +7169,26 @@ exit 1
     // branch code needed; the behavioural harness below writes a fresh file
     // per case, so it cannot see the cross-pass reuse.
     expect(wrapper).toContain(': > "${VERDICT}"');
+    // Explicit unlink BEFORE the truncation: WORKDIR persists within the
+    // round, so a pre-planted FIFO blocks the truncation's write-open until
+    // the step timeout (a one-line per-round DoS of the verification loop),
+    // and a symlink to a fingerprinted input would truncate the target
+    // THROUGH the link before the baseline capture records it.
+    expect(wrapper).toContain('rm -f "${VERDICT}"');
+    expect(wrapper.indexOf('rm -f "${VERDICT}"')).toBeLessThan(
+      wrapper.indexOf(': > "${VERDICT}"'),
+    );
     expect(wrapper.indexOf(': > "${VERDICT}"')).toBeLessThan(
       wrapper.indexOf('docker run --rm'),
     );
+    // The gate-authored rejection detail resets at the same single point:
+    // the gate writes it only on rejection paths, so a surviving copy from
+    // a run that never rejected was planted, and the report steps would
+    // publish it inside the rejection markers as the bot's own rationale.
+    expect(wrapper).toContain('rm -f "${WORKDIR}/gate-rejection.md"');
+    expect(
+      wrapper.indexOf('rm -f "${WORKDIR}/gate-rejection.md"'),
+    ).toBeLessThan(wrapper.indexOf('docker run --rm'));
     expect(wrapper).toContain('set -uo pipefail');
     expect(wrapper).not.toMatch(/^set -e/m);
     expect(wrapper.trimEnd().endsWith('exit "${GATE_RC}"')).toBe(true);
@@ -7081,14 +7198,19 @@ exit 1
       const out = join(dir, 'gh-output');
       writeFileSync(verdict, verdictLines.join('\n') + '\n');
       writeFileSync(out, '');
-      execFileSync(
-        'bash',
-        [
-          '-c',
-          `set -uo pipefail\nVERDICT='${verdict}'\nGITHUB_OUTPUT='${out}'\nGATE_RC=${rc}\n${translate}\nexit 0`,
-        ],
-        { encoding: 'utf8' },
-      );
+      try {
+        execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -uo pipefail\nVERDICT='${verdict}'\nGITHUB_OUTPUT='${out}'\nGATE_RC=${rc}\n${translate}\nexit 0`,
+          ],
+          { encoding: 'utf8' },
+        );
+      } catch {
+        // A tamper refusal exits 125 mid-translation; the output file
+        // (which it deliberately left empty) is still the assertion target.
+      }
       return readFileSync(out, 'utf8').trim();
     };
     // A genuine pass carries through.
@@ -7139,12 +7261,17 @@ exit 1
     expect(runTranslate(1, ['outcome=failed', 'xoutcome=fixed'])).toBe(
       'outcome=failed',
     );
-    // preexisting and retryable are mutually exclusive at the source, so an
-    // appended `retryable=true` must not ride a genuine preexisting rejection
-    // into a repair leg the repair agent is forbidden to act on.
+    // preexisting and retryable are mutually exclusive at the source
+    // (reject_fix writes one or the other), so BOTH present is proof of an
+    // append the gate never made. The translation refuses the verdict as
+    // tampered — nothing forwarded, crash-retry path — instead of guessing
+    // which flag is genuine: a planted `preexisting=true` overriding a
+    // genuine `retryable=true` would otherwise skip the repair the round is
+    // entitled to and permanently misclassify a fixable rejection as a
+    // terminal pre-existing failure.
     expect(
       runTranslate(1, ['retryable=true', 'outcome=failed', 'preexisting=true']),
-    ).toBe('outcome=failed\npreexisting=true');
+    ).toBe('');
     rmSync(dir, { recursive: true, force: true });
   });
 
