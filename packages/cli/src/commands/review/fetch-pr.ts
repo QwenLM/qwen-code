@@ -187,10 +187,13 @@ type FetchPrResult = PlanReport & {
    * (`behind-merge-base`), a delta carrying hunks the PR's own diff does not
    * contain (`hunks-outside-pr-diff` — an "undo per feedback" revert makes an
    * in-range anchor produce them), a containment check that could not be
-   * RULED because the parser cannot name a path (`containment-unverified`),
-   * a merge base too stale to rule the clamp on (`base-untrusted`), a
-   * capture that threw (`capture-failed`), or a partitioner that refused to
-   * tile (`partition-failed`).
+   * RULED — a path shape the parser cannot name, or no base at all with the
+   * fetch fine, so no PR diff exists to rule against
+   * (`containment-unverified`), a base fetch that failed and took the ruling
+   * needing it with it — the clamp when a stale sha still resolved, the
+   * containment check when none did (`base-untrusted`), a capture that threw
+   * (`capture-failed`), or a partitioner that refused to tile
+   * (`partition-failed`).
    *
    * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
    * means this round has no diff to review, whatever refused the anchor. A
@@ -891,7 +894,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // distinction. GitHub still renders SOMETHING for the PR, and a delta
       // never checked against it can still anchor a comment on a line that
       // render does not display.
-      demote('containment-unverified');
+      //
+      // WHY there is no base picks the reason, because reasons carry retry
+      // classes. A failed base fetch is the transient cause — on a fresh CI
+      // checkout (the normal machine for the side-file anchor path) the blip
+      // leaves no remote-tracking ref and no local one exists, and the
+      // re-run repeats exactly the component that failed — so it demotes as
+      // `base-untrusted`, the class the skill already retries. No base with
+      // the fetch FINE is unrelated histories, which a re-run reproduces:
+      // only that state keeps the deterministic label, the oracle genuinely
+      // absent rather than not fetched.
+      demote(baseFetchFailed ? 'base-untrusted' : 'containment-unverified');
     } else if (!(ruling = containmentRuling(delta, fullText)).ok) {
       // Two different facts, one refusal: the oracle DISPROVED containment,
       // or it could not rule at all (a path shape it does not model). Only

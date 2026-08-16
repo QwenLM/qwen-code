@@ -771,12 +771,13 @@ describe('fetch-pr report assembly', () => {
     // diff to check against" is the absence of proof, not proof — it was the
     // one arm where an uncontained delta shipped by design, and the shape it
     // ships is the same "undo per feedback" revert every sibling arm refuses.
-    // `base-untrusted` still means a base that cannot be TRUSTED; this is a
-    // base that does not exist, and the reason says the oracle could not rule.
+    // Fetch FINE and still no base is unrelated histories, which a re-run
+    // reproduces exactly: the oracle is genuinely absent, so the reason is
+    // the deterministic one.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: null,
-      baseFetchFailed: true,
+      baseFetchFailed: false,
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
@@ -790,6 +791,33 @@ describe('fetch-pr report assembly', () => {
     // tells agents to fall back to running `git diff` themselves. So this
     // costs no review that existed — it removes the one arm that shipped a
     // scope no containment check had ever seen.
+    expect(report.diffPath).toBeNull();
+  });
+
+  it('demotes a base-free round as RETRYABLE when the base FETCH failed', async () => {
+    // Same refusal, different cause, opposite retry class. On a fresh CI
+    // checkout — the normal machine for the side-file anchor path — a fetch
+    // blip leaves no remote-tracking ref and no local one exists, so the
+    // report reads {sha: null, baseFetchFailed: true}. The refusal is still
+    // right (no PR diff to check containment against), but naming it
+    // `containment-unverified` filed a transient fault under the class the
+    // skill NEVER retries, permanently costing the anchor its incremental
+    // scope — while the re-run re-fetches exactly the component that failed.
+    // The discriminator rides the same report; the arm must read it.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: true,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+    // Fail-closed exactly like the deterministic sibling: no delta ships
+    // unchecked, and with no base there is no full range to publish either.
     expect(report.diffPath).toBeNull();
   });
 
