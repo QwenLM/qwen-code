@@ -20,7 +20,7 @@ name: 'Auto-minimize spam comments'
 
 on:
   schedule:
-    - cron: '30 * * * *' # Every hour at :30
+    - cron: '3/5 * * * *' # Every 5 minutes, avoiding :00
   workflow_dispatch:
     inputs:
       hours:
