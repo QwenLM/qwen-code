@@ -31,12 +31,16 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { DAEMON_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  CHANNEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  type BridgeBranchedSession,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../live/session-source.js';
+} from '../conversations/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
@@ -89,6 +93,10 @@ import {
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  omitSkillDetailsForSdkSurface,
+  omitSkillDetailsFromReplayArrays,
+} from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
@@ -355,6 +363,22 @@ function parseHistoryPageSize(
     return null;
   }
   return value as number;
+}
+
+function parseLiveReplayMode(
+  body: Record<string, unknown>,
+  res: Response,
+): 'full' | 'summary' | undefined | null {
+  const value = body['liveReplayMode'];
+  if (value === undefined) return undefined;
+  if (value !== 'full' && value !== 'summary') {
+    res.status(400).json({
+      error: '`liveReplayMode` must be `full` or `summary`',
+      code: 'invalid_live_replay_mode',
+    });
+    return null;
+  }
+  return value;
 }
 
 function workspaceTranscriptCursorExceedsLimit(
@@ -2080,7 +2104,9 @@ export function registerSessionRoutes(
             });
             return;
           }
-          res.status(200).json(session);
+          // Same replay-array shape as the load response; redact skill
+          // bodies for the browser surface (#9234).
+          res.status(200).json(omitSkillDetailsFromReplayArrays(session));
         } catch (err) {
           sendBridgeError(res, err, { route, sessionId });
         }
@@ -2111,6 +2137,8 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
+      const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
+      if (liveReplayMode === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       let sessionIdReservation: RequestedSessionIdReservation;
@@ -2173,6 +2201,7 @@ export function registerSessionRoutes(
                     ...(historyPageSize !== undefined
                       ? { historyPageSize }
                       : {}),
+                    ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
@@ -2390,7 +2419,9 @@ export function registerSessionRoutes(
             }
           }
         }
-        res.status(200).json(session);
+        // The load response embeds the replay snapshot inline; redact the
+        // skill bodies there just like the SSE egress does (#9234).
+        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
       } catch (err) {
         sendBridgeError(res, err, {
           route,
@@ -2536,54 +2567,53 @@ export function registerSessionRoutes(
             name = name.slice(0, 200);
           }
         }
+        const atRecordId = body?.['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          res.status(400).json({
+            error: '`atRecordId` must be a string',
+            code: 'branch_point_invalid',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const result = await runtime.bridge.branchSession(
           sessionId,
-          { name },
+          {
+            name,
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+          },
           { clientId },
         );
-        try {
-          runtime.generationGuard?.assertOpen();
-        } catch (error) {
-          if (!result.attached) {
-            await runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => false);
-          } else {
+        if (atRecordId === undefined) {
+          const restored = result as BridgeBranchedSession;
+          const releaseLiveBranch = async () => {
+            if (restored.attached) {
+              await runtime.bridge
+                .detachClient(restored.sessionId, restored.clientId)
+                .catch(() => {});
+              return;
+            }
             await runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {});
+              .killSession(restored.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
+          };
+          if (!res.writable) {
+            void releaseLiveBranch();
+            return;
           }
-          throw error;
         }
-        if (!res.writable) {
-          if (!result.attached) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
-          } else {
-            runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          }
-          return;
-        }
-        res.status(201).json(result);
+        if (!res.writable) return;
+        // Branch/side-task responses carry the same replay snapshot shape as
+        // load; apply the same redaction (#9234). The helper returns its
+        // input unchanged when no replay arrays are present (checkpoint
+        // branches), so apply it unconditionally rather than re-deriving the
+        // bridge's variant discrimination here.
+        res
+          .status(201)
+          .json(
+            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
+          );
       },
     ),
   );
@@ -2647,7 +2677,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(result);
+        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
       },
     ),
   );
@@ -2815,7 +2845,13 @@ export function registerSessionRoutes(
         },
       );
       if (result === undefined) return;
-      res.status(200).set('Cache-Control', 'no-store').json(result);
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .json({
+          ...result,
+          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
+        });
     } catch (err) {
       sendBridgeError(res, err, {
         route,
@@ -2935,11 +2971,13 @@ export function registerSessionRoutes(
             return {
               v: 1 as const,
               sessionId,
-              events: replay.updates.map((update) => ({
-                v: 1 as const,
-                type: 'session_update' as const,
-                data: update,
-              })),
+              events: replay.updates.map((update) =>
+                omitSkillDetailsForSdkSurface({
+                  v: 1 as const,
+                  type: 'session_update' as const,
+                  data: update,
+                }),
+              ),
               ...(replay.nextCursor && !cursorTooLarge
                 ? { nextCursor: replay.nextCursor }
                 : {}),
@@ -3367,23 +3405,31 @@ export function registerSessionRoutes(
           forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
         const promptDisplayText =
           forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+        const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
           } else {
             delete forwardedBody['_meta'];
           }
         }
+        const channelWorkerAuthorized = isChannelWorkerPromptAuthorized(
+          promptAuthorization,
+          runtime.workspaceCwd,
+        );
         const trustedPromptDisplayText =
-          typeof promptDisplayText === 'string' &&
-          isChannelWorkerPromptAuthorized(
-            promptAuthorization,
-            runtime.workspaceCwd,
-          )
+          typeof promptDisplayText === 'string' && channelWorkerAuthorized
             ? promptDisplayText
             : undefined;
+        // Channel classification opts the turn out of loop-detected
+        // rejection, so it rides the same worker authorization as the
+        // display projection; a forged key from any other caller is dropped
+        // here and again at the bridge admission strip.
+        const trustedChannelPrompt =
+          channelWorkerAuthorized && channelPrompt === true;
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
@@ -3433,6 +3479,7 @@ export function registerSessionRoutes(
               ...(trustedPromptDisplayText !== undefined
                 ? { promptDisplayText: trustedPromptDisplayText }
                 : {}),
+              ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
               ...(delivery !== undefined
                 ? {
                     channelDelivery: {

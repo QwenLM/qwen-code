@@ -100,6 +100,8 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
+import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
@@ -322,8 +324,20 @@ const mockUiTelemetryService = vi.hoisted(() => ({
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 const mockInteractionTelemetry = vi.hoisted(() => ({
+  startInteractionSpan: vi.fn(),
+  endInteractionSpan: vi.fn(),
   getActiveInteractionSpan: vi.fn(),
+  recordInteractionActivity: vi.fn(),
+  addAgentInputMessageAttributes: vi.fn(),
   addUserPromptAttributes: vi.fn(),
+  outputCaptures: [] as Array<{
+    beginResponse: ReturnType<typeof vi.fn>;
+    appendText: ReturnType<typeof vi.fn>;
+    observeFinishReason: ReturnType<typeof vi.fn>;
+    restartAttempt: ReturnType<typeof vi.fn>;
+    commitResponse: ReturnType<typeof vi.fn>;
+    writeToSpan: ReturnType<typeof vi.fn>;
+  }>,
 }));
 vi.mock('../telemetry/tracer.js', () => ({
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
@@ -336,8 +350,26 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     ...actual,
     uiTelemetryService: mockUiTelemetryService,
     logMemoryRecallDelivery: mockLogMemoryRecallDelivery,
+    startInteractionSpan: mockInteractionTelemetry.startInteractionSpan,
+    endInteractionSpan: mockInteractionTelemetry.endInteractionSpan,
     getActiveInteractionSpan: mockInteractionTelemetry.getActiveInteractionSpan,
+    recordInteractionActivity:
+      mockInteractionTelemetry.recordInteractionActivity,
+    addAgentInputMessageAttributes:
+      mockInteractionTelemetry.addAgentInputMessageAttributes,
     addUserPromptAttributes: mockInteractionTelemetry.addUserPromptAttributes,
+    AgentOutputMessageCapture: class {
+      beginResponse = vi.fn();
+      appendText = vi.fn();
+      observeFinishReason = vi.fn();
+      restartAttempt = vi.fn();
+      commitResponse = vi.fn();
+      writeToSpan = vi.fn();
+
+      constructor() {
+        mockInteractionTelemetry.outputCaptures.push(this);
+      }
+    },
     // We keep the real implementations of logChatCompression, etc.
     // but we can spy on QwenLogger if needed
   };
@@ -465,6 +497,8 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    mockInteractionTelemetry.outputCaptures.length = 0;
+    mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue({});
     // The client concatenates these with the auto-memory suffix, so the
     // default mock must return a string, not undefined.
     vi.mocked(getCoreSystemPrompt).mockReturnValue('');
@@ -644,6 +678,7 @@ describe('Gemini Client (client.ts)', () => {
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getJsonSchema: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
@@ -5481,6 +5516,576 @@ hello
       );
     });
 
+    it('keeps one interaction open across multiple tool-result continuations', async () => {
+      const promptId = 'prompt-tool-loop';
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockImplementation(
+        (id?: string) =>
+          id === undefined || id === promptId ? owner : undefined,
+      );
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-1',
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'use a tool' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(mockConfig, expect.objectContaining({ promptId }));
+      expect(
+        mockInteractionTelemetry.endInteractionSpan,
+      ).not.toHaveBeenCalled();
+
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-2',
+              name: 'write_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.recordInteractionActivity,
+      ).toHaveBeenCalledWith(promptId, owner);
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        mockInteractionTelemetry.endInteractionSpan,
+      ).not.toHaveBeenCalled();
+
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'done' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [
+            {
+              functionResponse: { name: 'write_file', response: { ok: true } },
+            },
+          ],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledTimes(1);
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId },
+      );
+    });
+
+    it('starts Retry as a fresh agent invocation', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'retried' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'retry' }],
+          new AbortController().signal,
+          'retry-prompt',
+          { type: SendMessageType.Retry },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          promptId: 'retry-prompt',
+          messageType: SendMessageType.Retry,
+        }),
+      );
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId: 'retry-prompt' },
+      );
+      expect(
+        mockInteractionTelemetry.addAgentInputMessageAttributes,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('traces a UserQuery that is blocked before model admission', async () => {
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by hook' },
+        }),
+        response: vi.fn(),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+        messageBus as unknown as ReturnType<Config['getMessageBus']>,
+      );
+      vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+        (event: string) => event === 'UserPromptSubmit',
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'expanded prompt' }],
+          new AbortController().signal,
+          'prompt-blocked-before-model',
+          {
+            type: SendMessageType.UserQuery,
+            submittedPrompt: 'raw prompt',
+          },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ promptId: 'prompt-blocked-before-model' }),
+      );
+      expect(
+        mockInteractionTelemetry.addAgentInputMessageAttributes,
+      ).toHaveBeenCalledWith(mockConfig, owner, 'raw prompt');
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'cancelled',
+        { promptId: 'prompt-blocked-before-model' },
+      );
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('attributes blocked Goal finalization failures separately from hook failures', async () => {
+      const owner = {};
+      const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+      const finishTurn = vi.fn().mockResolvedValue(undefined);
+      const goalRuntime = {
+        getSnapshot: () => emptyGoalSnapshot(),
+        permitForTurn: vi.fn(() => permit),
+        subscribe: vi.fn(() => vi.fn()),
+        finishTurn,
+      } as unknown as GoalRuntime;
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by hook' },
+        }),
+        response: vi.fn(),
+      };
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        flush: vi.fn().mockRejectedValue(new Error('recording unavailable')),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+        messageBus as unknown as ReturnType<Config['getMessageBus']>,
+      );
+      vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+        (event: string) => event === 'UserPromptSubmit',
+      );
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'continue the goal' }],
+            new AbortController().signal,
+            'prompt-goal-finalization-failure',
+            {
+              type: SendMessageType.UserQuery,
+              goalPermit: permit,
+              goalTurnKey: 'goal-runtime:turn-1',
+            },
+          ),
+        ),
+      ).rejects.toThrow('recording unavailable');
+
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-goal-finalization-failure',
+          errorMessage: 'Goal turn finalization failed',
+          errorType: 'Error',
+        },
+      );
+      expect(finishTurn).toHaveBeenCalledWith(permit);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('captures only the final physical response for an agent invocation', async () => {
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'final answer' };
+          yield {
+            type: GeminiEventType.Finished,
+            value: { reason: 'STOP' },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'expanded request' }],
+          new AbortController().signal,
+          'prompt-agent-messages',
+          {
+            type: SendMessageType.UserQuery,
+            submittedPrompt: 'raw @file prompt',
+          },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.addAgentInputMessageAttributes,
+      ).toHaveBeenCalledWith(mockConfig, owner, 'raw @file prompt');
+      const capture = mockInteractionTelemetry.outputCaptures[0]!;
+      expect(capture.beginResponse).toHaveBeenCalledOnce();
+      expect(capture.appendText).toHaveBeenCalledWith('final answer');
+      expect(capture.observeFinishReason).toHaveBeenCalledWith('STOP');
+      expect(capture.commitResponse).toHaveBeenCalledWith(false);
+      expect(capture.writeToSpan).toHaveBeenCalledWith(owner);
+    });
+
+    it('does not write to a replacement interaction with the same prompt id', async () => {
+      const owner = {};
+      const replacement = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'stale answer' };
+          mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+            replacement,
+          );
+          yield {
+            type: GeminiEventType.Finished,
+            value: { reason: 'STOP' },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'request' }],
+          new AbortController().signal,
+          'reused-prompt-id',
+          { type: SendMessageType.UserQuery, submittedPrompt: 'request' },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.outputCaptures[0]!.writeToSpan,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockInteractionTelemetry.endInteractionSpan,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('resets failed provider attempts while preserving continuation retries', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'discarded' };
+          yield { type: GeminiEventType.Retry, isContinuation: false };
+          yield { type: GeminiEventType.Content, value: 'kept ' };
+          yield { type: GeminiEventType.Retry, isContinuation: true };
+          yield { type: GeminiEventType.Content, value: 'continuation' };
+          yield {
+            type: GeminiEventType.Finished,
+            value: { reason: 'STOP' },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'request' }],
+          new AbortController().signal,
+          'provider-retry-prompt',
+          { type: SendMessageType.UserQuery, submittedPrompt: 'request' },
+        ),
+      );
+
+      const capture = mockInteractionTelemetry.outputCaptures[0]!;
+      expect(capture.restartAttempt).toHaveBeenNthCalledWith(1, false);
+      expect(capture.restartAttempt).toHaveBeenNthCalledWith(2, true);
+      expect(capture.appendText.mock.calls).toEqual([
+        ['discarded'],
+        ['kept '],
+        ['continuation'],
+      ]);
+      expect(capture.commitResponse).toHaveBeenCalledWith(false);
+    });
+
+    it('starts Goal as a fresh invocation without assigning the session structured-output contract', async () => {
+      const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+      const finishTurn = vi.fn().mockResolvedValue(undefined);
+      const goalRuntime = {
+        getSnapshot: () => emptyGoalSnapshot(),
+        permitForTurn: vi.fn(() => permit),
+        subscribe: vi.fn(() => vi.fn()),
+        finishTurn,
+      } as unknown as GoalRuntime;
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
+      vi.mocked(mockConfig.getJsonSchema).mockReturnValue({ type: 'object' });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'goal progress' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'continue the goal' }],
+          new AbortController().signal,
+          'goal-prompt',
+          {
+            type: SendMessageType.Goal,
+            goalPermit: permit,
+            goalTurnKey: 'goal-runtime:turn-1',
+          },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          promptId: 'goal-prompt',
+          messageType: SendMessageType.Goal,
+        }),
+      );
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId: 'goal-prompt' },
+      );
+      expect(finishTurn).toHaveBeenCalledWith(permit);
+    });
+
+    it('keeps a Steer continuation in the original invocation', async () => {
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const getSteerInput = vi
+        .fn<() => Promise<SteerInput | undefined>>()
+        .mockResolvedValueOnce({
+          parts: [{ text: 'steer prompt' }],
+          accept: vi.fn(),
+          restore: vi.fn(),
+        })
+        .mockResolvedValue(undefined);
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'initial prompt' }],
+          new AbortController().signal,
+          'prompt-steer-continuation',
+          { type: SendMessageType.UserQuery, getSteerInput },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledTimes(1);
+      expect(getSteerInput).toHaveBeenCalledTimes(2);
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(
+        mockInteractionTelemetry.outputCaptures[1]?.writeToSpan,
+      ).toHaveBeenCalledWith(owner);
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId: 'prompt-steer-continuation' },
+      );
+    });
+
+    it('marks a JSON Schema invocation as failed when no structured output is produced', async () => {
+      vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+        type: 'object',
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'plain text' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'return structured output' }],
+          new AbortController().signal,
+          'prompt-schema-missing',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-schema-missing',
+          errorMessage: 'model did not produce structured output',
+          errorType: 'structured_output_missing',
+        },
+      );
+    });
+
+    it.each([
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])(
+      'does not assign the session structured-output contract to a %s invocation',
+      async (messageType) => {
+        vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+          type: 'object',
+        });
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'drain complete' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'automatic work' }],
+            new AbortController().signal,
+            `prompt-${messageType}`,
+            { type: messageType },
+          ),
+        );
+
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).toHaveBeenCalledWith('ok', {
+          promptId: `prompt-${messageType}`,
+        });
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).not.toHaveBeenCalledWith(
+          'error',
+          expect.objectContaining({ errorType: 'structured_output_missing' }),
+        );
+      },
+    );
+
+    it.each([
+      [SendMessageType.UserQuery, 'error'],
+      [SendMessageType.Notification, 'ok'],
+    ] as const)(
+      'preserves the %s structured-output ownership across a tool continuation',
+      async (messageType, expectedStatus) => {
+        const promptId = `prompt-schema-tool-${messageType}`;
+        const owner = {};
+        mockInteractionTelemetry.getActiveInteractionSpan.mockImplementation(
+          (id?: string) =>
+            id === undefined || id === promptId ? owner : undefined,
+        );
+        vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+          type: 'object',
+        });
+        mockTurnRunFn
+          .mockReturnValueOnce(
+            (async function* () {
+              yield {
+                type: GeminiEventType.ToolCallRequest,
+                value: {
+                  callId: `call-${messageType}`,
+                  name: 'read_file',
+                  args: {},
+                  isClientInitiated: false,
+                  prompt_id: promptId,
+                },
+              };
+            })(),
+          )
+          .mockReturnValueOnce(
+            (async function* () {
+              yield { type: GeminiEventType.Content, value: 'plain text' };
+            })(),
+          );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start' }],
+            new AbortController().signal,
+            promptId,
+            { type: messageType },
+          ),
+        );
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { ok: true },
+                },
+              },
+            ],
+            new AbortController().signal,
+            promptId,
+            { type: SendMessageType.ToolResult },
+          ),
+        );
+
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).toHaveBeenCalledWith(
+          expectedStatus,
+          expectedStatus === 'error'
+            ? {
+                promptId,
+                errorMessage: 'model did not produce structured output',
+                errorType: 'structured_output_missing',
+              }
+            : { promptId },
+        );
+      },
+    );
+
     it('should discard pending prefetch with no_safe_delivery_point on a no-tool turn', async () => {
       // Recall stays pending — never settles before the turn completes.
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
@@ -8588,6 +9193,185 @@ Other open files:
 
       // Assert
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
+    });
+
+    it('reports a safe actionable Arena category for API errors', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi.fn().mockResolvedValue(undefined),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.Error,
+            value: {
+              error: {
+                message: 'Bearer secret-token in /private/user/path',
+                status: 429,
+              },
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+        'prompt-id-arena-error',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(arenaAgentClient.reportError).toHaveBeenCalledWith(
+        'Rate limit exceeded',
+      );
+      expect(
+        JSON.stringify(arenaAgentClient.reportError.mock.calls),
+      ).not.toContain('secret-token');
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-arena-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
+    });
+
+    it('preserves the provider error outcome when Arena reporting fails', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi
+          .fn()
+          .mockRejectedValue(new Error('status write failed')),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.Error,
+            value: {
+              error: { message: 'provider failed', status: 500 },
+            },
+          };
+        })(),
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-id-arena-reporting-error',
+        ),
+      );
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Error,
+          value: {
+            error: { message: 'provider failed', status: 500 },
+          },
+        },
+      ]);
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-arena-reporting-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
+    });
+
+    it('reports authentication failures to Arena when Turn rethrows them', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi.fn().mockResolvedValue(undefined),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockImplementationOnce(async function* () {
+        yield* [];
+        throw new UnauthorizedError('Bearer secret-token');
+      });
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-id-arena-auth-error',
+          ),
+        ),
+      ).rejects.toThrow(UnauthorizedError);
+
+      expect(arenaAgentClient.reportError).toHaveBeenCalledWith(
+        'Authentication failed',
+      );
+      expect(
+        JSON.stringify(arenaAgentClient.reportError.mock.calls),
+      ).not.toContain('secret-token');
+    });
+
+    it('rethrows authentication failures when Arena reporting fails', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi
+          .fn()
+          .mockRejectedValue(new Error('status write failed')),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockImplementationOnce(async function* () {
+        yield* [];
+        throw new UnauthorizedError('Bearer secret-token');
+      });
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-id-arena-auth-reporting-error',
+          ),
+        ),
+      ).rejects.toThrow(UnauthorizedError);
     });
 
     it('should not call checkNextSpeaker when turn.run() yields a value then an error', async () => {
@@ -9853,6 +10637,12 @@ Other open files:
         expect(events).not.toContainEqual(
           expect.objectContaining({ type: GeminiEventType.LoopDetected }),
         );
+        expect(
+          mockInteractionTelemetry.startInteractionSpan,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).toHaveBeenCalledWith('ok', { promptId: 'prompt-stop-hook-budget' });
       });
 
       it('emits one active_goal null when the blocking cap aborts an active goal', async () => {
@@ -10892,6 +11682,12 @@ Other open files:
 
       it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        const activeSpanSpy = vi
+          .spyOn(telemetryIndex, 'getActiveInteractionSpan')
+          .mockReturnValue({} as never);
+        const endSpanSpy = vi
+          .spyOn(telemetryIndex, 'endInteractionSpan')
+          .mockImplementation(() => {});
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({
             output: { decision: 'block', reason: 'blocked by hook' },
@@ -10927,6 +11723,50 @@ Other open files:
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
+        expect(activeSpanSpy).toHaveBeenCalledWith(
+          'prompt-attached-steer-blocked',
+        );
+        expect(endSpanSpy).toHaveBeenCalledWith('cancelled', {
+          promptId: 'prompt-attached-steer-blocked',
+        });
+      });
+
+      it('ends an attached ToolResult interaction when UserPromptSubmit throws', async () => {
+        vi.spyOn(telemetryIndex, 'getActiveInteractionSpan').mockReturnValue(
+          {} as never,
+        );
+        const endSpanSpy = vi
+          .spyOn(telemetryIndex, 'endInteractionSpan')
+          .mockImplementation(() => {});
+        const mockMessageBus = {
+          request: vi.fn().mockRejectedValue(new Error('sensitive hook error')),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'tool result' }],
+              new AbortController().signal,
+              'prompt-tool-result-hook-error',
+              { type: SendMessageType.ToolResult },
+            ),
+          ),
+        ).rejects.toThrow('sensitive hook error');
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        expect(endSpanSpy).toHaveBeenCalledWith('error', {
+          promptId: 'prompt-tool-result-hook-error',
+          errorMessage: 'UserPromptSubmit hook failed',
+          errorType: 'Error',
+        });
       });
 
       it('forwards steerInput through the Steer continuation for early settling', async () => {

@@ -48,8 +48,9 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 // The handler resolves `review.comment` through `operatorReviewSettings` —
 // pin the view it reads so the wiring leg below does not depend on the
-// running developer's settings.json. The refusal assertions call
-// runPublishAssets directly and never touch this mock.
+// running developer's settings.json. The direct refusal assertions call
+// runPublishAssets and never touch this mock; the handler-path tests below
+// do.
 const reviewSettingsMock = vi.hoisted(() =>
   vi.fn((): Record<string, unknown> => ({})),
 );
@@ -61,9 +62,10 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
     // The production call carries `{ skipWorkspaceSettings: true }` — the
     // authorisation default resolves from operator scopes only. A caller that
     // forgets the flag reads the workspace-polluted view instead; the guards
-    // that redden are submit.test.ts's handler-level refusal test and
-    // review-settings.test.ts's direct assertion. This file's own refusals
-    // bypass the handler, so only the wiring leg below exercises the mock.
+    // that redden are submit.test.ts's handler-level refusal test,
+    // review-settings.test.ts's direct assertion, and this file's
+    // handler-level refusal test. The direct runPublishAssets refusals
+    // bypass the handler.
     loadSettings: vi.fn((...callArgs: unknown[]) => {
       const opts = callArgs[1] as
         | { skipWorkspaceSettings?: boolean }
@@ -164,6 +166,25 @@ describe('publish-assets', () => {
     } as never);
   }
 
+  // The handler-path counterpart of run(): every handler-level leg calls
+  // this, so the yargs-facing argument shape lives in exactly one place and
+  // a one-leg-only edit (a renamed key silenced by the `as never` cast) is
+  // structurally impossible.
+  async function runHandler(
+    overrides: Record<string, unknown> = {},
+  ): Promise<void> {
+    await publishAssetsCommand.handler?.({
+      _: [],
+      $0: 'qwen',
+      pr: 8346,
+      files: [pngFile('a.png')],
+      out: join(dir, 'manifest.json'),
+      'user-authorized': false,
+      'skill-args': argsFile,
+      ...overrides,
+    } as never);
+  }
+
   it('refuses without a designated repo — exit 3, nothing written', () => {
     delete process.env['QWEN_REVIEW_ASSETS_REPO'];
     run({ files: [pngFile('a.png')] });
@@ -181,6 +202,27 @@ describe('publish-assets', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
     const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
     expect(why).toContain('not authorised');
+  });
+
+  it('refuses an all-whitespace --host — the write must not retarget (exit 3)', () => {
+    // The round-6 Critical: a whitespace-only --host resolves to '' (falsy),
+    // which would skip the routing setGhHost and silently write to the
+    // env/default host while authorisation bound another. The raw-flag
+    // validation must refuse it before any gh call. setGhHost's documented
+    // TypeError fires for the whitespace value (mocked here as in the
+    // malformed-GH_HOST test).
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    run({ files: [pngFile('a.png')], host: ' ' });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('(from --host)');
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
   });
 
   it('binds authorisation to the target PR, not to a mood', () => {
@@ -217,17 +259,25 @@ describe('publish-assets', () => {
     writeFileSync(argsFile, '8346\n'); // no --comment
     reviewSettingsMock.mockReturnValue({ comment: true });
     happyGh();
-    await publishAssetsCommand.handler?.({
-      _: [],
-      $0: 'qwen',
-      pr: 8346,
-      files: [pngFile('wired.png')],
-      out: join(dir, 'manifest.json'),
-      'user-authorized': false,
-      'skill-args': argsFile,
-    } as never);
+    await runHandler({ files: [pngFile('wired.png')] });
     expect(process.exitCode).toBeUndefined();
     expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('the handler refuses when neither flag nor setting authorises — the polluted view must not decide', async () => {
+    // The refusal counterpart of the wiring leg above: setting off, no
+    // `--comment` in the recorded arguments. If the handler's loadSettings
+    // call drops `skipWorkspaceSettings`, the workspace-polluted mock view
+    // answers comment:true and this refusal becomes a publish — the exact
+    // regression review-settings.ts documents (a repository-controlled
+    // .qwen/settings.json deciding to publish for every reviewer).
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({}); // setting off
+    happyGh();
+    await runHandler({ files: [pngFile('refused.png')] });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('publishes, writes a manifest with commit-pinned URLs', () => {

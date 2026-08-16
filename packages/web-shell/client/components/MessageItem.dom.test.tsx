@@ -54,9 +54,11 @@ vi.mock('./messages/AssistantMessage', async () => {
     AssistantMessage: ({
       content,
       customFooterInfo,
+      onBranchSession,
     }: {
       content: string;
       customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+      onBranchSession?: () => void | Promise<void>;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       const { renderAssistantTurnFooter } = useWebShellCustomization();
@@ -68,6 +70,16 @@ vi.mock('./messages/AssistantMessage', async () => {
         { 'data-testid': 'assistant-ok' },
         content,
         customFooter,
+        onBranchSession
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'assistant-branch',
+                onClick: () => void onBranchSession(),
+              },
+              'branch',
+            )
+          : null,
       );
     },
     ThinkingMessage: ({ generateContent }: { generateContent?: unknown }) =>

@@ -1014,11 +1014,11 @@ const EN: Messages = {
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.imagesSkipped': (v) =>
-    `${v?.count ?? 0} unsupported image file(s) were skipped.`,
+    `${v?.count ?? 0} unsupported file(s) were skipped.`,
   'editor.imagesReadFailed': (v) =>
-    `${v?.count ?? 0} image file(s) could not be read.`,
+    `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
-    `${v?.count ?? 0} image file(s) exceeded the attachment size limit.`,
+    `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1424,6 +1424,7 @@ const EN: Messages = {
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
+  'queue.fileCount': (v) => `(+${v?.count ?? 0} files)`,
   'queue.more': (v) => `... (+${v?.count ?? 0} more)`,
   'midTurn.inserted': (v) => `Inserted message: ${v?.message ?? ''}`,
   'help.builtIn': 'Built-in commands',
@@ -1494,6 +1495,12 @@ const EN: Messages = {
   'notification.agent.cancelled': (v) =>
     `Background agent "${v?.description ?? ''}" was cancelled.`,
   'branch.failed': 'Failed to branch session.',
+  'branch.stale':
+    'This response is no longer on the active history path. The transcript has been refreshed.',
+  'branch.staleRefreshFailed':
+    'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+  'branch.staleUnsupported':
+    'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
@@ -1511,6 +1518,8 @@ const EN: Messages = {
   'error.unknown': 'Unknown error',
   'error.modelStreamInterrupted':
     'Model response stream was interrupted. Please retry.',
+  'error.loopDetected':
+    'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
@@ -2201,6 +2210,7 @@ const EN: Messages = {
   'resume.title': 'Resume Session',
   'parallelAgents.title': 'Parallel agents',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} done`,
+  'parallelAgents.failed': (v) => `${v?.count ?? 0} failed`,
   'skills.actions': 'Skill actions',
   'skills.disable': 'Disable',
   'skills.disabled': 'Skill disabled.',
@@ -2613,16 +2623,23 @@ const EN: Messages = {
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
   'channels.title': 'Channels',
+  'channels.description':
+    'Connect Qwen Code to the places where your team already works.',
   'channels.summary': (v) =>
     `${v?.workspace ?? ''} · ${v?.count ?? 0} configured`,
   'channels.workspace.current': 'Current workspace',
+  'channels.workspace.label': 'Workspace',
+  'channels.workspace.primary': 'Primary',
   'channels.loading': 'Loading channels',
   'channels.configured': 'Configured channels',
+  'channels.configured.description':
+    'Manage the bots that receive and deliver messages for this workspace.',
   'channels.availablePlatforms': 'Available platforms',
   'channels.availablePlatforms.description':
-    'Channel management is currently available for these platforms only.',
+    'Choose a platform to add another connection to this workspace.',
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
+  'channels.platform.add': 'Add connection',
   'channels.platform.configureNamed': (v) =>
     `Configure ${v?.platform ?? 'Channel'}`,
   'channels.status.stopped': 'Stopped',
@@ -2630,7 +2647,16 @@ const EN: Messages = {
   'channels.status.connected': 'Connected',
   'channels.status.partial': 'Partially connected',
   'channels.status.error': 'Error',
-  'channels.startsWithServe': 'Start with serve',
+  'channels.statusDescription.stopped': 'Offline and not receiving messages.',
+  'channels.statusDescription.starting': 'Connecting to the platform now.',
+  'channels.statusDescription.connected':
+    'Online and ready to receive messages.',
+  'channels.statusDescription.partial':
+    'Connected, but some capabilities are unavailable.',
+  'channels.statusDescription.error': 'Needs attention before it can connect.',
+  'channels.startsWithServe': 'Connect when Qwen Code starts',
+  'channels.startsWithServe.description':
+    'Automatically bring this Channel online after Qwen Code starts.',
   'channels.unsupported.title': 'Channel management is not supported',
   'channels.unsupported.description':
     'Update Qwen Code to a version that supports Channel management.',
@@ -2643,12 +2669,15 @@ const EN: Messages = {
     'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
+  'channels.action.refresh': 'Refresh',
   'channels.action.start': 'Start',
   'channels.action.stop': 'Stop',
   'channels.action.restart': 'Restart',
   'channels.action.retry': 'Retry',
   'channels.action.edit': 'Edit',
   'channels.action.editNamed': (v) => `Edit ${v?.name ?? 'Channel'}`,
+  'channels.action.moreNamed': (v) =>
+    `More actions for ${v?.name ?? 'Channel'}`,
   'channels.action.delete': 'Delete',
   'channels.action.deleteNamed': (v) => `Delete ${v?.name ?? 'Channel'}`,
   'channels.action.startWithServeNamed': (v) =>
@@ -2660,15 +2689,23 @@ const EN: Messages = {
   'channels.editor.addTitle': (v) => `Configure ${v?.platform ?? 'Channel'}`,
   'channels.editor.editTitle': (v) => `Edit ${v?.platform ?? 'Channel'}`,
   'channels.editor.addDescription':
-    'Connect this workspace with an existing platform application.',
+    'Connect a registered workspace with an existing platform application.',
   'channels.editor.editDescription':
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
-  'channels.editor.section.session': 'Session',
-  'channels.editor.section.access': 'Access policy',
+  'channels.editor.section.session': 'Conversation management',
+  'channels.editor.section.access': 'Access control',
+  'channels.editor.section.access.description':
+    'Configure direct-message and group access separately.',
+  'channels.editor.session.isolation': 'Conversation isolation',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
+  'channels.editor.workspace': 'Workspace',
+  'channels.editor.workspace.description':
+    'Messages, sessions, and Channel settings belong to this workspace. The primary workspace is selected by default.',
+  'channels.editor.workspace.lockedDescription':
+    'A configured Channel stays bound to its workspace. Create another instance to use a different workspace.',
   'channels.editor.environmentReference': '$ENV_VAR supported',
   'channels.editor.field.sessionScope': 'Session scope',
   'channels.editor.field.sessionScope.description':
@@ -2753,6 +2790,44 @@ const EN: Messages = {
   'channels.editor.secret.placeholder': (v) => `Enter ${v?.label ?? 'secret'}`,
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
+  'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.shared.senderPolicy.description':
+    'Choose who can start a direct conversation with this Channel.',
+  'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
+  'channels.editor.field.shared.senderPolicy.option.allowlist': 'Allowlist',
+  'channels.editor.field.shared.senderPolicy.option.open': 'Open',
+  'channels.editor.field.shared.allowedUsers': 'Allowed user IDs',
+  'channels.editor.field.shared.allowedUsers.description':
+    'Comma-separated stable user IDs that can access the Channel without pairing.',
+  'channels.editor.field.shared.groupPolicy': 'Group policy',
+  'channels.editor.field.shared.groupPolicy.description':
+    'Choose which group conversations can use this Channel.',
+  'channels.editor.field.shared.groupPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.shared.groupPolicy.option.pairing': 'Pairing',
+  'channels.editor.field.shared.groupPolicy.option.allowlist': 'Allowlist',
+  'channels.editor.field.shared.groupPolicy.option.open': 'Open',
+  'channels.editor.field.shared.allowedGroupIds': 'Allowed group IDs',
+  'channels.editor.field.shared.allowedGroupIds.description':
+    'Comma-separated stable chat or repository IDs allowed to use this Channel.',
+  'channels.editor.field.shared.allowedGroupIds.placeholder':
+    'group-a, group-b',
+  'channels.editor.field.shared.sessionScope': 'Conversation isolation',
+  'channels.editor.field.shared.sessionScope.description':
+    'Choose how conversations share persistent agent context.',
+  'channels.editor.field.shared.sessionScope.option.user': 'By user',
+  'channels.editor.field.shared.sessionScope.option.thread':
+    'By thread (legacy)',
+  'channels.editor.field.shared.sessionScope.option.chat_thread':
+    'By chat or thread',
+  'channels.editor.field.shared.sessionScope.option.single': 'Share all',
+  'channels.editor.field.shared.sessionScope.detail.user':
+    "The same user's messages continue in one conversation; users stay isolated from each other.",
+  'channels.editor.field.shared.sessionScope.detail.thread':
+    'Preserves the legacy thread routing used by existing Channel sessions.',
+  'channels.editor.field.shared.sessionScope.detail.chat_thread':
+    'Messages in the same group or topic share one conversation; best for collaboration.',
+  'channels.editor.field.shared.sessionScope.detail.single':
+    'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -2813,6 +2888,8 @@ const EN: Messages = {
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
+  'channels.editor.validation.invalidGroupId':
+    'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -3892,10 +3969,9 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
-  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的图片文件。`,
-  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个图片文件读取失败。`,
-  'editor.imagesTooLarge': (v) =>
-    `${v?.count ?? 0} 个图片文件超过附件大小限制。`,
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的文件。`,
+  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
+  'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -4275,6 +4351,7 @@ const ZH: Messages = {
   'queue.editFailed': '编辑排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
+  'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
   'queue.more': (v) => `...（还有 ${v?.count ?? 0} 条）`,
   'midTurn.inserted': (v) => `已插入消息：${v?.message ?? ''}`,
   'help.builtIn': '内置命令',
@@ -4336,6 +4413,11 @@ const ZH: Messages = {
   'notification.agent.cancelled': (v) =>
     `后台智能体已取消：${v?.description ?? ''}`,
   'branch.failed': '分支会话失败。',
+  'branch.stale': '这条回复已不在当前活跃历史路径中，会话记录已刷新。',
+  'branch.staleRefreshFailed':
+    '这条回复已不在当前活跃历史路径中，且会话记录刷新失败，请重试。',
+  'branch.staleUnsupported':
+    '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
@@ -4352,6 +4434,8 @@ const ZH: Messages = {
   'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
   'error.unknown': '未知错误',
   'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
+  'error.loopDetected':
+    '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
@@ -4987,6 +5071,7 @@ const ZH: Messages = {
   'resume.title': '恢复会话',
   'parallelAgents.title': '并行智能体',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} 完成`,
+  'parallelAgents.failed': (v) => `失败 ${v?.count ?? 0} 个`,
   'skills.actions': 'Skill 操作',
   'skills.disable': '禁用',
   'skills.disabled': 'Skill 已禁用。',
@@ -5372,22 +5457,34 @@ const ZH: Messages = {
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',
   'channels.title': '频道',
+  'channels.description': '让 Qwen Code 在团队日常使用的平台中收发消息。',
   'channels.summary': (v) =>
     `${v?.workspace ?? ''} · 已配置 ${v?.count ?? 0} 个`,
   'channels.workspace.current': '当前工作区',
+  'channels.workspace.label': '工作区',
+  'channels.workspace.primary': '主工作区',
   'channels.loading': '正在加载频道',
   'channels.configured': '已配置频道',
+  'channels.configured.description': '管理当前工作区中负责收发消息的机器人。',
   'channels.availablePlatforms': '可连接平台',
-  'channels.availablePlatforms.description': '频道管理目前仅开放以下平台。',
+  'channels.availablePlatforms.description':
+    '选择一个平台，为当前工作区添加新的连接。',
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
+  'channels.platform.add': '添加连接',
   'channels.platform.configureNamed': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.status.stopped': '已停止',
   'channels.status.starting': '启动中',
   'channels.status.connected': '已连接',
   'channels.status.partial': '部分连接',
   'channels.status.error': '错误',
-  'channels.startsWithServe': '随服务启动',
+  'channels.statusDescription.stopped': '当前离线，不会接收新消息。',
+  'channels.statusDescription.starting': '正在连接平台。',
+  'channels.statusDescription.connected': '在线，可以正常接收消息。',
+  'channels.statusDescription.partial': '已经连接，但部分能力暂不可用。',
+  'channels.statusDescription.error': '需要处理问题后才能重新连接。',
+  'channels.startsWithServe': 'Qwen Code 启动时自动连接',
+  'channels.startsWithServe.description': 'Qwen Code 启动后自动让该频道上线。',
   'channels.unsupported.title': '当前版本不支持频道管理',
   'channels.unsupported.description': '请升级 Qwen Code 到支持频道管理的版本。',
   'channels.readOnly.title': '频道管理为只读模式',
@@ -5399,12 +5496,14 @@ const ZH: Messages = {
     '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
+  'channels.action.refresh': '刷新',
   'channels.action.start': '启动',
   'channels.action.stop': '停止',
   'channels.action.restart': '重启',
   'channels.action.retry': '重试',
   'channels.action.edit': '编辑',
   'channels.action.editNamed': (v) => `编辑${v?.name ?? '频道'}`,
+  'channels.action.moreNamed': (v) => `${v?.name ?? '频道'}的更多操作`,
   'channels.action.delete': '删除',
   'channels.action.deleteNamed': (v) => `删除${v?.name ?? '频道'}`,
   'channels.action.startWithServeNamed': (v) =>
@@ -5415,14 +5514,22 @@ const ZH: Messages = {
   'channels.delete.error': '未能删除频道',
   'channels.editor.addTitle': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.editor.editTitle': (v) => `编辑${v?.platform ?? '频道'}`,
-  'channels.editor.addDescription': '连接当前工作区与已有的平台应用。',
+  'channels.editor.addDescription': '将已注册的工作区连接到已有的平台应用。',
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
-  'channels.editor.section.session': '会话',
-  'channels.editor.section.access': '准入策略',
+  'channels.editor.section.session': '会话管理',
+  'channels.editor.section.access': '访问控制',
+  'channels.editor.section.access.description':
+    '分别设置谁可以私聊，以及哪些群聊可以使用此频道。',
+  'channels.editor.session.isolation': '会话隔离方式',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
+  'channels.editor.workspace': '工作区',
+  'channels.editor.workspace.description':
+    '机器人消息、会话和频道配置都归属此工作区；默认选择主工作区。',
+  'channels.editor.workspace.lockedDescription':
+    '已配置的频道会固定归属当前工作区；如需更换，请新建一个频道实例。',
   'channels.editor.environmentReference': '支持 $ENV_VAR',
   'channels.editor.field.sessionScope': '会话作用域',
   'channels.editor.field.sessionScope.description':
@@ -5503,6 +5610,44 @@ const ZH: Messages = {
   'channels.editor.secret.clear': '清除',
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
+  'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.shared.senderPolicy.description':
+    '选择哪些用户可以通过私聊使用此频道。',
+  'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
+  'channels.editor.field.shared.senderPolicy.option.allowlist': '白名单',
+  'channels.editor.field.shared.senderPolicy.option.open': '开放',
+  'channels.editor.field.shared.allowedUsers': '允许的用户 ID',
+  'channels.editor.field.shared.allowedUsers.description':
+    '用英文逗号分隔稳定用户 ID；这些用户无需配对即可访问频道。',
+  'channels.editor.field.shared.groupPolicy': '群聊策略',
+  'channels.editor.field.shared.groupPolicy.description':
+    '选择哪些群聊可以使用此频道。',
+  'channels.editor.field.shared.groupPolicy.option.disabled': '禁用',
+  'channels.editor.field.shared.groupPolicy.option.pairing': '配对',
+  'channels.editor.field.shared.groupPolicy.option.allowlist': '白名单',
+  'channels.editor.field.shared.groupPolicy.option.open': '开放',
+  'channels.editor.field.shared.allowedGroupIds': '允许的群聊 ID',
+  'channels.editor.field.shared.allowedGroupIds.description':
+    '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',
+  'channels.editor.field.shared.allowedGroupIds.placeholder':
+    'group-a, group-b',
+  'channels.editor.field.shared.sessionScope': '会话隔离方式',
+  'channels.editor.field.shared.sessionScope.description':
+    '选择不同对话如何共享持久化的智能体上下文。',
+  'channels.editor.field.shared.sessionScope.option.user': '按用户隔离',
+  'channels.editor.field.shared.sessionScope.option.thread':
+    '按话题隔离（旧版）',
+  'channels.editor.field.shared.sessionScope.option.chat_thread':
+    '按群/话题隔离',
+  'channels.editor.field.shared.sessionScope.option.single': '全部共享',
+  'channels.editor.field.shared.sessionScope.detail.user':
+    '同一用户的消息进入同一个对话，不同用户互不影响。',
+  'channels.editor.field.shared.sessionScope.detail.thread':
+    '保留已有频道会话使用的旧版话题路由。',
+  'channels.editor.field.shared.sessionScope.detail.chat_thread':
+    '同一群聊或话题进入同一个对话，适合群内协作。',
+  'channels.editor.field.shared.sessionScope.detail.single':
+    '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
@@ -5560,6 +5705,8 @@ const ZH: Messages = {
     '请输入令牌，或开启本地 GitHub CLI 认证。',
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
+  'channels.editor.validation.invalidGroupId':
+    '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
