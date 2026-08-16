@@ -83,7 +83,7 @@ import type {
   ComposerSubmitCommit,
   EditorHandle,
 } from './hooks/useComposerCore';
-import type { PromptImage } from './adapters/promptTypes';
+import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -6161,6 +6161,7 @@ export function App({
             const result = rawEnqueuePrompt(
               text,
               images,
+              undefined,
               onComplete,
               inputAnnotations,
             );
@@ -6196,6 +6197,7 @@ export function App({
       const result = rawEnqueuePrompt(
         text,
         images,
+        undefined,
         onComplete,
         inputAnnotations,
       );
@@ -9707,6 +9709,10 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      // The composer still passes collected file attachments, but the
+      // prompt pipeline no longer carries files (#8977 branch rework
+      // removed them from the webui submit path) — accept and drop them.
+      _files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
