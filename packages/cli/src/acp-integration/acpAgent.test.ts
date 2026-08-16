@@ -2782,6 +2782,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  /** Installs a beginClose mock that tracks gate hold state; the returned
+   *  getter is asserted false after refusal/timeout paths to pin that the
+   *  close gate is always released. */
+  const trackCloseGateHeld = (): (() => boolean) => {
+    let held = false;
+    lastSessionMock?.beginClose.mockImplementation(() => {
+      held = true;
+      return () => {
+        held = false;
+      };
+    });
+    return () => held;
+  };
+
   it('uses the pre-category v1 baseline when initialize omits categories', async () => {
     await setupSessionMocks('legacy-active-work-session');
     const extNotification = vi.fn().mockResolvedValue(undefined);
@@ -2829,13 +2843,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(snapshots.at(-1)?.[1]).toMatchObject({
       sessions: [{ sessionId: 'legacy-active-work-session', holds: [] }],
     });
-    let closeGateHeld = false;
-    lastSessionMock?.beginClose.mockImplementation(() => {
-      closeGateHeld = true;
-      return () => {
-        closeGateHeld = false;
-      };
-    });
+    const closeGateHeld = trackCloseGateHeld();
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
         sessionId: 'legacy-active-work-session',
@@ -2848,7 +2856,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).not.toHaveBeenCalled();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
-    expect(closeGateHeld).toBe(false);
+    expect(closeGateHeld()).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2870,19 +2878,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.initialize({ clientCapabilities: {} });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let closeGateHeld = false;
+    const closeGateHeld = trackCloseGateHeld();
     let turnsSettled = false;
-    lastSessionMock?.beginClose.mockImplementation(() => {
-      closeGateHeld = true;
-      return () => {
-        closeGateHeld = false;
-      };
-    });
     lastSessionMock?.waitForActiveTurnsToSettle.mockImplementation(async () => {
       turnsSettled = true;
     });
     lastSessionMock?.collectActiveWorkHolds.mockImplementation(() =>
-      closeGateHeld && turnsSettled
+      closeGateHeld() && turnsSettled
         ? [{ category: 'shell', id: 'background-shells' }]
         : [],
     );
@@ -2917,7 +2919,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
     expect(abort).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
-    expect(closeGateHeld).toBe(false);
+    expect(closeGateHeld()).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2939,13 +2941,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.initialize({ clientCapabilities: {} });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let closeGateHeld = false;
-    lastSessionMock?.beginClose.mockImplementation(() => {
-      closeGateHeld = true;
-      return () => {
-        closeGateHeld = false;
-      };
-    });
+    const closeGateHeld = trackCloseGateHeld();
     lastSessionMock?.collectActiveWorkHolds.mockReturnValue([]);
     lastSessionMock?.waitForActiveTurnsToSettle
       .mockImplementationOnce(
@@ -2970,7 +2966,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
-    expect(closeGateHeld).toBe(false);
+    expect(closeGateHeld()).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2992,13 +2988,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.initialize({ clientCapabilities: {} });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let closeGateHeld = false;
-    lastSessionMock?.beginClose.mockImplementation(() => {
-      closeGateHeld = true;
-      return () => {
-        closeGateHeld = false;
-      };
-    });
+    const closeGateHeld = trackCloseGateHeld();
     lastSessionMock?.collectActiveWorkHolds.mockReturnValue([]);
     // A turn that never settles must not hang the close forever: the phase-1
     // cap rejects it and releases the gate, leaving queued work untouched.
@@ -3024,7 +3014,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
-    expect(closeGateHeld).toBe(false);
+    expect(closeGateHeld()).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('completes a conditional close when no holds appear at any re-check', async () => {
+    await setupSessionMocks('active-work-close-success');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock?.collectActiveWorkHolds.mockReturnValue([]);
+    // A turn in flight when the close begins: it must be aborted only after
+    // the settle + re-check authorize teardown, never before.
+    const controller = new AbortController();
+    const abort = vi.spyOn(controller, 'abort');
+    (
+      agent as unknown as {
+        generationControllers: Map<
+          string,
+          { sessionId: string; controller: AbortController }
+        >;
+      }
+    ).generationControllers.set('active-generation', {
+      sessionId: 'active-work-close-success',
+      controller,
+    });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'active-work-close-success',
+        onlyIfUnheld: true,
+      }),
+    ).resolves.toEqual({
+      sessionId: 'active-work-close-success',
+      closed: true,
+    });
+    expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalled();
+    expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(abort).toHaveBeenCalledOnce();
+    const firstSettleOrder =
+      lastSessionMock!.waitForActiveTurnsToSettle.mock.invocationCallOrder[0];
+    expect(abort.mock.invocationCallOrder[0]).toBeGreaterThan(firstSettleOrder);
+    expect(lastSessionMock?.dispose).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

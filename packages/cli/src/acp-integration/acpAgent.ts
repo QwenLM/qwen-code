@@ -3894,6 +3894,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     operation: () => Promise<T>,
     waitTimeoutMs?: number,
+    waitDisplayTimeoutMs?: number,
   ): Promise<T> {
     const previous =
       this.historyMutationTails.get(sessionId) ?? Promise.resolve();
@@ -3907,7 +3908,12 @@ class QwenAgent implements Agent {
       if (waitTimeoutMs === undefined) {
         await previous;
       } else {
-        await waitForSessionDrain(previous, waitTimeoutMs, 'close');
+        await waitForSessionDrain(
+          previous,
+          waitTimeoutMs,
+          'close',
+          waitDisplayTimeoutMs,
+        );
       }
     } catch (error) {
       release();
@@ -4685,6 +4691,14 @@ class QwenAgent implements Agent {
           removedFromStore = true;
           return undefined;
         },
+        // The mutation wait shares the conditional close's budget too, or
+        // the whole round trip can outlast the daemon's outer wait — the
+        // coupling the drain budget exists to keep. The mutation body
+        // itself stays untimed, so the guarantee remains approximate. The
+        // message reports the shared budget, not the residue.
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
         drainTimeoutMs,
       );
       if (blockedByHolds) return blockedByHolds;

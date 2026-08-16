@@ -2517,8 +2517,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // tombstone completes on the next settle event.
     if (
       byId.get(entry.sessionId) === entry &&
-      !entry.closing &&
-      !entry.activeWorkCloseInFlight &&
+      !isClosingOrAuthorizingClose(entry) &&
       entry.spawnOwnerWantedKill &&
       entry.attachCount === 0
     ) {
@@ -5025,7 +5024,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionClose,
         {
           sessionId: entry.sessionId,
-          drainTimeoutMs: sessionCloseDrainBudgetMs(initTimeoutMs),
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            opts?.timeoutMs ?? initTimeoutMs,
+          ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
         },
       );
@@ -8655,6 +8656,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       {
                         sessionId: result.newSessionId,
                         cwd: boundWorkspace,
+                        drainTimeoutMs:
+                          sessionCloseDrainBudgetMs(initTimeoutMs),
                       },
                     ),
                     channelUnavailableReject(
