@@ -13,6 +13,7 @@ import {
   serializeLedger,
   parseLedger,
   stripLedgerMarker,
+  LEDGER_ID_READBACK,
   LEDGER_MAX_FINDINGS,
   LEDGER_MAX_FILE,
   LEDGER_MAX_TITLE,
@@ -287,5 +288,29 @@ describe('ledger marker', () => {
   it('leaves an unterminated marker alone rather than truncating the body', () => {
     const body = 'prose <!-- qwen-review-ledger {"v":1 and the rest of it';
     expect(stripLedgerMarker(body)).toBe(body);
+  });
+});
+
+// The prefix-anchored readback both ledger read sides share wholesale:
+// compose-review's ledger builder and presubmit's re-post extractor.
+describe('LEDGER_ID_READBACK', () => {
+  // The shared regex's docstring claims the tolerated terminator set cannot
+  // drift between the two ends — which only holds if the set ITSELF is
+  // pinned: deleting a terminator from the class survives both consuming
+  // suites, and a prose-variant re-post then fails extraction at both ends
+  // and is dropped as a plain location overlap, re-creating #9208 with
+  // every consumer green (#9212 review).
+  const cases: Array<[string, string | null]> = [
+    ['R3-2: claim', 'R3-2'],
+    ['R3-2. claim', 'R3-2'],
+    ['R3-2) claim', 'R3-2'],
+    ['R3-2] claim', 'R3-2'],
+    ['R3-2 claim', 'R3-2'],
+    ['R3-2', 'R3-2'],
+    ['R3-2-1: extended run', null],
+    ['see R3-2: cross-reference', null],
+  ];
+  it.each(cases)('reads %j as %j', (line, expected) => {
+    expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
   });
 });
