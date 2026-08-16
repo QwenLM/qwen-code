@@ -646,7 +646,11 @@ Todo list modification failed with error: ${errorMessage}. You may need to retry
 }
 
 /**
- * Utility function to read todos for a specific session (useful for session recovery)
+ * Reads todos for a specific session.
+ *
+ * Accepts either a Config object or a raw directory path. When a Config is
+ * provided, the configured todosDirectory is used and containment is validated
+ * against the project root to prevent symlink-based escapes.
  */
 export async function readTodosForSession(
   config: Config,
@@ -677,7 +681,11 @@ export async function readTodosForSession(
 }
 
 /**
- * Utility function to list all todo files in the todos directory
+ * Lists all todo session files in the todos directory.
+ *
+ * Accepts either a Config object or a raw directory path. When a Config is
+ * provided, the configured todosDirectory is used and containment is validated
+ * against the project root to prevent symlink-based escapes.
  */
 export async function listTodoSessions(
   todoDirOrConfig?: string | Config,

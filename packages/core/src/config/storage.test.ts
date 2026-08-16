@@ -404,6 +404,56 @@ describe('Storage – getTodosDir', () => {
       'projectRoot is required when todosDirectory is configured',
     );
   });
+
+  it('rejects symlink pointing outside the project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const outside = path.resolve('tmp', 'outside');
+    const symlink = path.join(project, 'escape-link');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [symlink, outside],
+      ]),
+    );
+
+    expect(() => Storage.getTodosDir(project, './escape-link')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('allows legitimate symlink that stays within project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const target = path.join(project, 'todos-target');
+    const symlink = path.join(project, 'todos-link');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [symlink, target],
+      ]),
+    );
+
+    const result = Storage.getTodosDir(project, './todos-link');
+    expect(result).toBe(symlink);
+  });
+
+  it('rejects missing nested path under symlink that escapes project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const outside = path.resolve('tmp', 'outside');
+    const dataSymlink = path.join(project, 'data');
+    const missingSubdir = path.join(dataSymlink, 'subdir');
+    const missingTodos = path.join(missingSubdir, 'todos');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [dataSymlink, outside],
+      ]),
+      new Set([missingTodos, missingSubdir]),
+    );
+
+    expect(() => Storage.getTodosDir(project, './data/subdir/todos')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
 });
 
 describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
