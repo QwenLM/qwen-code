@@ -28,12 +28,13 @@
 import type { CommandModule } from 'yargs';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, normalize, relative, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR, safeTarget } from './lib/paths.js';
+import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
 export interface RunReviewArgs {
@@ -102,6 +103,24 @@ export type RunTargetClass =
   | { kind: 'file'; base: string }
   | { kind: 'local' };
 
+/**
+ * The repo-relative, normalised spelling of a user-typed path — the same
+ * identity `capture-local --file` derives before the child names anything.
+ *
+ * Falls back to a plain normalisation when the repo root cannot be resolved
+ * (no git, a detached invocation): the pin is then whatever the token
+ * spells, which is the pre-canonicalisation behaviour and no worse than it.
+ */
+function repoRelative(target: string): string {
+  const normalised = normalize(target).replace(/^\.\//, '');
+  const root = gitOpt('rev-parse', '--show-toplevel');
+  if (root === null) return normalised;
+  const rel = relative(root, resolve(normalised));
+  // A path outside the repo has no repo-relative spelling; leave it as the
+  // user typed it rather than pinning on a `..` walk.
+  return rel === '' || rel.startsWith('..') ? normalised : rel;
+}
+
 export function classifyRunTarget(target?: string): RunTargetClass {
   if (!target) return { kind: 'local' };
   const { target: t } = parseReviewArgs(target);
@@ -121,8 +140,16 @@ export function classifyRunTarget(target?: string): RunTargetClass {
     // first: a tab-completed `src/` classifies as a file target and reviews
     // the directory, and the empty remainder would pin a name no child
     // artifact can ever carry.
-    const trimmed = t.path.replace(/[\\/]+$/, '');
-    return { kind: 'file', base: safeTarget(trimmed || t.path) };
+    // The token is CANONICALISED before flattening, because the child
+    // canonicalises too: `capture-local --file` resolves the path against
+    // the caller's directory and re-bases it on the repo root, and SKILL.md
+    // names the artifacts from THAT. Flattening the raw token agreed only
+    // when the user typed the canonical repo-relative spelling — an absolute
+    // path, a `src/../src/foo.ts`, or a path typed from a subdirectory each
+    // produced a pin the child never writes: the same never-matching poll
+    // this pin was just fixed to avoid, for a new input class.
+    const trimmed = t.path.replace(/[\\/]+$/, '') || t.path;
+    return { kind: 'file', base: safeTarget(repoRelative(trimmed)) };
   }
   return { kind: 'local' };
 }

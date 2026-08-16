@@ -206,9 +206,10 @@ describe('target-pinned artifact patterns', () => {
     // A path that merely contains /pull/<n> is a FILE target to the parser,
     // and the file identity is the skill's `{target}` token: the
     // repo-relative path put through the CLI's own `safeTarget`
-    // normalization, NOT the basename. The two diverge for every file in a
-    // subdirectory, and the basename pin made the parent poll a name the
-    // child never writes.
+    // normalization, NOT the basename. (This suite mocks child_process, so
+    // the git-backed canonicalisation falls back to the token as typed —
+    // the canonical-spelling equivalence is pinned in
+    // `run-classify.integration.test.ts`, which uses real git.)
     expect(classifyRunTarget('docs/pull/42')).toEqual({
       kind: 'file',
       base: 'docs_pull_42',

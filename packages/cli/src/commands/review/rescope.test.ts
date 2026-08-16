@@ -1221,3 +1221,53 @@ describe('rescope — round-5/6 findings', () => {
     expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
   });
 });
+
+describe('rescope — round-6/7 Criticals', () => {
+  it.skipIf(process.platform === 'win32')(
+    'a content-revert that KEEPS chmod +x is not "restored" — the mode change is scope',
+    () => {
+      // `rev-parse <ref>:<path>` yields the blob alone, so a revert that
+      // keeps the exec bit compared equal and was dropped — yet its
+      // mode-only section IS in the PR's own diff, so the incremental scope
+      // narrowed below the full-range floor and exited 3 over a real change.
+      const { base } = seedHistory();
+      const anchor = git('rev-parse', 'HEAD');
+      write(CHANGED, 'export const v = 1;\n'); // content back to base
+      // A REAL exec bit on disk: `update-index --chmod` alone is undone by a
+      // later `commit -a`, which re-stages from the worktree.
+      execFileSync('chmod', ['+x', join(repo, CHANGED)]);
+      git('add', '-A');
+      git('commit', '-q', '--no-verify', '-m', 'revert content, keep +x');
+      const head2 = git('rev-parse', 'HEAD');
+      const planPath = writeFetchedPlan(base, head2);
+      run(planPath, anchor);
+      expect(process.exitCode ?? 0).toBe(0);
+      const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+      expect(plan.incremental.deltaFiles).toContain(CHANGED);
+      expect(readFileSync(join(repo, plan.diffPath), 'utf8')).toContain(
+        'new mode 100755',
+      );
+    },
+  );
+
+  it('an ASYNC stdout error after the plan write still exits 0', () => {
+    // EPIPE reaches the process as an unhandled 'error' EVENT, which no
+    // try/catch around the write can intercept; unhandled, it exits 1 over
+    // an already-rewritten plan.
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    // The listener the command installs is what makes the async shape inert.
+    expect(process.stdout.listenerCount('error')).toBeGreaterThan(0);
+    expect(process.stderr.listenerCount('error')).toBeGreaterThan(0);
+    expect(() =>
+      process.stdout.emit('error', new Error('EPIPE')),
+    ).not.toThrow();
+    expect(() =>
+      process.stderr.emit('error', new Error('EPIPE')),
+    ).not.toThrow();
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
+  });
+});
