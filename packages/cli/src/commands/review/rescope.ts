@@ -41,6 +41,8 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { fileLineCount, gitOpt, gitRaw } from './lib/git.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   buildDiffPlan,
@@ -423,8 +425,13 @@ function runRescope(args: RescopeArgs): void {
     diffPathAbsolute: resolve(diffRel),
     // `-C`-pinned like every other git call here: an unpinned `git show`
     // resolves `<ref>:<path>` against the process cwd's repository.
-    ...buildPlanReport(diffPlan, (path) =>
-      fileLineCount(fetchedSha, path, worktreePath),
+    ...buildPlanReport(
+      diffPlan,
+      (path) => fileLineCount(fetchedSha, path, worktreePath),
+      {
+        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+        hasDeadline: hasReviewDeadline(process.env),
+      },
     ),
     incremental,
   };

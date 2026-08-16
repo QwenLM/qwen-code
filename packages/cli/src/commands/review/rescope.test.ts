@@ -119,7 +119,10 @@ function writeFetchedPlan(base: string, head: string): string {
     diffPathAbsolute: join(repo, diffPath),
     effort: 'high',
     carriedThrough: 'untouched',
-    ...buildPlanReport(buildDiffPlan(diffText, 400), null),
+    ...buildPlanReport(buildDiffPlan(diffText, 400), null, {
+      operatorRoundCap: undefined,
+      hasDeadline: false,
+    }),
   };
   const planPath = join(repo, 'plan.json');
   writeFileSync(planPath, JSON.stringify(plan, null, 2));
