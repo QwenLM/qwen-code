@@ -2600,12 +2600,12 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            onAdmissionFailed: () => {
+              addMessage(submittedValue, true, submittedPrompt);
+            },
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit /btw submission', error);
         });
