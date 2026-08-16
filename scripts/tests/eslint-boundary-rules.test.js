@@ -101,7 +101,7 @@ describe('eslint cli serve boundary rules', () => {
 
     await expectServeBoundaryError(
       runtime,
-      "export async function load() { await import('../foo/../../../serve/index.js'); }",
+      "export async function load() { await import('../foo/../serve/index.js'); }",
     );
 
     await expectServeBoundaryError(
@@ -160,8 +160,8 @@ describe('eslint cli serve boundary rules', () => {
   });
 
   // Round 6: template literals containing expressions are computed sources
-  // and are rejected fail-closed (the pure-literal template form is caught
-  // by the quasis pattern selectors instead).
+  // and are rejected fail-closed (pure-literal template forms are resolved
+  // like string literals instead).
   it('rejects computed template-literal dynamic imports fail-closed', async () => {
     const [result] = await lintCliFile(
       'packages/cli/src/runtime/boundary-fixture.ts',
@@ -169,7 +169,7 @@ describe('eslint cli serve boundary rules', () => {
     );
     expect(result.messages.map((message) => message.message)).toEqual(
       expect.arrayContaining([
-        expect.stringContaining('computed import sources cannot be checked'),
+        expect.stringContaining('cannot be resolved statically'),
       ]),
     );
   });
@@ -199,7 +199,7 @@ describe('eslint cli serve boundary rules', () => {
   it('rejects a leading literal segment before the traversal run', async () => {
     await expectServeBoundaryError(
       'packages/cli/src/acp-integration/boundary-fixture.ts',
-      "export async function load() { await import('foo/../../../serve/index.js'); }",
+      "export async function load() { await import('foo/../../serve/index.js'); }",
     );
   });
 
@@ -209,15 +209,15 @@ describe('eslint cli serve boundary rules', () => {
     const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
     await expectServeBoundaryError(
       acp,
-      "vi.mock('../../serve/live/live-task-service.js');",
+      "vi.mock('../serve/live/live-task-service.js');",
     );
     await expectServeBoundaryError(
       acp,
-      "export async function load() { return vi.importActual('../../serve/live/live-task-service.js'); }",
+      "export async function load() { return vi.importActual('../serve/live/live-task-service.js'); }",
     );
     await expectServeBoundaryError(
       acp,
-      "vitest.mock('../../serve/live/live-task-service.js');",
+      "vitest.mock('../serve/live/live-task-service.js');",
     );
 
     // A non-serve vi.mock stays silent on the boundary.
@@ -232,45 +232,36 @@ describe('eslint cli serve boundary rules', () => {
   // while evading the relative patterns; every one is pinned here.
   it('rejects case-variant serve spellings', async () => {
     const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(acp, "import '../Serve/index.js';");
     await expectServeBoundaryError(
       acp,
-      "import '../../Serve/index.js';",
+      "export async function load() { return import('../Serve/live/live-task-service.js'); }",
     );
     await expectServeBoundaryError(
       acp,
-      "export async function load() { return import('../../Serve/live/live-task-service.js'); }",
-    );
-    await expectServeBoundaryError(
-      acp,
-      "vi.mock('../../SERVE/live/live-task-service.js');",
+      "vi.mock('../SERVE/live/live-task-service.js');",
     );
   });
 
   it('rejects ?query and #fragment suffixes on serve specifiers', async () => {
     const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(acp, "import '../serve/index.js?x';");
     await expectServeBoundaryError(
       acp,
-      "import '../../serve/index.js?x';",
+      "export async function load() { return import('../serve/index.js?x'); }",
     );
     await expectServeBoundaryError(
       acp,
-      "export async function load() { return import('../../serve/index.js?x'); }",
+      "vi.mock('../serve/live/live-task-service.js?x');",
     );
-    await expectServeBoundaryError(
-      acp,
-      "vi.mock('../../serve/live/live-task-service.js?x');",
-    );
-    await expectServeBoundaryError(
-      acp,
-      "import '../../serve/index.js#f';",
-    );
+    await expectServeBoundaryError(acp, "import '../serve/index.js#f';");
   });
 
   it('rejects percent-encoded pure-template vitest calls', async () => {
     const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
     await expectServeBoundaryError(
       acp,
-      'vi.mock(`../../%73erve/live/live-task-service.js`);',
+      'vi.mock(`../%73erve/live/live-task-service.js`);',
     );
   });
 
@@ -296,10 +287,95 @@ describe('eslint cli serve boundary rules', () => {
       acp,
       "import { createRequire } from 'node:module';",
     );
+    await expectServeBoundaryError(acp, "import moduleBuiltin from 'module';");
+  });
+
+  // Round-8 entrances (#8084): each spelling below reached serve/ while
+  // evading the old text-matching matrix entirely; the resolution-based
+  // rule collapses them into the same "lands in serve/" check.
+  it('rejects data: URL imports fail-closed', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
     await expectServeBoundaryError(
       acp,
-      "import moduleBuiltin from 'module';",
+      'export async function load() { await import("data:text/javascript,export*from\\"file:///repo/packages/cli/src/serve/index.js\\""); }',
     );
+  });
+
+  it('rejects baseUrl bare specifiers that resolve into serve', async () => {
+    // packages/cli tsconfig baseUrl "." makes `src/serve/...` a valid
+    // bare-specifier import — text patterns never saw a `../` run here.
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(acp, "import 'src/serve/index.js';");
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { return import('src/serve/live/live-task-service.js'); }",
+    );
+  });
+
+  it('rejects traversal-bearing bare specifiers fail-closed', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "import 'foo/../../src/serve/index.js';",
+    );
+  });
+
+  it('rejects process.getBuiltinModule in guarded trees fail-closed', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "const mod = process.getBuiltinModule('node:module');",
+    );
+  });
+
+  // Codex self-review: URL schemes are case-insensitive — `FILE:`/`DATA:`
+  // must fail closed just like their lowercase forms.
+  it('rejects case-variant file:/data: URL schemes fail-closed', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "import 'FILE:///repo/packages/cli/src/serve/index.js';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { await import('DATA:text/javascript,export default 1'); }",
+    );
+  });
+
+  // The URL parser strips surrounding whitespace, so ` DATA:...` loads the
+  // same way — scheme detection must trim before matching.
+  it('rejects whitespace-padded URL scheme spellings fail-closed', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "export async function load() { await import(' DATA:text/javascript,export default 1'); }",
+    );
+  });
+
+  // Codex self-review: vitest loaders reached through an alias evade the
+  // `vi.`/`vitest.` identifier match; the member/bare-name matchers must
+  // still catch them when the specifier resolves into serve/.
+  it('rejects aliased vitest module-loading calls into serve', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "import { vi as v } from 'vitest';\nv.mock('../serve/live/live-task-service.js');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "import { importActual } from 'vitest';\nexport async function load() { return importActual('../serve/live/live-task-service.js'); }",
+    );
+  });
+
+  // Codex self-review: child_process.spawn's first argument is an
+  // executable resolved via PATH/cwd, not a module — it must NOT be
+  // treated as an import source (would false-positive legitimate code).
+  it('does not treat child_process.spawn arguments as import sources', async () => {
+    const [result] = await lintCliFile(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "import { spawn } from 'node:child_process';\nexport function run() { return spawn(process.execPath, ['--version']); }",
+    );
+    const boundaryHits = result.messages.filter((message) =>
+      message.message.includes('serve'),
+    );
+    expect(boundaryHits).toEqual([]);
   });
 
   // R5-7: third-party packages whose name contains `serve` must not be

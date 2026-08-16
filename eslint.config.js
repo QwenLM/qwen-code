@@ -16,192 +16,27 @@ import globals from 'globals';
 import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import noServeBoundaryCross from './eslint-rules/no-serve-boundary-cross.js';
 
-// Static-import guard: relative specifiers only, enumerated by depth. The
-// earlier `**/serve*` globs also matched third-party package names (`serve`,
-// `@scope/serve`, `@scope/serve/subpath`), so bare/scoped specifiers must
-// never reach the boundary check; imports deeper than six levels below src/
-// do not occur in the guarded trees. `../serve` (bare directory) resolves to
-// the serve/ barrel and stays covered.
-const relativeServeImportPatterns = [];
-for (let depth = 1; depth <= 6; depth++) {
-  const prefix = '../'.repeat(depth);
-  relativeServeImportPatterns.push(
-    `${prefix}serve`,
-    `${prefix}serve/*`,
-    `${prefix}serve/**`,
-  );
-}
-
-const restrictedServeImports = (message) => ({
-  patterns: [{ group: relativeServeImportPatterns, message }],
-});
-
-// Dynamic-import guard. Relative spellings are matched with linear-time
-// patterns — the previous nested-quantifier shape backtracked exponentially
-// (ReDoS: ~4x cost per two added `../` segments). Non-literal sources and
-// type-level imports cannot be resolved statically, and rounds 2-5 each
-// demonstrated a new spelling entrance, so those are rejected fail-closed.
-const serveDynamicImportPatterns = [
-  // Canonical and duplicated-separator spellings: ../serve, ./../serve,
-  // ..//serve, ../../serve/x, ...
-  String.raw`^(?:\.\x2f+|\.\.\x2f+)+serve(?:\x2f|$)`,
-  // Spellings routing through intermediate or traversal segments:
-  // ../runtime/../serve/x, ../foo/../../../serve/x, ..//foo//serve, ...
-  String.raw`^(?:\.\x2f+|\.\.\x2f+)+(?:[^\x2f]+\x2f+)+serve(?:\x2f|$)`,
-  // A traversal run landing on serve from ANY position — covers a leading
-  // literal segment (foo/../../../serve/x) that the dot-slash-anchored
-  // patterns miss (round-6 entrance).
-  String.raw`(?:^|\x2f)(?:\.\.\x2f+)+serve(?:\x2f|$)`,
-];
-
-// Computed dynamic-import sources cannot be statically checked against the
-// serve/ boundary. Distinct from the boundary message on purpose: a
-// developer hitting this did not necessarily import serve/.
-const FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE =
-  'Dynamically computed import sources cannot be checked against the serve/ ' +
-  'boundary. Use a string-literal specifier so the boundary rule can see ' +
-  'the target (#8084, #9146).';
-
-// Node percent-decodes path segments when mapping the resolved URL to the
-// filesystem (`../%73erve/index.js` loads serve/), and bundlers/Node strip
-// `?query`/`#fragment` suffixes when resolving (`../serve?x` resolves to
-// the same module as `../serve`) — while these selectors match raw
-// specifier text. Any `%`, `?` or `#` in a guarded-tree specifier is
-// therefore rejected outright instead of pattern-matched (round-6/7
-// entrances).
-const SERVE_BOUNDARY_PERCENT_MESSAGE =
-  'Percent-encoded segments and ?query/#fragment suffixes bypass the ' +
-  'serve/ boundary check; use the canonical specifier spelling (#8084).';
-
-// Root-absolute and file: specifiers carry no `../` run, so none of the
-// relative patterns can see them, yet Node loads both into serve/
-// (round-7 entrance). Literal forms are fail-closed rejected: a guarded
-// tree has no legitimate business importing by absolute path or URL.
-const SERVE_BOUNDARY_ABSOLUTE_MESSAGE =
-  'Root-absolute and file: specifiers bypass the serve/ boundary check; ' +
-  'use a relative specifier instead (#8084).';
-
-// createRequire aliases require() under any name, escaping the
-// CallExpression[callee.name="require"] arm; Node >=22 require(esm) loads
-// serve/ through it (round-7 entrance). Flag the createRequire source
-// module itself in guarded trees.
-const SERVE_BOUNDARY_CREATE_REQUIRE_MESSAGE =
-  'createRequire aliases require() and bypasses the serve/ boundary; ' +
-  'import modules statically instead (#8084).';
-
-// vitest's module-loading call APIs resolve (and, without a factory, load)
-// the real module — same boundary, CallExpression shape (round-6
-// suggestion: vi.mock/doMock/importActual/importMock).
-const vitestModuleLoadingCallSelector =
-  'CallExpression[callee.object.name=/^(?:vi|vitest)$/][callee.property.name=/^(?:mock|doMock|importActual|importMock)$/]';
-
-const restrictedServeDynamicImports = (message) => [
-  ...serveDynamicImportPatterns.flatMap((pattern) => [
-    {
-      selector: `ImportExpression[source.value=/${pattern}/i]`,
-      message,
-    },
-    {
-      selector: `ImportExpression[source.quasis.0.value.cooked=/${pattern}/i]`,
-      message,
-    },
-    // Static spellings must pass the same regexes: the depth-enumerated
-    // no-restricted-imports globs only see canonical forms, while
-    // `./../serve`, `..//serve`, and traversal-through-intermediate static
-    // imports resolve to serve/ just the same (round-6 entrances).
-    {
-      selector: `ImportDeclaration[source.value=/${pattern}/i]`,
-      message,
-    },
-    {
-      selector: `ExportNamedDeclaration[source.value=/${pattern}/i]`,
-      message,
-    },
-    {
-      selector: `ExportAllDeclaration[source.value=/${pattern}/i]`,
-      message,
-    },
-    {
-      // @typescript-eslint wraps the specifier in a TSLiteralType: the string
-      // lives at argument.literal.value, NOT argument.value (probe-verified;
-      // the old path was dead code).
-      selector: `TSImportType[argument.literal.value=/${pattern}/i]`,
-      message,
-    },
-    // vitest module-loading calls (see vitestModuleLoadingCallSelector).
-    {
-      selector: `${vitestModuleLoadingCallSelector}[arguments.0.value=/${pattern}/i]`,
-      message,
-    },
-    {
-      selector: `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/${pattern}/i]`,
-      message,
-    },
-  ]),
-  // Percent/query/fragment spellings (see SERVE_BOUNDARY_PERCENT_MESSAGE).
-  ...[
-    'ImportExpression[source.value=/[%?#]/i]',
-    'ImportExpression[source.quasis.0.value.cooked=/[%?#]/i]',
-    'ImportDeclaration[source.value=/[%?#]/i]',
-    'ExportNamedDeclaration[source.value=/[%?#]/i]',
-    'ExportAllDeclaration[source.value=/[%?#]/i]',
-    'TSImportType[argument.literal.value=/[%?#]/i]',
-    `${vitestModuleLoadingCallSelector}[arguments.0.value=/[%?#]/i]`,
-    `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/[%?#]/i]`,
-  ].map((selector) => ({
-    selector,
-    message: SERVE_BOUNDARY_PERCENT_MESSAGE,
-  })),
-  // Root-absolute / file: literal spellings (round-7 entrance) — see
-  // SERVE_BOUNDARY_ABSOLUTE_MESSAGE. Computed forms already fail closed.
-  ...[
-    'ImportExpression[source.value=/^(?:\\x2f|file:)/i]',
-    'ImportExpression[source.quasis.0.value.cooked=/^(?:\\x2f|file:)/i]',
-    'ImportDeclaration[source.value=/^(?:\\x2f|file:)/i]',
-    'ExportNamedDeclaration[source.value=/^(?:\\x2f|file:)/i]',
-    'ExportAllDeclaration[source.value=/^(?:\\x2f|file:)/i]',
-    'TSImportType[argument.literal.value=/^(?:\\x2f|file:)/i]',
-    `${vitestModuleLoadingCallSelector}[arguments.0.value=/^(?:\\x2f|file:)/i]`,
-    `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/^(?:\\x2f|file:)/i]`,
-  ].map((selector) => ({
-    selector,
-    message: SERVE_BOUNDARY_ABSOLUTE_MESSAGE,
-  })),
-  // createRequire source modules (round-7 entrance) — see
-  // SERVE_BOUNDARY_CREATE_REQUIRE_MESSAGE.
-  ...[
-    "ImportDeclaration[source.value=/^(?:node:)?module$/]",
-    "ImportExpression[source.value=/^(?:node:)?module$/]",
-  ].map((selector) => ({
-    selector,
-    message: SERVE_BOUNDARY_CREATE_REQUIRE_MESSAGE,
-  })),
-  // Fail-closed: concatenation, `new URL(...)`, template literals containing
-  // expressions, and any other computed source cannot be proven safe
-  // statically (rounds 2-6 each demonstrated a new entrance). Pure template
-  // literals (no expressions) are fully described by their first quasi and
-  // stay covered by the pattern selectors above. These hits get their own
-  // message: the policy is "computed sources cannot be checked", not "you
-  // imported serve/".
-  {
-    selector:
-      'ImportExpression:not([source.type="Literal"]):not([source.type="TemplateLiteral"])',
-    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
-  },
-  {
-    selector: 'ImportExpression[source.type="TemplateLiteral"][source.expressions.0]',
-    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
-  },
-  {
-    selector: `${vitestModuleLoadingCallSelector}:not([arguments.0.type="Literal"]):not([arguments.0.type="TemplateLiteral"])`,
-    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
-  },
-  {
-    selector: `${vitestModuleLoadingCallSelector}[arguments.0.type="TemplateLiteral"][arguments.0.expressions.0]`,
-    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
-  },
-];
+// Resolution-based serve boundary guard (#8084, #9144 round-8 decision):
+// a local rule that RESOLVES each import-like specifier against the
+// importing file and reports anything landing inside src/serve/,
+// fail-closed on sources it cannot check statically. It replaces the
+// spelling-by-spelling regex/glob matrix (depth-enumerated globs,
+// per-shape selector regexes, percent/query/fragment/absolute/createRequire
+// special cases) — eight review rounds each demonstrated a new spelling
+// escaping that matrix, because every spelling is just another way to name
+// the same target.
+const serveBoundaryPlugin = {
+  rules: { 'no-serve-boundary-cross': noServeBoundaryCross },
+};
+const configDir = path.dirname(fileURLToPath(import.meta.url));
+const serveBoundaryOptions = {
+  serveDir: path.resolve(configDir, 'packages/cli/src/serve'),
+  baseUrlDir: path.resolve(configDir, 'packages/cli'),
+};
 
 const restrictedRequire = {
   selector: 'CallExpression[callee.name="require"]',
@@ -283,30 +118,23 @@ export default tseslint.config(
   {
     // `runtime/` is the neutral layer acp-integration is directed to; it must
     // not import `serve/` internals itself, or the #8084 boundary reforms
-    // transitively one hop away.
+    // transitively one hop away. Enforced by the resolution-based local rule
+    // (see serveBoundaryPlugin above).
     files: ['packages/cli/src/runtime/**/*.{ts,tsx}'],
+    plugins: { 'qwen-boundary': serveBoundaryPlugin },
     rules: {
-      'no-restricted-imports': [
-        'error',
-        restrictedServeImports(
-          'packages/cli/src/runtime must not import serve/ internals (#8084).',
-        ),
-      ],
+      'qwen-boundary/no-serve-boundary-cross': ['error', serveBoundaryOptions],
     },
-  },
-  {
+  },  {
     // `utils/` is the layer every other directory imports, so it must not
     // import back into one. The daemon direction is clean and enforced here;
     // the remaining `ui/`, `config/`, `i18n/` and `nonInteractive/` edges are
     // tracked in #9146 and will be added to this group as they are resolved.
+    // Enforced by the resolution-based local rule (see serveBoundaryPlugin).
     files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
+    plugins: { 'qwen-boundary': serveBoundaryPlugin },
     rules: {
-      'no-restricted-imports': [
-        'error',
-        restrictedServeImports(
-          'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
-        ),
-      ],
+      'qwen-boundary/no-serve-boundary-cross': ['error', serveBoundaryOptions],
     },
   },
   {
@@ -405,55 +233,16 @@ export default tseslint.config(
       radix: 'error',
       'default-case': 'error',
     },
-  },
-  {
-    // Positioned after the general TS block so the dynamic-import guard is not
-    // overwritten by the shared `no-restricted-syntax` rule.
-    files: ['packages/cli/src/runtime/**/*.{ts,tsx}'],
-    rules: {
-      'no-restricted-syntax': serveGuardSyntaxRules(
-        'packages/cli/src/runtime must not dynamically import serve/ internals (#8084).',
-      ),
-    },
-  },
-  {
-    // Positioned after the general TS block so the dynamic-import guard is not
-    // overwritten by the shared `no-restricted-syntax` rule.
-    files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
-    rules: {
-      'no-restricted-syntax': serveGuardSyntaxRules(
-        'packages/cli/src/utils must not dynamically import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
-      ),
-    },
-  },
-  {
+  },  {
     // ACP integration and the daemon are separate runtime surfaces that happen
     // to share a package directory. ACP may consume neutral contracts under
     // `runtime/`, but never `serve/` implementation modules — see #8084.
-    // Enforcement point is `npm run lint` in CI; fixture coverage lives in
-    // scripts/tests/eslint-boundary-rules.test.js (serve-boundary cases plus
-    // a string-throw probe that pins the restated selectors below).
-    //
-    // Positioned after the general TS block on purpose: flat config lets the
-    // last matching block win per rule, and that block also configures
-    // `no-restricted-syntax` — placing this one earlier would silently lose
-    // the dynamic-import guard below. The shared selectors are restated via
-    // serveGuardSyntaxRules so this override does not drop them.
+    // Enforced by the resolution-based local rule (see serveBoundaryPlugin);
+    // fixture coverage lives in scripts/tests/eslint-boundary-rules.test.js.
     files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
+    plugins: { 'qwen-boundary': serveBoundaryPlugin },
     rules: {
-      'no-restricted-imports': [
-        'error',
-        restrictedServeImports(
-          'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
-        ),
-      ],
-      // no-restricted-imports only visits static import/export declarations;
-      // the same boundary applies to dynamic `await import('../serve/…')`.
-      // The selector regex spells `/` as `\x2f` because esquery cannot parse
-      // a literal slash inside its attribute-regex syntax.
-      'no-restricted-syntax': serveGuardSyntaxRules(
-        'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
-      ),
+      'qwen-boundary/no-serve-boundary-cross': ['error', serveBoundaryOptions],
     },
   },
   {
