@@ -10499,15 +10499,15 @@ exit 1
           'PR',
           'REPO',
           'AUTOFIX_BOT',
-          'UPSERT_SHA256',
-          'UPSERT_LOG',
+          'UPSERT_SRC',
         ]),
       );
-      // Every entry pinned by its exact token, including UPSERT_LOG (the one
-      // isolation entry whose value was unpinned).
+      // Every entry pinned by its exact token, including UPSERT_SRC — the
+      // script CONTENT, which is what makes the staged copy (and its digest
+      // gate, and its check-then-use window) unnecessary.
       for (const entry of [
         'LD_PRELOAD=',
-        'UPSERT_LOG="${UPSERT_LOG}"',
+        'UPSERT_SRC="${UPSERT_SRC}"',
         'PATH="${TRUSTED_PATH}"',
         'GITHUB_TOKEN="${GITHUB_TOKEN}"',
         'GH_HOST=github.com',
@@ -10516,47 +10516,31 @@ exit 1
         'PR="${PR}"',
         'REPO="${REPO}"',
         'AUTOFIX_BOT="${AUTOFIX_BOT}"',
-        'UPSERT_SHA256="${UPSERT_SHA256}"',
       ]) {
         expect(assignments).toContain(entry.replace(/=$/, '='));
       }
-      // R9-1: the bytes that are HASHED are the bytes that RUN. A gate that
-      // hashes a path and then re-opens it to execute loses to a rename(2)
-      // between the two opens (measured: 20/20 payload executions against the
-      // old shape, 0/20 against this one).
-      expect(step).toContain(
-        'UPSERT_SRC="$(cat "${RUNNER_TEMP}/upsert-deferred-issue.sh"; printf x)"',
-      );
-      expect(step).toContain('UPSERT_SRC="${UPSERT_SRC%x}"');
+      // NO AGENT-WRITABLE PATH takes part in the privileged work. The
+      // script content arrives in expression context, so there is nothing
+      // staged to verify: no digest gate, no check-then-use window, no
+      // planted-FIFO or huge-file read. Rounds 9-12 each closed one hole in
+      // the path-based shape; removing the path closes the class.
       expect(step).toContain('bash -c "${UPSERT_SRC}"');
-      expect(step).not.toMatch(
-        /bash "\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh"/,
+      expect(step).not.toMatch(/RUNNER_TEMP\}\/upsert-deferred-issue\.sh/);
+      // …scoped to the upsert child: the step still runs the pre-existing
+      // resanitize digest gate, which is a different staged script.
+      const childBlock = step.slice(
+        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
       );
-      // R8-4: loader side channels (auxv dumps, ldd traces) write to the
-      // LAUNCH's stdout, which is discarded — the child logs to a private
-      // file instead, so no content filter is needed to keep them out of the
-      // parsed output. Path and read-back are fork-free: under a planted
-      // channel every external command in the parent prints to stdout, so
-      // $(mktemp)/$(cat) would return that noise inside the value.
-      expect(step).toContain(
-        'UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"',
-      );
-      // R10-22: the step runs under `bash -eo pipefail`, where `rm -f` on a
-      // planted DIRECTORY exits 1 and kills it; `-rf` clears any shape, and
-      // `set -C` then refuses a symlink planted in between.
-      expect(step).toContain('rm -rf "${UPSERT_LOG}" 2> /dev/null || true');
-      expect(step).toMatch(
-        /if ! \(set -C; : > "\$\{UPSERT_LOG\}"\) 2> \/dev\/null; then/,
-      );
-      expect(step).not.toMatch(/rm -f "\$\{UPSERT_LOG\}"/);
-      // R10-19: `$(<missing)` is fatal under -e and no `|| true` / `if !`
-      // form rescues it (measured), so the file is TESTED before the read.
-      expect(step).toMatch(
-        /if \[\[ -f "\$\{UPSERT_LOG\}" && -r "\$\{UPSERT_LOG\}" \]\]; then\n\s*UPSERT_OUT="\$\(<"\$\{UPSERT_LOG\}"\)"/,
-      );
-      expect(step).toContain('exec > "${UPSERT_LOG}" 2>&1');
-      expect(step).toContain('UPSERT_OUT="$(<"${UPSERT_LOG}")"');
-      expect(step).toMatch(/' > \/dev\/null 2>&1 \|\| true/);
+      expect(childBlock.length).toBeGreaterThan(0);
+      expect(childBlock).not.toMatch(/sha256sum/);
+      // The child's own messages travel on fd 3, which the parent captures,
+      // while fd 1/2 — where every loader side channel writes — are
+      // discarded. No log file to plant, race, or bound.
+      expect(step).toContain('exec >&3');
+      expect(step).toMatch(/' > \/dev\/null 2>&1 ; \} 3>&1 \)"/);
+      expect(step).not.toMatch(/UPSERT_LOG/);
+      expect(step).not.toMatch(/autofix-upsert-log/);
       // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS and
       // LD_SHOW_AUXV are presence-tested — even an empty assignment leaves
       // them on), so liveness is VERIFIED: the child prints a sentinel
@@ -10589,16 +10573,9 @@ exit 1
       // Ordering: the digest gate runs, and ONLY on a match does the staged
       // script execute — both inside the same clean child. A reordering or a
       // gate-condition flip must fail here.
-      const gateIdx = step.indexOf(
-        'if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then',
-      );
       const execIdx = step.indexOf('bash -c "${UPSERT_SRC}"');
-      // Anchor on the launch line: in the failure step the first textual
-      // `/usr/bin/env -i` is a NOTE comment ~560 lines earlier, which made
-      // the gate-after-launch check vacuous there.
       const launchIdx = argStart;
-      expect(gateIdx).toBeGreaterThan(launchIdx);
-      expect(execIdx).toBeGreaterThan(gateIdx);
+      expect(execIdx).toBeGreaterThan(launchIdx);
     }
     expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(2);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
@@ -10609,7 +10586,7 @@ exit 1
     const childCore = (step) =>
       step
         .match(
-          /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?sha256sum \| cut -d" " -f1\)" != "\$\{UPSERT_SHA256\}" \]\]; then[\s\S]*?NOT persisted this round"\n\s*exit 0\n\s*fi/,
+          /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?could not create a gh config dir[^\n]*\n\s*exit 0\n\s*fi\n\s*export GH_CONFIG_DIR/,
         )?.[0]
         .replace(/\s+/g, ' ');
     expect(childCore(pushAndReportStep)).toBeTruthy();
@@ -10621,10 +10598,10 @@ exit 1
     expect(reviewAddressReportStep).toMatch(
       /if \[\[ "\$\{DRY_RUN\}" != "true" && "\$\{STALE:-\}" != "true" && -n "\$\{GITHUB_TOKEN:-\}" \]\]; then(?:(?!\n {10}fi\n)[\s\S])*\/usr\/bin\/env -i(?:(?!\n {10}fi\n)[\s\S])*\n {10}fi\n/,
     );
-    // Pre-stage failures leave UPSERT_SHA256 empty: that skips with a plain
+    // Pre-stage failures leave UPSERT_SRC empty: that skips with a plain
     // notice instead of imitating a tamper alarm.
     expect(reviewAddressReportStep).toMatch(
-      /if \[\[ -z "\$\{UPSERT_SHA256:-\}" \]\]; then[\s\S]*?deferred-findings upsert skipped: stage step never ran[\s\S]*?else[\s\S]*?\/usr\/bin\/env -i/,
+      /if \[\[ -z "\$\{UPSERT_SRC:-\}" \]\]; then[\s\S]*?deferred-findings upsert skipped: stage step never ran[\s\S]*?else[\s\S]*?\/usr\/bin\/env -i/,
     );
     // The failure path can run without POST_HANDOFF's identity check
     // (OUTCOME=fixed/noop), so the clean child verifies the PAT identity.
@@ -10641,9 +10618,7 @@ exit 1
       'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
     );
     expect(idIdx).toBeGreaterThan(
-      reviewAddressReportStep.indexOf(
-        'if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then',
-      ),
+      reviewAddressReportStep.indexOf('LD_PRELOAD= LD_AUDIT='),
     );
     expect(idIdx).toBeLessThan(
       reviewAddressReportStep.indexOf('bash -c "${UPSERT_SRC}"'),
@@ -10664,49 +10639,21 @@ exit 1
       reviewAddressJob.match(
         /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
       )?.[0] ?? '';
-    expect(stageStep).toContain(
-      'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
+    // The script travels as CONTENT captured from the trusted checkout into
+    // expression context — no staged copy on an agent-writable path, hence
+    // no digest to record or verify.
+    expect(stageStep).toContain('echo "upsert_src<<${_upsert_delim}"');
+    expect(stageStep).toContain('cat .github/scripts/upsert-deferred-issue.sh');
+    expect(stageStep).toMatch(
+      /_upsert_delim="EOF_\$\(head -c 16 \/dev\/urandom/,
     );
-    // The digest must be taken AFTER the trusted copy lands, or it records
-    // whatever was already at that path — the gate's whole premise.
-    expect(
-      stageStep.indexOf(
-        'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
-      ),
-    ).toBeLessThan(stageStep.indexOf('echo "upsert_sha256='));
-    // RUNNER_TEMP is agent-writable between staging and invocation, so every
-    // invocation verifies the digest the stage step recorded in expression
-    // context; a mismatch skips persistence (best-effort), never the round.
-    expect(stageStep).toContain(
-      'echo "upsert_sha256=$(sha256sum "${RUNNER_TEMP}/upsert-deferred-issue.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
-    );
-    expect(
-      workflow.split(
-        'if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then',
-      ).length - 1,
-    ).toBe(2);
-    // R5-5: both --paginate sites are pinned at the source (the recording gh
-    // stub ignores the flag). Dropping either silently truncates the lookup
-    // or the dedupe corpus.
-    // Exactly ONE paginated call remains — the tracking issue's own comments,
-    // which is bounded by that issue. The lookup is a bounded, early-exit page
-    // loop instead (a full --paginate there re-downloaded the bot's entire
-    // lifetime corpus on every defer round). The flag is anchored to the
-    // comments call, so relocating it to the lookup fails even though the
-    // count is unchanged.
-    expect(
-      upsertDeferredScript
-        .split('\n')
-        .filter(
-          (l) => !l.trimStart().startsWith('#') && l.includes('--paginate'),
-        ),
-    ).toHaveLength(1);
-    expect(upsertDeferredScript).toMatch(
-      /issues\/\$\{ISSUE_NUM\}\/comments\?per_page=100"[\s\S]{0,40}--paginate/,
+    expect(workflow).not.toMatch(/upsert_sha256/);
+    expect(workflow).not.toMatch(
+      /cp \.github\/scripts\/upsert-deferred-issue\.sh/,
     );
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       expect(step).toContain(
-        "UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'",
+        "UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'",
       );
     }
     expect(reviewAddressJob).toContain(
@@ -11381,6 +11328,20 @@ exit 1
         '[{"id":21,"source":"review","reason":"修复内存泄漏问题"},' +
         '{"id":21,"source":"review","reason":"修复资源泄漏"}]',
     });
+    // RC-1: the resolved-id corpus grows with the round's resolutions, and
+    // one argv element caps at MAX_ARG_STRLEN — the same failure `known`
+    // already avoided. Both corpora go in via --rawfile now.
+    expect(
+      upsertDeferredScript.match(/--rawfile \w+ "\$\{[A-Z_]+\}"/g) ?? [],
+    ).toHaveLength(2);
+    expect(upsertDeferredScript).not.toMatch(/--arg resolved/);
+    const bigResolved = runUpsert({
+      findings: '[{"id":999999,"reason":"not resolved"}]',
+      resolved: Array.from({ length: 40000 }, (_, i) => `rc:${i + 1}`).join(
+        '\n',
+      ),
+    });
+    expect(bigResolved.calls).toContain('- rc:999999 ');
     expect(cjkSiblings.out).toContain('(2 of 2 new)');
     expect(cjkSiblings.calls).toContain('修复内存泄漏问题');
     expect(cjkSiblings.calls).toContain('修复资源泄漏');

@@ -3970,7 +3970,6 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
-          cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
@@ -3985,7 +3984,17 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "upsert_sha256=$(sha256sum "${RUNNER_TEMP}/upsert-deferred-issue.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          # The upsert script travels as CONTENT, not as a staged copy: it
+          # runs in a clean child that reads it from this expression-context
+          # output, so there is no agent-writable copy to protect and no
+          # digest to verify. The delimiter is random per run, so script text
+          # cannot close the heredoc.
+          _upsert_delim="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "upsert_src<<${_upsert_delim}"
+            cat .github/scripts/upsert-deferred-issue.sh
+            echo "${_upsert_delim}"
+          } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -5510,7 +5519,7 @@ jobs:
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
-          UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'
+          UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Growth-brake baseline: written into this window's FIRST report
           # comment only (growth_base_new), so later rounds' first-wins parse
@@ -5720,63 +5729,35 @@ jobs:
               echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
           }
-          # Deferred-findings persistence, shared by both arms below (the
-          # pasted twin diverged once already in review). Verify the staged
-          # copy's digest (recorded in expression context at stage time)
-          # before executing: RUNNER_TEMP is writable by the branch/agent
-          # code that ran in between. Best-effort like the upsert itself —
-          # a mismatch skips persistence, never the round.
+          # Deferred-findings persistence, shared by both arms below.
+          #
+          # No agent-writable path takes part in this. The script CONTENT
+          # travels in expression context — captured at stage time from the
+          # trusted checkout — so there is no staged copy to verify, and with
+          # it go the digest gate, its check-then-use window, and the
+          # planted-FIFO/huge-file reads that a path-based read invites. The
+          # child's own messages travel on fd 3, which the parent captures,
+          # while fd 1/2 are discarded; every loader side channel (auxv dumps,
+          # ldd traces, whatever is next) writes there and cannot reach the
+          # parsed output, and there is no log file to plant, race or bound.
+          #
+          # /usr/bin/env is invoked by ABSOLUTE PATH: bash never does
+          # function/alias lookup on a slash-bearing word, so a planted
+          # BASH_FUNC_env%% cannot intercept the bootstrap. `-i` then drops
+          # every BASH_FUNC_* import, BASH_ENV, SHELLOPTS, alias and trap.
+          # LD_* is the one family env -i cannot block (ld.so acts while
+          # loading env itself), so the ones that MATTER are cleared by
+          # command-prefix assignment and the rest are caught by verifying the
+          # RESULT: the child prints a liveness sentinel first, and its
+          # absence — trace mode, exec failure, a missing interpreter — is
+          # reported rather than passing silently for a successful round.
           run_deferred_upsert() {
-            # Sound isolation, not an in-shell denylist. /usr/bin/env is
-            # invoked by ABSOLUTE PATH: bash never does function/alias lookup
-            # on a slash-bearing word, so a $GITHUB_ENV-planted
-            # BASH_FUNC_env%% cannot intercept it. `-i` then drops every
-            # BASH_FUNC_* import, BASH_ENV, SHELLOPTS, sourced aliases and
-            # traps, so the digest gate and the staged script run in a shell
-            # with only the allow-listed vars below — a clean namespace an
-            # in-shell sweep could never bootstrap from the tainted one. PATH
-            # is the trusted staged value; the child mints its own throwaway
-            # GH_CONFIG_DIR. RUNNER_TEMP stays agent-writable between staging
-            # and here, so the digest is verified INSIDE the child; a
-            # mismatch skips persistence, never the round.
-            # LD_* is the one channel env -i cannot block: ld.so maps a
-            # planted library into /usr/bin/env ITSELF at execve, before -i
-            # runs. Neutralize it with a command-prefix assignment (pure
-            # shell parameter assignment — no function/alias lookup, so no
-            # BASH_FUNC can shadow it — applied to env's own environment).
-            # Enumerating LD_* names cannot be complete: LD_TRACE_LOADED_OBJECTS
-            # and LD_SHOW_AUXV are presence-tested, so even an empty assignment
-            # leaves them ON (measured). Two structural answers instead of a
-            # longer list. (1) SEPARATE THE STREAMS: every loader side channel
-            # writes to the launch process's own stdout, so that stdout is
-            # discarded and the child writes its messages to a private log —
-            # auxv dumps and ldd traces cannot reach the parsed output, with no
-            # content filter to get wrong. (2) VERIFY THE RESULT: the child's
-            # first act is a liveness sentinel, and its absence — trace mode,
-            # exec failure, a missing interpreter — is reported rather than
-            # passing silently for a successful persistence.
-            # The staged script is read ONCE and executed from those exact
-            # bytes: a check-then-use gate (hash the path, then re-open it to
-            # run) loses to a rename(2) between the two opens on this
-            # agent-writable path.
-            # Path from a plain expansion and read back with bash's $(<file)
-            # builtin — no fork on either side. A planted loader channel makes
-            # every EXTERNAL command in this (parent) shell print to stdout, so
-            # $(mktemp) / $(cat) would return that noise inside the value.
-            UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"
-            # This step runs under `bash -eo pipefail`. A watcher can
-            # pre-plant this predictable path, and `rm -f` on a DIRECTORY
-            # exits 1 — fatal — while `-rf` clears any planted shape.
-            # Creating under `set -C` then refuses to follow a symlink
-            # planted between the two, and a creation failure warns
-            # instead of killing the round.
-            rm -rf "${UPSERT_LOG}" 2> /dev/null || true
-            if ! (set -C; : > "${UPSERT_LOG}") 2> /dev/null; then
-              echo '::warning::could not create the upsert log file; deferred findings NOT persisted this round'
-              UPSERT_LOG=''
+            if [[ -z "${UPSERT_SRC:-}" ]]; then
+              # Stage never ran: nothing was deferred either.
+              echo 'deferred-findings upsert skipped: stage step never ran'
+              return 0
             fi
-            if [[ -n "${UPSERT_LOG}" ]]; then
-            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
               LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
               /usr/bin/env -i \
               PATH="${TRUSTED_PATH}" \
@@ -5787,53 +5768,32 @@ jobs:
               PR="${PR}" \
               REPO="${REPO}" \
               AUTOFIX_BOT="${AUTOFIX_BOT}" \
-              UPSERT_SHA256="${UPSERT_SHA256}" \
-              UPSERT_LOG="${UPSERT_LOG}" \
+              UPSERT_SRC="${UPSERT_SRC}" \
               bash --norc -c '
                 set -uo pipefail
-                exec > "${UPSERT_LOG}" 2>&1
+                exec >&3
                 printf "%s\n" "__upsert_child_live__"
                 if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
                   echo "::warning::could not create a gh config dir; deferred findings NOT persisted this round"
                   exit 0
                 fi
                 export GH_CONFIG_DIR
-                UPSERT_SRC="$(cat "${RUNNER_TEMP}/upsert-deferred-issue.sh"; printf x)"
-                UPSERT_SRC="${UPSERT_SRC%x}"
-                if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then
-                  echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
-                  exit 0
-                fi
                 bash -c "${UPSERT_SRC}" ||
                   echo "::warning::deferred-findings upsert failed; continuing"
-              ' > /dev/null 2>&1 || true
-            # `$(<missing)` is FATAL under -e and neither `|| true` nor
-            # `if !` rescues it (measured), so the file is TESTED first.
-            # Still fork-free: a planted loader channel makes every
-            # external command in this shell print to stdout, so
-            # $(cat …) would carry that noise into the value.
-            UPSERT_OUT=''
-            if [[ -f "${UPSERT_LOG}" && -r "${UPSERT_LOG}" ]]; then
-              UPSERT_OUT="$(<"${UPSERT_LOG}")"
-            fi
-            rm -rf "${UPSERT_LOG}" 2> /dev/null || true
+              ' > /dev/null 2>&1 ; } 3>&1 )" || true
             # INSPECTION uses bash builtins only ([[ ]], read, printf — no
-            # exec; the surrounding setup does run rm/mktemp, which is fine):
-            # under loader trace mode every external binary, grep included,
-            # would itself print-and-exit-0, so a grep-based check would be
-            # neutered by the very condition it is meant to detect.
+            # exec): under loader trace mode every external binary, grep
+            # included, would itself print-and-exit-0, so a grep-based check
+            # would be neutered by the very condition it must detect.
             if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
               echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
             fi
-            # The log lives in agent-writable RUNNER_TEMP, so a line-start
-            # `::` reaching this step's stdout would be a workflow command.
-            # Neutralized with the same parameter expansion the rest of the
-            # feature uses a sed for — builtin, no fork.
+            # The child's output is agent-reachable content, so a line-start
+            # `::` is neutralized before it reaches this step's stdout.
             while IFS= read -r _upsert_line; do
               [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
                 printf '%s\n' "${_upsert_line//::/;;}"
             done <<< "${UPSERT_OUT}"
-            fi
           }
 
                     # Take this PAT-bearing step off every mutable host git surface —
@@ -6231,7 +6191,7 @@ jobs:
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
-          UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'
+          UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           # NOTE: the deferred-findings upsert below runs its digest gate,
@@ -6770,42 +6730,16 @@ jobs:
           # push loop's exit paths), this block is the only persistence
           # route left.
           if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
-            if [[ -z "${UPSERT_SHA256:-}" ]]; then
-              # Stage never ran (pre-stage failure): no staged copy exists
-              # and nothing was deferred — a digest "mismatch" here would be
-              # a false tamper alarm, not a signal.
+            if [[ -z "${UPSERT_SRC:-}" ]]; then
+              # Stage never ran (pre-stage failure): nothing was deferred.
               echo 'deferred-findings upsert skipped: stage step never ran'
             else
-              # Sound isolation, same rationale as run_deferred_upsert in
-              # 'Push and report': /usr/bin/env (absolute path — unshadowable
-              # by a planted BASH_FUNC_env%%) with -i drops every BASH_FUNC_*
-              # import, BASH_ENV, SHELLOPTS, alias and trap, so the digest
-              # gate, the PAT bot-identity check (POST_HANDOFF's own check is
-              # skipped on the fixed/noop-outcome path that also reaches here)
-              # and the staged script all run in a clean allow-listed shell.
-              # LD_* enumeration cannot be complete — LD_TRACE_LOADED_OBJECTS and
-              # LD_SHOW_AUXV are presence-tested, so an empty assignment leaves
-              # them ON (measured). Same two structural answers as the twin:
-              # the launch's stdout (where every loader side channel writes) is
-              # discarded while the child logs to a private file, and the
-              # child's liveness is VERIFIED by a sentinel. The staged script is
-              # read ONCE and run from those exact bytes, so a rename(2) between
-              # a hash-the-path check and a re-open cannot swap the payload.
-              # Fork-free path + read-back, same rationale as the twin.
-              UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"
-              # This step runs under `bash -eo pipefail`. A watcher can
-              # pre-plant this predictable path, and `rm -f` on a DIRECTORY
-              # exits 1 — fatal — while `-rf` clears any planted shape.
-              # Creating under `set -C` then refuses to follow a symlink
-              # planted between the two, and a creation failure warns
-              # instead of killing the round.
-              rm -rf "${UPSERT_LOG}" 2> /dev/null || true
-              if ! (set -C; : > "${UPSERT_LOG}") 2> /dev/null; then
-                echo '::warning::could not create the upsert log file; deferred findings NOT persisted this round'
-                UPSERT_LOG=''
-              fi
-              if [[ -n "${UPSERT_LOG}" ]]; then
-              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              # Same shape as run_deferred_upsert in 'Push and report' — no
+              # agent-writable path, content from expression context, child
+              # messages on fd 3 — plus the PAT bot-identity check, because
+              # POST_HANDOFF's own check is skipped on the fixed/noop-outcome
+              # path that also reaches here.
+              UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
               LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
                 /usr/bin/env -i \
                 PATH="${TRUSTED_PATH}" \
@@ -6816,23 +6750,16 @@ jobs:
                 PR="${PR}" \
                 REPO="${REPO}" \
                 AUTOFIX_BOT="${AUTOFIX_BOT}" \
-                UPSERT_SHA256="${UPSERT_SHA256}" \
-                UPSERT_LOG="${UPSERT_LOG}" \
+                UPSERT_SRC="${UPSERT_SRC}" \
                 bash --norc -c '
                   set -uo pipefail
-                  exec > "${UPSERT_LOG}" 2>&1
+                  exec >&3
                   printf "%s\n" "__upsert_child_live__"
                   if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
                     echo "::warning::could not create a gh config dir; deferred findings NOT persisted this round"
                     exit 0
                   fi
                   export GH_CONFIG_DIR
-                  UPSERT_SRC="$(cat "${RUNNER_TEMP}/upsert-deferred-issue.sh"; printf x)"
-                  UPSERT_SRC="${UPSERT_SRC%x}"
-                  if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then
-                    echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
-                    exit 0
-                  fi
                   UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"
                   if [[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                     echo "::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got ${UPSERT_ACTOR:-none}); NOT persisted this round"
@@ -6840,27 +6767,15 @@ jobs:
                   fi
                   bash -c "${UPSERT_SRC}" ||
                     echo "::warning::deferred-findings upsert failed; continuing"
-                ' > /dev/null 2>&1 || true
-              # `$(<missing)` is FATAL under -e and neither `|| true` nor
-              # `if !` rescues it (measured), so the file is TESTED first.
-              # Still fork-free: a planted loader channel makes every
-              # external command in this shell print to stdout, so
-              # $(cat …) would carry that noise into the value.
-              UPSERT_OUT=''
-              if [[ -f "${UPSERT_LOG}" && -r "${UPSERT_LOG}" ]]; then
-                UPSERT_OUT="$(<"${UPSERT_LOG}")"
-              fi
-              rm -rf "${UPSERT_LOG}" 2> /dev/null || true
+                ' > /dev/null 2>&1 ; } 3>&1 )" || true
               # Builtin-only inspection, same rationale as the twin.
               if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
                 echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
               fi
-              # Same neutralization as the twin: the log is agent-reachable.
               while IFS= read -r _upsert_line; do
                 [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
                   printf '%s\n' "${_upsert_line//::/;;}"
               done <<< "${UPSERT_OUT}"
-              fi
             fi
           fi
 

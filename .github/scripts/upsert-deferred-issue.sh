@@ -29,7 +29,8 @@ FINDINGS="${WORKDIR}/deferred-findings.json"
 MERGED=''
 KNOWN_FILE=''
 GH_ERR=''
-trap 'rm -f "${MERGED}" "${KNOWN_FILE}" "${GH_ERR}"' EXIT
+EMPTY_RESOLVED=''
+trap 'rm -f "${MERGED}" "${KNOWN_FILE}" "${GH_ERR}" "${EMPTY_RESOLVED}"' EXIT
 # Every gh call writes its stderr here so the warnings can NAME the cause:
 # a rate limit, an expired/rotated PAT, a transport error and a 404 are
 # indistinguishable when stderr goes to /dev/null, and these warnings are
@@ -230,8 +231,18 @@ fi
 # drop ids already tracked (line-anchored), sanitize path and flatten
 # reason (both agent/branch-influenced), cap the batch. The marker
 # neutralization matches every other agent-derived publish site.
-RESOLVED_RAW=''
-[[ -f "${WORKDIR}/resolved-comments.txt" ]] && RESOLVED_RAW="$(cat "${WORKDIR}/resolved-comments.txt")"
+# --rawfile for BOTH corpora, not just `known`: resolved-comments.txt grows
+# with the round's resolutions and one argv element caps at MAX_ARG_STRLEN,
+# the exact failure the note below describes — passing it as --arg left the
+# same hole this script already closed once.
+RESOLVED_FILE="${WORKDIR}/resolved-comments.txt"
+if [[ ! -f "${RESOLVED_FILE}" ]]; then
+  if ! RESOLVED_FILE="$(mktemp)"; then
+    lost 'could not create a temp file for the resolved-id corpus'
+    exit 0
+  fi
+  EMPTY_RESOLVED="${RESOLVED_FILE}"
+fi
 # --rawfile, not --arg: a large corpus in one argv element hits Linux
 # MAX_ARG_STRLEN and the exec failure would be swallowed into a silent
 # "nothing new" exit.
@@ -242,7 +253,7 @@ RESOLVED_RAW=''
 # &#0064; &commat;) get their `&` escaped — both measured inert against the
 # real renderer; `\@` and bare entity-escaping are NOT. Paths are already
 # reduced to a safe charset (no `@` survives).
-if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RAW}" '
+if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RESOLVED_FILE}" '
   # Identity for the multi-finding sources. LOSSLESS on content: only case
   # and PUNCTUATION are normalized, so the tolerance for rewording survives
   # while every letter of every script does too. The earlier form stripped
