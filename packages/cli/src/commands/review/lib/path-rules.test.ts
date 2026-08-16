@@ -51,10 +51,29 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['docs/notes.java.md', false],
     ['scripts/build.sh', true],
     ['tools/release.bash', true],
+    // pathTool routes .ksh/.dash to shellcheck, so the lane syllabus is owed
+    // to the same files; the rest pin every remaining extension alternative.
+    ['scripts/deploy.ksh', true],
+    ['tools/setup.dash', true],
     ['scripts/win/setup.ps1', true],
+    ['ci/cleanup.zsh', true],
+    ['tools/win/build.bat', true],
+    ['tools/win/setup.cmd', true],
     ['.github/scripts/label-pr.mjs', true],
+    // A document under .github/scripts has no lanes and no shell.
+    ['.github/scripts/README.md', false],
     ['scripts/tests/install-script.test.js', true],
+    ['scripts/tests/install-script.test.mts', true],
     ['packages/cli/scripts/tests/pack.spec.ts', true],
+    // The suite config decides which lanes collect the script tests, and it
+    // carries a live platform gate — the lane-inventory question applies.
+    ['scripts/tests/vitest.config.ts', true],
+    // A Dockerfile's RUN lines are shell in the image's userland; every
+    // spelling pathTool's hadolint branch recognises is governed.
+    ['Dockerfile', true],
+    ['docker/build.dockerfile', true],
+    ['ci/Dockerfile.alpine', true],
+    ['src/mydockerfile', false],
     // A test outside the script layer is not handed a shell syllabus, and a
     // document that merely talks about one is not code.
     ['src/pay.test.ts', false],
@@ -157,6 +176,47 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     // workflow diff needs both, and neither subsumes the other.
     const out = pathRulesFor(['.github/workflows/ci.yml']);
     expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('pins the composite-action branch of the shell rule itself', () => {
+    // A table row only proves SOME rule matched; this pins that the lane
+    // syllabus itself reaches a diff touching only a composite action, whose
+    // `run:` blocks are the miss this rule exists to catch.
+    expect(pathRulesFor(['.github/actions/setup/action.yml'])).toContain(
+      'Shell and CI scripts — the lanes that run them',
+    );
+  });
+
+  it('pairs both checklists on a script-only diff', () => {
+    // The security checklist says the scripts a workflow calls are part of
+    // the workflow, so a diff touching only such a script needs the
+    // expression-injection eyes and the lane eyes together.
+    const out = pathRulesFor(['.github/scripts/pr-safety-precheck.mjs']);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('does not govern non-script files under .github/scripts', () => {
+    // The scripts arm filters on script extensions: a README or JSON fixture
+    // there has no lanes and no shell, so it draws neither checklist.
+    expect(pathRulesFor(['.github/scripts/README.md'])).toBe('');
+  });
+
+  it('attaches to Dockerfiles, and only to the lane checklist', () => {
+    // A RUN line is shell executing in the image's userland — the
+    // Alpine/busybox lane the GNU-ism bullet is written about — but a
+    // Dockerfile is not a workflow, so the security checklist stays absent.
+    const out = pathRulesFor(['Dockerfile']);
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+    expect(out).not.toContain('GitHub Actions workflows');
+  });
+
+  it('attaches to the suite config that decides which lanes collect the tests', () => {
+    // scripts/tests/vitest.config.ts carries the suite's platform gate; a
+    // diff editing that gate is exactly what the lane-inventory question is
+    // for.
+    const out = pathRulesFor(['scripts/tests/vitest.config.ts']);
     expect(out).toContain('Shell and CI scripts — the lanes that run them');
   });
 
