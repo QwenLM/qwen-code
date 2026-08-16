@@ -2850,7 +2850,7 @@ export function registerSessionRoutes(
         .set('Cache-Control', 'no-store')
         .json({
           ...result,
-          events: result.events.map(omitSkillDetailsForSdkSurface),
+          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
         });
     } catch (err) {
       sendBridgeError(res, err, {
