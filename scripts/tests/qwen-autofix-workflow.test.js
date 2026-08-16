@@ -6630,18 +6630,30 @@ exit 1
     // "the PAT is never in the same execution context as branch code". Assert
     // it structurally, so a future step that adds a build/test next to the PAT
     // fails here instead of silently re-opening the class.
-    const steps = workflow.split(/\n {6}- name: /).slice(1);
+    // Resolve the secret WIRING, not step text: a job-level `env:` grants the
+    // PAT to every step in the job, and it lives above the first `- name:`, so
+    // a step-chunk scan attributes it to the PREVIOUS job entirely by accident
+    // (three jobs here wire the PAT that way; their steps are reached today
+    // only because an error message happens to spell the secret's name).
+    const jobs = workflow
+      .slice(workflow.indexOf('\njobs:\n'))
+      .split(/\n {2}(?=[a-z][a-z0-9-]*:\n)/)
+      .slice(1);
     const branchCode =
       /bash "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"|run-agent\.mjs|\bnpm (run|ci|test|install|i|rebuild|exec)\b|\bnpx |\bpnpm |\byarn /;
     const offenders = [];
-    for (const step of steps) {
-      if (!step.includes('CI_DEV_BOT_PAT')) continue;
-      const name = step.split('\n')[0].replace(/'/g, '').trim();
-      const code = step
-        .split('\n')
-        .filter((l) => !l.trim().startsWith('#'))
-        .join('\n');
-      if (branchCode.test(code)) offenders.push(name);
+    for (const job of jobs) {
+      const jobEnv = job.match(/\n {4}env:\n((?: {6}\S.*\n|\n)+)/)?.[1] ?? '';
+      const jobHoldsPat = jobEnv.includes('CI_DEV_BOT_PAT');
+      for (const step of job.split(/\n {6}- name: /).slice(1)) {
+        if (!jobHoldsPat && !step.includes('CI_DEV_BOT_PAT')) continue;
+        const name = step.split('\n')[0].replace(/'/g, '').trim();
+        const code = step
+          .split('\n')
+          .filter((l) => !l.trim().startsWith('#'))
+          .join('\n');
+        if (branchCode.test(code)) offenders.push(name);
+      }
     }
     // The ONE recorded exception: issue triage runs the agent while holding
     // the PAT, but it runs BEFORE any branch is checked out — the working
@@ -6649,6 +6661,22 @@ exit 1
     // branch-authored. Listed explicitly so a NEW agent/build invocation in a
     // PAT step shows up as a failure rather than joining a silent allowlist.
     expect(offenders).toEqual(['Assess candidates']);
+    // Scope, stated so it is not mistaken for more than it is: what the loop
+    // above asserts is STEP-local — no PAT-bearing step also runs branch code.
+    // The job-level property (no PAT anywhere in a job that runs branch code)
+    // does NOT hold yet: issue-autofix still runs its gate inline on the host,
+    // in the same job as the PAT-bearing 'Publish PR'. That is the remaining
+    // half of #9089 — this PR containerizes the review path only — and it is
+    // asserted here as a live fact so containerizing the issue path trips this
+    // and the invariant gets widened with it.
+    const issueAutofixJob =
+      jobs.find((j) => j.startsWith('issue-autofix:')) ?? '';
+    const issueGateStep = issueAutofixJob
+      .split(/\n {6}- name: /)
+      .find((s) => s.startsWith("'Verification gate'"));
+    expect(issueGateStep).toBeTruthy();
+    expect(branchCode.test(issueGateStep)).toBe(true);
+    expect(issueAutofixJob).toContain('CI_DEV_BOT_PAT');
   });
 
   it('escalates to a maintainer-decision handoff when the diff keeps growing past budget (non-convergence)', () => {
