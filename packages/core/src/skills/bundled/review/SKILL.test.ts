@@ -311,6 +311,16 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**say in your Step 6 terminal summary what was trimmed and what it said.**',
     );
+    // Step 8 makes the same promise about the deferral list from the other
+    // end. It drifted once already — the budget can drop the whole list, not
+    // just the entries past its 20-line cap — so pin the qualification here
+    // rather than let the two paragraphs disagree about the same channel.
+    expect(body).toContain(
+      'Their durable record on the PR is the POSTED deferral list',
+    );
+    expect(body).toContain(
+      'it is **not guaranteed**: the list is the first section the body budget trims',
+    );
   });
 
   it('routes both remote-resolution paths through match-remote', () => {

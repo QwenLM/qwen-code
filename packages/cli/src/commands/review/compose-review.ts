@@ -1670,14 +1670,27 @@ function composeReviewBody(
    * WHICH kinds went, so a reader can tell a trimmed disclosure from a
    * disclosure that never existed.
    */
-  const trimNote = (ranks: number[]): Bi => {
+  const trimNote = (ranks: number[], sections: number, cut: boolean): Bi => {
     const named = ranks.map((r) => RANK_NAMES[r]).filter(Boolean);
     const en = named.map((n) => n.en).join(' and ');
     const zh = named.map((n) => n.zh).join('与');
+    // "Nothing blocking was trimmed" is true of the RANKS — both are
+    // non-blocking by construction. It is not true of the tail cut below,
+    // which can reach blocker text, so the claim is dropped exactly when a
+    // cut happened and the truncation notice takes over the subject.
+    const safe = cut
+      ? {
+          en: '',
+          zh: '',
+        }
+      : {
+          en: ' Nothing blocking was trimmed.',
+          zh: '被裁剪的均非阻断内容。',
+        };
     return {
       keep: 1,
-      en: `⚠️ This body was trimmed to fit GitHub's ${BODY_MAX_CHARS}-character review limit: ${en} did not fit (${ranks.length} section(s)). Sentences below that refer to them still hold — read them in the terminal report, and deferred findings in this run's findings artifact. Nothing blocking was trimmed.`,
-      zh: `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，本正文已裁剪：${zh}未能放入（共 ${ranks.length} 个段落）。下方引用它们的句子依然成立——请在终端报告中查看，延后发现另见本次运行的 findings 工件。被裁剪的均非阻断内容。`,
+      en: `⚠️ This body was trimmed to fit GitHub's ${BODY_MAX_CHARS}-character review limit: ${en} did not fit (${sections} section(s)). Sentences below that refer to them still hold — read them in the terminal report, and deferred findings in this run's findings artifact.${safe.en}`,
+      zh: `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，本正文已裁剪：${zh}未能放入（共 ${sections} 个段落）。下方引用它们的句子依然成立——请在终端报告中查看，延后发现另见本次运行的 findings 工件。${safe.zh}`,
     };
   };
 
@@ -1694,6 +1707,32 @@ function composeReviewBody(
    * as a list that was complete.
    */
   const bodyTrim = { sections: 0, deferralList: false, truncated: false };
+  /**
+   * Name what a trim dropped, and say where it can still be read.
+   *
+   * Every exit of `render` that dropped a rank owes this line — the
+   * last-resort path drops ranks AND cuts, and a stderr record naming only
+   * the cut leaves the kinds it dropped disclosed nowhere but the body.
+   * Only rank 1 has a second durable copy (each deferral is a
+   * `D<round>-<n>` entry in the findings artifact); a trimmed disclosure
+   * section survives nowhere but the terminal summary, so ask for it there
+   * rather than pointing at an artifact that does not carry it.
+   */
+  const noteTrimmedRanks = (droppedRanks: number[]): void => {
+    if (droppedRanks.length === 0) return;
+    remediation.push(
+      `body budget: ${droppedRanks
+        .map((r) => RANK_NAMES[r]?.en ?? `rank ${r}`)
+        .join(' and ')} did not fit GitHub's ${BODY_MAX_CHARS}-character ` +
+        `review limit and ${droppedRanks.length === 1 ? 'was' : 'were'} ` +
+        `trimmed from the posted body — ` +
+        (droppedRanks.includes(1)
+          ? `the deferred findings are in the findings artifact; `
+          : '') +
+        `repeat the trimmed sections in your terminal summary, which is ` +
+        `their only other copy`,
+    );
+  };
   const render = (parts: Bi[], sep: string): string => {
     const full = assemble(parts, sep);
     if (full === '' || full.length <= bodyBudget) return full;
@@ -1706,63 +1745,76 @@ function composeReviewBody(
     ].sort((a, b) => a - b);
     let survivors = parts;
     const droppedRanks: number[] = [];
+    // Sections, not ranks: one rank can carry four `Not reviewed:`
+    // paragraphs, and a note reading "(2 section(s))" over five dropped
+    // ones is the same miscount the deferral line was fixed for.
+    let droppedSections = 0;
     for (const rank of ranks) {
       const going = survivors.filter((p) => p.trim === rank).length;
       if (going === 0) continue;
       survivors = survivors.filter((p) => p.trim !== rank);
       droppedRanks.push(rank);
-      const trimmed = assemble([trimNote(droppedRanks), ...survivors], sep);
+      droppedSections += going;
+      const trimmed = assemble(
+        [trimNote(droppedRanks, droppedSections, false), ...survivors],
+        sep,
+      );
       if (trimmed.length <= bodyBudget) {
-        bodyTrim.sections = droppedRanks.length;
+        bodyTrim.sections = droppedSections;
         bodyTrim.deferralList = droppedRanks.includes(1);
-        // Name what went, and say where it can still be read. Only rank 1
-        // has a second durable copy (each deferral is a `D<round>-<n>`
-        // entry in the findings artifact); a trimmed disclosure section
-        // survives nowhere but this terminal summary, so ask for it there
-        // rather than pointing at an artifact that does not carry it.
-        remediation.push(
-          `body budget: ${droppedRanks
-            .map((r) => RANK_NAMES[r]?.en ?? `rank ${r}`)
-            .join(' and ')} did not fit GitHub's ${BODY_MAX_CHARS}-character ` +
-            `review limit and ${droppedRanks.length === 1 ? 'was' : 'were'} ` +
-            `trimmed from the posted body — ` +
-            (droppedRanks.includes(1)
-              ? `the deferred findings are in the findings artifact; `
-              : '') +
-            `repeat the trimmed sections in your terminal summary, which is ` +
-            `their only other copy`,
-        );
+        noteTrimmedRanks(droppedRanks);
         return trimmed;
       }
     }
-    bodyTrim.sections = droppedRanks.length;
+    bodyTrim.sections = droppedSections;
     bodyTrim.deferralList = droppedRanks.includes(1);
     // What remains is un-trimmable by policy — the blockers, the undecided
     // blockers, the sentences that qualify the verdict — and it still
     // overflows. Drop the bilingual fold first: it is pure duplication of
     // text that survives above it, and a cut inside it would leave
-    // unbalanced markup on the PR page. Order the remainder by `keep` so
-    // the tail cut, when one is still needed, spends prose the author
-    // already has before it spends this round's only-copy blockers.
-    const ordered = [
-      ...(droppedRanks.length > 0 ? [trimNote(droppedRanks)] : []),
+    // unbalanced markup on the PR page.
+    const withNote = (cut: boolean): Bi[] => [
+      ...(droppedRanks.length > 0
+        ? [trimNote(droppedRanks, droppedSections, cut)]
+        : []),
       ...survivors,
-    ].sort((a, b) => (a.keep ?? 3) - (b.keep ?? 3));
-    const head = ordered.map((p) => p.en).join(sep);
+    ];
     const footerTail = footer === '' ? '' : `\n\n${footer}`;
-    if (head.length + footerTail.length <= bodyBudget) {
+    // Composition order, because this branch cuts nothing: reordering a
+    // body that survives whole buys no room and files "Unresolved, please
+    // confirm" as a footnote to the 40,000-character blocker above it.
+    const natural = withNote(false)
+      .map((p) => p.en)
+      .join(sep);
+    if (natural.length + footerTail.length <= bodyBudget) {
       // The fold alone was the overflow: nothing is cut, so nothing may
-      // claim a truncation. Say what actually happened.
+      // claim a truncation. Say what actually happened — and do not call
+      // the English text complete when the rank loop above dropped
+      // sections out of it.
       const foldNote =
         `\n\n⚠️ The Chinese translation of this body was dropped to fit ` +
         `GitHub's ${BODY_MAX_CHARS}-character review limit; the English text ` +
-        `above is complete.`;
+        `above is complete${
+          droppedRanks.length > 0
+            ? ' apart from the sections the notice at the top names'
+            : ''
+        }.`;
+      noteTrimmedRanks(droppedRanks);
       remediation.push(
         `body budget: the bilingual fold was dropped to fit GitHub's ` +
-          `${BODY_MAX_CHARS}-character review limit — the English body is complete`,
+          `${BODY_MAX_CHARS}-character review limit — the English body is ` +
+          `complete${
+            droppedRanks.length > 0 ? ' apart from the trimmed sections' : ''
+          }`,
       );
-      return `${head}${foldNote}${footerTail}`;
+      return `${natural}${foldNote}${footerTail}`;
     }
+    // Order the remainder by `keep` so the tail cut spends prose the author
+    // already has before it spends this round's only-copy blockers.
+    const head = withNote(true)
+      .sort((a, b) => (a.keep ?? 3) - (b.keep ?? 3))
+      .map((p) => p.en)
+      .join(sep);
     // A real cut. The notice rides in the protected tail as well as the
     // head, because the cut takes the tail of `head` and a notice that can
     // itself be sliced off discloses nothing.
@@ -1777,6 +1829,7 @@ function composeReviewBody(
       cut = cut.slice(0, -1);
     }
     bodyTrim.truncated = true;
+    noteTrimmedRanks(droppedRanks);
     remediation.push(
       `body budget: read the complete blockers in the terminal report and the ` +
         `findings artifact — the un-trimmable content does not fit the room ` +
@@ -2036,7 +2089,17 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
+      : [
+          // Blocker-grade retention: this is the list of things the review
+          // could not clear, and the tail cut must spend ordinary prose
+          // before it spends any of it. Untagged, it sorted BELOW the
+          // body Criticals and went first, under a notice that still said
+          // nothing blocking had been trimmed.
+          {
+            ...formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath)),
+            keep: 2,
+          },
+        ];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
@@ -2441,6 +2504,17 @@ function composeReviewBody(
     ...(openerParts.length > 0
       ? [
           {
+            // The merge is a rendering detail; it must not launder away the
+            // retention the merged clauses carry. Take the strongest (the
+            // lowest `keep`) — a downgrade disclosure merged into an opener
+            // is still a sentence that qualifies the verdict, and defaulting
+            // it to 3 made it the FIRST thing the tail cut spent. No `trim`
+            // rank rides here: an opener clause never carries one, and
+            // inheriting one would drop untagged text with it.
+            keep: openerParts.reduce(
+              (lowest, c) => Math.min(lowest, c.keep ?? 3),
+              3,
+            ),
             en: openerParts.map((c) => c.en).join(' '),
             zh: openerParts.map((c) => c.zh).join(' '),
           },

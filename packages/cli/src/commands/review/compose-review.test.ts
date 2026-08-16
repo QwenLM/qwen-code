@@ -4979,20 +4979,149 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
   });
 
+  it('keeps the downgrade disclosure through the COMMENT opener merge', () => {
+    // The COMMENT path merges clauses 1-4 into one paragraph. The merge
+    // copied only `en`/`zh`, so every `keep` tag on those clauses was lost
+    // and the merged opener — carrying the downgrade disclosure — became the
+    // FIRST thing the tail cut spent: a posted Critical with no disclosure
+    // that the verdict had been downgraded.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      bodyCriticals: ['C'.repeat(70_000)],
+      presubmit: {
+        downgradeRequestChanges: true,
+        downgradeReasons: ['CI failing'],
+      },
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain('Downgraded from Request changes');
+  });
+
   it('never cuts a surrogate pair when it truncates', () => {
     // The ASCII truncation case could not fail this guard: every cut landed
     // on a single code unit. An astral-plane blocker (CJK Extension B here,
     // as real as an emoji in a quoted log line) puts a surrogate pair on the
     // boundary, where removing the guard leaves a lone high surrogate in the
     // posted body.
+    // The one-character prefix is load-bearing: without it the cut for this
+    // fixture lands BETWEEN pairs, and the test passes with the guard
+    // deleted. Shifting the boundary by one code unit puts it inside one.
     const r = composeReview(
-      base({ bodyCriticals: ['\u{20000}'.repeat(40_000)] }),
+      base({ bodyCriticals: ['q' + '\u{20000}'.repeat(40_000)] }),
     );
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.body).toContain('was TRUNCATED to fit');
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
     expect(r.body.includes('\uFFFD')).toBe(false);
     expect(r.bodyTrim.truncated).toBe(true);
+  });
+
+  it('spends ordinary prose before the undecided blockers — and stops claiming nothing blocking went', () => {
+    // The undecided-blocker list is the record of what the review could not
+    // clear. Untagged it sorted BELOW the body Criticals in the last-resort
+    // order and was spent first, under a notice that still read "Nothing
+    // blocking was trimmed" — a body that dropped a blocker while denying it.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        bodyCriticals: ['C'.repeat(70_000)],
+        cannotTellCriticals: ['ZZZ old blocker — still unresolved'],
+        deferredSuggestions: [nit(1), nit(2)],
+        unreviewedDimensions: ['security — gap'],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain('ZZZ old blocker');
+    expect(r.body).not.toContain('Nothing blocking was trimmed');
+    expect(r.body).toContain('was TRUNCATED to fit');
+    // The truncation exit dropped ranks on its way here, and owes the same
+    // stderr line the rank loop pushes — a record naming only the cut
+    // leaves the kinds it dropped disclosed nowhere but the body.
+    expect(r.remediation.join('\n')).toContain(
+      'repeat the trimmed sections in your terminal summary',
+    );
+  });
+
+  it('a fold-only overflow after a rank drop does not call the English text complete', () => {
+    // Two exits, one claim each, and they contradicted: the rank loop had
+    // dropped sections, then the fold-only exit said the English text above
+    // was complete and pushed only its own stderr line — so the instruction
+    // to recover the dropped sections went nowhere.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { han: true }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      bodyCriticals: ['C'.repeat(40_000)],
+      deferredSuggestions: [nit(1), nit(2)],
+      unreviewedDimensions: ['security — gap'],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(false);
+    expect(r.bodyTrim.sections).toBeGreaterThan(0);
+    expect(r.body).toContain('Chinese translation of this body was dropped');
+    expect(r.body).toContain(
+      'apart from the sections the notice at the top names',
+    );
+    expect(r.remediation.join('\n')).toContain(
+      'repeat the trimmed sections in your terminal summary',
+    );
+  });
+
+  it('does not reorder a body it never cuts', () => {
+    // The `keep` sort exists to steer a CUT. Running it on the fold-only
+    // exit reordered a body that survives whole, filing "Unresolved, please
+    // confirm" as a footnote to the 40,000-character blocker above it.
+    // The unlicensed-deferral disclosure is `keep: 1` and is composed AFTER
+    // the undecided-blocker block (`keep: 2`) — the one pair whose natural
+    // order the sort visibly inverts. Without such a pair every fixture
+    // reads the same sorted or not, which is how the first version of this
+    // test passed under the very mutation it was written to catch.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { han: true }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      deferredSuggestions: [nit(1)],
+      bodyCriticals: ['C'.repeat(40_000)],
+      cannotTellCriticals: ['old blocker — still unresolved'],
+    });
+    expect(r.bodyTrim.truncated).toBe(false);
+    // This must be the fold-only exit: it is the branch under test.
+    expect(r.body).toContain('Chinese translation of this body was dropped');
+    const undecided = r.body.indexOf('old blocker — still unresolved');
+    const unlicensed = r.body.indexOf('deferred without a posture licence');
+    expect(undecided).toBeGreaterThan(-1);
+    expect(unlicensed).toBeGreaterThan(undecided);
+  });
+
+  it('counts the sections it dropped, not the ranks', () => {
+    // One rank can carry four `Not reviewed:` paragraphs. Counting ranks
+    // reported "(2 section(s))" over five dropped ones — and persisted that
+    // number into the artifact.
+    const dims = ['security', 'perf', 'a11y', 'i18n'].map(
+      (d, i) => `${d} — ${'D'.repeat(700)}${i}`,
+    );
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        bodyCriticals: ['B'.repeat(62_000)],
+        deferredSuggestions: [nit(1), nit(2), nit(3)],
+        unreviewedDimensions: dims,
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.sections).toBe(5);
+    expect(r.body).toContain('(5 section(s))');
   });
 
   it('holds room for the ledger marker, so the POSTED body still fits', () => {
