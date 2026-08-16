@@ -276,6 +276,13 @@ vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
 }));
 
+// The ledger append is the wiring under test here, not the ledger itself
+// (run-ledger.test.ts owns that): a silently unwritten ledger would make a
+// later --resume find no prior sessions and re-run everything.
+vi.mock('./lib/run-ledger.js', () => ({
+  appendRunSession: vi.fn(),
+}));
+
 describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -622,5 +629,175 @@ describe('countDiffChangedLines', () => {
       '+q',
     ].join('\n');
     expect(countDiffChangedLines(d)).toBe(4);
+  });
+});
+
+describe('fetch-pr diff identity (diffSha256)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+  });
+
+  async function reportFor() {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: '/tmp/fetch-report.json',
+      maxChunkLines: 400,
+    } as unknown as Parameters<typeof handler>[0]);
+    const call = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    if (!call) throw new Error('report was not written');
+    return JSON.parse(String(call[1]));
+  }
+
+  it('hashes the captured diff bytes — the resume check compares against this', async () => {
+    const diff = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const { createHash } = await import('node:crypto');
+    expect(report.diffSha256).toBe(
+      createHash('sha256').update(Buffer.from(diff)).digest('hex'),
+    );
+  });
+
+  it('hashes the BYTES, not a utf8 decode of them', async () => {
+    // A pure-ASCII fixture cannot see the difference: digests of the Buffer
+    // and of its utf8-decoded string coincide for every valid-UTF-8 diff and
+    // diverge only on invalid bytes — which real diffs of binary-adjacent or
+    // latin1 files do contain. A regression to string-hashing would make the
+    // resume comparison refuse legitimate resumes on exactly those PRs.
+    const bytes = Buffer.concat([
+      Buffer.from('diff --git a/f b/f\n+'),
+      Buffer.from([0xff, 0xfe, 0x80]),
+      Buffer.from('\n'),
+    ]);
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? (bytes as unknown as Buffer) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const { createHash } = await import('node:crypto');
+    expect(report.diffSha256).toBe(
+      createHash('sha256').update(bytes).digest('hex'),
+    );
+    // The decode-then-hash digest differs; equality above rules it out.
+    expect(report.diffSha256).not.toBe(
+      createHash('sha256').update(bytes.toString('utf8')).digest('hex'),
+    );
+  });
+
+  it('is null when no diff was captured', async () => {
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    const report = await reportFor();
+    expect(report.diffSha256).toBeNull();
+  });
+});
+
+describe('fetch-pr run-session ledger wiring', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // clearAllMocks resets call history, NOT implementations — re-assert the
+    // ones the preceding diff-identity describe reprogrammed, so this
+    // suite's "no diff captured" shape is an assertion rather than a
+    // coincidence of whatever final state leaked in.
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation(() => Buffer.from(''));
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+  });
+
+  it('appends the session against the plan it just wrote, after the write', async () => {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: '/tmp/fetch-report.json',
+      maxChunkLines: 400,
+    } as unknown as Parameters<typeof handler>[0]);
+
+    const { appendRunSession } = await import('./lib/run-ledger.js');
+    expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(
+      '/tmp/fetch-report.json',
+    );
+    // After the plan write: the entry must sit inside the run-epoch fence the
+    // readers apply, which is keyed on the plan's mtime.
+    const appendOrder = vi.mocked(appendRunSession).mock.invocationCallOrder[0];
+    const writeIndex = producerMocks.writeFileSync.mock.calls.findIndex(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    // A findIndex miss returns -1, and `.at(-1)` would silently hand back an
+    // unrelated call's order — the assertion below would still pass.
+    expect(writeIndex).toBeGreaterThanOrEqual(0);
+    const writeOrder =
+      producerMocks.writeFileSync.mock.invocationCallOrder[writeIndex];
+    expect(appendOrder).toBeGreaterThan(writeOrder);
   });
 });

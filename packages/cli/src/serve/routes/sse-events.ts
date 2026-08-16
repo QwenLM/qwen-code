@@ -33,6 +33,7 @@ import {
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
 import { parseEventEpochHeader } from '../sse-last-event-id.js';
+import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
@@ -125,6 +126,7 @@ interface RegisterSseEventsRoutesDeps {
 type OmitId<T> = Omit<T, 'id'>;
 
 function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
+  const shaped = omitSkillDetailsForSdkSurface(event);
   // SSE format: id (optional), event (optional), data, blank line.
   // The `id:` line is intentionally omitted when `event.id` is absent —
   // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
@@ -142,7 +144,7 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // `_meta.serverTimestamp`: EventBus stamps normal session frames when they
   // are published so SSE and load/replay share the same event time. Keep this
   // fallback for synthetic frames that do not pass through EventBus.
-  const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const existingMeta = (shaped as { _meta?: Record<string, unknown> })._meta;
   const existingServerTimestamp = existingMeta?.['serverTimestamp'];
   const serverTimestamp =
     typeof existingServerTimestamp === 'number' &&
@@ -150,13 +152,13 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
       ? existingServerTimestamp
       : Date.now();
   const stamped = {
-    ...event,
+    ...shaped,
     _meta: { ...(existingMeta ?? {}), serverTimestamp },
   };
   const dataJson = JSON.stringify(stamped);
   const idLine =
-    'id' in event && event.id !== undefined ? `id: ${event.id}\n` : '';
-  return `${idLine}event: ${event.type}\ndata: ${dataJson}\n\n`;
+    'id' in shaped && shaped.id !== undefined ? `id: ${shaped.id}\n` : '';
+  return `${idLine}event: ${shaped.type}\ndata: ${dataJson}\n\n`;
 }
 
 export function registerSseEventsRoutes(
