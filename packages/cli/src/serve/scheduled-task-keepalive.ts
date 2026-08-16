@@ -93,7 +93,7 @@ export interface KeepaliveBridge {
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; titleSource?: 'manual' | 'auto' },
   ): unknown;
 }
 

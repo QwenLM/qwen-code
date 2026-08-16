@@ -92,7 +92,7 @@ export interface ScheduledTasksSessionBridge {
    * session list (rather than a bare id). Best-effort. */
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; titleSource?: 'manual' | 'auto' },
   ): unknown;
 }
 
