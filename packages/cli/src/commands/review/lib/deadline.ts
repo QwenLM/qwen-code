@@ -40,16 +40,10 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import {
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
-import { promptRecordDir } from './prompt-record.js';
+import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
 export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
@@ -158,36 +152,11 @@ interface RoundStamp {
 const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
 
-/**
- * Slack for the run-epoch fence below: absorbs the sub-millisecond skew
- * between a file mtime (fractional) and `Date.now()` (integral) when a
- * record is written moments after the plan. Real cross-run gaps are minutes
- * to hours; two seconds is noise against them.
- */
-const RUN_EPOCH_SLACK_MS = 2000;
-
-/**
- * The run's epoch: records older than this predate the run and are ignored.
- *
- * The stamps and the stop marker key on the plan path, which is stable per
- * PR — but every run rewrites the plan at its Step 1 capture (`fetch-pr` /
- * `plan-diff` / `capture-local`), so the plan's own mtime dates the run. A
- * budgeted run killed by the outer deadline leaves its records behind (the
- * Step 9 cleanup never ran, and the workflow's start-of-run sweep removes
- * worktrees, not these files); without the fence the next review of the
- * same PR would price its rounds off the previous run's stamps (an
- * hours-old stamp reads as an hours-long round and refuses round 1 of a
- * fresh budget) and cap its verdict on a stop that did not happen in this
- * run. An unstatable plan disables the fence — fail open, like every other
- * malformed input this module reads.
- */
-export function runEpochMs(planPath: string): number {
-  try {
-    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
-  } catch {
-    return Number.NEGATIVE_INFINITY;
-  }
-}
+// The run-epoch fence is shared with every other per-run artifact (the
+// prompt records, the transcripts, the session ledger) — one definition in
+// `prompt-record.ts`, so a change to it cannot apply to some readers and not
+// others. The stamps and the stop marker key on the plan path, which is
+// stable per PR; its mtime dates the run.
 
 /**
  * The admission stamps written so far THIS RUN, oldest first. Unreadable →
