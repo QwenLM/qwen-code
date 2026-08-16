@@ -2607,3 +2607,259 @@ describe('review_requested burst coalescing (#8945)', () => {
     );
   });
 });
+
+describe('fallback comment resilience (PR #8894 incident class)', () => {
+  // The health-probe fail-fast, the fallback-comment job, and the cross-job
+  // marker dedup are the incident's three defenses; reverting any hunk must
+  // fail here, since nothing outside this workflow references the marker.
+  const doc = parse(workflow);
+  const job = doc.jobs['fallback-comment'];
+  const step = job.steps.find((s) => s.name === 'Post fallback comment');
+  const inJobStep = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Post fallback comment on failure',
+  );
+  const health = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Verify runner directory health',
+  );
+  const marker = doc.env?.FALLBACK_MARKER;
+
+  it('defines the fallback marker once and every site references the env', () => {
+    expect(marker).toBe('<!-- qwen-review-fallback -->');
+    // Both comment bodies are built from the variable, and the dedup filter
+    // interpolates it — a hardcoded copy surviving in any run block could be
+    // renamed on one side only, silently breaking cross-job dedup.
+    expect(inJobStep.run).toContain(`printf '%s\\n\\n%s' "$FALLBACK_MARKER"`);
+    expect(step.run).toContain(`printf '%s\\n\\n%s' "$FALLBACK_MARKER"`);
+    expect(step.run).toContain('contains(\\"$FALLBACK_MARKER\\")');
+    for (const run of [inJobStep.run, step.run, health.run]) {
+      expect(run).not.toContain('<!-- qwen-review-fallback -->');
+    }
+  });
+
+  it('keeps every in-job failure body linked to the run and marker-prepended', () => {
+    // All four FAILURE_KIND bodies carry the workflow-logs link — dropping it
+    // from a variant ships a dead-end comment on exactly that failure path.
+    expect(
+      inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
+    ).toHaveLength(4);
+    expect(inJobStep.run).toContain(
+      `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
+    );
+  });
+
+  it('scopes the dedup to the authenticated bot login, resolved dynamically', () => {
+    // upsert-bot-comment.sh protocol: only comments by the authenticated
+    // login are dedup targets, or a participant posting the marker suppresses
+    // the fallback. Resolving the login dynamically (as upsert does) locks
+    // the filter to the account CI_BOT_PAT posts as.
+    expect(step.run).toContain('bot_login="$(gh api user --jq \'.login\')"');
+    expect(step.run).toContain('select(.author.login == \\"$bot_login\\")');
+  });
+
+  it('opens the gate on any upstream failure but never on skip or resolve', () => {
+    expect(job.needs).toEqual(['review-config', 'authorize', 'review-pr']);
+    // Failure-keyed, not != 'success': resolve dispatch runs skip review-pr
+    // BY DESIGN and would otherwise mint false-alarm fallbacks.
+    expect(job.if).toContain("needs.review-pr.result == 'failure'");
+    expect(job.if).toContain("needs.authorize.result == 'failure'");
+    expect(job.if).toContain("needs.review-config.result == 'failure'");
+    expect(job.if).not.toContain("!= 'success'");
+    // Resolve dispatch runs never review, and only there can authorize fail
+    // while review-pr is skipped by design.
+    expect(job.if).toContain("github.event.inputs.command != 'resolve'");
+    expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
+    expect(job.if).toContain("github.event.inputs.review_mode == 'comment'");
+  });
+
+  it('probes the runner root three levels up and _diag when present', () => {
+    const run = health.run;
+    // The workspace sits at <runner-root>/_work/<owner>/<repo>; two levels
+    // resolves to _work and never probes the directory whose _diag/pages
+    // corruption killed the PR #8894 run.
+    expect(run).toContain('GITHUB_WORKSPACE/../../..');
+    expect(run).not.toMatch(/GITHUB_WORKSPACE\/\.\.\/\.\."/);
+    expect(run).toContain('"$HOME"');
+    expect(run).toContain('"${RUNNER_TEMP:?}"');
+    expect(run).toContain('"$RUNNER_ROOT/_diag"');
+    expect(run).toContain('status=1');
+    expect(run.trim()).toMatch(/exit "\$status"$/);
+  });
+
+  // Executed shape: run the step's REAL bash with a stub gh that logs every
+  // call. The stub pre-applies the dedup filter's semantics to the fixture
+  // (the filter's author scope is pinned by the text test above).
+  function runFallbackStep(
+    scenario,
+    {
+      eventName = 'issue_comment',
+      comments = '',
+      runHead = '',
+      prHead = '',
+    } = {},
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      const summary = join(dir, 'summary');
+      const posted = join(dir, 'posted');
+      const commentsFile = join(dir, 'comments');
+      writeFileSync(calls, '');
+      writeFileSync(summary, '');
+      writeFileSync(posted, '');
+      writeFileSync(commentsFile, comments);
+      const stub = (name, body) => {
+        const p = join(bin, name);
+        writeFileSync(p, body);
+        chmodSync(p, 0o755);
+      };
+      stub('sleep', '#!/bin/bash\nexit 0\n');
+      stub(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "gh $*" >> "$CALLS"',
+          'cmd="$1"; sub="${2:-}"',
+          'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
+          '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
+          '  echo "qwen-code-ci-bot"; exit 0',
+          'fi',
+          'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
+          '  [ "${SCENARIO:-}" = "runview_fail" ] && exit 1',
+          '  echo "${RUN_HEAD:-}"; exit 0',
+          'fi',
+          'if [ "$cmd" = "pr" ] && [ "$sub" = "view" ]; then',
+          '  case "$*" in',
+          '    *comments*)',
+          '      [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
+          '      cat "$COMMENTS_FILE"; exit 0 ;;',
+          '    *headRefOid*)',
+          '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
+          '      echo "${PR_HEAD:-}"; exit 0 ;;',
+          '    *state*)',
+          '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
+          '      [ "${SCENARIO:-}" = "pr_closed" ] && echo "MERGED" || echo "OPEN"; exit 0 ;;',
+          '  esac',
+          'fi',
+          'if [ "$cmd" = "pr" ] && [ "$sub" = "comment" ]; then',
+          '  prev=""; body=""',
+          '  for a in "$@"; do [ "$prev" = "--body" ] && body="$a"; prev="$a"; done',
+          '  printf \'%s\' "$body" > "$POSTED"',
+          '  exit 0',
+          'fi',
+          'exit 1',
+        ].join('\n') + '\n',
+      );
+      let status = 0;
+      let stdout = '';
+      try {
+        stdout = execFileSync('bash', ['-c', step.run], {
+          encoding: 'utf8',
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            SCENARIO: scenario,
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            GITHUB_RUN_ID: '12345',
+            GITHUB_EVENT_NAME: eventName,
+            GITHUB_STEP_SUMMARY: summary,
+            PR_NUMBER: '42',
+            RUN_URL: 'https://github.com/QwenLM/qwen-code/actions/runs/12345',
+            FALLBACK_MARKER: marker,
+            RUN_HEAD: runHead,
+            PR_HEAD: prHead,
+            CALLS: calls,
+            COMMENTS_FILE: commentsFile,
+            POSTED: posted,
+          },
+        });
+      } catch (e) {
+        status = e.status ?? 1;
+        stdout = `${e.stdout ?? ''}`;
+      }
+      return {
+        status,
+        stdout,
+        calls: readFileSync(calls, 'utf8'),
+        summary: readFileSync(summary, 'utf8'),
+        posted: readFileSync(posted, 'utf8'),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('posts the marker-headed retry comment when no fallback exists', () => {
+    const r = runFallbackStep('default');
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('dedupes on the marker plus this run URL', () => {
+    const r = runFallbackStep('already', {
+      comments: `${marker}\n\nretry actions/runs/12345 now`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('already exists');
+  });
+
+  it('fails closed when the dedup lookup keeps failing', () => {
+    // A failed listing must never be treated as an empty result — posting
+    // on it is how a transient 5xx mints a permanent duplicate.
+    const r = runFallbackStep('lookup_fail');
+    expect(r.status).toBe(1);
+    expect(r.posted).toBe('');
+    expect(r.stdout).toContain('::error::');
+    expect((r.calls.match(/^gh api user --jq/gm) ?? []).length).toBe(3);
+  });
+
+  it('fails closed when the PR state check itself fails', () => {
+    const r = runFallbackStep('state_fail');
+    expect(r.status).toBe(1);
+    expect(r.posted).toBe('');
+    expect(r.stdout).toContain('::error::');
+  });
+
+  it('skips a non-OPEN PR with exit 0', () => {
+    const r = runFallbackStep('pr_closed');
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('MERGED');
+  });
+
+  it('skips a stale run whose head moved on pull_request_target', () => {
+    const r = runFallbackStep('moved', {
+      eventName: 'pull_request_target',
+      runHead: 'oldsha',
+      prHead: 'newsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    // The skip happens before the dedup lookup is even attempted.
+    expect(r.calls).not.toContain('--json comments');
+  });
+
+  it('still posts on comment/review runs where the head is not comparable', () => {
+    // Comment and review runs report main's tip as headSha, so a naive
+    // comparison would suppress the fallback on the very path the job
+    // exists for; posting wins over silence there.
+    const r = runFallbackStep('moved_comment', {
+      eventName: 'issue_comment',
+      runHead: 'oldsha',
+      prHead: 'newsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+    expect(r.calls).not.toContain('run view');
+  });
+
+  it('degrades to POSTING when the head comparison lookups fail', () => {
+    const r = runFallbackStep('runview_fail', {
+      eventName: 'pull_request_target',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+});
