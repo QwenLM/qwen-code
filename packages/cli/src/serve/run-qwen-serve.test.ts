@@ -232,7 +232,10 @@ describe('buildProviderSetupInputs', () => {
       },
     );
 
-    expect(inputs.preserveModels).toEqual([savedProxy]);
+    expect(inputs.preserveModels).toEqual([
+      savedProxy,
+      { ...legacyCustom, baseUrl: 'https://api.deepseek.com' },
+    ]);
 
     const implicitInputs = buildProviderSetupInputs(
       {
@@ -249,8 +252,49 @@ describe('buildProviderSetupInputs', () => {
     );
     expect(implicitInputs.preserveModels).toEqual([
       savedProxy,
-      legacyCustom,
+      { ...legacyCustom, baseUrl: 'https://api.deepseek.com' },
     ]);
+  });
+
+  it('scopes custom-provider preserved models to the selected endpoint', () => {
+    const firstBaseUrl = 'https://first.example/v1';
+    const secondBaseUrl = 'https://second.example/v1';
+    const firstModel = {
+      id: 'shared-model',
+      baseUrl: firstBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        firstBaseUrl,
+      ),
+    };
+    const secondModel = {
+      id: 'shared-model',
+      baseUrl: secondBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        secondBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 22222 },
+    };
+
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-second',
+        baseUrl: secondBaseUrl,
+        modelIds: ['shared-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [firstModel, secondModel],
+      },
+    );
+
+    expect(inputs.preserveModels).toEqual([secondModel]);
   });
 });
 

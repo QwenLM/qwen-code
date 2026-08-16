@@ -967,6 +967,18 @@ describe('useProviderSetupFlow', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';
     const onSubmit = vi.fn(async () => undefined);
+    const firstPreserved = {
+      id: 'first-custom',
+      baseUrl: firstUrl,
+      envKey: generateCustomEnvKey(AuthType.USE_OPENAI, firstUrl),
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const secondPreserved = {
+      id: 'second-custom',
+      baseUrl: secondUrl,
+      envKey: generateCustomEnvKey(AuthType.USE_OPENAI, secondUrl),
+      generationConfig: { contextWindowSize: 22222 },
+    };
     const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
 
     act(() => {
@@ -984,6 +996,7 @@ describe('useProviderSetupFlow', () => {
           [firstUrl, ['first-custom']],
           [secondUrl, ['second-custom']],
         ]),
+        [firstPreserved, secondPreserved],
       );
       result.current.changeBaseUrl(secondUrl);
     });
@@ -1002,6 +1015,7 @@ describe('useProviderSetupFlow', () => {
         baseUrl: secondUrl,
         apiKey: 'sk-second',
         modelIds: ['second-custom'],
+        preserveModels: [secondPreserved],
       }),
     );
 

@@ -156,7 +156,12 @@ describe('AuthMessageHandler', () => {
     );
     expect(authInteractiveHandler).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'deepseek' }),
-      expect.objectContaining({ preserveModels: [proxyCustom] }),
+      expect.objectContaining({
+        preserveModels: [
+          proxyCustom,
+          { ...legacyCustom, baseUrl: 'https://api.deepseek.com' },
+        ],
+      }),
     );
   });
 

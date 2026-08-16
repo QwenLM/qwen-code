@@ -433,13 +433,16 @@ export class AuthMessageHandler extends BaseMessageHandler {
             (model) =>
               !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
           )
-        : existing?.models.filter((model) => {
-            // Legacy base-URL-less customs are represented by modelIds and
-            // regenerated at the canonical endpoint. Preserving the old
-            // object too would create a duplicate identity.
-            if (model.baseUrl === undefined) return false;
-            if (!isSelectedEndpointModel(model)) return true;
-            return !defaultIdSet.has(model.id) && selectedIdSet.has(model.id);
+        : existing?.models.flatMap((model) => {
+            if (!isSelectedEndpointModel(model)) return [model];
+            if (defaultIdSet.has(model.id) || !selectedIdSet.has(model.id)) {
+              return [];
+            }
+            // Stamp a selected legacy model before identity merging so its
+            // rich configuration survives canonical regeneration.
+            return [
+              model.baseUrl === undefined ? { ...model, baseUrl } : model,
+            ];
           });
     } else {
       modelIds = getDefaultModelIds(provider, baseUrl);

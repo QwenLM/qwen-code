@@ -195,19 +195,22 @@ export function getExistingProviderSetup(
       )
       .map((model) => model.id) ?? [];
   const restoredEndpoint = normalizeBaseUrlForMatching(initialBaseUrl);
-  const preserveModels = (saved?.models ?? []).filter((model) => {
-    if (model.baseUrl === undefined) return false;
-    const modelEndpoint = model.baseUrl ?? initialBaseUrl;
+  const preserveModels = (saved?.models ?? []).flatMap((model) => {
+    if (initialBaseUrl === undefined) return [];
+    const preserved =
+      model.baseUrl === undefined
+        ? { ...model, baseUrl: initialBaseUrl }
+        : model;
+    const modelEndpoint = preserved.baseUrl ?? initialBaseUrl;
     const belongsToAnotherEndpoint =
-      model.baseUrl !== undefined &&
-      normalizeBaseUrlForMatching(model.baseUrl) !== restoredEndpoint;
+      normalizeBaseUrlForMatching(modelEndpoint) !== restoredEndpoint;
     const endpointDefaults = new Set(
       getDefaultModelIds(providerConfig, modelEndpoint),
     );
-    return (
+    const shouldPreserve =
       (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
-      !endpointDefaults.has(model.id)
-    );
+      (!belongsToAnotherEndpoint && !endpointDefaults.has(preserved.id));
+    return shouldPreserve ? [preserved] : [];
   });
   const restoredModelIdSet = new Set(restoredModelIds);
   return {

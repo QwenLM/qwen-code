@@ -485,7 +485,6 @@ export function useProviderSetupFlow(
         }
         const belongsToSelectedMergeEndpoint =
           !provider.mergeModelsByIdentity ||
-          !Array.isArray(provider.baseUrl) ||
           (model.baseUrl !== undefined && !belongsToAnotherEndpoint);
         return (
           belongsToSelectedMergeEndpoint &&

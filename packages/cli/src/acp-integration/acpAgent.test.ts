@@ -409,6 +409,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         models: undefined,
         modelsEditable: true,
         modelNamePrefix: '',
+        mergeModelsByIdentity: true,
         uiGroup: 'third-party',
         ownsModel: (model: { envKey?: string }) =>
           typeof model.envKey === 'string' &&
@@ -12287,7 +12288,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({
         modelIds: ['deepseek-chat', 'legacy-custom'],
-        preserveModels: [proxyModel],
+        preserveModels: [
+          proxyModel,
+          {
+            ...legacyCustom,
+            baseUrl: 'https://api.deepseek.com',
+          },
+        ],
       }),
     );
 
@@ -12301,7 +12308,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({
-        preserveModels: [proxyModel, legacyCustom],
+        preserveModels: [
+          proxyModel,
+          {
+            ...legacyCustom,
+            baseUrl: 'https://api.deepseek.com',
+          },
+        ],
       }),
     );
 
@@ -13084,6 +13097,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         apiKey: 'sk-second',
         baseUrl: secondBaseUrl,
+        preserveModels: [
+          expect.objectContaining({
+            id: 'custom-model',
+            baseUrl: secondBaseUrl,
+          }),
+        ],
       }),
     );
     expect(buildInstallPlan).not.toHaveBeenCalledWith(

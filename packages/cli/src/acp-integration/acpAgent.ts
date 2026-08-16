@@ -2419,30 +2419,23 @@ function readProviderSetupInputs(
     modelProviders,
     protocol ?? config.protocol,
   )?.models;
-  const preserveModels = existingModels?.filter((model) => {
+  const preserveModels = existingModels?.flatMap((model) => {
+    const preserved =
+      model.baseUrl === undefined ? { ...model, baseUrl } : model;
     if (!config.mergeModelsByIdentity) {
-      // Base-URL-less legacy customs are regenerated at the selected
-      // canonical endpoint from their requested ID. Preserving the legacy
-      // object as well would give it a distinct identity and create a
-      // duplicate entry.
-      if (model.baseUrl === undefined) {
-        return !hasExplicitModelIds && !defaultModelIdSet.has(model.id);
-      }
       const belongsToAnotherEndpoint =
-        normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint;
-      return (
+        normalizeBaseUrlForMatching(preserved.baseUrl) !== selectedEndpoint;
+      const shouldPreserve =
         belongsToAnotherEndpoint ||
-        (!defaultModelIdSet.has(model.id) &&
-          (!hasExplicitModelIds || requestedModelIdSet.has(model.id)))
-      );
+        (!defaultModelIdSet.has(preserved.id) &&
+          (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)));
+      return shouldPreserve ? [preserved] : [];
     }
-    return (
-      !defaultModelIdSet.has(model.id) &&
-      (!hasExplicitModelIds || requestedModelIdSet.has(model.id)) &&
-      (!Array.isArray(config.baseUrl) ||
-        (model.baseUrl !== undefined &&
-          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint))
-    );
+    const shouldPreserve =
+      !defaultModelIdSet.has(preserved.id) &&
+      (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)) &&
+      normalizeBaseUrlForMatching(preserved.baseUrl) === selectedEndpoint;
+    return shouldPreserve ? [preserved] : [];
   });
 
   return {

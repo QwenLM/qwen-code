@@ -971,29 +971,32 @@ export function buildProviderSetupInputs(
     helpers.getDefaultModelIds,
   );
   const defaultIds = new Set(helpers.getDefaultModelIds(provider, baseUrl));
+  const requestedIds = new Set(modelIds);
   const hasExplicitModelIds = req.modelIds !== undefined;
   const selectedEndpoint = helpers.normalizeBaseUrlForMatching?.(baseUrl);
-  const preserveModels = helpers.existingModels?.filter((model) => {
+  const preserveModels = helpers.existingModels?.flatMap((model) => {
+    const preserved =
+      model.baseUrl === undefined ? { ...model, baseUrl } : model;
     if (!provider.mergeModelsByIdentity) {
-      // A base-URL-less legacy custom is rebuilt at the resolved endpoint
-      // from modelIds. Carrying the old object too would create a second,
-      // identity-distinct copy.
-      if (model.baseUrl === undefined) {
-        return !hasExplicitModelIds && !defaultIds.has(model.id);
-      }
-      return (
-        !defaultIds.has(model.id) ||
-        helpers.normalizeBaseUrlForMatching?.(model.baseUrl) !==
-          selectedEndpoint
-      );
+      const belongsToAnotherEndpoint =
+        helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) !==
+        selectedEndpoint;
+      const shouldPreserve =
+        belongsToAnotherEndpoint ||
+        (!defaultIds.has(preserved.id) &&
+          (!hasExplicitModelIds || requestedIds.has(preserved.id)));
+      return shouldPreserve ? [preserved] : [];
     }
-    return (
-      !defaultIds.has(model.id) &&
-      (!Array.isArray(provider.baseUrl) ||
-        (model.baseUrl !== undefined &&
-          helpers.normalizeBaseUrlForMatching?.(model.baseUrl) ===
-            selectedEndpoint))
-    );
+    const selectedModel =
+      helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) ===
+      selectedEndpoint;
+    const selectedByEditableFreeForm =
+      provider.baseUrl !== undefined || requestedIds.has(preserved.id);
+    const shouldPreserve =
+      selectedModel &&
+      !defaultIds.has(preserved.id) &&
+      (!hasExplicitModelIds || selectedByEditableFreeForm);
+    return shouldPreserve ? [preserved] : [];
   });
   return {
     ...(provider.protocolOptions ? { protocol } : {}),

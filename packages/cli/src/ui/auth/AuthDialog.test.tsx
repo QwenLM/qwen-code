@@ -389,7 +389,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         ['https://api.kimi.com/coding/v1', ['k3-256k', 'custom-code-model']],
         ['https://api.moonshot.ai/v1', ['kimi-k3', 'custom-kimi-model']],
       ]),
-      preserveModels: [codeCustom, apiCustom],
+      preserveModels: [codeCustom],
     });
   });
 
@@ -492,6 +492,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           id: 'legacy-custom',
           name: '[DeepSeek] legacy-custom',
           envKey: 'DEEPSEEK_API_KEY',
+          generationConfig: { contextWindowSize: 54321 },
         },
         {
           id: 'proxy-custom',
@@ -506,6 +507,13 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     expect(setup.customModelIds).toContain('legacy-custom');
     expect(setup.customModelIds).not.toContain('proxy-custom');
     expect(setup.preserveModels).toEqual([
+      {
+        id: 'legacy-custom',
+        name: '[DeepSeek] legacy-custom',
+        baseUrl: 'https://api.deepseek.com',
+        envKey: 'DEEPSEEK_API_KEY',
+        generationConfig: { contextWindowSize: 54321 },
+      },
       {
         id: 'proxy-custom',
         name: '[DeepSeek] proxy-custom',
@@ -541,7 +549,15 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
     expect(setup.initialBaseUrl).toBe('https://api.deepseek.com');
     expect(setup.customModelIds).toEqual(['legacy-custom']);
-    expect(setup.preserveModels).toEqual([proxyCustom]);
+    expect(setup.preserveModels).toEqual([
+      {
+        id: 'legacy-custom',
+        name: '[DeepSeek] legacy-custom',
+        baseUrl: 'https://api.deepseek.com',
+        envKey: 'DEEPSEEK_API_KEY',
+      },
+      proxyCustom,
+    ]);
   });
 
   it('seeds no trims or customs for a provider without saved models', () => {
@@ -604,16 +620,6 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         {
           id: 'gpt-oss',
           baseUrl: 'https://y.example/v1',
-          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
-        },
-        {
-          id: 'llama',
-          baseUrl: 'https://x.example/v1',
-          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
-        },
-        {
-          id: 'x-shared-env',
-          baseUrl: 'https://x.example/v1',
           envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
         },
         {
