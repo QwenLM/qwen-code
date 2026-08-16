@@ -168,6 +168,7 @@ class FakeBridge {
       ) => Promise<unknown>)
     | undefined;
   lastSetModel: unknown;
+  lastSetModelContext: { clientId?: string } | undefined;
   lastSpawnScope: string | undefined;
   lastRequestedSessionId: string | undefined;
   closeShouldThrow = false;
@@ -180,6 +181,7 @@ class FakeBridge {
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
+  branchAttached = false;
   spawnSessionId = 'sess-1';
   honorRequestedSessionId = true;
   spawnAttached = false;
@@ -193,6 +195,11 @@ class FakeBridge {
   loadState: Record<string, unknown> = { replayed: true };
   loadPartial: true | undefined;
   loadReplayError: string | undefined;
+  branchRequests: Array<{
+    sessionId: string;
+    name?: string;
+    clientId?: string;
+  }> = [];
 
   closedSessions: string[] = [];
 
@@ -235,6 +242,29 @@ class FakeBridge {
       state: this.loadState,
       ...(this.loadPartial ? { partial: this.loadPartial } : {}),
       ...(this.loadReplayError ? { replayError: this.loadReplayError } : {}),
+    };
+  }
+
+  async branchSession(
+    sessionId: string,
+    req: { name?: string },
+    context?: { clientId?: string },
+  ) {
+    this.branchRequests.push({
+      sessionId,
+      ...(req.name !== undefined ? { name: req.name } : {}),
+      ...(context?.clientId !== undefined
+        ? { clientId: context.clientId }
+        : {}),
+    });
+    return {
+      sessionId: 'branch-1',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: this.branchAttached,
+      clientId: 'client-branch',
+      state: this.loadState,
+      displayName: req.name ?? 'Branch',
+      forkedFrom: { sessionId, displayName: sessionId },
     };
   }
 
@@ -312,8 +342,13 @@ class FakeBridge {
     return true;
   }
 
-  async setSessionModel(_s: string, req: unknown) {
+  async setSessionModel(
+    _s: string,
+    req: unknown,
+    context?: { clientId?: string },
+  ) {
     this.lastSetModel = req;
+    this.lastSetModelContext = context;
     return { modelServiceId: 'qwen-max' };
   }
 
@@ -3528,6 +3563,100 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await sess.body?.cancel(); // release the long-lived SSE socket
   });
 
+  it('session/fork owns the restored v1 branch', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 2);
+    await new Promise((r) => setTimeout(r, 50));
+    await newSession(connId);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'session/fork',
+      params: { sessionId: 'sess-1', name: 'Forked' },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      result: { sessionId: string };
+    }>;
+    expect(frames[1]).toMatchObject({
+      id: 21,
+      result: { sessionId: 'branch-1' },
+    });
+    expect(bridge.branchRequests).toEqual([
+      {
+        sessionId: 'sess-1',
+        name: 'Forked',
+        clientId: 'client-1',
+      },
+    ]);
+    expect(bridge.loadRequests).toEqual([]);
+    const sessionStream = await openStream(connId, 'branch-1');
+    expect(sessionStream.status).toBe(200);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'session/set_model',
+      params: { sessionId: 'branch-1', modelId: 'qwen-max' },
+    });
+    await vi.waitFor(() =>
+      expect(bridge.lastSetModelContext).toMatchObject({
+        clientId: 'client-branch',
+      }),
+    );
+    await sessionStream.body?.cancel();
+  });
+
+  it.each([
+    { attached: true, cleanup: 'detach' },
+    { attached: false, cleanup: 'kill' },
+  ] as const)(
+    '$cleanup a restored fork when the connection closes before the reply',
+    async ({ attached, cleanup }) => {
+      let releaseBranch!: () => void;
+      const branchGate = new Promise<void>((resolve) => {
+        releaseBranch = resolve;
+      });
+      bridge.branchAttached = attached;
+      const originalBranch = bridge.branchSession.bind(bridge);
+      vi.spyOn(bridge, 'branchSession').mockImplementation(async (...args) => {
+        const result = await originalBranch(...args);
+        await branchGate;
+        return result;
+      });
+      const connId = await initialize();
+      await newSession(connId);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 24,
+        method: 'session/fork',
+        params: { sessionId: 'sess-1', name: 'Forked' },
+      });
+      await vi.waitFor(() => expect(bridge.branchRequests).toHaveLength(1));
+
+      await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': connId },
+      });
+      releaseBranch();
+
+      if (cleanup === 'detach') {
+        await vi.waitFor(() =>
+          expect(bridge.detached).toContainEqual({
+            sessionId: 'branch-1',
+            clientId: 'client-branch',
+          }),
+        );
+        expect(bridge.killed).not.toContain('branch-1');
+      } else {
+        await vi.waitFor(() => expect(bridge.killed).toContain('branch-1'));
+        expect(bridge.detached).not.toContainEqual(
+          expect.objectContaining({ sessionId: 'branch-1' }),
+        );
+      }
+    },
+  );
+
   it('session/load reports partial replay status under qwen _meta', async () => {
     bridge.loadState = {
       replayed: true,
@@ -6165,6 +6294,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.arrayContaining(['stream_error', 'client_evicted']),
     );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
+  });
+
+  it('keeps availableSkillDetails verbatim on pumped session_update frames (#9234)', async () => {
+    // Mirror of the SSE redaction tests: the SDK/browser surface strips
+    // `_meta.availableSkillDetails`, but the /acp surface must keep
+    // delivering it untouched — desktop clients parse the skill bodies
+    // for display/editing.
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    const got = takeFrames(sess, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const skillDetails = [
+      { name: 'bugfix', body: 'skill body', filePath: '/skills/bugfix' },
+    ];
+    bridge.queues.get('sess-1')?.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'help', description: 'Help' }],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: skillDetails,
+          },
+        },
+      },
+    });
+    const frames = (await got) as Array<{
+      method: string;
+      params: {
+        sessionId: string;
+        update: { _meta?: { availableSkillDetails?: unknown } };
+      };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'help', description: 'Help' }],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: skillDetails,
+          },
+        },
+      },
+    });
   });
 
   it('session/load while a session/close is in-flight → rejected (TOCTOU guard)', async () => {

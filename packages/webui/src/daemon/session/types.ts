@@ -270,6 +270,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   /**
    * When true, the daemon strips orphaned user entries from the chat
@@ -304,6 +305,14 @@ export interface GetTasksActionOptions {
 
 export interface DaemonPromptImage {
   data: string;
+  mimeType?: string;
+  mediaType?: string;
+  media_type?: string;
+}
+
+export interface DaemonPromptFile {
+  name: string;
+  text: string;
   mimeType?: string;
   mediaType?: string;
   media_type?: string;
@@ -473,7 +482,12 @@ export interface DaemonSessionActions {
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
-  ): Promise<{ sessionId: string; displayName: string }>;
+    atRecordId?: string,
+  ): Promise<{
+    sessionId: string;
+    displayName: string;
+    switchStarted: boolean;
+  }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 

@@ -998,10 +998,32 @@ export interface BranchSessionRequest {
   name?: string;
 }
 
-export interface DaemonBranchedSession extends DaemonRestoredSession {
+export interface HistoricalBranchSessionRequest extends BranchSessionRequest {
+  atRecordId: string;
+}
+
+export type DaemonBranchSessionRequest =
+  | BranchSessionRequest
+  | HistoricalBranchSessionRequest;
+
+export interface DaemonBranchPoint {
+  assistantRecordUuid: string;
+  checkpointUuid: string;
+}
+
+export interface DaemonPersistedBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }
+
+export interface DaemonBranchedSession
+  extends DaemonRestoredSession,
+    DaemonPersistedBranchedSession {}
+
+export type DaemonBranchSessionResult =
+  | DaemonBranchedSession
+  | DaemonPersistedBranchedSession;
 
 export interface SideTaskSessionRequest {
   name?: string;
@@ -3807,6 +3829,7 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
