@@ -44,7 +44,7 @@ import {
   roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
-import { MAX_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
+import { LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   HOSTNAME_RE,
@@ -973,7 +973,9 @@ function composeReviewBody(
       }
       budgetEntry = isRoundCap
         ? roundCapStopDisclosure(
-            typeof stop.cap === 'number' ? stop.cap : MAX_REVERSE_AUDIT_ROUNDS,
+            typeof stop.cap === 'number'
+              ? stop.cap
+              : LARGE_REVERSE_AUDIT_ROUNDS,
           )
         : budgetStopDisclosure(stop.round ?? undefined);
       coverageEntries.push(budgetEntry);
