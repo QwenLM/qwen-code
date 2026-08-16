@@ -17696,6 +17696,68 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('does not reap retained media while a restore of the session is in flight', async () => {
+      // A restore registers inFlightRestores synchronously but lands in byId
+      // only after the async channel-spawn/loadSession gap. A sweep tick
+      // inside that gap must not release the media being restored, or the
+      // restored session non-deterministically loses every attachment.
+      vi.useFakeTimers();
+      const handles: ChannelHandle[] = [];
+      const load = deferred<LoadSessionResponse>();
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({ loadSessionImpl: () => load.promise });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 0,
+        sessionRestoreTimeoutMs: 4 * 60 * 60 * 1_000,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const reference = await bridge.storeSessionMedia(
+          session.sessionId,
+          Uint8Array.of(1),
+          'image/png',
+          { clientId: session.clientId },
+        );
+
+        // Crash path: entry removed from byId, media retained with a
+        // detachedAt stamp.
+        handles[0]!.crash();
+        await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+        // Start the restore and hold it open inside the loadSession gap.
+        const restore = bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+        });
+        await vi.waitFor(() => {
+          expect(handles).toHaveLength(2);
+          expect(handles[1]!.agent.loadSessionCalls).toHaveLength(1);
+        });
+
+        // Sweep ticks straddling the TTL boundary land inside the gap.
+        await vi.advanceTimersByTimeAsync(3 * 60 * 60 * 1_000 + 61_000);
+
+        load.resolve({});
+        await restore;
+
+        // The retained media survived the restore.
+        const media = await bridge.readSessionMedia(
+          session.sessionId,
+          reference.mediaId,
+        );
+        expect(media).toBeDefined();
+        expect([...(media?.data ?? [])]).toEqual([1]);
+      } finally {
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
     it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {

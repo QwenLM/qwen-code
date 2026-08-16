@@ -185,6 +185,22 @@ function contentHasDegradedMedia(
   });
 }
 
+// A transient hydration failure (anything but 404/410) returns the raw
+// reference block — an image-shaped block without string `data` — instead of
+// the placeholder (DaemonSessionClient.hydrateBlock). Treat it as provisional
+// degradation: the daemon still holds the blob, so a later hydrated snapshot
+// upgrades the row back, while editing it must stay blocked.
+function contentHasUnhydratedMedia(
+  content: readonly PromptContentBlock[] | undefined,
+): boolean {
+  if (!content || content.length === 0) return false;
+  return content.some((block) => {
+    if (typeof block !== 'object' || block === null) return false;
+    const record = block as Record<string, unknown>;
+    return record['type'] === 'image' && typeof record['data'] !== 'string';
+  });
+}
+
 function toStoreFiles(
   files: readonly PromptFile[] | undefined,
 ): Array<{ name: string; mimeType: string }> | undefined {
@@ -406,7 +422,10 @@ export function useQueuedPrompts({
           ...(serverImages ? { images: serverImages } : {}),
           serverPromptId: serverPrompt.promptId,
           serverState: serverPrompt.state,
-          payloadCompleteness: 'summary-only',
+          // A row rebuilt with hydrated images is payload-complete; pinning
+          // it to summary-only would disable editing until the user deletes
+          // (and loses) the attachments.
+          payloadCompleteness: serverImages ? undefined : 'summary-only',
         });
       }
       if (areQueuedPromptsEqual(queuedPromptsRef.current, next)) return;
@@ -531,7 +550,11 @@ export function useQueuedPrompts({
         const message = snapshot.messages.find(
           (item) => item.messageId === prompt.midTurnMessageId,
         );
-        if (!message || contentHasDegradedMedia(message.content)) {
+        if (
+          !message ||
+          contentHasDegradedMedia(message.content) ||
+          contentHasUnhydratedMedia(message.content)
+        ) {
           return prompt;
         }
         const hydrated = contentToImages(message.content);
@@ -574,9 +597,13 @@ export function useQueuedPrompts({
           text: message.text,
           ...(images ? { images } : {}),
           // A hydration-failure placeholder in the snapshot means the row's
-          // attachments are gone from the client; degrade it like a
-          // summary-only row so editing cannot silently discard them.
-          ...(salvaged === undefined && contentHasDegradedMedia(message.content)
+          // attachments are gone from the client; an unhydrated reference
+          // means they are transiently unreachable. Degrade both like a
+          // summary-only row so editing cannot silently discard them — a
+          // later hydrated snapshot upgrades the provisional case back.
+          ...(salvaged === undefined &&
+          (contentHasDegradedMedia(message.content) ||
+            contentHasUnhydratedMedia(message.content))
             ? { payloadCompleteness: 'summary-only' as const }
             : {}),
           midTurnState: 'queued',

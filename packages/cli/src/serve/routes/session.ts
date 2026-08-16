@@ -205,6 +205,63 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // 256 matches the session media store's item cap, so a message can still
 // reference every stored item.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
+
+// Shared per-block validation for the prompt and mid-turn routes. SVG can
+// carry scripts; this origin also hosts the daemon API and Web Shell UI, and
+// stored bytes are served back to browsers — raster formats only, matching
+// the upload route's policy.
+type MediaBlockParseResult =
+  | { valid: true; block: BridgePromptContentBlock }
+  | { valid: false; code: 'not-object' | 'invalid-shape' | 'svg' };
+
+function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
+  if (typeof block !== 'object' || block === null || Array.isArray(block)) {
+    return { valid: false, code: 'not-object' };
+  }
+  const record = block as Record<string, unknown>;
+  const type = record['type'];
+  const data = record['data'];
+  const mediaId = record['mediaId'];
+  const mimeType = record['mimeType'];
+  const size = record['size'];
+  const inline = typeof data === 'string' && data.length > 0;
+  const reference =
+    typeof mediaId === 'string' &&
+    mediaId.length > 0 &&
+    typeof size === 'number' &&
+    Number.isSafeInteger(size) &&
+    size > 0;
+  if (
+    type !== 'image' ||
+    inline === reference ||
+    typeof mimeType !== 'string' ||
+    !mimeType.startsWith(`${type}/`)
+  ) {
+    return { valid: false, code: 'invalid-shape' };
+  }
+  if (mimeType === 'image/svg+xml') {
+    return { valid: false, code: 'svg' };
+  }
+  return {
+    valid: true,
+    block: inline
+      ? ({ type, data, mimeType } as BridgePromptContentBlock)
+      : ({ type, mediaId, mimeType, size } as BridgePromptContentBlock),
+  };
+}
+
+function mediaBlockParseError(
+  code: 'not-object' | 'invalid-shape' | 'svg',
+  entryLabel: string,
+): string {
+  if (code === 'not-object') {
+    return `each ${entryLabel} must be a media content block`;
+  }
+  if (code === 'svg') {
+    return 'SVG images are not supported';
+  }
+  return `each ${entryLabel} must be an image block with either \`data\`, or \`mediaId\` and \`size\`, plus a matching \`mimeType\``;
+}
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/side-task',
@@ -3465,6 +3522,21 @@ export function registerSessionRoutes(
           });
           return;
         }
+        // Same per-block validation as the mid-turn route, scoped to image
+        // blocks: a malformed image admitted here only fails the ACP child's
+        // schema parse later, surfacing an async turn error instead of a
+        // synchronous 400. Other non-text blocks (legacy inline audio,
+        // embedded resources) keep their pre-existing child-side validation.
+        for (const item of prompt) {
+          if ((item as Record<string, unknown>)['type'] !== 'image') continue;
+          const parsed = parseMediaContentBlock(item);
+          if (!parsed.valid) {
+            res.status(400).json({
+              error: mediaBlockParseError(parsed.code, '`prompt` image block'),
+            });
+            return;
+          }
+        }
         const rawRequestDeadline = body['deadlineMs'];
         let requestDeadlineMs: number | undefined;
         if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
@@ -4921,51 +4993,14 @@ export function registerSessionRoutes(
           }
           mediaBlocks = [];
           for (const block of rawContent) {
-            if (
-              typeof block !== 'object' ||
-              block === null ||
-              Array.isArray(block)
-            ) {
+            const parsed = parseMediaContentBlock(block);
+            if (!parsed.valid) {
               res.status(400).json({
-                error: 'each `content` entry must be a media content block',
+                error: mediaBlockParseError(parsed.code, '`content` entry'),
               });
               return;
             }
-            const record = block as Record<string, unknown>;
-            const type = record['type'];
-            const data = record['data'];
-            const mediaId = record['mediaId'];
-            const mimeType = record['mimeType'];
-            const size = record['size'];
-            const inline = typeof data === 'string' && data.length > 0;
-            const reference =
-              typeof mediaId === 'string' &&
-              mediaId.length > 0 &&
-              typeof size === 'number' &&
-              Number.isSafeInteger(size) &&
-              size > 0;
-            if (
-              type !== 'image' ||
-              inline === reference ||
-              typeof mimeType !== 'string' ||
-              !mimeType.startsWith(`${type}/`)
-            ) {
-              res.status(400).json({
-                error:
-                  'each `content` entry must be an image block with either `data`, or `mediaId` and `size`, plus a matching `mimeType`',
-              });
-              return;
-            }
-            mediaBlocks.push(
-              inline
-                ? ({ type, data, mimeType } as BridgePromptContentBlock)
-                : ({
-                    type,
-                    mediaId,
-                    mimeType,
-                    size,
-                  } as BridgePromptContentBlock),
-            );
+            mediaBlocks.push(parsed.block);
           }
         }
         if (trimmed.length === 0 && mediaBlocks === undefined) {

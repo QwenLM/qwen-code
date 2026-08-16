@@ -92,6 +92,8 @@ describe('parseSidechannelMidTurnInjected', () => {
   });
 
   it('preserves empty slots for image-only messages', () => {
+    // The renderability gate keeps the frame (image item), but the hydrated
+    // items themselves are never carried into the sidechannel payload.
     expect(
       parseSidechannelMidTurnInjected({
         type: 'mid_turn_message_injected',
@@ -110,11 +112,6 @@ describe('parseSidechannelMidTurnInjected', () => {
       sessionId: 's-1',
       messages: [''],
       messageIds: ['mid-image'],
-      items: [
-        {
-          content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
-        },
-      ],
     });
   });
 
@@ -138,25 +135,52 @@ describe('parseSidechannelMidTurnInjected', () => {
       sessionId: 's-1',
       messages: [''],
       messageIds: ['mid-gone'],
-      items: [{ content: [{ type: 'text', text: placeholder }] }],
     });
   });
 
-  it('drops misaligned items', () => {
+  it('survives a misaligned renderable frame exactly like the SDK normalizer', () => {
+    // The SDK normalizer's hasRenderableItemContent evaluates the RAW items
+    // array with no index-alignment precondition. The parser must agree, or
+    // the two consumers of the same frame disagree: the normalizer renders
+    // the echo while the queued row's callback waits for the turn-end idle
+    // reconcile.
     expect(
       parseSidechannelMidTurnInjected({
         type: 'mid_turn_message_injected',
         data: {
           sessionId: 's-1',
-          messages: ['first', 'second'],
+          messages: [''],
           items: [
             {
               content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
             },
+            {
+              content: [{ type: 'image', data: 'BAUG', mimeType: 'image/png' }],
+            },
           ],
         },
       }),
-    ).toEqual({ sessionId: 's-1', messages: ['first', 'second'] });
+    ).toEqual({ sessionId: 's-1', messages: [''] });
+  });
+
+  it('never carries hydrated items into the payload, even when aligned', () => {
+    // No consumer reads `items` from a sidechannel batch (dedup settles by
+    // messageIds and removes rows by messages); multi-MB hydrated base64
+    // payloads must not ride the buffer unread.
+    const parsed = parseSidechannelMidTurnInjected({
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['first'],
+        items: [
+          {
+            content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+          },
+        ],
+      },
+    });
+    expect(parsed).toEqual({ sessionId: 's-1', messages: ['first'] });
+    expect(parsed).not.toHaveProperty('items');
   });
 
   it('rejects non-string message entries to preserve index alignment', () => {
@@ -255,31 +279,22 @@ describe('mid-turn injected sidechannel pub/sub', () => {
     ]);
   });
 
-  it('copies items when publishing', () => {
-    const items = [
-      {
-        content: [
-          { type: 'image' as const, data: 'aW1n', mimeType: 'image/png' },
-        ],
-      },
-    ];
+  it('does not buffer hydrated items on publish', () => {
     publishSidechannelMidTurnInjected({
       sessionId: 's-1',
       messages: ['a'],
-      items,
+      items: [
+        {
+          content: [
+            { type: 'image' as const, data: 'aW1n', mimeType: 'image/png' },
+          ],
+        },
+      ],
     });
-    items.splice(0);
     expect(getSidechannelMidTurnInjected()).toEqual([
-      {
-        sessionId: 's-1',
-        messages: ['a'],
-        items: [
-          {
-            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
-          },
-        ],
-      },
+      { sessionId: 's-1', messages: ['a'] },
     ]);
+    expect(getSidechannelMidTurnInjected()[0]).not.toHaveProperty('items');
   });
 
   it('consume removes only the handled batches, leaving a later-arrived frame (race)', () => {

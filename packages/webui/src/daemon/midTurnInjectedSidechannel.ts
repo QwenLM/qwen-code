@@ -60,7 +60,6 @@ export function publishSidechannelMidTurnInjected(
       sessionId: data.sessionId,
       messages: [...data.messages],
       ...(data.messageIds ? { messageIds: [...data.messageIds] } : {}),
-      ...(data.items ? { items: [...data.items] } : {}),
       ...(data.originatorClientId
         ? { originatorClientId: data.originatorClientId }
         : {}),
@@ -125,8 +124,8 @@ function notifyMidTurnInjectedListeners(): void {
 /**
  * Parse a raw daemon SSE frame into the injected-messages payload, or
  * `undefined` if the frame is not a well-formed `mid_turn_message_injected`
- * event. Empty text slots are preserved so `messages`, `messageIds`, and
- * media `items` remain index-aligned for image-only messages.
+ * event. Empty text slots are preserved so `messages` and `messageIds`
+ * remain index-aligned for image-only messages.
  */
 export function parseSidechannelMidTurnInjected(
   event: unknown,
@@ -146,20 +145,18 @@ export function parseSidechannelMidTurnInjected(
     return undefined;
   }
   const stringMessages = messages as string[];
-  const items = dataRecord['items'];
-  const alignedItems =
-    Array.isArray(items) && items.length === messages.length
-      ? items
-      : undefined;
   // Mirror the SDK normalizer's `hasRenderableItemContent`: a frame survives
   // when any item carries an image block OR a non-empty text block. The
   // degraded-media drain publishes `messages: ['']` whose items hold only the
   // '[Attached media is no longer available]' text block — dropping it here
   // while the normalizer renders it leaves the queued row unsettled until the
-  // turn-end idle reconcile.
+  // turn-end idle reconcile. Evaluate over the RAW items array exactly like
+  // the normalizer (no index-alignment precondition), so the two consumers
+  // of the same frame can never disagree.
+  const items = dataRecord['items'];
   const hasRenderableContent =
-    alignedItems !== undefined &&
-    alignedItems.some(
+    Array.isArray(items) &&
+    items.some(
       (item) =>
         !!item &&
         typeof item === 'object' &&
@@ -189,13 +186,15 @@ export function parseSidechannelMidTurnInjected(
   // Older daemons put `originatorClientId` on the SSE envelope. New clients
   // use it only in the capability fallback for those daemons.
   const originatorClientId = record['originatorClientId'];
+  // `items` (hydrated inline base64 image content) is deliberately NOT
+  // carried into the sidechannel: no consumer reads it (dedup settles by
+  // `messageIds` and removes rows by `messages`), and multi-MB payloads
+  // would otherwise ride parser → buffer → consume unread. The transcript
+  // renders from the hydrated event stream directly.
   return {
     sessionId,
     messages: stringMessages,
     ...(stringMessageIds ? { messageIds: stringMessageIds } : {}),
-    ...(alignedItems
-      ? { items: alignedItems as DaemonMidTurnMessageInjectedData['items'] }
-      : {}),
     ...(typeof originatorClientId === 'string' ? { originatorClientId } : {}),
   };
 }

@@ -2976,7 +2976,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   function sweepRetainedMedia(): void {
     const now = Date.now();
     for (const [id] of retainedMedia) {
-      if (byId.has(id)) continue;
+      // A restore registers `inFlightRestores` synchronously but lands in
+      // `byId` only after its async channel-spawn/loadSession gap; sweeping
+      // inside that gap would delete the media mid-restore.
+      if (byId.has(id) || inFlightRestores.has(id)) continue;
       const detachedAt = retainedMediaDetachedAt.get(id);
       if (
         detachedAt === undefined ||

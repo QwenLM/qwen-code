@@ -9528,6 +9528,48 @@ describe('createServeApp', () => {
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
 
+    it('400 when `content` carries an SVG block (raster-only policy)', async () => {
+      // The upload route rejects SVG with an explicit security rationale;
+      // the inline-block path must enforce the same policy.
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'hi',
+        content: [
+          { type: 'image', data: 'PHN2Zz4=', mimeType: 'image/svg+xml' },
+        ],
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('SVG images are not supported');
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('forwards reference-form media blocks to the bridge verbatim', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'see this',
+        content: [
+          { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+        ],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'see this',
+          options: {
+            content: [
+              {
+                type: 'image',
+                mediaId: 'media-1',
+                mimeType: 'image/png',
+                size: 4,
+              },
+            ],
+          },
+        },
+      ]);
+    });
+
     it('400 when the trimmed message exceeds the 16 KB cap', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
@@ -12810,6 +12852,97 @@ describe('createServeApp', () => {
         });
       expect(res.status).toBe(400);
       expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('400 when a non-text prompt block is malformed (validated before admission)', async () => {
+      // Without per-block validation the block is admitted and only fails
+      // the ACP child's schema parse later, surfacing an async turn error
+      // instead of a synchronous 400.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'aW1n' },
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('400 when a prompt media block is SVG (raster-only policy)', async () => {
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'PHN2Zz4=', mimeType: 'image/svg+xml' },
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('SVG images are not supported');
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('202 still admits legacy inline audio blocks (child-side validation)', async () => {
+      // The per-block validation is scoped to image blocks; legacy audio
+      // prompts keep their pre-existing behavior (the ACP child validates).
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'audio', data: 'YXVk', mimeType: 'audio/wav' },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('202 accepts valid inline and reference media blocks', async () => {
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 4,
+            },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req.prompt).toEqual([
+        { type: 'text', text: 'hi' },
+        { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+        { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+      ]);
     });
 
     it('202 envelope carries eventEpoch alongside lastEventId (DAEMON-001)', async () => {

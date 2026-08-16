@@ -2152,6 +2152,30 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         serverPromptId: 'p-refresh',
         images: [{ data: 'aW1n', media_type: 'image/png' }],
       });
+      // A server row rebuilt WITH hydrated images is payload-complete — it
+      // must not stay pinned to summary-only (which disables editing and
+      // leaves delete-and-retype as the only way to change the message).
+      expect(row?.payloadCompleteness).not.toBe('summary-only');
+
+      // Editing proceeds through the pending-prompt removal instead of
+      // early-returning, and restores text + images into the editor.
+      sdkMock.actions.removePendingPrompt.mockResolvedValue({ removed: true });
+      await act(async () => {
+        void harness.result().editQueuedPrompt(row!.id);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+        'p-refresh',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.editor.setText).toHaveBeenCalledWith('refreshed prompt');
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
     } finally {
       await harness.dispose();
     }
@@ -2282,6 +2306,182 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.editor.setText).toHaveBeenCalledWith('degraded note');
       expect(harness.editor.restoreImages).toHaveBeenCalledWith([
         { data: 'aW1n', media_type: 'image/png' },
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('degrades a refresh-rebuilt row when media hydration only transiently failed', async () => {
+    // A transient hydration failure (anything but 404/410) leaves the raw
+    // reference block in the snapshot — image-shaped but without string
+    // `data`. The rebuilt row must degrade to summary-only like the
+    // placeholder case, so editing cannot silently discard attachments the
+    // daemon still holds.
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-flaky',
+          text: 'flaky note',
+          content: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      for (let i = 0; i < 2; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        text: 'flaky note',
+        midTurnState: 'queued',
+        midTurnMessageId: 'm-flaky',
+        payloadCompleteness: 'summary-only',
+      });
+      expect(row?.images).toBeUndefined();
+
+      // Editing stays blocked: no daemon-message removal, no draft restore.
+      await act(async () => {
+        void harness.result().editQueuedPrompt(row!.id);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(sdkMock.actions.removeMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.editor.setText).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('self-heals a transiently degraded row once every reference hydrates', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-flaky',
+          text: 'flaky note',
+          content: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      expect(harness.result().queuedPrompts[0]).toMatchObject({
+        midTurnMessageId: 'm-flaky',
+        payloadCompleteness: 'summary-only',
+      });
+
+      // A partially hydrated snapshot (one reference still unhydrated) must
+      // NOT upgrade the row — upgrading on the hydrated subset would drop
+      // the other attachment.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [
+          {
+            messageId: 'm-flaky',
+            text: 'flaky note',
+            content: [
+              { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+              {
+                type: 'image',
+                mediaId: 'media-2',
+                mimeType: 'image/png',
+                size: 3,
+              },
+            ],
+          },
+        ],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      });
+      await harness.render({
+        streamingState: 'responding',
+        connected: false,
+      });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.result().queuedPrompts[0]).toMatchObject({
+        midTurnMessageId: 'm-flaky',
+        payloadCompleteness: 'summary-only',
+      });
+
+      // Fully hydrated: the upgrade path restores the payload and editability.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [
+          {
+            messageId: 'm-flaky',
+            text: 'flaky note',
+            content: [
+              { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+              { type: 'image', data: 'aW1nMg==', mimeType: 'image/png' },
+            ],
+          },
+        ],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      });
+      await harness.render({
+        streamingState: 'responding',
+        connected: false,
+      });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        midTurnMessageId: 'm-flaky',
+        images: [
+          { data: 'aW1n', media_type: 'image/png' },
+          { data: 'aW1nMg==', media_type: 'image/png' },
+        ],
+      });
+      expect(row?.payloadCompleteness).not.toBe('summary-only');
+
+      // The row is editable again: editing restores text + images.
+      await act(async () => {
+        void harness.result().editQueuedPrompt(row!.id);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.editor.setText).toHaveBeenCalledWith('flaky note');
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+        { data: 'aW1nMg==', media_type: 'image/png' },
       ]);
     } finally {
       await harness.dispose();
