@@ -17,12 +17,12 @@ import {
   type LocalControlService,
 } from '../local-control/service.js';
 import { registerWorkspaceLocalControlRoutes } from './workspace-local-control.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLineSafe } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../utils/stdioHelpers.js')>();
-  return { ...actual, writeStdoutLine: vi.fn() };
+  return { ...actual, writeStdoutLineSafe: vi.fn() };
 });
 
 /** Marks the request bearer-authenticated the way `bearerAuth` does after
@@ -267,7 +267,7 @@ describe('Local Control routes', () => {
       safeBody: () => ({}),
       primaryBindHostname: '127.0.0.1',
     });
-    vi.mocked(writeStdoutLine).mockClear();
+    vi.mocked(writeStdoutLineSafe).mockClear();
 
     const response = await request(app).post('/workspace/local-control/enable');
 
@@ -278,6 +278,8 @@ describe('Local Control routes', () => {
     expect(response.body.urlRedacted).toBe(true);
     // The operator still needs the URL to pair; the daemon terminal is the one
     // channel a local attacker cannot read over HTTP.
-    expect(writeStdoutLine).toHaveBeenCalledWith(expect.stringContaining(url));
+    expect(writeStdoutLineSafe).toHaveBeenCalledWith(
+      expect.stringContaining(url),
+    );
   });
 });

@@ -435,6 +435,71 @@ Notes:
 >   matched case-sensitively by yargs `choices` (`--memory-project-scope
 Workspace` is rejected). Use lowercase values when copying between the two.
 
+### Built-in daemon Git relocation guard
+
+Every managed daemon ACP session applies a built-in pre-execution guard for
+model shell commands, independent of `--external-tool-guard-mode` and without
+any capability advertisement. The daemon owns the bound workspace and the
+session's current effective working directory; both are supplied from trusted
+session state and never accepted from the ACP child.
+
+The guard inspects the tools that run a shell command line — `run_shell_command`
+and `monitor` — and denies a mutating Git
+command before execution when its repository location resolves outside the
+session's effective working directory. Relocation is recognized for literal
+forms of `git -C <path>`, `git --git-dir[=]<path>`,
+`git --work-tree[=]<path>`, leading
+`GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE` assignments (also
+when made through `export`/`declare`/`readonly`, which keep them in the
+environment of every later command in the chain),
+directory-shifting wrapper flags (`env -C`, `sudo -D`), and `cd`, `pushd`, or
+`popd` builtins earlier in the same command chain. Common wrapper prefixes
+(`sh -c`, `bash -c`, `eval`, `sudo`, `nohup`, `timeout`, `exec`, `command`,
+`builtin`,
+`env`, path-qualified `git` binaries, and `{ …; }` / `! …` shell syntax) are
+unwrapped so the same policy applies to the inner Git invocation, and `$(…)`
+or backtick substitution bodies are analyzed as commands of their own.
+
+A sub-agent pinned to its own worktree is contained to that worktree rather
+than to the session's directory; a shell call whose execution directory the
+daemon cannot place is denied.
+
+Relative targets resolve from the command's effective starting directory
+(`arguments.directory` when present, otherwise the session's current effective
+working directory) after canonical path resolution, including `.git` gitfile
+redirects, symlinks, and per-worktree administrative directories. A relocated
+target that cannot be fully resolved before execution — a dynamic target
+(`$VAR`, backticks, `~`, globs), a path that does not exist yet, or an
+unreadable indirection — is denied for mutating or unclassifiable subcommands.
+A relocated target that cannot be resolved is denied whatever the subcommand
+is — including the read-only ones. Relocated commands whose subcommand is one
+of a small verified read-only set (`rev-parse`, `cat-file`) remain allowed
+once the target resolves, unless the command carries command-executing `-c`
+config, or
+it carries a `--output`, `--textconv`, or `--filters` flag: those write a file
+or run the target repository's configured drivers. Commands with no recognized
+relocation keep their existing behavior.
+Denials are final and are reported to the model as
+`Daemon shell guard denied a mutating Git command…` for a resolved, dynamic,
+or unresolvable repository location, and as
+`Daemon shell guard denied a shell command…` when the command could not be
+parsed, its payload could not be resolved, or an unrecognized program may run
+a relocated Git command.
+
+The guard is reliable against Git relocation written in the literal forms
+above — the mis-targeted command this control exists for — and is
+**best-effort, not a boundary**, against shell text written to defeat it:
+constructions that hide the relocation from a static reader may pass, and new
+ones will keep being found. Do not grant a daemon broader trust on the
+strength of it. It does not interpret script files,
+track environment variable values across commands, or analyze heredoc bodies
+(Git-shaped text inside a heredoc can be denied even though the shell never
+executes it). `/fork` and agent-backed workspace memory remember/dream remain
+available under the built-in guard; they are only restricted while the
+external provider mode below is active. An optional external tool guard
+remains an additional policy and receives the same request only after the
+built-in policy allows it.
+
 ### Required external Tool Guard
 
 This opt-in is for managed ACP deployments that need an external allow/deny
