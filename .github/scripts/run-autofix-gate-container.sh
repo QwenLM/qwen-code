@@ -29,7 +29,6 @@ set -uo pipefail
 # GITHUB_WORKSPACE/GITHUB_OUTPUT are runner-provided, GATE_IMAGE and
 # FOOTPRINT_ENFORCE are step-level env. None is defined here.
 
-GATE_SCRIPT="${RUNNER_TEMP}/run-autofix-review-verification.sh"
 VERDICT="${WORKDIR}/gate-verdict"
 # The container's own RUNNER_TEMP: a fresh directory holding COPIES of just
 # the scripts the gate reads. The real RUNNER_TEMP is never mounted — it holds
@@ -49,8 +48,13 @@ CRW="${CTEMP}/rw"
 # and torn down explicitly: --rm only fires on a normal exit, but a step
 # timeout / job cap / cancel kills the docker CLIENT and leaves the container
 # running as the runner uid with rw mounts on the shared workspace.
+# `timeout 30` like every other docker call here: the trap fires on the same
+# cancel/step-timeout paths where a wedged daemon blocks the CLI indefinitely,
+# and a hung teardown is killed with the process group — leaving exactly the
+# running leftover the trap exists to remove, which no janitor reaps (they
+# skip RUNNING containers).
 GATE_CONTAINER="qwen-code-gate-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
-teardown() { docker rm -f "${GATE_CONTAINER}" > /dev/null 2>&1 || true; }
+teardown() { timeout 30 docker rm -f "${GATE_CONTAINER}" > /dev/null 2>&1 || true; }
 trap teardown EXIT INT TERM
 
 if [[ -z "${GATE_IMAGE:-}" ]]; then

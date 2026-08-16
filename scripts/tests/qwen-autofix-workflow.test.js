@@ -6242,6 +6242,22 @@ exit 1
       expect(gate).toContain(
         'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null',
       );
+      // Presence is not enough: the digest checks are only a wall if they run
+      // BEFORE the wrapper and actually abort. Moving the invocation above
+      // them (a tampered wrapper executes before verification sees it) or
+      // appending `|| true` (verification that cannot fail) both leave every
+      // other assertion here green.
+      for (const verifyLine of [
+        'echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null',
+        'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null',
+        'GATE_HELPERS_NOW="$(cat ',
+      ]) {
+        expect(gate.indexOf(verifyLine)).toBeGreaterThan(-1);
+        expect(gate.indexOf(verifyLine)).toBeLessThan(
+          gate.indexOf('bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"'),
+        );
+      }
+      expect(gate).not.toMatch(/sha256sum -c[^\n]*\|\| true/);
       // The image comes from the resolve step's OUTPUT (expression context),
       // not $GITHUB_ENV, which an earlier step can append to.
       expect(gate).toContain(
@@ -6281,7 +6297,21 @@ exit 1
     // The three helpers the gate EXECUTES are staged in the same writable
     // RUNNER_TEMP, so they are digested at staging and verified before the
     // wrapper copies them across the wall.
-    expect(workflow).toContain('echo "gate_helpers_sha256=$(cat ');
+    // Writer and reader must digest the SAME files in the SAME order. Pinned
+    // only by prefix and count, the two sides can silently disagree: swapping
+    // the cat order at staging alone makes the digests never match, so every
+    // gate run exits 1 at 'staged gate helpers no longer match the digest
+    // recorded at staging time' — the review autofix loop fail-closed-broken
+    // for every PR, with the whole suite green. Compare them directly.
+    const helperBlob = workflow.match(
+      /echo "gate_helpers_sha256=\$\(cat (.*?) \| sha256sum/,
+    )?.[1];
+    expect(helperBlob).toBeTruthy();
+    for (const gate of [verificationGateSteps[1], repairVerificationGateStep]) {
+      expect(gate).toContain(
+        `GATE_HELPERS_NOW="$(cat ${helperBlob} | sha256sum`,
+      );
+    }
     expect(workflow.match(/GATE_HELPERS_NOW="\$\(cat /g) ?? []).toHaveLength(2);
     // The container env is an explicit ALLOWLIST: everything unnamed is
     // absent inside, which is the isolation. The PAT, the host $GITHUB_ENV
@@ -6289,6 +6319,32 @@ exit 1
     const dockerRun =
       wrapper.match(/docker run --rm[\s\S]*?"\$\{GATE_IMAGE\}"/)?.[0] ?? '';
     expect(dockerRun).toBeTruthy();
+    // The COMMAND sits past the image, outside the extraction above. Pin it:
+    // the digests cover what gets STAGED, not what docker is told to run, so
+    // a mutant running a different staged script — or the host copy under the
+    // real RUNNER_TEMP, which is deliberately never mounted — leaves every
+    // assertion here green while the container stops executing the gate.
+    expect(wrapper).toMatch(
+      /"\$\{GATE_IMAGE\}" \\\n\s*bash "\$\{CBIN\}\/run-autofix-review-verification\.sh"\s*$/m,
+    );
+    // What the loop stages into CBIN must be exactly the gate plus the three
+    // helpers the workflow digests. Dropping one (e.g. check-autofix-
+    // contracts.sh) makes the gate invoke a missing helper INSIDE the
+    // container: bash exit 127 becomes a retryable deterministic rejection
+    // charged to every round — a permanent outage with no test signal.
+    const stagedList = (
+      wrapper.match(/for staged in ([\s\S]*?); do/)?.[1] ?? ''
+    )
+      .replace(/\\\s+/g, ' ')
+      .trim()
+      .split(/\s+/);
+    const digestedHelpers = [
+      ...helperBlob.matchAll(/\$\{RUNNER_TEMP\}\/([\w.-]+)/g),
+    ].map((m) => m[1]);
+    expect(digestedHelpers.length).toBe(3);
+    expect(stagedList.slice().sort()).toEqual(
+      ['run-autofix-review-verification.sh', ...digestedHelpers].sort(),
+    );
     const passedEnv = [...dockerRun.matchAll(/--env ([A-Z_]+)=/g)].map(
       (m) => m[1],
     );
@@ -6359,6 +6415,20 @@ exit 1
     expect(wrapper).toMatch(
       /if \[\[ "\$\(verdict_inputs_digest\)" != "\$\{INPUTS_BEFORE\}" \]\]/,
     );
+    // Both halves are ORDERING properties, and presence alone pins neither.
+    // Capturing the fingerprint after the run compares post-run state with
+    // itself, so it never fires; running the refusal after the translation
+    // forwards a tampered round's outcome=fixed to the step's real
+    // $GITHUB_OUTPUT before exiting 125 — and with continue-on-error,
+    // 'Finalize verification' reads it and 'Push and report' PAT-pushes it.
+    expect(
+      wrapper.indexOf('INPUTS_BEFORE="$(verdict_inputs_digest)"'),
+    ).toBeLessThan(wrapper.indexOf('docker run --rm'));
+    expect(
+      wrapper.indexOf(
+        'if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]',
+      ),
+    ).toBeLessThan(wrapper.indexOf('OUTCOME="$(verdict_value'));
     for (const f of [
       'no-action.md',
       'address-summary.md',
@@ -6373,8 +6443,19 @@ exit 1
     // pool's qwen-code-* janitors can see it, and tear it down explicitly.
     expect(dockerRun).toContain('--name "${GATE_CONTAINER}"');
     expect(wrapper).toMatch(/GATE_CONTAINER="qwen-code-gate-/);
-    expect(wrapper).toContain('docker rm -f "${GATE_CONTAINER}"');
+    // …under a timeout, like every docker call in the pool janitors: the trap
+    // fires on the same cancel/step-timeout paths where a wedged daemon
+    // blocks the CLI indefinitely, and a teardown that hangs past the
+    // SIGINT→SIGKILL grace window is killed with the process group, leaving
+    // the running leftover it exists to remove (janitors skip RUNNING ones).
+    expect(wrapper).toContain('timeout 30 docker rm -f "${GATE_CONTAINER}"');
     expect(wrapper).toMatch(/trap teardown EXIT INT TERM/);
+    // Every docker invocation in the wrapper is either timeout-wrapped or the
+    // gate run itself, which is bounded by the step's own timeout-minutes.
+    for (const line of wrapper.split('\n')) {
+      if (!/\bdocker /.test(line) || /^\s*#/.test(line)) continue;
+      expect(line).toMatch(/timeout \d+ docker |docker run --rm/);
+    }
 
     // Behavioural: the verdict translation is the security-critical half —
     // branch code inside the container CAN append to the mounted verdict
@@ -6387,6 +6468,18 @@ exit 1
     // half-written. The wrapper must stay errexit-free and end on its own
     // explicit `exit "${GATE_RC}"` (the harness below appends `exit 0` for
     // the same reason: it runs the fragment, not the whole script).
+    // The verdict file lives in the round's job-level WORKDIR, so the repair
+    // pass reuses the first pass's path. Without this reset a verdict-less
+    // crash (rc=1, no outcome written) reads the FIRST pass's stale
+    // outcome=failed + retryable=true, and 'Finalize verification' books the
+    // repair round as an EVALUATED rejection — watermark advanced, item
+    // handed off for good — instead of the gate-crashed retry. No malicious
+    // branch code needed; the behavioural harness below writes a fresh file
+    // per case, so it cannot see the cross-pass reuse.
+    expect(wrapper).toContain(': > "${VERDICT}"');
+    expect(wrapper.indexOf(': > "${VERDICT}"')).toBeLessThan(
+      wrapper.indexOf('docker run --rm'),
+    );
     expect(wrapper).toContain('set -uo pipefail');
     expect(wrapper).not.toMatch(/^set -e/m);
     expect(wrapper.trimEnd().endsWith('exit "${GATE_RC}"')).toBe(true);
