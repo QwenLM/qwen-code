@@ -55,6 +55,7 @@ import {
   verifyBudgetMessage,
   writeBudgetStop,
   writeRoundCapStop,
+  hasReviewDeadline,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -86,6 +87,7 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  isTerritoryFanOut,
   requiredAgents,
   reviewMode,
   type RequiredAgent,
@@ -138,7 +140,22 @@ interface PlanReport {
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
-  budget?: { agentToolBudget?: unknown };
+  /**
+   * The two size fields the topology gate reads (#9242) and the ones
+   * `reverseAuditRoundCap` derives this plan's round-cap tier from — the same
+   * pair, read by two callers for two reasons, which is why one declaration
+   * serves both. Declared even though those functions take `unknown` (they
+   * parse a file, so they validate at runtime whatever the type says) because
+   * the declaration is what makes the coupling visible: without it a rename on
+   * the writing side compiles clean, the per-chunk paths stop noticing a
+   * fan-out the plan never asked for, and every cap here silently collapses to
+   * the fallback tier — a quieter failure than a wrong number.
+   * `isTerritoryFanOut` tolerates the `unknown` via the `RosterPlan` cast, the
+   * same bridge `runRoster` uses.
+   */
+  srcDiffLines?: unknown;
+  diffLines?: unknown;
+  budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -194,6 +211,8 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - Copy it **verbatim** from the diff, indentation included. Strip the leading \`+\`.
 - Prefer **added (\`+\`) lines** — that is what a review comments on. An unchanged context line inside a hunk resolves too. A **removed (\`-\`) line does not**: deleted code has no line on the side a comment can attach to. To comment on a deletion, anchor on the line that *replaced* it.
 - Give **enough lines to be unique**. A bare \`}\` or \`});\` appears everywhere in the file and will resolve to whichever one happens to be nearest. Two or three lines are almost always unique; one distinctive line is fine.
+- A finding about a file this diff does **not** touch — a docs page or a caller the change falsifies — cannot anchor there: a comment attaches only to files the PR changes. Quote the diff line that creates the problem, and name the affected file in **Issue**.
+- A line too long to quote whole — a multi-KB single-line Markdown paragraph — may be quoted as a distinctive verbatim **fragment** of at least 12 characters (measured after whitespace collapse); it resolves to the line containing it.
 - Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
 **The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
@@ -1986,7 +2005,10 @@ function admitReverseAuditRound(
   fanOutWidth: number,
 ): boolean {
   // The plan's round cap first: deterministic, and cheaper than the
-  // deadline arithmetic. The full cap normally; a reduced cap for a huge
+  // deadline arithmetic. One value per topology (`reverseAuditRoundTier`) —
+  // ten on a 3A diff, where a round is one auditor; five on a 3B one, where
+  // it is one per non-retired chunk; and — only in a run that has a deadline,
+  // since the reduction answers a ceiling — a reduced three for a huge
   // diff, where a single reverse-audit round is ~90 minutes and the full
   // loop cannot finish (measured: the 6-hour CI reviews that posted nothing
   // were 4,000-5,300-line PRs). A round past the cap writes a marker so
@@ -2057,6 +2079,41 @@ function refuseConverged(planPath: string): void {
   process.exitCode = 5;
 }
 
+/**
+ * Topology anomaly note (#9242): the plan's own size fields decide the
+ * topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
+ * reverse-audit round-cap tier is priced against that decision — but the
+ * per-chunk build paths never consulted it, so a per-chunk fan-out can be
+ * built on a plan whose numbers say one whole-diff auditor per round (a
+ * hand-edited/corrupted plan, or an orchestrator that took the wrong fork).
+ * This is a note, not a refusal: legitimate per-chunk work exists (an
+ * honest 3A plan can carry up to ~8 chunks for read paging), so the CLI
+ * surfaces the mismatch and proceeds, and the orchestrator owes an
+ * explanation for a deliberate one. Both numbers must be declared:
+ * `isTerritoryFanOut` coerces an absent or null field to 0, and one
+ * declared number cannot establish a mismatch the other, unknown one may
+ * yet justify — partial knowledge is unknown topology, so silence. Called
+ * only AFTER the convergence/admission gates and with the round's actual
+ * width: a round that builds nothing notes nothing, and a round that
+ * builds two auditors must not claim three.
+ */
+function noteTopologyMismatch(report: PlanReport, subject: string): void {
+  if (
+    report.srcDiffLines == null ||
+    report.diffLines == null ||
+    isTerritoryFanOut(report as RosterPlan)
+  ) {
+    return;
+  }
+  writeStderrLine(
+    `agent-prompt: ${subject}, but the plan's own numbers ` +
+      `(srcDiffLines=${report.srcDiffLines}, diffLines=${report.diffLines}) ` +
+      'say Step 3A — one whole-diff auditor per round, which is what the ' +
+      'reverse-audit round cap is priced for. Proceeding; if this fan-out ' +
+      'is deliberate, say so in the round.',
+  );
+}
+
 function runAllChunks(
   report: PlanReport,
   planPath: string,
@@ -2124,7 +2181,7 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report.budget),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       chunks.length,
     )
   ) {
@@ -2134,6 +2191,10 @@ function runAllChunks(
   const dueSet = schedule === null ? null : new Set(schedule.due);
   const dueChunks =
     dueSet === null ? chunks : chunks.filter((c) => dueSet.has(c.id));
+  noteTopologyMismatch(
+    report,
+    `--all-chunks is fanning out ${dueChunks.length} chunk auditors`,
+  );
   const coldSet = new Set(schedule?.coldChecks ?? []);
   const skipped = schedule?.skipped ?? [];
 
@@ -2176,7 +2237,10 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
-  const planRoundCap = reverseAuditRoundCap(report.budget);
+  const planRoundCap = reverseAuditRoundCap(
+    report,
+    hasReviewDeadline(process.env),
+  );
   const retirementNote =
     skipped.length === 0
       ? []
@@ -2539,7 +2603,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report.budget),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       1,
     )
   ) {
@@ -2622,11 +2686,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report.budget),
+        reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
         planChunkIds.length,
       )
     )
       return;
+    noteTopologyMismatch(
+      report,
+      `--chunk ${args.chunk} is building a per-chunk auditor`,
+    );
   }
 
   if (args.allChunks && args.role && findingsContent !== undefined) {

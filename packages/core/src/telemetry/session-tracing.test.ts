@@ -510,6 +510,25 @@ describe('session-tracing', () => {
       expect(mockSpans[1]!.attributes['gen_ai.output.type']).toBe('json');
     });
 
+    it.each(['cron', 'notification', 'teammate', 'goal'])(
+      'does not assign the session JSON contract to %s interactions',
+      (messageType) => {
+        startInteractionSpan(
+          createMockConfig({ jsonSchema: { type: 'object' } }),
+          {
+            promptId: `automatic-${messageType}`,
+            model: 'm',
+            messageType,
+          },
+        );
+
+        expect(
+          mockSpans.at(-1)!.attributes['gen_ai.output.type'],
+        ).toBeUndefined();
+        endInteractionSpan('ok', { promptId: `automatic-${messageType}` });
+      },
+    );
+
     it('isolates concurrent prompts and ends only the requested interaction', () => {
       const config = createMockConfig();
       startInteractionSpan(config, {

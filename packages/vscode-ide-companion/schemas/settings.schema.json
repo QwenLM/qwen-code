@@ -254,6 +254,11 @@
             "suggestion"
           ],
           "default": "auto"
+        },
+        "reverseAuditRounds": {
+          "description": "Lower the reverse-audit loop's round cap for every high-effort review. The cap is normally chosen from the diff topology (10 small / 5 chunked; a huge diff is 3 when the run has a review deadline and 5 when it does not, because that reduction answers a CI ceiling and applies only where one exists) because a round costs one agent on a small diff and ~90 minutes on a huge one; this setting can only LOWER whichever tier applies, never raise it — a value that is not a whole number above zero, or that is out of range (below 3, or above the plan's own tier), is ignored and leaves the tier alone — JSON Schema has no integer type here, so a fraction validates in an editor and is then discarded at runtime. Understand what it buys before enabling: the loop ends on two consecutive dry rounds, so cutting the cap does not make reviews converge sooner, it makes them stop before converging more often — and every such stop is disclosed as unreviewed scope and caps the verdict at Comment, so a cheaper review is also one that can no longer Approve. To spend LESS on reviews generally, prefer \"effort\". Nothing here makes a loop run LONGER: a review deadline bounds a run rather than extending it, and on a huge diff setting one lowers the cap from 5 to 3 rather than raising it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+          "type": "number",
+          "default": 0
         }
       }
     },
