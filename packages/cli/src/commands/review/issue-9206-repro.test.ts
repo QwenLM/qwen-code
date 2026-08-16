@@ -289,12 +289,57 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
           ],
         },
       }),
+    ];
+    // A compliant auditor reads the cumulative findings list its prompt
+    // points at — the comparison against known findings IS the audit's
+    // method, and the dry bar (#9091) refuses a receipt from an auditor
+    // that skipped the read.
+    const pointer = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(
+      launchPrompt,
+    );
+    if (pointer) {
+      lines.push(
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: `${id}-c2`,
+                  name: 'read_file',
+                  args: { file_path: pointer[1] },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: `${id}-c2`,
+                  name: 'read_file',
+                  response: { output: 'findings list' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+    }
+    lines.push(
       JSON.stringify({
         ...base,
         type: 'assistant',
         message: { role: 'model', parts: [{ text: finalText }] },
       }),
-    ];
+    );
     writeFileSync(
       join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
       lines.join('\n') + '\n',

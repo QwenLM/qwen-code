@@ -42,7 +42,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
-import { readTranscripts, type AgentRecord } from './transcripts.js';
+import { readRunTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
   INLINE_LAYER_WALKED_RE,
@@ -73,6 +73,7 @@ export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
 export type CertificationFailure =
   | 'no matching transcript'
   | 'launch matched multiple records'
+  | 'auditor never returned'
   | 'no successful tool calls'
   | 'no read of the diff'
   | 'territory read missing'
@@ -81,7 +82,8 @@ export type CertificationFailure =
   | 'receipt lead contradicts the phrase'
   | 'receipt clause contradicts the phrase'
   | 'receipt clause names no walk'
-  | 'receipt clause too thin';
+  | 'receipt clause too thin'
+  | 'findings list unread';
 
 /** One transcript's classified return, with the failed bar when not dry. */
 interface Classification {
@@ -424,6 +426,7 @@ function substantiveClause(clause: string): boolean {
  * this module lands on the audit side. `memo` keys on the pointer so the
  * pairing walk reads each round's list once, not once per record.
  */
+
 function findingsListFor(
   prompt: string,
   recordDir: string,
@@ -480,6 +483,24 @@ function stripLayerReceiptLines(finalText: string): string {
 }
 
 /**
+ * Did this transcript's agent successfully `read_file` the findings pointer
+ * its record's prompt names? True when the prompt names none.
+ *
+ * Takes the POINTER, extracted once from the RAW prompt by the same call
+ * `findingsListFor` uses: extracting again from trim-normalized lines asked
+ * the same question under a different normalization, and trimming defeats
+ * the `^…$` anchors that exist to reject indented quotations.
+ */
+function readTheFindingsPointer(
+  rec: AgentRecord,
+  pointer: string | null,
+): boolean {
+  if (pointer === null) return true;
+  const needle = JSON.stringify(pointer);
+  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
+}
+
+/**
  * Classify one auditor's return.
  *
  * `yielded` outranks everything: a return that files a finding against a
@@ -504,7 +525,15 @@ function classifyReturn(
   rec: AgentRecord,
   territory: Array<[number, number]>,
   findingsList: string,
+  findingsRead: boolean,
 ): Classification {
+  // RETURNED, before anything else — the yield branch included: `finalText`
+  // keeps the last non-empty assistant text, narration included, so a
+  // died-mid-flight auditor's flushed narration can carry a receipt shape
+  // or a quoted finding; neither is a return.
+  if (!rec.returned) {
+    return { outcome: 'unknown', failure: 'auditor never returned' };
+  }
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
@@ -597,6 +626,14 @@ function classifyReturn(
     return unknown('receipt clause names no walk');
   if (!substantiveClause(judgedClause))
     return unknown('receipt clause too thin');
+  // The DRY bar only, and last: the brief's whole method is the comparison
+  // against the cumulative findings list, and a no-issues receipt from an
+  // auditor that never opened the list certifies a comparison nobody made.
+  // A filed YIELD (above) needs no such gate — the finding proves the
+  // territory hot whatever else was skipped, and gating it before
+  // classification flipped a round from yielded to dry and retired a chunk
+  // with a live finding.
+  if (!findingsRead) return unknown('findings list unread');
   return { outcome: 'dry', failure: null };
 }
 
@@ -680,7 +717,17 @@ export function scheduleReverseAuditRound(
   // retries with the least time left. A record older than the plan is the
   // dead attempt's, and reads as absent.
   const since = statSync(planPath).mtimeMs;
-  const transcripts = readTranscripts(since, env, diffPath);
+  // Run-scoped: a resumed run's earlier rounds ran in a different session,
+  // and their dry receipts are exactly what lets the continuation retire
+  // territory instead of re-auditing it. The fence stays the plan's mtime,
+  // which a resume deliberately leaves untouched.
+  // `currentDirOptional`: a resumed run schedules its next round BEFORE
+  // launching any current-session agent, so its own transcript dir does not
+  // exist yet; without the option this throws and re-audits territory the
+  // prior attempt already retired.
+  const transcripts = readRunTranscripts(planPath, since, env, diffPath, {
+    currentDirOptional: true,
+  });
   const built = readRecordedPrompts(planPath, since);
 
   // The prior-round records: one per (chunk, round) prompt this CLI built.
@@ -694,6 +741,7 @@ export function scheduleReverseAuditRound(
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
+    pointer: string | null;
   }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
@@ -709,6 +757,7 @@ export function scheduleReverseAuditRound(
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
       findings: findingsListFor(prompt, recordDir, findingsMemo),
+      pointer: findingsPointerOf(prompt),
     });
   }
 
@@ -765,7 +814,17 @@ export function scheduleReverseAuditRound(
   matchesByRecord.forEach((matches, i) => {
     const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
     const classifications = unique.map((t) =>
-      classifyReturn(t, records[i].territory, records[i].findings),
+      // The findings-read fact rides INTO the classification and gates only
+      // the dry branch there: applied out here as a filter it also
+      // suppressed filed YIELDS, flipping a round to dry and retiring a
+      // chunk that had a live finding. The POINTER was extracted once from
+      // the RAW prompt by the same call `findingsListFor` uses.
+      classifyReturn(
+        t,
+        records[i].territory,
+        records[i].findings,
+        readTheFindingsPointer(t, records[i].pointer),
+      ),
     );
     classificationsByRecord.push(classifications);
     if (classifications.some((c) => c.outcome === 'dry')) {
