@@ -847,6 +847,17 @@ describe('fetch-pr report assembly', () => {
     });
     // The FULL range is what the round carries, for the flows that continue.
     expect(writtenDiff()).toBe(FULL_DIFF);
+    // …and NO delta capture ran. That is the property this shape exists to
+    // pin, and the assertions above cannot see it: with the at-head arm
+    // removed, the anchor resolves to `f00df00df00d`, the handler captures
+    // `f00df00d..f00df00d`, the mock answers empty, and the empty-delta arm
+    // sets the identical `upToDate` — both the report and the written diff
+    // come out byte-identical. The redundant `git diff` is exactly what
+    // deciding at-head BEFORE any capture exists to eliminate.
+    const ranges = producerMocks.gitRaw.mock.calls
+      .flat()
+      .filter((a: unknown) => typeof a === 'string' && a.includes('..'));
+    expect(ranges).toEqual([`${BASE}..f00df00df00d`]);
   });
 
   it('reuses the full range when the anchor IS the merge base', async () => {

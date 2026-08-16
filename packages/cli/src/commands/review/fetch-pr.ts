@@ -690,14 +690,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // producer that published on every success leaked an empty delta's path
   // into the full-range judgment and recommended a live PR for closure on
   // an infrastructure state.
-  const readRange = (left: string): string | null => {
+  const readRange = (left: string): Buffer | null => {
     try {
+      // BYTES, not text. `diffSha256` identifies the published diff for the
+      // resume comparison, and a diff of a binary-adjacent or latin1 file
+      // contains bytes that are not valid UTF-8: decoding first collapses
+      // them onto U+FFFD, so the digest would no longer name what was
+      // written. The decode happens where text is actually wanted.
       return gitRaw(
         ...PINNED_DIFF_CONFIG,
         'diff',
         ...PINNED_DIFF_FLAGS,
         `${left}..${fetchedSha}`,
-      ).toString('utf8');
+      );
     } catch (err) {
       writeStderrLine(`Failed to capture diff: ${(err as Error).message}`);
       return null;
@@ -714,21 +719,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
    * written — the failure class the partition catch below calls out as one
    * that must not take the whole review with it.
    */
-  const publish = (text: string): boolean => {
+  const publish = (bytes: Buffer): boolean => {
     try {
-      writeFileSync(diffRel, text);
+      writeFileSync(diffRel, bytes);
     } catch (err) {
       writeStderrLine(`Failed to capture diff: ${(err as Error).message}`);
       return false;
     }
-    diffText = text;
+    diffText = bytes.toString('utf8');
     diffPath = diffRel;
     diffPathAbsolute = resolve(diffRel);
-    // Digest of what was WRITTEN, not of what was captured. The capture is
-    // read-only now and a round may read two ranges before publishing one, so
-    // hashing at capture time would report a digest for bytes no reader ever
-    // sees.
-    diffSha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+    // Digest of what was WRITTEN, over the bytes themselves. A round may read
+    // two ranges before publishing one, so hashing at capture time would name
+    // bytes no reader ever sees; hashing a decode of them would name bytes
+    // nobody wrote.
+    diffSha256 = createHash('sha256').update(bytes).digest('hex');
     return true;
   };
 
@@ -840,7 +845,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // are defined against (both compare the PR's whole diff, never a delta),
   // and the containment oracle the clamp cannot be. Reading it costs one
   // `git diff`; the savings incremental review exists for are agent time.
-  const fullText = mergeBaseSha === null ? null : readRange(mergeBaseSha);
+  const fullBytes = mergeBaseSha === null ? null : readRange(mergeBaseSha);
+  const fullText = fullBytes === null ? null : fullBytes.toString('utf8');
   if (mergeBaseSha === null) {
     writeStderrLine(
       `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
@@ -855,9 +861,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // hand: re-running the identical `git diff` would spend the capture (and
     // its timeout) twice on the same bytes. Reachable without adversary —
     // commits older than the last round's head landing in the base.
-    const delta =
-      anchor.diffBase === mergeBaseSha ? fullText : readRange(anchor.diffBase);
-    if (delta === null) {
+    const deltaBytes =
+      anchor.diffBase === mergeBaseSha ? fullBytes : readRange(anchor.diffBase);
+    const delta = deltaBytes === null ? null : deltaBytes.toString('utf8');
+    if (deltaBytes === null || delta === null) {
       // Infrastructure, not anchor validity — but the report must not claim
       // an incremental scope the capture never produced.
       demote('capture-failed');
@@ -904,7 +911,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         ruling.unverified ? 'containment-unverified' : 'hunks-outside-pr-diff',
       );
     } else {
-      if (publish(delta)) {
+      if (publish(deltaBytes)) {
         scopedDelta = true;
         // The scoped range's left side, full-sha, for downstream consumers
         // that recompute their own diffs (Agent 7's test-efficacy probe
@@ -919,7 +926,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
   }
   if (!scopedDelta) {
-    if (fullText !== null) publish(fullText);
+    if (fullBytes !== null) publish(fullBytes);
     // `upToDate` is NOT demoted when the full range is unavailable. It is a
     // fact about the ANCHOR — nothing has landed since it — proven by the
     // delta capture (or, for anchor-at-head, by arithmetic), and neither
@@ -964,13 +971,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // optimization, the full range is the review. Retry it, and demote under
     // the reason that names what actually happened (the capture succeeded;
     // the partitioner did not).
-    if (scopedDelta && fullText !== null && fullText.trim() !== '') {
+    if (
+      scopedDelta &&
+      fullBytes !== null &&
+      fullText !== null &&
+      fullText.trim() !== ''
+    ) {
       try {
         const rescued = buildDiffPlan(fullText, args.maxChunkLines);
         // A write failure here is degradation, not a tiling failure: the
         // inner catch must not swallow it into "both ranges refuse to tile"
         // and ship plan chunks beside a null `diffPath`.
-        if (publish(fullText)) {
+        if (publish(fullBytes)) {
           plan = rescued;
           scopedDelta = false;
           writeStderrLine(
