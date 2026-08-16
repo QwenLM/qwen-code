@@ -10,6 +10,7 @@ export interface MidTurnQueueItem {
   files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
+  isInserting?: boolean;
 }
 
 export interface MidTurnInjectedBatch {
@@ -77,7 +78,7 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
         messageId !== undefined
           ? remaining.findIndex(
               (prompt) =>
-                prompt.midTurnState !== undefined &&
+                (prompt.midTurnState !== undefined || prompt.isInserting) &&
                 prompt.midTurnMessageId === messageId &&
                 isTextOnly(prompt),
             )
@@ -85,9 +86,9 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
       if (index < 0 && originatorMatches) {
         index = remaining.findIndex(
           (prompt) =>
-            prompt.midTurnState !== undefined &&
+            (prompt.midTurnState !== undefined || prompt.isInserting) &&
             (messageId === undefined ||
-              (prompt.midTurnState === 'submitting' &&
+              ((prompt.midTurnState === 'submitting' || prompt.isInserting) &&
                 (!strictMessageIds ||
                   prompt.midTurnMessageId === undefined))) &&
             prompt.text === message &&

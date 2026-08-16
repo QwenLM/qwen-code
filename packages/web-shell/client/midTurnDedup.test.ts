@@ -152,6 +152,19 @@ describe('removeInjectedFromQueue', () => {
     expect(next).toEqual([]);
   });
 
+  it('matches an explicit insert before its admission response arrives', () => {
+    const inserting = {
+      text: 'early explicit insert',
+      isInserting: true,
+    };
+    const next = removeInjectedFromQueue(
+      [inserting],
+      [batch('s', 'early explicit insert')],
+      's',
+    );
+    expect(next).toEqual([]);
+  });
+
   it('removes the id-matched row, not an earlier same-text row still submitting', () => {
     // Two same-text sends: the first is still awaiting its admission id, the
     // second was admitted and queued with an id. The injection frame names the

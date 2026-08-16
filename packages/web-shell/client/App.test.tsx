@@ -19740,6 +19740,62 @@ describe('App /goal command', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('re-syncs canonical Goal state after creating it in an allocated session', async () => {
+    const active = activeGoalSnapshot('first objective');
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-created',
+    });
+    mockSessionActions.attachSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-created';
+      mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    });
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: active,
+    });
+    mockSessionActions.getGoal.mockImplementationOnce(async () => {
+      mockConnection.goalState = active;
+      return { snapshot: active };
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal first objective';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.getGoal).toHaveBeenCalledOnce();
+    });
+
+    expect(
+      mockWorkspaceActions.controlGoal.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockSessionActions.getGoal.mock.invocationCallOrder[0]!);
+    expect(mockConnection.goalState).toBe(active);
+  });
+
+  it('keeps /goal attachments in the composer instead of discarding them', async () => {
+    renderApp();
+    await flush();
+    testState.prompt = '/goal inspect this screenshot';
+    const images = [{ data: 'abc', media_type: 'image/png' }];
+
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        testState.prompt,
+        images,
+        undefined,
+        editorCommit,
+      );
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.controlGoal).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/goal inspect this screenshot');
+  });
+
   it('drops a lazy /goal create when another session wins allocation', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockResolvedValueOnce({
@@ -20412,6 +20468,19 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     const { container } = renderApp();
     await flush();
     const run = await openRunHandler(container);
+
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toThrow(/Goal is active/);
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unbound run while Goal state is hydrating', async () => {
+    mockConnection.goalState = undefined;
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockConnection.goalState = undefined;
 
     await act(async () => {
       await expect(run('do the thing', null)).rejects.toThrow(/Goal is active/);

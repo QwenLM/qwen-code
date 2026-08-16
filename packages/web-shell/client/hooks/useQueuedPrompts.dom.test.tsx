@@ -1225,6 +1225,37 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('does not resend an explicit insert when its echo beats the admission ack', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('explicit early injection'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    sdk.batches = [
+      {
+        sessionId: 'session-1',
+        originatorClientId: 'client-1',
+        messages: ['explicit early injection'],
+      },
+    ];
+    render('responding');
+    expect(latest.queuedPrompts).toEqual([]);
+
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'mid-early' });
+      await insertion;
+    });
+    render('idle', 'session-1', false, false, false);
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('falls back to one ordinary submission when mid-turn admission fails', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({

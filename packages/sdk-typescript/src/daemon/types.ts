@@ -51,6 +51,11 @@ export interface GoalSnapshotV2 {
   v: 2;
   goal: GoalRecord | null;
   activity: GoalActivity;
+  clearedGoal?: {
+    goalId: string;
+    revision: number;
+    updatedAt: number;
+  };
 }
 
 export type GoalControlRequest =

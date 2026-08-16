@@ -8246,7 +8246,10 @@ export function App({
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        if (connectionRef.current.goalState?.goal?.status === 'active') {
+        if (
+          connectionRef.current.goalState === undefined ||
+          connectionRef.current.goalState.goal?.status === 'active'
+        ) {
           reject(
             new Error('Cannot start a scheduled task while Goal is active'),
           );
@@ -8497,12 +8500,15 @@ export function App({
         ) {
           setGoalSnapshot(response.snapshot);
         }
+        if (connectionRef.current.sessionId === sessionId) {
+          await refreshGoal();
+        }
         return response.snapshot;
       } finally {
         setGoalControlBusy(false);
       }
     },
-    [workspaceActions],
+    [refreshGoal, workspaceActions],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -8528,7 +8534,11 @@ export function App({
   );
 
   const handleGoalSlashCommand = useCallback(
-    (text: string) => {
+    (text: string, hasAttachments: boolean) => {
+      if (hasAttachments) {
+        pushToast('error', t('goals.error.attachmentsUnsupported'));
+        return false;
+      }
       const operation = parseWebShellGoalCommand(text);
       if (operation.kind === 'status') {
         openGoals();
@@ -8591,6 +8601,7 @@ export function App({
       createGoalForAllocatedSession,
       ensureSessionForPrompt,
       openGoals,
+      pushToast,
       reportError,
       sessionOwnerGuard,
       store,
@@ -8855,7 +8866,12 @@ export function App({
             return true;
           }
           if (cmd === 'goal') {
-            return handleGoalSlashCommand(text);
+            return handleGoalSlashCommand(
+              text,
+              (images?.length ?? 0) > 0 ||
+                (files?.length ?? 0) > 0 ||
+                (metadata?.inputAnnotations?.length ?? 0) > 0,
+            );
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();

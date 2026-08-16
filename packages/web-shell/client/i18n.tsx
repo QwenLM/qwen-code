@@ -2088,6 +2088,8 @@ const EN: Messages = {
   'goals.error.createFailed': 'Failed to start the goal',
   'goals.error.saveFailed': 'Failed to save the goal',
   'goals.error.goalUnavailable': 'The goal is no longer available.',
+  'goals.error.attachmentsUnsupported':
+    'Remove attachments before using /goal.',
   'goals.error.editFailed': 'Failed to edit the goal',
   'goals.error.pauseFailed': 'Failed to pause the goal',
   'goals.error.resumeFailed': 'Failed to resume the goal',
@@ -4982,6 +4984,7 @@ const ZH: Messages = {
   'goals.error.createFailed': '启动目标失败',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
+  'goals.error.attachmentsUnsupported': '使用 /goal 前请先移除附件。',
   'goals.error.editFailed': '编辑目标失败',
   'goals.error.pauseFailed': '暂停目标失败',
   'goals.error.resumeFailed': '继续目标失败',

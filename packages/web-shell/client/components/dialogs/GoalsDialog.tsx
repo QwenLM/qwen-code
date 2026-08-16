@@ -177,7 +177,9 @@ export function GoalsDialog({
           goals?.find((item) => item.sessionId === editingGoal.sessionId) ??
           editingGoal;
         const goal = currentEditingGoal.snapshot.goal;
-        if (!goal) throw new Error(t('goals.error.goalUnavailable'));
+        if (!goal || goal.goalId !== editingGoal.snapshot.goal?.goalId) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
         await actions.controlGoal(
           currentEditingGoal.sessionId,
           versionedRequest(goal, 'edit', trimmed),

@@ -489,6 +489,38 @@ describe('GoalsDialog', () => {
     });
   });
 
+  it('rejects an edit when polling finds a replacement goal', async () => {
+    await mount([baseGoal()]);
+
+    click(document.querySelector('button[aria-label="Edit goal"]'));
+    setTextarea('text meant for the old goal');
+    actions.listGoals.mockResolvedValue({
+      goals: [
+        baseGoal({
+          snapshot: {
+            ...baseGoal().snapshot,
+            goal: {
+              ...baseGoal().snapshot.goal,
+              goalId: 'goal-2',
+              revision: 1,
+            },
+          },
+        }),
+      ],
+      droppedCount: 0,
+    });
+    click(findButton('Refresh'));
+    await flush();
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.controlGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'no longer available',
+    );
+  });
+
   it('never lets a slow /goals poll overlap itself', async () => {
     // `GET /goals` fans out one probe per live session and a wedged child can
     // hold it for the bridge's ext-method timeout, which is the same order as

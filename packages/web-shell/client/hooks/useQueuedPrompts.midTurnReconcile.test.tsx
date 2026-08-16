@@ -1004,6 +1004,88 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('retains an unknown explicit insert across a session switch', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue(undefined);
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('do not lose me');
+      });
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        await harness.result().insertQueuedPrompt(1);
+      });
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'do not lose me',
+          admissionOutcome: 'unknown',
+        }),
+      ]);
+
+      await harness.render({
+        sessionId: 'session-b',
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'do not lose me',
+          admissionOutcome: 'unknown',
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('retains held prompts when the same session learns a new workspace', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-before',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('typed never-sent text');
+      });
+
+      await harness.render({
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace-after',
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({ text: 'typed never-sent text' }),
+      ]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('preserves a stable-id admission across same-session owner replacement', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockReturnValue(
       new Promise(() => {}),

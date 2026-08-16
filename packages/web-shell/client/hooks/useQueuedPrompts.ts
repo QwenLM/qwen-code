@@ -90,6 +90,15 @@ function isLocallyHeldPrompt(prompt: QueuedPrompt): boolean {
   );
 }
 
+function shouldStashPrompt(prompt: QueuedPrompt): boolean {
+  return (
+    isLocallyHeldPrompt(prompt) ||
+    (prompt.admissionOutcome === 'unknown' &&
+      prompt.payloadCompleteness !== 'summary-only' &&
+      prompt.payloadAvailable !== false)
+  );
+}
+
 /**
  * Merge a restored prompt's text into the editor content. Restoration paths
  * (failed submits, failed mid-turn inserts, queue clears) prepend the prompt
@@ -673,7 +682,12 @@ export function useQueuedPrompts({
       previousOwner.sessionId,
     );
     if (previousOwnerKey) {
-      const heldPrompts = queuedPromptsRef.current.filter(isLocallyHeldPrompt);
+      const heldPrompts = queuedPromptsRef.current.filter(
+        (prompt) =>
+          shouldStashPrompt(prompt) &&
+          (!prompt.midTurnMessageId ||
+            !pendingMidTurnAdmissionsRef.current.has(prompt.midTurnMessageId)),
+      );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
       } else {
@@ -705,9 +719,21 @@ export function useQueuedPrompts({
     }
     queuedPromptsOwnerRef.current = ownerToken;
     const nextOwnerKey = queueOwnerKey(workspaceCwd, sessionId);
-    const heldPrompts = nextOwnerKey
+    let heldPrompts = nextOwnerKey
       ? (heldPromptsByOwnerRef.current.get(nextOwnerKey) ?? [])
       : [];
+    if (
+      heldPrompts.length === 0 &&
+      nextOwnerKey &&
+      previousOwnerKey &&
+      previousOwner.sessionId === sessionId
+    ) {
+      heldPrompts = heldPromptsByOwnerRef.current.get(previousOwnerKey) ?? [];
+      heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+      if (heldPrompts.length > 0) {
+        heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
+      }
+    }
     const retainedPrompts = [
       ...retainedAdmissions.map(([, entry]) => entry.prompt),
       ...heldPrompts,

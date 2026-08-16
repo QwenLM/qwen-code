@@ -368,8 +368,19 @@ export function selectGoalState(
 ): GoalSnapshotV2 {
   if (incoming.goal === null) {
     const clearedGoal =
-      current?.goal ?? (current ? clearedGoalOrder.get(current) : undefined);
+      incoming.clearedGoal ??
+      current?.goal ??
+      (current ? clearedGoalOrder.get(current) : undefined);
     if (clearedGoal) {
+      if (
+        current?.goal &&
+        (current.goal.goalId !== clearedGoal.goalId ||
+          current.goal.revision > clearedGoal.revision ||
+          (current.goal.revision === clearedGoal.revision &&
+            current.goal.updatedAt > clearedGoal.updatedAt))
+      ) {
+        return current;
+      }
       clearedGoalOrder.set(incoming, {
         goalId: clearedGoal.goalId,
         revision: clearedGoal.revision,
@@ -422,7 +433,35 @@ function getGoalState(
     return undefined;
   }
   if (raw?.['goal'] === null) {
-    return { v: 2, goal: null, activity };
+    const clearedGoal = getRecord(raw['clearedGoal']);
+    const clearedGoalId = getString(clearedGoal, 'goalId');
+    const clearedRevision = getNumber(clearedGoal, 'revision');
+    const clearedUpdatedAt = getNumber(clearedGoal, 'updatedAt');
+    if (
+      raw['clearedGoal'] !== undefined &&
+      (!clearedGoalId ||
+        clearedRevision === undefined ||
+        clearedRevision <= 0 ||
+        clearedUpdatedAt === undefined)
+    ) {
+      return undefined;
+    }
+    return {
+      v: 2,
+      goal: null,
+      activity,
+      ...(clearedGoalId &&
+      clearedRevision !== undefined &&
+      clearedUpdatedAt !== undefined
+        ? {
+            clearedGoal: {
+              goalId: clearedGoalId,
+              revision: clearedRevision,
+              updatedAt: clearedUpdatedAt,
+            },
+          }
+        : {}),
+    };
   }
   const source = getRecord(raw?.['goal']);
   const goalId = getString(source, 'goalId');
