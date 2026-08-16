@@ -807,6 +807,7 @@ export function createSubSessionLauncher(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: subSessionName(info.name ?? info.prompt),
+          titleSource: 'auto',
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);

@@ -5461,12 +5461,14 @@ export function App({
           const carriedName = carryOverManualNameRef.current;
           if (carriedName) {
             carryOverManualNameRef.current = undefined;
-            void sessionActions.renameSession(carriedName).catch((error) => {
-              console.warn(
-                '[WebShell] failed to carry the manual session name over /clear:',
-                error,
-              );
-            });
+            void sessionActions
+              .renameSession(carriedName, { silent: true })
+              .catch((error) => {
+                console.warn(
+                  '[WebShell] failed to carry the manual session name over /clear:',
+                  error,
+                );
+              });
           }
         });
       } catch (error) {
@@ -8098,6 +8100,10 @@ export function App({
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
       closeMobileDrawer();
+      // Opening an existing session is not a /clear successor, so a pending
+      // manual-name carry-over must not leak onto the next created session
+      // (#8977).
+      carryOverManualNameRef.current = undefined;
       // Loading another session should reveal its chat, not stay on the
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();

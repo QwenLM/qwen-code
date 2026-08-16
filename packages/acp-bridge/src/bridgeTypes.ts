@@ -633,6 +633,12 @@ export interface BridgeSessionGoal {
 
 export interface SessionMetadataUpdate {
   displayName?: string;
+  /**
+   * Source of the name change. Defaults to `'manual'` (an HTTP/ACP rename is
+   * user-chosen); daemon-internal machine-generated names pass `'auto'` so a
+   * `/clear` never treats them as user-chosen (#8977).
+   */
+  titleSource?: 'manual' | 'auto';
 }
 
 export interface CloseSessionOpts {

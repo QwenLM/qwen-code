@@ -10072,6 +10072,7 @@ describe('App session callbacks', () => {
       await vi.waitFor(() => {
         expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
           'My manual name',
+          { silent: true },
         );
       });
     });
@@ -10115,6 +10116,7 @@ describe('App session callbacks', () => {
       await vi.waitFor(() => {
         expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
           'My manual name',
+          { silent: true },
         );
       });
     });

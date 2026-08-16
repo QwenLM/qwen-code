@@ -186,6 +186,7 @@ async function bindAndNameSessions(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
+          titleSource: 'auto',
         });
         renamed.add(sessionId);
       } catch {
@@ -235,6 +236,7 @@ async function bindAndNameSessions(
     try {
       bridge.updateSessionMetadata(sessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
+        titleSource: 'auto',
       });
       renamed.add(sessionId);
     } catch (err) {

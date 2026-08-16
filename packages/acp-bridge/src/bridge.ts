@@ -8808,11 +8808,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 : ''),
           );
           if (nextDisplayName) {
+            const titleSource = metadata.titleSource ?? 'manual';
             entry.connection
               .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
                 sessionId,
                 displayName: nextDisplayName,
-                titleSource: 'manual',
+                titleSource,
               })
               .then((res: unknown) => {
                 const r = res as { persisted?: boolean } | undefined;
@@ -8833,14 +8834,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
-              // `titleSource` mirrors what the child-side title-update path
-              // rebroadcasts: an HTTP rename is by definition manual, and
-              // clients need the source to tell a user-chosen name from an
-              // auto-generated one (#8977).
+              // `titleSource` defaults to `manual` (an HTTP rename is by
+              // definition user-chosen); daemon-internal callers pass `auto`
+              // for machine-generated names so clients can tell them apart
+              // (#8977).
               data: {
                 sessionId,
                 displayName: entry.displayName,
-                titleSource: 'manual',
+                titleSource: metadata.titleSource ?? 'manual',
               },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }

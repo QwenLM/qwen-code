@@ -391,7 +391,7 @@ describe('LiveSessionCoordinator', () => {
     });
     expect(harness.bridge.updateSessionMetadata).toHaveBeenCalledWith(
       'live-new',
-      { displayName: 'Voice chat' },
+      { displayName: 'Voice chat', titleSource: 'auto' },
     );
     expect(harness.host.setCallState).toHaveBeenLastCalledWith(1, 'listening');
 

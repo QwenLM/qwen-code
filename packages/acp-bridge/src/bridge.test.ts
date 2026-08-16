@@ -22880,6 +22880,41 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('publishes titleSource auto when the caller stamps it (#8977)', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Machine name',
+        titleSource: 'auto',
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) => e.type === 'session_metadata_updated',
+      );
+      expect(
+        (metaEvent?.data as { titleSource?: string }).titleSource,
+      ).toBe('auto');
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
     it('keeps the optimistic update and logs a generic persistence failure', async () => {
       const stderrSpy = vi
         .spyOn(process.stderr, 'write')
