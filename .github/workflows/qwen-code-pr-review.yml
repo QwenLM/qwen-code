@@ -555,14 +555,15 @@ jobs:
           # review, never a silently skipped one).
           #
           # The label alone is NOT sufficient (#9193): Stage 1f applies it
-          # once at open time and nothing ever removes it, so a PR that
-          # earns it with a benign v1 would silently skip review for every
-          # later push of arbitrary content. Skip only while the triage run's
-          # marker comment is pinned to the LIVE head SHA; a push after
-          # triage moves the head (triage does not re-run on synchronize),
-          # stale pin -> the new diff goes to the review lane. A manually
-          # applied "parked" label has no marker and never skips. Unreadable
-          # head fails open like the label read.
+          # once at open time and, until a stale pin strips it, it never
+          # leaves the exempt list — so a PR that earns it with a benign v1
+          # could silently skip review for every later push of arbitrary
+          # content. Skip only while the triage run's marker comment is
+          # pinned to the LIVE head/base SHA pair; a push or base retarget
+          # after triage moves them (triage re-runs on neither), stale pin ->
+          # the new diff goes to the review lane, which also strips the
+          # label. A manually applied "parked" label has no marker and never
+          # skips. Unreadable head/base fails open like the label read.
           if [ "$AUTO_REVIEW" = "true" ]; then
             # No `printf | grep -q` pipes below: under `set -o pipefail`
             # the -q consumer exits at the first match and closes the
@@ -586,7 +587,7 @@ jobs:
               PR_REFS="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .base.sha] | @tsv' 2>/dev/null || true)"
               IFS=$'\t' read -r HEAD_SHA BASE_SHA <<< "$PR_REFS"
               MARKERS_READ_OK=true
-              MARKERS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot") | .body' 2>/dev/null)" || MARKERS_READ_OK=false
+              MARKERS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot") | select(.body | startswith("<!-- qwen-triage on-hold sha=")) | .body' 2>/dev/null)" || MARKERS_READ_OK=false
               if [ -n "$HEAD_SHA" ] && [ -n "$BASE_SHA" ] && [ "$MARKERS_READ_OK" = true ] && [[ "$MARKERS" == *"qwen-triage on-hold sha=${HEAD_SHA} base=${BASE_SHA}"* ]]; then
                 echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold pinned to head ${HEAD_SHA} and base ${BASE_SHA} (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
                 echo "should_run=false" >> "$GITHUB_OUTPUT"

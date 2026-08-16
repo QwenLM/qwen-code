@@ -2582,7 +2582,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
             '  */comments*)',
             '    if [ "${CONTEXT_MARKERS_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi',
-            '    node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author)) console.log(row.body);\'',
+            '    node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author) && row.body.startsWith("<!-- qwen-triage on-hold sha=")) console.log(row.body);\'',
             '    if [ "${CONTEXT_MARKER_PAD:-0}" != "0" ]; then head -c "$CONTEXT_MARKER_PAD" /dev/zero | tr "\\\\0" "x"; echo; fi ;;',
             '  *pulls/*) printf \'%s\\t%s\\n\' "$CONTEXT_HEAD_SHA" "$CONTEXT_BASE_SHA" ;;',
             '  *) ;;',
@@ -2703,6 +2703,38 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       baseSha: 'newbase888',
       onHoldMarkers: [
         '<!-- qwen-triage on-hold sha=abc123def456 base=oldbase111 -->',
+      ],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('not pinned to the live head/base');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('fails open when the base SHA alone is unreadable (#9193)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'abc123def456',
+      baseSha: '',
+      onHoldMarkers: [
+        '<!-- qwen-triage on-hold sha=abc123def456 base=oldbase111 -->',
+      ],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('live head/base SHA was unreadable');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('a marker embedded in a larger bot comment does not skip (#9193)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'abc123def456',
+      onHoldMarkers: [
+        {
+          author: 'qwen-code-ci-bot',
+          body: '<details><pre><code>\nqwen-triage on-hold sha=abc123def456 base=base777\n</code></pre></details>',
+        },
       ],
     });
     expect(r.output).toContain('should_run=true');

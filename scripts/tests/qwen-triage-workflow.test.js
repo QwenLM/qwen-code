@@ -6060,10 +6060,23 @@ describe('triage skill non-functional routing (#7411)', () => {
     // The marker posts through the author-scoped upsert helper (never a bare
     // `gh pr comment`) so a re-run PATCHes the existing pin in place.
     expect(section).toContain(
-      "printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md",
+      'gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid',
+    );
+    expect(section).toContain('empty base SHA — fail closed');
+    expect(section).toContain(
+      'MARKER_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-on-hold-marker.XXXXXX")"',
     );
     expect(section).toContain(
-      '.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" \'qwen-triage on-hold sha=\' /tmp/qwen-triage-on-hold-marker.md',
+      "printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > \"$MARKER_FILE\"",
+    );
+    expect(section).toContain(
+      '.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" \'qwen-triage on-hold sha=\' "$MARKER_FILE"',
+    );
+    expect(section).toContain('rm -f "$MARKER_FILE"');
+    // Fail closed, in this order: the marker upsert must precede the label
+    // so a failed upsert never leaves a bare "parked" label behind.
+    expect(section.indexOf('upsert-bot-comment.sh')).toBeLessThan(
+      section.indexOf("labels[]='status/on-hold'"),
     );
     expect(section).toContain(
       "skips the automatic lane only while the marker's SHA pair matches the live head and base",

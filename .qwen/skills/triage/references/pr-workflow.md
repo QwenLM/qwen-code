@@ -305,8 +305,10 @@ classification evidence — read the diff.
 ```bash
 BASE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefOid --jq '.baseRefOid') || exit 1
 [ -n "$BASE_SHA" ] || { echo 'empty base SHA — fail closed'; exit 1; }
-printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md
-.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' /tmp/qwen-triage-on-hold-marker.md
+MARKER_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-on-hold-marker.XXXXXX")"
+printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> base=<BASE_SHA> -->' > "$MARKER_FILE"
+.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' "$MARKER_FILE"
+rm -f "$MARKER_FILE"
 gh api --method POST "repos/$REPO/issues/$PR_NUMBER/labels" -f labels[]='status/on-hold'
 ```
 
@@ -318,7 +320,7 @@ alone cannot skip (the gate requires the label too), and a re-run of
 the triage upserts the same pin in place and retries the label; but an
 outcome posted without the label would promise a skip the gate does
 not grant. The review-lane gate requires the label AND a pin
-matching the live head (a label without the pin runs the review lane),
+matching the live head and base (a label without the pin runs the review lane),
 so the harm of a partial state is not a silent skip — it is the inverse:
 the outcome comment promises that no review verdict will post
 automatically while the unpinned label leaves the automatic lane
