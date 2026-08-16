@@ -87,9 +87,16 @@ export interface Ledger {
  * A usable anchor: abbreviated-to-full hex, matching what `git rev-parse`
  * emits. The parser drops a field that fails this rather than the ledger —
  * the findings are still a work list even when the anchor is garbage — and
- * Step 1 additionally verifies the anchor is an ancestor of the fetched head
- * before scoping to it, so a tampered sha costs a full-range review, never a
- * mis-scoped one.
+ * `fetch-pr --since` additionally verifies the anchor is an ancestor of the
+ * fetched head before scoping to it (in the CLI; the orchestrator never runs
+ * git against an anchor), so a tampered sha costs a full-range review, never
+ * a mis-scoped one.
+ *
+ * Exported because `fetch-pr --since` gates on the SAME shape: an anchor the
+ * marker will not carry must not be one the fetch accepts, or a
+ * ledger-blessed anchor and a cache-supplied one would be judged by two
+ * predicates that can drift (a second, case-insensitive copy shipped once).
+ * One answer about the shape, applied at every gate that reads an anchor.
  *
  * Sibling check, deliberately not shared: `repo-context.ts` validates
  * `plan.mergeBaseSha` as a FULL 40/64-char object id and hard-throws — that
@@ -98,7 +105,30 @@ export interface Ledger {
  * body. Two claims, two strictnesses; one shared helper would invite using
  * the loose one where the strict one is meant.
  */
-const SHA_RE = /^[0-9a-f]{7,64}$/;
+export const SHA_RE = /^[0-9a-f]{7,64}$/;
+
+/**
+ * Grammar of a ledger finding id (`R<round>-<n>`). Shared by every site
+ * that reads carried ids — compose-review's re-post prefix parser and
+ * presubmit's carried-id extractor — so the two ends cannot drift: a
+ * divergence makes re-posts read as plain overlaps and get dropped,
+ * silently re-creating #9208.
+ */
+export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
+
+/**
+ * Prefix-anchored readback of a carried id off the claim line: the write side
+ * guarantees the id leads the line right after the severity marker, so the
+ * read sides key on that same position. Shared WHOLESALE — terminator
+ * included — by compose-review's ledger builder and presubmit's re-post
+ * extractor, so the tolerated terminator set cannot drift on one end only
+ * (#9212 review). The earlier `\b`-bounded whole-body scan also matched
+ * cross-references ("see R3-2 for context") and ids embedded in longer
+ * hyphen runs, exempting a re-post under an unrelated thread.
+ */
+export const LEDGER_ID_READBACK = new RegExp(
+  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+);
 
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
