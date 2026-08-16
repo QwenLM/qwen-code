@@ -1028,6 +1028,62 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it('takes the round cap from the CLOCK as well, on a sized huge plan', () => {
+    // Every other cap test here uses the unsized `PLAN` fixture, whose tier is
+    // the LARGE fallback whatever the clock says, or forces a cap by storing
+    // one — so the `hasReviewDeadline(process.env)` argument at all four call
+    // sites was mutation-invisible: hardcoding it to either constant left the
+    // whole suite green. A SIZED huge plan is the only shape where the flag
+    // decides anything.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-clock-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      const before = process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+      const huge = join(dir, 'huge.json');
+      writeFileSync(
+        huge,
+        JSON.stringify({ ...PLAN, srcDiffLines: 5000, diffLines: 5000 }),
+      );
+      try {
+        // No clock: the huge reduction does not apply, so the 3B tier stands
+        // and round 4 builds.
+        delete process.env[DEADLINE_ENV];
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 4 });
+        expect(process.exitCode).toBeUndefined();
+        expect(readRecordedPrompts(huge).size).toBe(1);
+
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 6 });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 5');
+
+        // A clock: the same plan, the same round, refused at the reduced tier.
+        process.env[DEADLINE_ENV] = String(
+          Math.floor(Date.now() / 1000) + 7200,
+        );
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 4 });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 3');
+      } finally {
+        if (before === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = before;
+      }
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('takes the round cap from the plan’s topology on the chunkless path', () => {
     // 3A is the topology that actually runs this path — one auditor a round,
     // the whole diff — and it is the one the tier raises. Both arms use the
