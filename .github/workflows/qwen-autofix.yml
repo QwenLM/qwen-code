@@ -5351,8 +5351,11 @@ jobs:
           # unions in; merge if a previous repair already left one.
           if [[ -s "${WORKDIR}/deferred-findings.json" ]]; then
             if [[ -s "${WORKDIR}/deferred-findings.carry.json" ]]; then
-              if jq -s 'add' "${WORKDIR}/deferred-findings.carry.json" \
-                "${WORKDIR}/deferred-findings.json" \
+              # This round FIRST: unique_by keeps first-of-group in original
+              # order, so a finding re-emitted with fresher text wins — the
+              # same precedence the upsert script documents for its own union.
+              if jq -s 'add' "${WORKDIR}/deferred-findings.json" \
+                "${WORKDIR}/deferred-findings.carry.json" \
                 > "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then
                 mv "${WORKDIR}/deferred-findings.carry.next" \
                   "${WORKDIR}/deferred-findings.carry.json"
@@ -5783,7 +5786,7 @@ jobs:
                 fi
                 export GH_CONFIG_DIR
                 bash -c "${UPSERT_SRC}" ||
-                  echo "::warning::deferred-findings upsert failed; continuing"
+                  echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
               ' > /dev/null 2>&1 ; } 3>&1 )" || true
             # INSPECTION uses bash builtins only ([[ ]], read, printf — no
             # exec): under loader trace mode every external binary, grep
@@ -6780,7 +6783,7 @@ jobs:
                     exit 0
                   fi
                   bash -c "${UPSERT_SRC}" ||
-                    echo "::warning::deferred-findings upsert failed; continuing"
+                    echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
                 ' > /dev/null 2>&1 ; } 3>&1 )" || true
               # Builtin-only inspection, same rationale as the twin.
               if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then

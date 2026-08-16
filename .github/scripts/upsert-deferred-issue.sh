@@ -75,7 +75,13 @@ dump_file() {
   local size
   size="$(wc -c < "$1" 2> /dev/null | tr -d ' ')"
   if [[ -n "${size}" ]] && (( size > 4000 )); then
-    echo "--- $1 (first 4000 of ${size} bytes — TRUNCATED; the full file is in this run's artifact dump)"
+    if [[ "$1" == "${WORKDIR}/"* ]]; then
+      echo "--- $1 (first 4000 of ${size} bytes — TRUNCATED; the full file is in this run's artifact dump)"
+    else
+      # A merge temp lives outside WORKDIR, so it is NOT uploaded — say so
+      # rather than point at an artifact that will not contain it.
+      echo "--- $1 (first 4000 of ${size} bytes — TRUNCATED; this file is a temporary merge product and is NOT in the artifact dump)"
+    fi
   else
     echo "--- $1"
   fi
@@ -291,7 +297,7 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RE
     ascii_downcase | gsub("[[:punct:]]+"; " ") | gsub("\\s+"; " ")
     | sub("^ "; "") | sub(" $"; "");
   ($resolved | split("\n")
-    | map(sub("^rc:"; "") | sub("\r$"; "")
+    | map(sub("^\\s+"; "") | sub("\\s+$"; "") | sub("^rc:"; "")
       | select(test("^[0-9]+$")) | tonumber)) as $done
   | ($known | split("\n")) as $klines
   | map(.id as $id
@@ -301,6 +307,7 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RE
        else "rc" end) as $pfx
     | select(($src != "review_comment") or (($done | index($id)) | not))
     | {src: $src, id: $id,
+       raw: ((.path // "?") + " " + .reason),
        # The path charset filter already excludes `<`, so the comment opener
        # cannot survive there; the reason is escaped explicitly below.
        line: "- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
@@ -321,13 +328,18 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --rawfile resolved "${RE
     # of path+reason — case-folded, punctuation-collapsed, capped — which
     # absorbs whitespace and phrasing churn while keeping genuinely distinct
     # findings apart. Erring toward a visible duplicate over a silent loss.
-    | . + {key: (.line | normkey)})
+    # Intra-batch identity from the UNCAPPED text: deriving it from the
+    # rendered line let two siblings that differ only past the 500-char reason
+    # cap collide and one vanish. The corpus check below still compares
+    # rendered forms — that is all the issue stores — so cross-round the cap
+    # can cost a duplicate, never a loss.
+    | . + {key: (.line | normkey), fullkey: (.raw | normkey)})
   # An inline comment is one finding, so its id IS the identity (and the
   # anchor keeps working across rounds). A review body or an issue-level
   # comment can raise SEVERAL findings under one id, so there the identity —
   # and the corpus check — is the rendered line itself; keying those on the
   # id alone silently ate every sibling but the first.
-  | unique_by(if .src == "review_comment" then [.src, .id] else [.src, .id, .key] end)
+  | unique_by(if .src == "review_comment" then [.src, .id] else [.src, .id, .fullkey] end)
   | map(. as $r
     | select(if $r.src == "review_comment"
         then ($klines | any(test($r.anchor))) | not

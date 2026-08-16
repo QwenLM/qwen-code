@@ -10433,6 +10433,11 @@ exit 1
     expect(pushAndReportStep.split('run_deferred_upsert() {').length - 1).toBe(
       1,
     );
+    // Its empty-content skip: without it an absent stage output would send an
+    // empty script into the child and read as a successful round.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ -z "\$\{UPSERT_SRC:-\}" \]\]; then\n(?:\s*#[^\n]*\n)*\s*echo 'deferred-findings upsert skipped: stage step never ran'\n\s*return 0/,
+    );
     expect(
       pushAndReportStep.match(
         /resolve_and_reply_threads\n(?:\s*#[^\n]*\n)*\s*run_deferred_upsert\n/g,
@@ -10539,7 +10544,7 @@ exit 1
       // while fd 1/2 — where every loader side channel writes — are
       // discarded. No log file to plant, race, or bound.
       expect(step).toContain('exec >&3');
-      expect(step).toMatch(/' > \/dev\/null 2>&1 ; \} 3>&1 \)"/);
+      expect(step).toMatch(/' > \/dev\/null 2>&1 ; \} 3>&1 \)" \|\| true/);
       expect(step).not.toMatch(/UPSERT_LOG/);
       expect(step).not.toMatch(/autofix-upsert-log/);
       // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS and
@@ -10642,6 +10647,10 @@ exit 1
     // The script travels as CONTENT captured from the trusted checkout into
     // expression context — no staged copy on an agent-writable path, hence
     // no digest to record or verify.
+    // The consumers read `steps.stage.outputs.*`, so the producing step must
+    // actually be identified as `stage` — the one link whose break makes
+    // every UPSERT_SRC silently empty.
+    expect(stageStep).toMatch(/\n\s*id: 'stage'\n/);
     expect(stageStep).toContain('echo "upsert_src<<${_upsert_delim}"');
     expect(stageStep).toContain('cat .github/scripts/upsert-deferred-issue.sh');
     expect(stageStep).toMatch(
@@ -10711,8 +10720,11 @@ exit 1
     // Both inputs of the repair-side union, in order: carry first, then this
     // round's (the sidecar is the accumulated history there). The old
     // assertion was also satisfied by the else-branch `mv` line.
+    // This round FIRST, matching the script's own union precedence: unique_by
+    // keeps first-of-group, so a re-emitted finding wins with its fresher
+    // text. The old order let the carried copy win (R14-7).
     expect(repairStep).toMatch(
-      /jq -s 'add' "\$\{WORKDIR\}\/deferred-findings\.carry\.json" \\\n\s*"\$\{WORKDIR\}\/deferred-findings\.json" \\\n\s*> "\$\{WORKDIR\}\/deferred-findings\.carry\.next" 2> \/dev\/null; then/,
+      /jq -s 'add' "\$\{WORKDIR\}\/deferred-findings\.json" \\\n\s*"\$\{WORKDIR\}\/deferred-findings\.carry\.json" \\\n\s*> "\$\{WORKDIR\}\/deferred-findings\.carry\.next" 2> \/dev\/null; then/,
     );
     // R9-20: the script-side union is the freshness guarantee — this round
     // first, so unique_by (first-of-group, original order) keeps the fresh
@@ -11325,6 +11337,41 @@ exit 1
     });
     expect(freshWins.calls).toContain('fresh');
     expect(freshWins.calls).not.toContain('stale');
+    // R14-13: the intra-batch identity comes from the UNCAPPED text —
+    // deriving it from the rendered line let two siblings that differ only
+    // past the 500-char reason cap collide, and one vanished silently.
+    const past = 'x'.repeat(520);
+    const beyondCap = runUpsert({
+      findings: JSON.stringify([
+        { id: 21, source: 'review', reason: past + 'AAA' },
+        { id: 21, source: 'review', reason: past + 'BBB' },
+      ]),
+    });
+    expect(beyondCap.out).toContain('(2 of 2 new)');
+    // R14-14: a resolved id survives stray surrounding whitespace.
+    const paddedResolved = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      resolved: '  rc:7  \n',
+    });
+    // (the lookup still runs; what must not happen is a write)
+    expect(paddedResolved.calls).not.toContain('-f title=');
+    expect(paddedResolved.calls).not.toContain('/comments -f body=');
+    // R14-1: EVERY wrapper-authored warning carries the trusted marker, so
+    // none of them is demoted to plain text by the `::` neutralization.
+    for (const step of [pushAndReportStep, reviewAddressReportStep]) {
+      // …scoped to the clean child: warnings elsewhere in the step reach the
+      // log directly and never pass through the neutralizing replay.
+      const child = step.slice(
+        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
+      );
+      const wrapperWarnings =
+        child.match(/echo "(?:__upsert_trusted__)?::warning::[^"]*"/g) ?? [];
+      expect(wrapperWarnings.length).toBeGreaterThan(0);
+      for (const w of wrapperWarnings) {
+        expect(w).toContain('__upsert_trusted__');
+      }
+    }
     // BSD/macOS `wc -l` pads with leading spaces, and the count is
     // interpolated into the cap warning and the success line — so the script
     // strips it. Driven with a padding `wc` stub, since GNU wc never pads and
