@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 import {
   parseProxyEp,
   discoverGithubToken,
   exchangeGhuForCapi,
+  createCopilotTokenManager,
 } from './copilot-auth.js';
 
 describe('parseProxyEp', () => {
@@ -173,5 +175,129 @@ describe('exchangeGhuForCapi', () => {
     expect(result.endpointsApi).toBe(
       'https://api.enterprise.githubcopilot.com',
     );
+  });
+});
+
+describe('CopilotTokenManager', () => {
+  it('getSnapshot returns atomic bearer+endpointsApi pair', async () => {
+    const cacheFile = join(
+      mkdtempSync(join(tmpdir(), 'copi-mgr-')),
+      'copilot.json',
+    );
+    const { fetch } = makeMockFetch([
+      {
+        status: 200,
+        body: {
+          token: 'tid=abc;proxy-ep=proxy.individual.githubcopilot.com',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        },
+      },
+    ]);
+    const mgr = createCopilotTokenManager({ cacheFile, fetchImpl: fetch });
+    const snap = await mgr.getSnapshot();
+    // bearer is a RedactedString (toString→[redacted]); use valueOf() for the
+    // functional primitive value (Ruling 2: brief's bare toContain/toBe are
+    // incompatible with the Global-Constraint RedactedString).
+    expect(snap.bearer.valueOf()).toContain('tid=');
+    expect(snap.endpointsApi).toBe('https://api.individual.githubcopilot.com');
+    expect(snap.expiresAtMs).toBeGreaterThan(Date.now());
+  });
+
+  it('gho_ path skips fetch (no exchange HTTP)', async () => {
+    const cacheFile = join(
+      mkdtempSync(join(tmpdir(), 'copi-mgr-')),
+      'copilot.json',
+    );
+    const hostsFile = join(
+      mkdtempSync(join(tmpdir(), 'copi-mgr-')),
+      'hosts.json',
+    );
+    writeFileSync(
+      hostsFile,
+      JSON.stringify({ 'github.com': { oauth_token: 'gho_TEST1234' } }),
+      {
+        mode: 0o600,
+      },
+    );
+    const { fetch, calls } = makeMockFetch([]);
+    process.env['COPILOT_GITHUB_TOKEN_PATH'] = hostsFile;
+    const mgr = createCopilotTokenManager({ cacheFile, fetchImpl: fetch });
+    const snap = await mgr.getSnapshot();
+    expect(snap.bearer.valueOf()).toBe('gho_TEST1234');
+    expect(calls).toHaveLength(0); // no exchange HTTP
+    delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+  });
+
+  it('redacts bearer in inspect/toString/toJSON', async () => {
+    const cacheFile = join(
+      mkdtempSync(join(tmpdir(), 'copi-mgr-')),
+      'copilot.json',
+    );
+    const { fetch } = makeMockFetch([
+      {
+        status: 200,
+        body: {
+          token: 'tid=SECRETBEARER;proxy-ep=proxy.individual.githubcopilot.com',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        },
+      },
+    ]);
+    const mgr = createCopilotTokenManager({ cacheFile, fetchImpl: fetch });
+    const snap = await mgr.getSnapshot();
+    expect(String(snap.bearer)).not.toContain('SECRETBEARER');
+    expect(JSON.stringify(snap)).not.toContain('SECRETBEARER');
+    expect(inspect(snap)).not.toContain('SECRETBEARER');
+  });
+
+  it('concurrent getSnapshot calls share a single mint (mintInFlight dedup)', async () => {
+    const cacheFile = join(
+      mkdtempSync(join(tmpdir(), 'copi-mgr-')),
+      'copilot.json',
+    );
+    let fetchCallCount = 0;
+    const countingFetch = (async (_url: URL | string, _init?: RequestInit) => {
+      fetchCallCount++;
+      return new Response(
+        JSON.stringify({
+          token: 'tid=abc;proxy-ep=proxy.individual.githubcopilot.com',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const mgr = createCopilotTokenManager({
+      cacheFile,
+      fetchImpl: countingFetch,
+    });
+    const [a, b, c] = await Promise.all([
+      mgr.getSnapshot(),
+      mgr.getSnapshot(),
+      mgr.getSnapshot(),
+    ]);
+    expect(fetchCallCount).toBe(1);
+    expect(a.bearer.valueOf()).toBe(b.bearer.valueOf());
+    expect(b.bearer.valueOf()).toBe(c.bearer.valueOf());
+  });
+
+  it('cache dir created with 0o700 permissions', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'copi-perm-'));
+    const cacheFile = join(tempRoot, 'subdir', 'copilot.json');
+    const { fetch } = makeMockFetch([
+      {
+        status: 200,
+        body: {
+          token: 'tid=abc;proxy-ep=proxy.individual.githubcopilot.com',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        },
+      },
+    ]);
+    const mgr = createCopilotTokenManager({ cacheFile, fetchImpl: fetch });
+    await mgr.getSnapshot();
+    const dirStat = statSync(join(tempRoot, 'subdir'));
+    expect(dirStat.mode & 0o777).toBe(0o700);
   });
 });

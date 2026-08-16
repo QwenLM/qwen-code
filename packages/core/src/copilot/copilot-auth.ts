@@ -1,7 +1,16 @@
 // packages/core/src/copilot/copilot-auth.ts
-import { readFile } from 'node:fs/promises';
+import {
+  open,
+  writeFile,
+  readFile,
+  mkdir,
+  unlink,
+  rename,
+} from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { inspect } from 'node:util';
 
 export interface CopilotAuthSnapshot {
   readonly bearer: string;
@@ -218,11 +227,179 @@ export function parseProxyEp(bearer: string): string | null {
   return `https://${host}`;
 }
 
-export function createCopilotTokenManager(_opts?: {
+const REFRESH_BUFFER_MS = 60_000;
+const LOCK_TIMEOUT_MS = 8_000;
+const LOCK_POLL_MS = 100;
+const LOCK_STALE_MS = 30_000;
+
+class RedactedString extends String {
+  [inspect.custom]() {
+    return '[redacted]';
+  }
+  override toString() {
+    return '[redacted]';
+  }
+  toJSON() {
+    return '[redacted]';
+  }
+}
+
+interface CacheData {
+  bearer: string;
+  endpointsApi: string;
+  expiresAtMs: number;
+  cachedAtMs: number;
+  ghuSource?: string;
+}
+
+async function acquireMintLock(lockFile: string): Promise<() => Promise<void>> {
+  await mkdir(dirname(lockFile), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const fh = await open(lockFile, 'wx', 0o600);
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      return async () => {
+        try {
+          await unlink(lockFile);
+        } catch {
+          // already gone
+        }
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      // stale-steal
+      try {
+        const st = statSync(lockFile);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          await unlink(lockFile);
+        }
+      } catch {
+        // race — file gone
+      }
+      await new Promise((r) => setTimeout(r, LOCK_POLL_MS));
+    }
+  }
+  throw new Error(`Copilot cache lock timeout after ${LOCK_TIMEOUT_MS}ms`);
+}
+
+async function readDiskCache(cacheFile: string): Promise<CacheData | null> {
+  try {
+    const raw = await readFile(cacheFile, 'utf-8');
+    return JSON.parse(raw) as CacheData;
+  } catch {
+    return null;
+  }
+}
+
+async function writeDiskCache(
+  cacheFile: string,
+  data: CacheData,
+): Promise<void> {
+  await mkdir(dirname(cacheFile), { recursive: true, mode: 0o700 });
+  const tmp = `${cacheFile}.tmp.${process.pid}`;
+  await writeFile(tmp, JSON.stringify(data), { mode: 0o600 });
+  await rename(tmp, cacheFile);
+}
+
+function isFresh(data: CacheData | null): data is CacheData {
+  return !!data && data.expiresAtMs - REFRESH_BUFFER_MS > Date.now();
+}
+
+export function createCopilotTokenManager(opts?: {
   cacheFile?: string | false;
   fetchImpl?: typeof fetch;
 }): CopilotTokenManager {
-  throw new Error('not implemented');
+  const cacheFile =
+    opts?.cacheFile ?? join(homedir(), '.config', 'qwen-code', 'copilot.json');
+  const lockFile = typeof cacheFile === 'string' ? `${cacheFile}.lock` : null;
+  const f = opts?.fetchImpl ?? fetch;
+
+  let inMemory: CacheData | null = null;
+  let mintInFlight: Promise<CacheData> | null = null;
+
+  async function mint(): Promise<CacheData> {
+    const discovered = await discoverGithubToken();
+    let data: CacheData;
+    if (discovered.token.startsWith('gho_')) {
+      const proxyEp = parseProxyEp(discovered.token);
+      data = {
+        bearer: discovered.token,
+        endpointsApi: proxyEp ?? 'https://api.githubcopilot.com',
+        expiresAtMs: Date.now() + 3_600_000,
+        cachedAtMs: Date.now(),
+        ghuSource: discovered.source,
+      };
+    } else {
+      const exchanged = await exchangeGhuForCapi(discovered.token, {
+        fetchImpl: f,
+      });
+      data = {
+        bearer: exchanged.bearer,
+        endpointsApi: exchanged.endpointsApi,
+        expiresAtMs: exchanged.expiresAtMs,
+        cachedAtMs: Date.now(),
+        ghuSource: discovered.source,
+      };
+    }
+    if (typeof cacheFile === 'string' && lockFile) {
+      const release = await acquireMintLock(lockFile);
+      try {
+        // double-check under lock
+        const diskCheck = await readDiskCache(cacheFile);
+        if (isFresh(diskCheck)) {
+          inMemory = diskCheck;
+          return diskCheck;
+        }
+        await writeDiskCache(cacheFile, data);
+      } finally {
+        await release();
+      }
+    }
+    inMemory = data;
+    return data;
+  }
+
+  async function getSnapshot(): Promise<CopilotAuthSnapshot> {
+    if (isFresh(inMemory)) {
+      const d = inMemory!;
+      return Object.freeze({
+        bearer: new RedactedString(d.bearer) as unknown as string,
+        endpointsApi: d.endpointsApi,
+        expiresAtMs: d.expiresAtMs,
+      });
+    }
+    if (!mintInFlight) {
+      mintInFlight = mint().finally(() => {
+        mintInFlight = null;
+      });
+    }
+    const data = await mintInFlight;
+    return Object.freeze({
+      bearer: new RedactedString(data.bearer) as unknown as string,
+      endpointsApi: data.endpointsApi,
+      expiresAtMs: data.expiresAtMs,
+    });
+  }
+
+  async function forceRefresh(): Promise<void> {
+    inMemory = null;
+    if (typeof cacheFile === 'string') {
+      try {
+        await unlink(cacheFile);
+      } catch {
+        // ok
+      }
+    }
+    await getSnapshot();
+  }
+
+  async function getAvailableModelIds(): Promise<string[] | null> {
+    return null; // populated by Task 4.1 via modelsList; stub for now
+  }
+
+  return { getSnapshot, forceRefresh, getAvailableModelIds };
 }
 
 export async function runCopilotDeviceFlow(_opts?: {
