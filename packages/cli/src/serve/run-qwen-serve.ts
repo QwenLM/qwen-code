@@ -815,6 +815,15 @@ export interface RunHandle {
 
 const retryableChannelWorkerShutdownErrors = new WeakSet<Error>();
 
+function hasRetryableChannelWorkerShutdownError(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return error.errors.some(hasRetryableChannelWorkerShutdownError);
+  }
+  return (
+    error instanceof Error && retryableChannelWorkerShutdownErrors.has(error)
+  );
+}
+
 type CoreRuntime = typeof import('./core-runtime.js');
 type LiveDiscoveryRuntime = typeof import('./live/discovery.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
@@ -7303,10 +7312,7 @@ async function runQwenServeImpl(
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          if (
-            err instanceof Error &&
-            retryableChannelWorkerShutdownErrors.has(err)
-          ) {
+          if (hasRetryableChannelWorkerShutdownError(err)) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
@@ -7657,10 +7663,7 @@ async function runQwenServeImpl(
           (closeError: unknown) =>
             reject(
               closeError instanceof Error
-                ? new AggregateError(
-                    [error, closeError],
-                    'Serve startup and cleanup failed.',
-                  )
+                ? new AggregateError([error, closeError], error.message)
                 : error,
             ),
         );
@@ -7786,10 +7789,7 @@ async function runQwenServeImpl(
                     closeErr instanceof Error ? closeErr : null,
                   ),
                 );
-                if (
-                  closeErr instanceof Error &&
-                  retryableChannelWorkerShutdownErrors.has(closeErr)
-                ) {
+                if (hasRetryableChannelWorkerShutdownError(closeErr)) {
                   writeDaemonLifecycleBestEffort(() =>
                     daemonLog.error(
                       'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
@@ -7872,10 +7872,7 @@ async function runQwenServeImpl(
           (closeError: unknown) =>
             reject(
               closeError instanceof Error
-                ? new AggregateError(
-                    [err, closeError],
-                    'Serve startup and cleanup failed.',
-                  )
+                ? new AggregateError([err, closeError], err.message)
                 : err,
             ),
         );
@@ -7897,10 +7894,7 @@ async function runQwenServeImpl(
           (closeError: unknown) =>
             reject(
               closeError instanceof Error
-                ? new AggregateError(
-                    [error, closeError],
-                    'Serve startup and cleanup failed.',
-                  )
+                ? new AggregateError([error, closeError], error.message)
                 : error,
             ),
         );

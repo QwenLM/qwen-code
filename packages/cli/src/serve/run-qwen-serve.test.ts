@@ -10552,6 +10552,80 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('keeps the channel lease when lifecycle aggregation wraps the retryable worker error', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-aggregate-error-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      pid: 1234,
+      channels: ['telegram'],
+      error: 'Channel worker did not exit after SIGKILL.',
+    });
+    worker.stop
+      .mockRejectedValueOnce(
+        new Error('Channel worker did not exit after SIGKILL.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    const originalServerClose = handle.server.close;
+    handle.server.close = vi.fn((callback) => {
+      setImmediate(() => callback?.(new Error('listener close failed')));
+      return handle.server;
+    }) as typeof handle.server.close;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+
+      expect(worker.stop).toHaveBeenCalledOnce();
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      handle.server.close = originalServerClose;
+      await handle.close().catch(() => undefined);
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
   it('bounds the logger flush before allowing a retryable close to reject', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-log-stuck-')),
@@ -11193,6 +11267,47 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(bridge.shutdown).toHaveBeenCalledTimes(1);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('preserves the startup reason when channel cleanup also fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-startup-cleanup-')),
+    );
+    const cleanupError = new Error('session maintenance drain failed');
+    const bridge = makeFakeBridge();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      app.locals['sessionArchiveCoordinator'] = {
+        sealMaintenanceAndWait: vi.fn().mockRejectedValue(cleanupError),
+      };
+      return app;
+    });
+
+    try {
+      await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge,
+          trustedWorkspace: false,
+          channelServicePidfile: makePidfileDeps(),
+        },
+      );
+      expect.fail('Expected serve startup to reject.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).message).toContain(
+        'is not trusted; cannot host channels',
+      );
+      expect((error as AggregateError).errors).toContain(cleanupError);
+    }
   });
 
   it('keeps the serve owner alive when failed startup cannot confirm worker exit', async () => {
