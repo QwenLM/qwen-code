@@ -138,21 +138,35 @@ it and must not be invoked. This closes the rubber-stamp hole by the
 absence side: an audit round that skips the audit cannot push. The tag
 reaches the gate as a verify-step env (same pattern as
 `FOOTPRINT_ENFORCE`), and shape validation uses `jq`, already a
-workflow dependency. The verify step runs on `always()`, and the check
-must sit before the gate script's no-commit/failure.md early-exits so
-it also applies to no-op audit rounds: a verdict of `sound` with
-nothing left to fix still requires the audit artifact.
+workflow dependency. Shape validation enforces the taxonomy where it
+is unambiguous (`sound` requires both axes `pass`, `drift` at least
+one `fail`, `conflict` unconstrained), rejects multi-document verdict
+files, and enforces the conflict routing: a `conflict` verdict whose
+round did not stop with a handoff fails NON-retryable — conflict must
+STOP BLOCKED, never push. The verify step runs on `always()`, and the
+check must sit before the gate script's no-commit/failure.md
+early-exits so it also applies to no-op audit rounds (a verdict of
+`sound` with nothing left to fix still requires the audit artifact)
+AND to conflict rounds (whose BLOCKED stop exits via `failure.md`;
+the verdict must be validated and surfaced before that exit, or the
+trail marker never posts and the park never engages).
 
 ### D. Verdict routing and the audit trail (qwen-autofix.yml report step)
 
 The report never re-reads `growth-audit.json`: the gate records the
 verdict it VALIDATED as a step output (`audit_verdict`), and both
-report steps consume that (repair pass first if it ran). The branch's
-own build/tests run as the runner user on a predictable WORKDIR after
-the gate looks, so a re-read could be overwritten in between — a
-forged re-arm, or a conflict verdict flipped back to sound, defeating
-the park. The gate-validated verdict is the only verdict that may reach
-the trail marker and the re-arm.
+report steps consume the FIRST pass's if it ran (the repair pass
+re-reads the branch-writable file after the first pass's build had a
+write window, so its re-read can only ever lose). The branch's own
+build/tests run as the runner user on a predictable WORKDIR after the
+gate looks, so a re-read could be overwritten in between — a forged
+re-arm, or a conflict verdict flipped back to sound, defeating the
+park. The gate-validated verdict is the only verdict that may reach
+the trail marker and the re-arm. The check subprocesses that run the
+branch's build/tests are stripped of the runner injection channels
+(`GITHUB_OUTPUT`/`GITHUB_ENV`/`GITHUB_PATH`), so branch code cannot
+append its own `audit_verdict` after the gate's write (step outputs
+are last-write-wins).
 
 Every audit round posts its verdict in the round report comment with a
 machine-readable marker
@@ -166,14 +180,15 @@ round is exempt from supersede discard and can run with a stale window
 after a re-arm, so a marker written under the dead key would be
 invisible to every later read.
 
-On `verdict=sound`, the report step additionally posts the re-arm
-marker comment (`<!-- autofix-rearm -->`). This reuses the existing
+On `verdict=sound` on a COMPLETED round, the report step additionally
+posts the re-arm marker comment (`<!-- autofix-rearm -->`). This reuses the existing
 `LIVE_REARM_KEY` machinery exactly (window key = latest
 `takeover-ack engaged` or `autofix-rearm` marker): the watermark
 releases, queued old-window jobs supersede themselves, and the next
 round re-anchors the growth baseline at the CURRENT size, so the
-remaining work gets a fresh budget. Effectively an automatic,
-audit-gated `/retry`.
+remaining work gets a fresh budget (completed-round report paths only
+— a round that FAILED records the verdict but never re-arms).
+Effectively an automatic, audit-gated `/retry`.
 
 Explicit decision: the re-arm has full `/retry` semantics — the
 per-window round counter and the suggestion valve reset too. Continuing
@@ -296,8 +311,9 @@ behavior and must be rewritten with the change:
   Critical-only without a breach); verdict gate rejecting a KISS_AUDIT
   round with missing/malformed `growth-audit.json`;
   `<!-- autofix-growth-audit … -->` trail marker in the report;
-  `<!-- autofix-rearm -->` posted iff verdict is `sound`; conflict
-  handoff idempotence.
+  `<!-- autofix-rearm -->` posted iff verdict is `sound` on a completed
+  round (the failure path records the verdict but never re-arms);
+  conflict handoff idempotence.
 
 ## Rollout and dependencies
 

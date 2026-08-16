@@ -4800,7 +4800,7 @@ jobs:
               | select((.body // "") | contains("<!-- autofix-base-updated"))
               | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
           # The instant THIS round's net was measured. Stamped into the
-          # growth-now marker so the divergence read filters on measurement
+          # growth-now marker so the census filters on measurement
           # time, not the marker comment's created_at — the report posts the
           # marker only after the agent's ~120-minute run, so a round in
           # flight when a concurrent base update lands would otherwise pass a
@@ -4866,7 +4866,7 @@ jobs:
             echo "growth_base_win=${LIVE_REARM_KEY}"
             # The round's own growth + over-budget flag, so the report step can
             # write this round's autofix-growth-now marker (the per-round
-            # history the divergence read above consumes).
+            # history the census above consumes).
             echo "growth_src=${GROWTH_SRC}"
             echo "growth_test=${GROWTH_TEST}"
           } >> "${GITHUB_OUTPUT}"
@@ -5897,11 +5897,15 @@ jobs:
           # report carries the audit's verdict marker (and a sound verdict
           # additionally re-arms the window at the current size).
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
-          # The verdict the verification GATE validated (the repair pass's if
-          # it ran, else the first pass's) — never a re-read of the
-          # branch-writable growth-audit.json. Empty when the gate rejected
-          # the verdict itself or never ran; the marker then stays absent.
-          AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict || steps.verify.outputs.audit_verdict }}'
+          # The verdict the verification GATE validated — never a re-read of
+          # the branch-writable growth-audit.json. FIRST PASS preferred: its
+          # read happens before any branch code runs in the verify step (and
+          # the checks no longer inherit the output channel), while the
+          # repair pass re-reads the file after the first pass's build had a
+          # write window — a forged rewrite must lose to the first pass's
+          # validated verdict. Empty when the gate rejected the verdict
+          # itself or never ran; the marker then stays absent.
+          AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict || steps.verify_repair.outputs.audit_verdict }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
         run: |-
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
@@ -6392,8 +6396,8 @@ jobs:
               if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
-              # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
+              # Per-round growth history the next round's census counts;
+              # run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
               # job re-run re-posts the same run; measured= orders and picks
               # that run's latest attempt).
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
@@ -6430,8 +6434,8 @@ jobs:
               if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
-              # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
+              # Per-round growth history the next round's census counts;
+              # run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
               # job re-run re-posts the same run; measured= orders and picks
               # that run's latest attempt).
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
@@ -6598,8 +6602,9 @@ jobs:
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
           KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
           # Gate-validated verdict (see 'Push and report'): never a re-read
-          # of the branch-writable file.
-          AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict || steps.verify.outputs.audit_verdict }}'
+          # of the branch-writable file; first pass preferred over the
+          # repair pass's re-read for the same forgery reason.
+          AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict || steps.verify_repair.outputs.audit_verdict }}'
           UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
@@ -7134,8 +7139,8 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
-              # Per-round growth history the divergence read counts — same
-              # marker the push/no-op report paths write, so an over-budget
+              # Per-round growth history the census counts — same marker
+              # the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=
               # (per-workflow-run) is the DEDUP identity; measured= orders.
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"

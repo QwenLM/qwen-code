@@ -60,27 +60,6 @@ if [[ "${committed_rc}" -eq 1 ]]; then
   echo "committed=true" >> "${GITHUB_OUTPUT}"
 fi
 
-if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
-  echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
-  git status --short
-  cat "${WORKDIR}/failure.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
-fi
-
-if [[ -f "${WORKDIR}/failure.md" ]]; then
-  echo "🛑 Agent aborted intentionally:"
-  cat "${WORKDIR}/failure.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
-fi
-
-# Convention: hooks are severed at EVERY host checkout of the PR
-# branch (no secret sits in this step's env, but a post-checkout
-# hook still runs branch code on the host).
-git config core.hooksPath /dev/null
-git checkout "${BRANCH}"
-
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
 rm -f "${GATE_LOG}.bite"
@@ -133,12 +112,15 @@ reject_fix() {
 # is over the growth budget) must carry the audit's machine-readable verdict
 # — the audit IS the round's judgment of the over-budget approach, and a
 # round that skipped it must not push (the rubber-stamp hole by absence).
-# Sits at the head of the check section (after reject_fix so the rejection
-# shape is shared), before the build/schema/footprint checks AND before the
-# no-commit/no-op exits below: the verdict is required even for a no-op
-# audit round whose verdict is sound with nothing left to fix. Malformed is
-# agent misbehavior, not a build problem — NON-retryable, so the repair pass
-# is never invoked and the next scan simply re-runs the audit.
+# Sits BEFORE the failure.md early-exits below: a conflict round stops
+# BLOCKED via failure.md, and its verdict must be validated and surfaced to
+# GITHUB_OUTPUT before that exit writes outcome=failed — otherwise the
+# conflict trail marker never posts and the idempotent park never engages.
+# Also before the build/schema/footprint checks AND the no-commit/no-op
+# exits further down: the verdict is required even for a no-op audit round
+# whose verdict is sound with nothing left to fix. Malformed is agent
+# misbehavior, not a build problem — NON-retryable, so the repair pass is
+# never invoked and the next scan simply re-runs the audit.
 if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
   AUDIT_VERDICT=''
   if [[ -f "${WORKDIR}/growth-audit.json" ]]; then
@@ -146,16 +128,33 @@ if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
         select((.verdict // "") | IN("sound", "drift", "conflict"))
         | select((.kiss.result // "") | IN("pass", "fail"))
         | select((.minimal_change.result // "") | IN("pass", "fail"))
+        | select((.verdict != "sound")
+            or ((.kiss.result == "pass") and (.minimal_change.result == "pass")))
+        | select((.verdict != "drift")
+            or ((.kiss.result == "fail") or (.minimal_change.result == "fail")))
         | .verdict' "${WORKDIR}/growth-audit.json" 2> /dev/null || true)"
   fi
+  # Anchor the parsed value: jq applies the shape check per input document
+  # and happily parses a *stream* of concatenated verdict objects, which
+  # would otherwise surface as a multi-line AUDIT_VERDICT.
+  [[ "${AUDIT_VERDICT}" =~ ^(sound|drift|conflict)$ ]] || AUDIT_VERDICT=''
   if [[ -z "${AUDIT_VERDICT}" ]]; then
     {
       echo "Growth-audit round (this counting window is over its growth budget) without a valid growth-audit.json verdict."
-      echo "The audit must run BEFORE any edit this round, and the verdict file must carry verdict sound|drift|conflict plus kiss.result and minimal_change.result each pass|fail. Re-run the audit and produce the file; do not push without it."
+      echo "The audit must run BEFORE any edit this round, and the verdict file must be a single JSON document carrying verdict sound|drift|conflict plus kiss.result and minimal_change.result each pass|fail, consistent with the taxonomy (sound requires both axes pass; drift requires at least one axis fail). Re-run the audit and produce the file; do not push without it."
     } >> "${GATE_LOG}"
     reject_fix 'growth-audit round missing a valid growth-audit.json verdict (audit skipped or malformed)' 'false' 'false'
   fi
   echo "🔎 growth-audit verdict: ${AUDIT_VERDICT}"
+  # Conflict routing is enforced HERE, not by convention: a conflict verdict
+  # must STOP BLOCKED with a handoff (the only growth path to a human). A
+  # round that kept fixing and committed would otherwise clear the gate like
+  # sound/drift, push the contested code, and park the next scan on a
+  # handoff question that was never asked. NON-retryable: re-audit, don't
+  # repair.
+  if [[ "${AUDIT_VERDICT}" == 'conflict' && ! -f "${WORKDIR}/failure.md" && ! -f "${WORKDIR}/handoff.md" ]]; then
+    reject_fix 'growth-audit verdict is conflict but the round did not stop with a handoff; conflict must STOP BLOCKED (no push)' 'false' 'false'
+  fi
   # Record the verdict the GATE validated, for the report step to consume
   # via the step output. The report must NOT re-read the file itself: the
   # branch's own build/tests run as the runner user after this point and
@@ -163,6 +162,27 @@ if [[ "${KISS_AUDIT:-false}" == 'true' ]]; then
   # the only verdict that may reach the trail marker and the re-arm.
   echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
 fi
+
+if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
+  echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
+  git status --short
+  cat "${WORKDIR}/failure.md"
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
+if [[ -f "${WORKDIR}/failure.md" ]]; then
+  echo "🛑 Agent aborted intentionally:"
+  cat "${WORKDIR}/failure.md"
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
+# Convention: hooks are severed at EVERY host checkout of the PR
+# branch (no secret sits in this step's env, but a post-checkout
+# hook still runs branch code on the host).
+git config core.hooksPath /dev/null
+git checkout "${BRANCH}"
 baseline_also_fails() {
   # A deterministic rejection is only chargeable to this round if the same
   # check passes WITHOUT the round's commits. Measured counterexample, run
@@ -210,7 +230,7 @@ baseline_also_fails() {
   local ab_log="${GATE_LOG}.baseline"
   : > "${ab_log}"
   rc=0
-  if ! "$@" >> "${ab_log}" 2>&1; then
+  if ! strip_runner_channels "$@" >> "${ab_log}" 2>&1; then
     rc=1
   fi
   git restore -- . 2>> "${GATE_LOG}" || true
@@ -305,6 +325,17 @@ fail_signature() {
 seed_dist_note() {
   echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
 }
+# Every check below runs the BRANCH's own code (npm scripts, tests, and
+# their lifecycle children) with this step's inherited environment. Strip
+# the runner injection channels first: a check appending to GITHUB_OUTPUT
+# would overwrite the gate's own outputs last-write-wins (a forged
+# audit_verdict=sound after the gate's write), and GITHUB_ENV/GITHUB_PATH
+# plant environment for the PAT-bearing steps that follow. Same class the
+# deferred-upsert child closes with env -i; targeted -u here because the
+# checks need the ordinary environment (PATH, HOME, …) to run at all.
+strip_runner_channels() {
+  env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH "$@"
+}
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's. The
   # side copy holds THIS check's transcript alone — the identity comparison
@@ -312,7 +343,7 @@ run_check() {
   local label="${1}"
   shift
   : > "${GATE_LOG}.check"
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
+  if ! strip_runner_channels "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
     if baseline_also_fails "$@"; then
       reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
     fi
@@ -332,7 +363,7 @@ run_check_no_ab() {
   # allowlist).
   local label="${1}"
   shift
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+  if ! strip_runner_channels "$@" 2>&1 | tee -a "${GATE_LOG}"; then
     reject_fix "${label}"
   fi
 }
@@ -873,7 +904,7 @@ bite_runner_default() {
   # $1 = workspace dir, rest = test paths relative to the workspace.
   local ws="${1}"
   shift
-  npm run test --workspace "${ws}" --if-present -- "$@"
+  strip_runner_channels npm run test --workspace "${ws}" --if-present -- "$@"
 }
 mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \

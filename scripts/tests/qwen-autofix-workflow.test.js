@@ -7647,10 +7647,12 @@ exit 1
     )?.[0];
     expect(emitMarkerFnFailure).toBeTruthy();
     expect(emitMarkerFnFailure).toBe(emitMarkerFn);
-    // Both report steps bind the gate-validated verdict (the repair pass's
-    // if it ran, else the first pass's).
+    // Both report steps bind the gate-validated verdict, FIRST PASS
+    // preferred: the repair pass re-reads the branch-writable file after
+    // the first pass's build had a write window, so a forged rewrite must
+    // lose to the first pass's validated verdict.
     const auditVerdictBind =
-      "AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict || steps.verify.outputs.audit_verdict }}'";
+      "AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict || steps.verify_repair.outputs.audit_verdict }}'";
     expect(pushAndReportStep).toContain(auditVerdictBind);
     expect(reviewAddressReportStep).toContain(auditVerdictBind);
     // Push + no-op report paths allow the re-arm; the failure/handoff path
@@ -7732,6 +7734,26 @@ exit 1
     expect(reviewVerificationRunner).toContain(
       'echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"',
     );
+    // jq parses a *stream* of concatenated documents happily; the anchored
+    // regex keeps a multi-document verdict file out.
+    expect(reviewVerificationRunner).toContain(
+      '[[ "${AUDIT_VERDICT}" =~ ^(sound|drift|conflict)$ ]] || AUDIT_VERDICT=\'\'',
+    );
+    // Conflict routing is gate-enforced: a conflict verdict that did not
+    // stop with a handoff must not clear the gate and push.
+    expect(reviewVerificationRunner).toContain(
+      "reject_fix 'growth-audit verdict is conflict but the round did not stop with a handoff; conflict must STOP BLOCKED (no push)' 'false' 'false'",
+    );
+    // The checks run the branch's own code with the runner injection
+    // channels stripped — a check appending to GITHUB_OUTPUT would
+    // overwrite the gate's outputs last-write-wins (a forged
+    // audit_verdict=sound after the gate's write).
+    expect(reviewVerificationRunner).toContain(
+      'env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH "$@"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'strip_runner_channels npm run test',
+    );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
     const verdictGateAt = reviewVerificationRunner.indexOf(
@@ -7742,6 +7764,13 @@ exit 1
       reviewVerificationRunner.indexOf(
         'if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then',
       ),
+    );
+    // And BEFORE the failure.md early-exits: a BLOCKED conflict round
+    // exits via failure.md, and its verdict must be validated and surfaced
+    // before that exit writes outcome=failed — otherwise the trail marker
+    // never posts and the idempotent park never engages.
+    expect(verdictGateAt).toBeLessThan(
+      reviewVerificationRunner.indexOf('if [[ -f "${WORKDIR}/failure.md"'),
     );
 
     // The agent-facing policy documents the audit, and the old
@@ -14965,11 +14994,23 @@ exit 1
         /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
 
-    // 1. A failing check records WHY, not just THAT, it failed.
-    const capture = gate.match(
-      /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n\}\nrun_check\(\) \{[\s\S]*?\n\}/,
-    )?.[0];
-    expect(capture).toBeTruthy();
+    // 1. A failing check records WHY, not just THAT, it failed. Two
+    // extractions: the capture machinery (GATE_LOG init + reject_fix) and
+    // run_check with its channel-strip helper. The span BETWEEN them now
+    // holds the growth-audit verdict gate, the failure.md early-exits, and
+    // bare git lines (hooks sever + branch checkout) that cannot run in
+    // this standalone fixture — the verdict gate and the exits are inert
+    // here (no KISS_AUDIT tag, no failure.md), but the git lines are not,
+    // so they stay out of the extraction.
+    const capture =
+      (gate.match(
+        /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n\}\n/,
+      )?.[0] ?? '') +
+      (gate.match(
+        /strip_runner_channels\(\) \{[\s\S]*?\n\}\nrun_check\(\) \{[\s\S]*?\n\}/,
+      )?.[0] ?? '');
+    expect(capture).toContain('reject_fix()');
+    expect(capture).toContain('run_check()');
     const dir = mkdtempSync(join(tmpdir(), 'gate-'));
     const out = join(dir, 'gh_output');
     writeFileSync(out, '');
@@ -16811,6 +16852,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // the audit's verdict file in the workdir.
     kissAudit = false,
     auditJson = null,
+    // Stop markers the agent leaves in the workdir: a BLOCKED conflict
+    // round exits via failure.md; handoff.md is the other stop shape.
+    failureMd = null,
+    handoffMd = null,
+    // Forgery probe: the stubbed build attempts to append a forged
+    // audit_verdict to the step output channel.
+    forgeOutput = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -16870,6 +16918,14 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         join(bin, 'npm'),
         [
           '#!/bin/bash',
+          'if [[ "${FORGE_OUTPUT:-}" == "1" && "$1" == "run" && "$2" == "build" ]]; then',
+          '  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then',
+          '    echo "audit_verdict=sound" >> "${GITHUB_OUTPUT}"',
+          '    echo "forge landed: GITHUB_OUTPUT inherited"',
+          '  else',
+          '    echo "forge blocked: GITHUB_OUTPUT not inherited"',
+          '  fi',
+          'fi',
           'if [[ "$1" == "run" && "$2" == "build" ]]; then',
           '  head="$(git rev-parse HEAD)"',
           '  for s in ${FAIL_BUILD_SHAS}; do',
@@ -16959,6 +17015,12 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       if (auditJson !== null) {
         writeFileSync(join(workdir, 'growth-audit.json'), auditJson);
       }
+      if (failureMd !== null) {
+        writeFileSync(join(workdir, 'failure.md'), failureMd);
+      }
+      if (handoffMd !== null) {
+        writeFileSync(join(workdir, 'handoff.md'), handoffMd);
+      }
       const outFile = join(dir, 'gh-output');
       writeFileSync(outFile, '');
 
@@ -16994,6 +17056,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
             RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
             KISS_AUDIT: kissAudit ? 'true' : 'false',
+            FORGE_OUTPUT: forgeOutput ? '1' : '',
           },
         },
       );
@@ -17299,6 +17362,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     minimal_change: { result: 'pass', untraceable_hunks: [] },
     rationale: 'every hunk traces to a finding',
   });
+  const driftAuditJson = JSON.stringify({
+    verdict: 'drift',
+    kiss: { result: 'fail', simpler_alternative: 'drop the guard stack' },
+    minimal_change: { result: 'pass', untraceable_hunks: [] },
+    rationale: 'the kiss axis fails',
+  });
+  const conflictAuditJson = JSON.stringify({
+    verdict: 'conflict',
+    kiss: { result: 'pass', simpler_alternative: null },
+    minimal_change: { result: 'pass', untraceable_hunks: [] },
+    rationale: 'two defensible directions',
+  });
 
   it('rejects a growth-audit round that skipped the audit, non-retryably', () => {
     const r = runGate({ kissAudit: true });
@@ -17391,6 +17466,125 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('retryable=true');
     expect(r.rejection).toContain('stub build FAILED');
+  });
+
+  it('surfaces the conflict verdict before the failure.md exit ends the round', () => {
+    // The composition the conflict park lives on: a BLOCKED conflict round
+    // stops via failure.md, and the verdict gate sits ABOVE that exit — so
+    // audit_verdict reaches GITHUB_OUTPUT before outcome=failed. A gate
+    // ordered after the exit surfaces nothing, the trail marker never posts,
+    // and the idempotent park never engages.
+    const r = runGate({
+      kissAudit: true,
+      auditJson: conflictAuditJson,
+      failureMd: 'conflict handoff\n',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('audit_verdict=conflict');
+    expect(r.stdout).toContain('growth-audit verdict: conflict');
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('retryable=true');
+  });
+
+  it('rejects a verdict-less audit round even when failure.md is present', () => {
+    // Ordering proof for the failure.md side: the verdict gate runs BEFORE
+    // the failure.md early-exits, so an audit round that stopped without
+    // the artifact takes the verdict rejection (non-retryable), not the
+    // plain abort exit.
+    const r = runGate({ kissAudit: true, failureMd: 'blocked\n' });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.rejection).toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+  });
+
+  it('passes a drift verdict end-to-end and proceeds to the checks', () => {
+    // Sound is not the only verdict that must clear the gate: drift has to
+    // surface as drift — a mutation reporting every verdict as sound would
+    // skip the simplify-first routing (the conflict end-to-end shape is
+    // the failure.md case above).
+    const r = runGate({
+      kissAudit: true,
+      auditJson: driftAuditJson,
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('growth-audit verdict: drift');
+    expect(r.outputs).toContain('audit_verdict=drift');
+    expect(r.outputs).toContain('retryable=true');
+  });
+
+  it('strips the runner output channel from the branch checks', () => {
+    // The stubbed build tries to append a forged audit_verdict=sound
+    // (step outputs are last-write-wins): the gate strips GITHUB_OUTPUT
+    // from the check subprocesses, so the forge branch runs but lands
+    // nothing.
+    const r = runGate({
+      kissAudit: true,
+      auditJson: driftAuditJson,
+      forgeOutput: true,
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('audit_verdict=drift');
+    expect(r.outputs).not.toContain('audit_verdict=sound');
+    expect(r.outputs.match(/audit_verdict=/g)).toHaveLength(1);
+    // Proof the forge branch actually executed inside the check.
+    expect(r.stdout).toContain('forge blocked: GITHUB_OUTPUT not inherited');
+  });
+
+  it('rejects a verdict file holding a stream of concatenated documents', () => {
+    // jq applies the shape check per input document; without the anchored
+    // parse a two-document file would surface a multi-line verdict.
+    const r = runGate({
+      kissAudit: true,
+      auditJson: `${validAuditJson}${driftAuditJson}`,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain(
+      'growth-audit round missing a valid growth-audit.json verdict',
+    );
+  });
+
+  it('rejects verdicts contradicting the taxonomy', () => {
+    for (const auditJson of [
+      // sound with a failing axis…
+      JSON.stringify({
+        verdict: 'sound',
+        kiss: { result: 'fail' },
+        minimal_change: { result: 'pass' },
+      }),
+      // …and drift with both axes passing are both inert.
+      JSON.stringify({
+        verdict: 'drift',
+        kiss: { result: 'pass' },
+        minimal_change: { result: 'pass' },
+      }),
+    ]) {
+      const r = runGate({ kissAudit: true, auditJson });
+      expect(r.status).toBe(1);
+      expect(r.outputs).not.toContain('audit_verdict=');
+      expect(r.rejection).toContain(
+        'growth-audit round missing a valid growth-audit.json verdict',
+      );
+    }
+  });
+
+  it('rejects a conflict verdict whose round did not stop with a handoff', () => {
+    // Conflict must STOP BLOCKED: a protocol-deviant round that kept
+    // fixing and committed is rejected non-retryably instead of clearing
+    // the gate and pushing the contested code.
+    const r = runGate({ kissAudit: true, auditJson: conflictAuditJson });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('audit_verdict=');
+    expect(r.rejection).toContain(
+      'growth-audit verdict is conflict but the round did not stop with a handoff',
+    );
   });
 
   it('leaves the growth-audit verdict check inert on non-audit rounds', () => {

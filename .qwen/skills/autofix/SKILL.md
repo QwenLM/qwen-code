@@ -356,12 +356,15 @@ silently overriding or silently complying.
   secondary — a size signal triggers a JUDGMENT, never a stop: the takeover
   exists to land fixes, not to police line counts. BEFORE any other work or
   edit this round, audit the approach on the two axes below, then record
-  `growth-audit.json` in the workdir — verdict `sound|drift|conflict` plus
-  `kiss.result` and `minimal_change.result` each `pass|fail`, the drift
-  alternative or untraceable hunks, and a rationale — and route on the
-  verdict. The verification gate rejects the round without a valid verdict,
-  and a repeated verdict after a prior audit this window must bring new
-  evidence (the feedback section lists the prior audits).
+  `growth-audit.json` in the workdir — a single JSON document, verdict
+  `sound|drift|conflict` plus `kiss.result` and `minimal_change.result`
+  each `pass|fail`, the drift alternative or untraceable hunks, and a
+  rationale — and route on the verdict. The verification gate rejects the
+  round without a valid verdict (the taxonomy is enforced — `sound`
+  requires both axes `pass`, `drift` at least one `fail` — and a conflict
+  verdict must stop the round with the handoff), and a repeated verdict
+  after a prior audit this window must bring new evidence (the feedback
+  section lists the prior audits).
   - KISS (structure): assume the PR IS over-engineered and try to prove it.
     Either NAME a structurally simpler approach that achieves the same goal
     (shape, not prose) or justify each accumulated piece as load-bearing for
