@@ -11,8 +11,13 @@ import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
-import { createTask, listTasks } from '../tasks.js';
+import { createTask, listTasks, updateTask, getTask } from '../tasks.js';
 import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
+import { formatAgentId } from '../teamHelpers.js';
+import { runWithTeammateIdentity } from '../identity.js';
+import { TaskUpdateTool } from '../../../tools/task-update.js';
+import type { TaskUpdateParams } from '../../../tools/task-update.js';
+import type { Config } from '../../../config/config.js';
 
 // Mock Storage so all file I/O uses the harness's temp dir.
 vi.mock('../../../config/storage.js', async (importOriginal) => {
@@ -336,6 +341,219 @@ describe('TeamCoordinationHarness', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       expect(h.getAgent('reader').getReceivedMessages()).toHaveLength(0);
+    });
+  });
+
+  // ─── Manual assignment dispatch (#9282) ────────────────────
+
+  // A manually assigned task is owned + in_progress, so the auto-claim
+  // path (pending + unowned only) can never deliver it: without a direct
+  // dispatch the leader's task_update persists "success" and the task
+  // sits undelivered. These tests drive the REAL leader TaskUpdateTool
+  // against the harness's live TeamManager.
+  describe('manual task assignment dispatch (#9282)', () => {
+    const leaderConfig = (h: TeamCoordinationHarness) =>
+      ({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => 'default',
+      }) as unknown as Config;
+
+    const leaderAssign = (
+      h: TeamCoordinationHarness,
+      params: TaskUpdateParams,
+    ) =>
+      new TaskUpdateTool(leaderConfig(h))
+        .build(params)
+        .execute(new AbortController().signal);
+
+    it('delivers one task prompt to the assigned idle owner', async () => {
+      const h = await createHarness();
+      // Reserve the task as in_progress BEFORE alice exists so auto-claim
+      // cannot consume it — the issue's deterministic repro shape.
+      const task = await createTask(h.teamName, {
+        subject: 'Fix bug',
+        description: 'Fix the login bug',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      await h.waitForMessages('alice', 1);
+      const msgs = h.getAgent('alice').getReceivedMessages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toContain(`task #${task.id}`);
+      expect(msgs[0]).toContain('Fix the login bug');
+      // And the persisted owner is the assignee, not the deliverer.
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('alice');
+    });
+
+    it('delivers the prompt when an owned pending task is moved to in_progress', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Reserved work',
+        description: 'Reserved for alice',
+      });
+      // Owned pending: auto-claim skips owned tasks, so this cannot be
+      // consumed before the leader activates it. The tool requires an
+      // explicit owner on the in_progress transition, so the leader
+      // re-states it — the owner is UNCHANGED, which means only the
+      // status-change branch can trigger the dispatch here.
+      await updateTask(h.teamName, task.id, { owner: 'alice' });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      await h.waitForMessages('alice', 1);
+      const msgs = h.getAgent('alice').getReceivedMessages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toContain('Reserved for alice');
+    });
+
+    it('re-dispatches to the new owner when an in_progress task is reassigned', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Reassign me',
+        description: 'Moving owners',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      await h.spawnTeammate('bob', { onMessage: () => {} });
+
+      await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.waitForMessages('alice', 1);
+
+      const reassign = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'bob',
+      });
+      expect(reassign.error).toBeUndefined();
+      await h.waitForMessages('bob', 1);
+
+      expect(h.getAgent('bob').getReceivedMessages()).toHaveLength(1);
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('bob');
+    });
+
+    it('does not re-dispatch when the same owner and status are re-asserted', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Once only',
+        description: 'One prompt per assignment',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.waitForMessages('alice', 1);
+
+      // The exact same call again: no second prompt.
+      await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
+    });
+
+    it('does not prompt a teammate for their own claim', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Self claim',
+        description: 'Alice claims this herself',
+      });
+      await updateTask(h.teamName, task.id, { owner: 'alice' });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentName: 'alice',
+          teamName: h.teamName,
+          agentId: formatAgentId('alice', h.teamName),
+          isTeamLead: false,
+        },
+        () =>
+          new TaskUpdateTool(leaderConfig(h))
+            .build({ taskId: task.id, status: 'in_progress' })
+            .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+      expect((await getTask(h.teamName, task.id))?.status).toBe('in_progress');
+    });
+
+    it('rejects assigning to a teammate that does not exist', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'No ghost delivery',
+        description: 'Must not persist a dead end',
+      });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'ghost',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('ghost');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+    });
+
+    it('rejects assigning to a teammate whose shutdown is pending', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'No dying delivery',
+        description: 'Shutdown beats assignment',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      h.teamManager.markShutdownRequested('alice');
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeDefined();
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
     });
   });
 

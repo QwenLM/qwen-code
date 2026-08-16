@@ -391,6 +391,29 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       };
     }
 
+    // The pre-update snapshot feeds the assignment checks below (#9282):
+    // what matters is whether THIS call changed the owner or moved the
+    // task into in_progress, not the post-update state alone.
+    const existing = await getTask(teamName, taskId);
+
+    // A manual owner assignment can only be delivered to an existing,
+    // non-shutting-down teammate (#9282): auto-claim consumes pending,
+    // UNOWNED tasks only, so an owned in_progress task has no delivery
+    // path other than the direct dispatch. Validate before the write —
+    // persisting any other assignment would report success for a task
+    // that can never arrive.
+    const teamManager = this.config.getTeamManager?.() ?? null;
+    if (this.params.owner && teamManager) {
+      const refusal = teamManager.validateTaskOwner(this.params.owner);
+      if (refusal) {
+        return {
+          llmContent: refusal,
+          returnDisplay: refusal,
+          error: { message: refusal },
+        };
+      }
+    }
+
     let task;
     try {
       task = await updateTask(
@@ -428,6 +451,27 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         returnDisplay: msg,
         error: { message: msg },
       };
+    }
+
+    // Dispatch the manual assignment (#9282). Auto-claim only consumes
+    // pending, unowned tasks, so an owned in_progress task has exactly
+    // one delivery path: this prompt. Fire it when THIS call assigned
+    // the work — the owner changed, or the task moved into in_progress
+    // under its owner — and never for a self-claim (the caller already
+    // knows; it just made the call). Re-asserting an unchanged
+    // owner+status dispatches nothing, so a retried task_update cannot
+    // double-deliver the same assignment.
+    const statusBecameInProgress =
+      this.params.status === 'in_progress' &&
+      existing?.status !== 'in_progress';
+    if (
+      teamManager &&
+      task.status === 'in_progress' &&
+      task.owner &&
+      task.owner !== teammateCallerName &&
+      (task.owner !== existing?.owner || statusBecameInProgress)
+    ) {
+      await teamManager.dispatchAssignedTask(task);
     }
 
     // Mirror dependency edges so auto-claim and completion-unblock
