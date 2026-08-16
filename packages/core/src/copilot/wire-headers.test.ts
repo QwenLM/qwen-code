@@ -54,4 +54,26 @@ describe('wire headers per path', () => {
     );
     expect(h['X-GitHub-Api-Version']).toBeUndefined();
   });
+
+  it('caller Authorization is replaced, not duplicated', async () => {
+    let h: Record<string, string> = {};
+    const f = (async (_u: URL | string, init?: RequestInit) => {
+      h = (init?.headers as Record<string, string>) ?? {};
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    await wrapFetchWithCopilotAuth(mgr, { fetchImpl: f })(
+      `${COPILOT_SENTINEL_BASE_URL}/responses`,
+      {
+        method: 'POST',
+        headers: { Authorization: 'Bearer caller-placeholder-token' },
+        body: '{}',
+      },
+    );
+    // Copilot bearer must REPLACE the caller's Authorization, not duplicate.
+    // Headers.forEach normalizes to lowercase 'authorization'; setting
+    // 'Authorization' (capital A) creates a separate Record key, so undici
+    // appends both → CAPI receives the caller's invalid placeholder token.
+    expect(h['Authorization']).toBe('Bearer tid=HDR');
+    expect(h['authorization']).toBeUndefined();
+  });
 });

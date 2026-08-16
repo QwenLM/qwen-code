@@ -65,7 +65,14 @@ export function wrapFetchWithCopilotAuth(
 
       // Use Headers for robust merge of caller-provided headers, then
       // materialize to a plain Record so consumers/tests can read by key.
+      // Delete any caller-provided Authorization first — Headers.forEach
+      // normalizes to lowercase 'authorization', but we set 'Authorization'
+      // (capital A) below. Without the delete, the Record carries both keys
+      // and undici appends them into a single comma-separated header (or two
+      // separate headers), causing CAPI to receive the caller's invalid
+      // placeholder token alongside the real Copilot bearer.
       const merged = new Headers(init?.headers);
+      merged.delete('authorization');
       const headers: Record<string, string> = {};
       merged.forEach((v, k) => {
         headers[k] = v;
