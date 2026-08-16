@@ -42,6 +42,7 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
+import { narrowToDelta } from './lib/narrow-diff.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -52,7 +53,6 @@ import {
 import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
-  parseDiff,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
@@ -184,13 +184,14 @@ type FetchPrResult = PlanReport & {
    * reason names a CAUSE: a rebase or force-push (`not-an-ancestor`), a sha
    * this history has never seen (`unknown-commit`), an anchor older than the
    * merge base that would scope WIDER than the PR's diff
-   * (`behind-merge-base`), a delta carrying hunks the PR's own diff does not
-   * contain (`hunks-outside-pr-diff` — an "undo per feedback" revert makes an
-   * in-range anchor produce them), a containment check that could not be
-   * RULED because the parser cannot name a path (`containment-unverified`),
-   * a merge base too stale to rule the clamp on (`base-untrusted`), a
-   * capture that threw (`capture-failed`), or a partitioner that refused to
-   * tile (`partition-failed`).
+   * (`behind-merge-base`), a merge base too stale to rule the clamp on
+   * (`base-untrusted`), a capture that threw (`capture-failed`), a
+   * partitioner that refused to tile (`partition-failed`), or a PR diff with
+   * nothing left in the changed range (`nothing-to-narrow`). That last one
+   * exists because the scope is BUILT from the PR's own diff rather than
+   * checked against it: when the commits since the anchor put lines back the
+   * way the base had them, the PR no longer displays that region and there is
+   * nothing there to narrow to.
    *
    * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
    * means this round has no diff to review, whatever refused the anchor. A
@@ -209,8 +210,7 @@ export interface IncrementalDecision {
     | 'unknown-commit'
     | 'not-an-ancestor'
     | 'behind-merge-base'
-    | 'hunks-outside-pr-diff'
-    | 'containment-unverified'
+    | 'nothing-to-narrow'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
@@ -350,213 +350,6 @@ function fileLineCount(ref: string, path: string): number {
   } catch {
     return 0; // absent at this ref: created by the PR, or deleted by it
   }
-}
-
-/**
- * Does every hunk of `inner` fall inside `outer`, per file?
- *
- * This is the containment an ancestry clamp cannot give. An anchor can be a
- * proper ancestor of the head and still produce a delta whose hunks are absent
- * from the PR's own diff: an "undo per feedback" commit reverts some of the
- * previous round's lines back to base content, so those lines are changed in
- * `anchor..head` and unchanged in `base..head`. A comment anchored on such a
- * hunk 422s the whole Create Review call.
- *
- * The result is TWO facts, not one: DISPROVED containment and an oracle that
- * could not rule are different, and only the first is what
- * `hunks-outside-pr-diff` asserts. A boolean wrapper over this used to exist
- * for the tests' convenience; it collapsed exactly the split the refusal enum
- * pays to keep, so callers take the pair.
- *
- * The grammar is NOT re-implemented here. Three rounds of review found a new
- * shape-tolerance defect in a hand-rolled parser every time — count-less
- * headers, trailing function context, quoted rename headers, deletion
- * junctions — so this reads the sections and hunks out of `parseDiff`, the
- * parser the chunk planner already trusts on these exact captures (it
- * unquotes paths, tracks hunk bodies, and knows the binary and rename
- * shapes). A ruling is then set arithmetic over its output.
- */
-export function containmentRuling(
-  inner: string,
-  outer: string,
-): { ok: boolean; unverified: boolean } {
-  // Both captures reach here already decoded as UTF-8, and that decode is
-  // LOSSY: every byte git emitted that is not valid UTF-8 — in a path or in a
-  // line's content — arrives as one U+FFFD. Distinct bytes therefore become
-  // the same character, and everything below compares decoded strings: two
-  // filenames differing only in an invalid byte share one map key, so one
-  // file's hunks get judged against the other's ranges; two byte-distinct
-  // deleted lines match each other 1:1. Neither is detectable after the
-  // decode, so the oracle declines to rule rather than ruling on text it
-  // knows is not the text git produced. A file that legitimately contains
-  // U+FFFD refuses too — a full review, which is the safe direction.
-  if (inner.includes('�') || outer.includes('�')) {
-    return { ok: false, unverified: true };
-  }
-  const innerSections = sectionsOf(inner);
-  const outerSections = sectionsOf(outer);
-  if (innerSections === null || outerSections === null) {
-    return { ok: false, unverified: true };
-  }
-  return {
-    ok: sectionsContained(innerSections, outerSections),
-    unverified: false,
-  };
-}
-
-/**
- * What one HUNK contributes to a ruling.
- *
- * Two facts, because the two sides of a diff are comparable in different ways.
- * The captures share a head tree, so their NEW-side line numbers name the same
- * lines and compare as numbers. Their OLD sides are different trees — the
- * anchor and the merge base — so old-side line numbers name nothing in common
- * and deletions compare only by CONTENT.
- *
- * The pairing is what makes the content comparison sound. Held per FILE, a
- * `-X` the PR displays in one hunk cleared a `-X` the delta performs thirty
- * lines away in another — a line displayed nowhere near where the delta
- * deletes it. Locality is available (the head tree is shared, which is the
- * same fact the range check already rests on), so it is used: a deletion is
- * matched only against hunks that ENCLOSE the hunk performing it.
- */
-interface HunkFacts {
-  /** New-side range of this hunk. */
-  range: [number, number];
-  /**
-   * This hunk body's `-` lines as `content@junction`.
-   *
-   * The junction is the new-side cursor where the deleted line stood: context
-   * and `+` lines advance it, `-` lines do not — the same walk `parseDiff`
-   * performs. Content alone was not enough. Two hunks can delete the same text
-   * at different places, and matching by text let a delta's `-dup` be cleared
-   * by a `-dup` the PR displays thirty lines away, in a hunk that never
-   * touches the delta's junction. Junctions are comparable for the same reason
-   * ranges are: both captures end at the same head tree.
-   */
-  deletions: string[];
-}
-
-/** `path -> hunks`, via the shared parser. Null if it found nothing in a
- *  non-empty diff, which is the "could not rule" state. */
-function sectionsOf(diffText: string): Map<string, HunkFacts[]> | null {
-  const { files } = parseDiff(diffText);
-  if (diffText.trim() !== '' && files.length === 0) return null;
-  // Split once: `containmentRuling` runs on every incremental capture, and
-  // re-splitting per hunk made it quadratic in the diff size.
-  const lines = diffText.split('\n');
-  const out = new Map<string, HunkFacts[]>();
-  for (const f of files) {
-    // A section with no hunk at all — a mode change, a binary replacement, a
-    // pure rename — carries nothing to compare. It enters as an EMPTY list so
-    // the path check still runs: each used to pass vacuously, which is how a
-    // delta whose only content is a file the PR's own diff never mentions
-    // became the scope.
-    const hunks = out.get(f.path) ?? [];
-    for (const h of f.hunks) {
-      // A pure deletion (`newCount === 0`) sits BETWEEN two post-image lines;
-      // `parseDiff` already clamps its range to the junction, and comparing
-      // that junction against a covering hunk is what keeps a deletion the
-      // PR's own diff performs from being refused.
-      const deletions: string[] = [];
-      // Body lines only. `diffStart` is the `@@` header's own 1-based line
-      // number, so the body begins at that index and ends at `diffEnd - 1`;
-      // starting at the header would read `---` file metadata as a deletion.
-      let cursor = h.newStart;
-      for (let i = h.diffStart; i < h.diffEnd; i++) {
-        const line = lines[i];
-        if (line === undefined) continue;
-        if (line.startsWith('-')) {
-          // Where this line stood on the new side: between the lines the
-          // cursor has and has not yet reached.
-          deletions.push(`${cursor}\u0000${line.slice(1)}`);
-        } else if (
-          line.startsWith('+') ||
-          line === '' ||
-          line.startsWith(' ')
-        ) {
-          // Both occupy a new-side line. A `\ No newline at end of file`
-          // marker is neither, and must not move the cursor.
-          cursor++;
-        }
-      }
-      hunks.push({ range: [h.newStart, h.newEnd], deletions });
-    }
-    out.set(f.path, hunks);
-  }
-  return out;
-}
-
-/** The containment loop over already-parsed sections. */
-function sectionsContained(
-  inner: Map<string, HunkFacts[]>,
-  outer: Map<string, HunkFacts[]>,
-): boolean {
-  for (const [file, hunks] of inner) {
-    const covering = outer.get(file);
-    if (!covering) return false;
-    // A delta section with nothing comparable — a mode change, a pure rename,
-    // a binary replacement — carries no hunk at all, so the loop below iterates
-    // zero times and the section passes vacuously. That is the right answer
-    // only when the PR's own section is equally contentless (two binary
-    // sections, say). When the covering section HAS hunks, the delta is
-    // asserting a change of a kind the PR's diff does not show — an "undo per
-    // feedback" round that reverts round 1's `chmod +x` is exactly this shape —
-    // and vacuous truth is the wrong verdict for it.
-    if (hunks.length === 0 && covering.length > 0) return false;
-
-    // Keyed by `content@junction`, not content. The entry a delta deletion
-    // consumes must be the one the PR displays AT THAT PLACE: matching by text
-    // alone let a `-dup` the PR shows near the top of the file clear a `-dup`
-    // the delta performs thirty lines down, at a junction the PR's diff never
-    // touches. Junctions are comparable for the same reason ranges are — both
-    // captures end at the same head tree.
-    //
-    // ONE budget for the whole file, consumed across every delta hunk, so a
-    // single displayed deletion is spent once. Measured honestly: with the
-    // junction in the key this is not observable — two delta hunks cannot
-    // delete at the same junction — so it is the invariant stated where it
-    // belongs rather than a live guard. Rebuilding it per hunk would make
-    // correctness depend on junction-uniqueness without saying so.
-    const budget = new Map<string, number>();
-    for (const o of covering) {
-      for (const d of o.deletions) budget.set(d, (budget.get(d) ?? 0) + 1);
-    }
-
-    for (const hunk of hunks) {
-      const [start, end] = hunk.range;
-      // Strict containment, no slack. Both captures share the head tree, so
-      // a deletion the PR's own diff performs yields an identical junction
-      // range and is covered at equality; slack for it bought nothing and
-      // accepted a delta hunk one line past the covering hunk — a line
-      // GitHub's PR diff does not display, where an anchored comment 422s
-      // the entire all-or-nothing Create Review call.
-      if (!covering.some((o) => o.range[0] <= start && end <= o.range[1])) {
-        return false;
-      }
-
-      // Deleted lines occupy NO new-side line, so the range check above is
-      // blind to them: what survives a deletion hunk on the new side is its
-      // context, which the covering hunk contains for free. A delta that
-      // deletes a line the PR's own diff never displays passed the range check
-      // outright.
-      //
-      // The discriminator is where the line came from. `-X` in the delta means
-      // X stood at the anchor and is gone at head. If X also stood at the merge
-      // base then the PR — which ends at that same head — must delete it too,
-      // so `-X` appears in the full capture, at the same junction. So the
-      // converse is the refusal: no such entry means the PR introduced X after
-      // the base and took it back out, and GitHub's PR diff shows that line on
-      // neither side. An inline comment anchored there 422s the entire
-      // all-or-nothing Create Review call.
-      for (const deleted of hunk.deletions) {
-        const left = budget.get(deleted) ?? 0;
-        if (left === 0) return false;
-        budget.set(deleted, left - 1);
-      }
-    }
-  }
-  return true;
 }
 
 /** The real git surface `resolveMergeBase` runs against. */
@@ -855,7 +648,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
   /** True when the FINAL published diff is the incremental delta. */
   let scopedDelta = false;
-  let ruling = { ok: true, unverified: false };
+  /** The PR's own hunks, narrowed to what changed since the anchor. */
+  let narrowed: Buffer | null = null;
   if (anchor?.diffBase) {
     // An anchor that resolved to the merge base names the range already in
     // hand: re-running the identical `git diff` would spend the capture (and
@@ -874,44 +668,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // below for the flows that continue anyway (a model change,
       // --comment).
       anchor.incremental.upToDate = true;
-    } else if (fullText === null && mergeBaseSha !== null) {
-      // The oracle was LOST, not absent: a base was resolved and its capture
-      // threw (the 120s git timeout on the large long-lived PR `--since`
-      // exists for). Scoping now would publish a delta no containment check
-      // ever ran against — the same unchecked scope this guard exists to
-      // refuse, arrived at by an infrastructure failure instead of a bad
-      // anchor.
+    } else if (fullBytes === null || fullText === null) {
+      // No PR diff to narrow. A base was resolved and its capture threw (the
+      // 120s git timeout the large long-lived PR `--since` exists for), or no
+      // base resolved at all. Either way the scope this round would publish
+      // cannot be built out of what GitHub displays, so it is not built:
+      // the round keeps the full range, which on a base-free PR is itself
+      // nothing — the same state such a round reaches without `--since`.
       demote('capture-failed');
-    } else if (fullText === null) {
-      // Base-FREE: no merge base resolved, so there is no PR diff to be
-      // contained in. That used to be read as licence to publish the delta
-      // unchecked — the one arm where an uncontained scope shipped by design.
-      // But "no diff to check against" is not proof of containment, it is the
-      // absence of any, and every other arm here fails closed on exactly that
-      // distinction. GitHub still renders SOMETHING for the PR, and a delta
-      // never checked against it can still anchor a comment on a line that
-      // render does not display.
-      demote('containment-unverified');
-    } else if (!(ruling = containmentRuling(delta, fullText)).ok) {
-      // Two different facts, one refusal: the oracle DISPROVED containment,
-      // or it could not rule at all (a path shape it does not model). Only
-      // the first is what `hunks-outside-pr-diff` asserts; the second is an
-      // unavailable oracle, reported as `containment-unverified` so the
-      // reason a reader keys on stays true.
-      //
-      // Ancestry containment is not HUNK containment. An ordinary "undo per
-      // feedback" commit reverts some of the anchor round's lines back to
-      // base content: the delta then carries hunks the PR's own diff does
-      // NOT contain, agents review them, and one comment anchored there
-      // 422s the entire Create Review call — all-or-nothing, taking every
-      // other finding with it. The clamp cannot see this (it compares
-      // history, not content), so the delta is checked against the PR's
-      // diff before it is allowed to be the review's scope.
-      demote(
-        ruling.unverified ? 'containment-unverified' : 'hunks-outside-pr-diff',
-      );
+    } else if ((narrowed = narrowToDelta(fullBytes, delta)) === null) {
+      // The PR's own diff has no hunk in the range that changed since the
+      // anchor. The ordinary cause is an "undo per feedback" round: the
+      // commits since the anchor put lines back the way the base had them, so
+      // that region is absent from `base..head` entirely and there is nothing
+      // there left to re-review. Keeping the full range costs a wider review
+      // and never a wrong one.
+      demote('nothing-to-narrow');
     } else {
-      if (publish(deltaBytes)) {
+      if (publish(narrowed)) {
         scopedDelta = true;
         // The scoped range's left side, full-sha, for downstream consumers
         // that recompute their own diffs (Agent 7's test-efficacy probe
@@ -919,7 +693,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // full merge-base range on a delta-scoped round.
         anchor.incremental.diffBase = anchor.diffBase;
       } else {
-        // The delta captured but could not be written: degrade like any
+        // The scope was built but could not be written: degrade like any
         // other capture failure rather than scoping to a file nobody has.
         demote('capture-failed');
       }
