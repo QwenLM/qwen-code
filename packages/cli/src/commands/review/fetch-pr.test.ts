@@ -561,7 +561,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
+      diffBase: BASE,
     });
     expect(report.diffPath).not.toBeNull();
     // The DISK payload, not just the report: a write unpaired from the text
@@ -604,8 +604,8 @@ describe('fetch-pr report assembly', () => {
     // array — the recovery flow produces one — and the array stringifies to
     // "shaA,shaB", which the hex gate refuses with zero git probes. And the
     // ruling must scope from what rev-parse RESOLVED, not from the string
-    // that came in: `diffBase` is welded into Agent 7's `--base`, where an
-    // abbreviation is ambiguous once the repo grows.
+    // that came in: the delta capture is keyed on the resolved sha, where
+    // an abbreviation is ambiguous once the repo grows.
     producerMocks.gitOpt.mockImplementation((...args: string[]) =>
       args[0] === 'cat-file' || args[0] === 'merge-base'
         ? ''
@@ -622,7 +622,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: 'abc1234',
       effective: true,
-      diffBase: ANCHOR,
+      diffBase: BASE,
     });
     // The probes ran against the LAST value, not the first or the join.
     expect(producerMocks.gitOpt.mock.calls).toContainEqual([
@@ -1033,16 +1033,16 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
-  it("welds Agent 7's --base to the anchor the producer stamped", async () => {
+  it("welds Agent 7's --base to the range the published scope came from", async () => {
     // The only test that crosses the producer→consumer seam. This file never
     // mentions `buildRoleBrief` and agent-prompt's own tests hand-build every
     // report, so an asymmetric rename of `diffBase` — or a consumer guard
-    // that stops matching — ships with both suites green while Agent 7
-    // silently falls back to the merge base: its test-efficacy probe then
-    // recomputes `base..HEAD`, spending the round's budget reversing hunks an
-    // earlier round already reviewed and reporting survivors outside this
-    // round's diff. The PR's own comment concedes the reversion "left the
-    // whole suite green".
+    // that stops matching — ships with both suites green while Agent 7's
+    // test-efficacy probe silently recomputes a different range. The value
+    // itself matters: the published hunks are hunks of `BASE..head`, so
+    // welding the ANCHOR instead would send the probe over a range carrying
+    // hunks the PR's diff does not display — an undo round's reverted lines
+    // — and report survivors no comment can anchor on.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1053,7 +1053,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
+      diffBase: BASE,
     });
     // The REAL brief builder, over the REAL report the handler just wrote.
     // The probe block is gated on a PR number and a plan path — the shape
@@ -1063,8 +1063,8 @@ describe('fetch-pr report assembly', () => {
       '7',
       { planPath: '/tmp/plan.json' },
     );
-    expect(brief).toContain(`--base ${ANCHOR}`);
-    expect(brief).not.toContain(`--base ${BASE}`);
+    expect(brief).toContain(`--base ${BASE}`);
+    expect(brief).not.toContain(`--base ${ANCHOR}`);
   });
 
   it('reads collapsedFromUpstream off the FULL range on a delta round', async () => {
@@ -1099,7 +1099,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
-      diffBase: ANCHOR,
+      diffBase: BASE,
     });
     expect(writtenDiff()).toBe(NARROWED);
     // …and the full-range fact is still reported.

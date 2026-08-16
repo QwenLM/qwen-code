@@ -171,7 +171,8 @@ type FetchPrResult = PlanReport & {
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
-   * in this report cover `since..fetchedSha` instead of the merge-base range.
+   * in this report are the merge-base range narrowed to what changed since
+   * the anchor, rather than the whole merge-base range.
    * `upToDate: true` means nothing has landed since the anchor (the anchor is
    * the head, or the commits since it change no bytes) — a fact about the
    * anchor, proven without consulting the base. The diff and plan then cover
@@ -215,13 +216,15 @@ export interface IncrementalDecision {
     | 'capture-failed'
     | 'partition-failed';
   /**
-   * The scoped range's left side as a FULL sha, present exactly when the
-   * report's diff is the delta (`effective` and not `upToDate`). Downstream
-   * consumers that recompute their own ranges read it instead of
-   * `mergeBaseSha` — Agent 7's test-efficacy probe welds `--base` into its
-   * brief, and probing the full range on a delta-scoped round would spend
-   * the probe budget on already-reviewed hunks and report survivors from
-   * outside this round's scope.
+   * The left side of the range the published scope was assembled from, as a
+   * FULL sha, present exactly when the report's diff is the narrowed scope
+   * (`effective` and not `upToDate`). Downstream consumers that recompute
+   * their own ranges read it — Agent 7's test-efficacy probe welds `--base`
+   * into its brief. It is the merge base, never the anchor: the published
+   * hunks are byte-identical hunks of `mergeBase..head`, so that range
+   * covers every one of them and never a byte the PR's diff does not
+   * display, while the anchor range can carry hunks an undo round netted
+   * out of the PR's diff.
    */
   diffBase?: string;
 }
@@ -668,7 +671,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // below for the flows that continue anyway (a model change,
       // --comment).
       anchor.incremental.upToDate = true;
-    } else if (fullBytes === null || fullText === null) {
+    } else if (
+      mergeBaseSha === null ||
+      fullBytes === null ||
+      fullText === null
+    ) {
       // No PR diff to narrow. A base was resolved and its capture threw (the
       // 120s git timeout the large long-lived PR `--since` exists for), or no
       // base resolved at all. Either way the scope this round would publish
@@ -687,11 +694,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     } else {
       if (publish(narrowed)) {
         scopedDelta = true;
-        // The scoped range's left side, full-sha, for downstream consumers
-        // that recompute their own diffs (Agent 7's test-efficacy probe
-        // welds --base into its brief) — without it they would probe the
-        // full merge-base range on a delta-scoped round.
-        anchor.incremental.diffBase = anchor.diffBase;
+        // The published hunks are byte-identical hunks of
+        // `mergeBaseSha..head`, so that range is what downstream consumers
+        // recomputing their own diffs must probe (Agent 7's test-efficacy
+        // probe welds --base into its brief): it covers every published hunk
+        // and never a byte the PR's diff does not display, while the anchor
+        // range can carry hunks an undo round netted out of it.
+        anchor.incremental.diffBase = mergeBaseSha;
       } else {
         // The scope was built but could not be written: degrade like any
         // other capture failure rather than scoping to a file nobody has.

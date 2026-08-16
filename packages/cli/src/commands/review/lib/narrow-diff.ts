@@ -51,27 +51,36 @@ function overlaps(
  *
  * Returns null when there is nothing to narrow to — the caller keeps the full
  * range, which is always safe because it is the review the round would have
- * done anyway. Null covers three cases deliberately treated alike: a capture
- * that did not parse, a delta touching no path the PR's diff carries, and a
- * delta whose ranges miss every hunk of it. The last is the "undo per feedback"
- * round, where the commits since the anchor put lines back the way the base
- * had them: the PR's diff no longer shows that region at all, so there is
- * genuinely nothing there to re-review, and the round falls back rather than
- * scoping to hunks nobody can comment on.
+ * done anyway. Null covers, deliberately treated alike: a capture that did
+ * not decode, a delta carrying a path the full capture keys differently (git's
+ * rename detection resolved differently across the two ranges, so the change
+ * would drop from the scope under the key mismatch), a delta touching no path
+ * the PR's diff carries, and a delta whose ranges miss every hunk of it. The
+ * last is the "undo per feedback" round, where the commits since the anchor
+ * put lines back the way the base had them: the PR's diff no longer shows
+ * that region at all, so there is genuinely nothing there to re-review, and
+ * the round falls back rather than scoping to hunks nobody can comment on.
  */
 export function narrowToDelta(
   fullBytes: Buffer,
   deltaText: string,
 ): Buffer | null {
   // Bytes in, bytes out. The selection below runs on decoded text, because
-  // that is what `parseDiff` reads — so a capture that does not round-trip
-  // through UTF-8 cannot be reassembled faithfully: re-encoding would write
-  // bytes git never produced and give `diffSha256` a value naming a file
-  // nobody captured. Checked exactly, by round-trip, rather than by hunting
-  // for U+FFFD. Such a round keeps the full range, which is the original
-  // bytes untouched.
-  const fullText = fullBytes.toString('utf8');
-  if (!Buffer.from(fullText, 'utf8').equals(fullBytes)) return null;
+  // that is what `parseDiff` reads — so a capture that does not survive UTF-8
+  // cannot be reassembled faithfully: re-encoding would write bytes git never
+  // produced and give `diffSha256` a value naming a file nobody captured. A
+  // fatal decode rejects exactly those bytes, without materializing a
+  // re-encoded full-size copy just to compare. Such a round keeps the full
+  // range, which is the original bytes untouched.
+  let fullText: string;
+  try {
+    fullText = new TextDecoder('utf-8', {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(fullBytes);
+  } catch {
+    return null;
+  }
   if (fullText.trim() === '' || deltaText.trim() === '') return null;
   const full = parseDiff(fullText);
   const delta = parseDiff(deltaText);
@@ -82,39 +91,64 @@ export function narrowToDelta(
   for (const f of delta.files) {
     const ranges = touched.get(f.path) ?? [];
     // A section with no hunks — a mode change, a pure rename, a binary
-    // replacement — touches the path without naming a range. It still counts
-    // as "this path changed since the anchor", so it enters as a range that
-    // overlaps nothing and the path-level check below carries it.
+    // replacement — touches the path without naming a range. It enters as an
+    // EMPTY range list, which the emission loop reads as "the change lives in
+    // the full section's header; emit the section whole".
     for (const h of f.hunks) ranges.push([h.newStart, h.newEnd]);
     touched.set(f.path, ranges);
   }
 
+  // The two captures can key the same change under different paths whenever
+  // git's rename detection resolves differently across the two ranges —
+  // `base..head` is a two-tree diff with no intermediate tree. A delta path
+  // that does not cross is a change the PR's diff displays that would
+  // silently drop from the published scope, so refuse to narrow instead: the
+  // round keeps the full range, which still displays it.
+  const fullPaths = new Set(full.files.map((f) => f.path));
+  for (const p of touched.keys()) {
+    if (!fullPaths.has(p)) return null;
+  }
+
   // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
   const lines = fullText.split('\n');
-  const slice = (from: number, to: number) => lines.slice(from - 1, to);
 
-  const out: string[] = [];
+  /** [from, to] line ranges of the full capture the output carries, in order. */
+  const selected: Array<[number, number]> = [];
   for (const file of full.files) {
     const ranges = touched.get(file.path);
     if (ranges === undefined) continue;
 
+    if (ranges.length === 0) {
+      // Hunk-less delta touch (mode change, pure rename, binary replacement):
+      // the change lives in the full section's header, so emit the section
+      // whole.
+      selected.push([file.diffStart, file.diffEnd]);
+      continue;
+    }
+
     // The section header: everything from the start of the section up to its
-    // first hunk. A hunkless section has no hunks to select, so the header IS
-    // the section, and it is emitted whole when the delta touched that path.
+    // first hunk. A hunkless full section has no hunks to select, so the
+    // header IS the section, and it is emitted whole when the delta touched
+    // that path.
     const firstHunk = file.hunks[0];
-    const headerEnd =
-      firstHunk === undefined ? file.diffEnd : firstHunk.diffStart - 1;
-    const selected = file.hunks.filter((h) =>
+    const matching = file.hunks.filter((h) =>
       ranges.some((r) => overlaps([h.newStart, h.newEnd], r)),
     );
-    if (firstHunk !== undefined && selected.length === 0) continue;
+    if (firstHunk !== undefined && matching.length === 0) continue;
 
-    out.push(...slice(file.diffStart, headerEnd));
-    for (const h of selected) out.push(...slice(h.diffStart, h.diffEnd));
+    const headerEnd =
+      firstHunk === undefined ? file.diffEnd : firstHunk.diffStart - 1;
+    selected.push([file.diffStart, headerEnd]);
+    for (const h of matching) selected.push([h.diffStart, h.diffEnd]);
   }
 
-  if (out.length === 0) return null;
-  // Safe to encode: the round-trip check above proved this text's bytes are
-  // exactly the ones git emitted, and every line here came from it.
-  return Buffer.from(out.join('\n') + '\n', 'utf8');
+  if (selected.length === 0) return null;
+  // Assemble without spreading the ranges into a single `push`: a selected
+  // hunk can exceed the argument-count ceiling (~125k lines), and this path
+  // exists for exactly the large long-lived PRs that carry such hunks. Safe
+  // to encode: every line here came from text that decoded cleanly above.
+  const parts = selected.map(([from, to]) =>
+    lines.slice(from - 1, to).join('\n'),
+  );
+  return Buffer.from(parts.join('\n') + '\n', 'utf8');
 }
