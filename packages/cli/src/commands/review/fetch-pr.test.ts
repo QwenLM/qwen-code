@@ -3161,11 +3161,19 @@ describe('fetch-pr --resume', () => {
         headRefOidOnly: undefined,
       }),
     );
-    const { gitOpt } = await import('./lib/git.js');
+    const { gitOpt, gitRaw } = await import('./lib/git.js');
     // rev-parse → the fetched SHA; `status --porcelain` → clean.
     vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
       args.includes('status') ? '' : 'f00df00df00d',
     );
+    // The re-derivation terms: a resolvable merge-base and a `git diff`
+    // whose bytes match the recorded capture.
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockImplementation(() => ({
+      sha: 'baseb45eb45e',
+      baseFetchFailed: false,
+    }));
+    vi.mocked(gitRaw).mockImplementation(() => Buffer.from(DIFF_BYTES));
     // clearAllMocks resets call history but NOT implementations; re-assert
     // the ledger defaults so a mockReturnValue set by one test cannot leak
     // into the next — the same discipline the fs mock above follows.
@@ -3275,6 +3283,62 @@ describe('fetch-pr --resume', () => {
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([
       { resumed: false, resumeRefused: 'diff-hash-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged-but-CONSISTENT diff pair — git re-derives the truth', async () => {
+    // The attacker rewrote the diff file AND patched diffSha256 to match:
+    // the two attacker-writable operands agree with each other and disagree
+    // with what `git diff` derives for the recorded head.
+    const doctored =
+      'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+EVIL\n';
+    const doctoredSha = createHash('sha256')
+      .update(Buffer.from(doctored))
+      .digest('hex');
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ diffSha256: doctoredSha });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(doctored) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'diff-rederive-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged worktreePath — downstream steps route through it', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ worktreePath: '/tmp/evil' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'worktree-path-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged emptyDiff — the gate must not pass by absence', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ emptyDiff: true });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'empty-diff-mismatch' },
     ]);
   });
 

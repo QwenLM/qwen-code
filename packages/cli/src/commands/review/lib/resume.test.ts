@@ -15,10 +15,13 @@ import { RESUME_MAX } from './run-ledger.js';
 const SHA = 'f00df00df00df00d';
 const DIFF_SHA = 'a'.repeat(64);
 
+const WT = '.qwen/tmp/review-pr-42';
+
 const prev = () => ({
   prNumber: '42',
   fetchedSha: SHA,
   diffSha256: DIFF_SHA,
+  worktreePath: WT,
 });
 
 const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
@@ -26,6 +29,9 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   worktreeHeadSha: SHA,
   worktreeClean: true,
   diffSha256OnDisk: DIFF_SHA,
+  diffSha256Rederived: DIFF_SHA,
+  rederivedDiffEmpty: false,
+  worktreePath: WT,
   liveHeadSha: SHA,
   resumeCount: 0,
   requestedEffort: null,
@@ -249,6 +255,61 @@ describe('assessResume', () => {
   it('still resumes one short of the cap', () => {
     expect(
       assessResume(prev(), probes({ resumeCount: RESUME_MAX - 1 })),
+    ).toEqual({ ok: true });
+  });
+});
+
+describe('assessResume — resume state is untrusted where the reviewed code ran', () => {
+  // In CI the report, the diff file and the worktree all sit on a disk the
+  // reviewed PR's own code wrote during attempt 1 (yolo-mode agents, no
+  // sandbox). Self-consistency between two attacker-writable operands
+  // proves nothing; the terms below come from the forge and the object
+  // store instead.
+
+  it('refuses a forged-but-consistent diff pair — the re-derived hash disagrees', () => {
+    // The attacker rewrites the diff file AND patches diffSha256 to match.
+    const doctored = 'b'.repeat(64);
+    expect(
+      assessResume(
+        { ...prev(), diffSha256: doctored },
+        probes({ diffSha256OnDisk: doctored }),
+      ),
+    ).toEqual({ ok: false, reason: 'diff-rederive-mismatch' });
+  });
+
+  it('refuses when the diff cannot be re-derived at all', () => {
+    expect(assessResume(prev(), probes({ diffSha256Rederived: null }))).toEqual(
+      { ok: false, reason: 'diff-underivable' },
+    );
+  });
+
+  it('refuses a worktreePath this run did not derive', () => {
+    expect(
+      assessResume({ ...prev(), worktreePath: '/tmp/evil' }, probes()),
+    ).toEqual({ ok: false, reason: 'worktree-path-mismatch' });
+  });
+
+  it('refuses a report with NO worktreePath — routing needs the field', () => {
+    const { worktreePath: _dropped, ...rest } = prev();
+    expect(assessResume(rest, probes())).toEqual({
+      ok: false,
+      reason: 'worktree-path-mismatch',
+    });
+  });
+
+  it('refuses a forged emptyDiff — the gate must not pass by absence', () => {
+    expect(assessResume({ ...prev(), emptyDiff: true }, probes())).toEqual({
+      ok: false,
+      reason: 'empty-diff-mismatch',
+    });
+  });
+
+  it('accepts a GENUINE empty diff recorded as one', () => {
+    expect(
+      assessResume(
+        { ...prev(), emptyDiff: true },
+        probes({ rederivedDiffEmpty: true }),
+      ),
     ).toEqual({ ok: true });
   });
 });

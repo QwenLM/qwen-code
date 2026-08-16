@@ -27,6 +27,10 @@ export type ResumeRefusal =
   | 'worktree-dirty' // the worktree holds uncommitted changes
   | 'diff-unreadable' // the captured diff is gone or cannot be read
   | 'diff-hash-mismatch' // the diff file changed since it was captured
+  | 'diff-underivable' // the diff could not be re-derived from git objects
+  | 'diff-rederive-mismatch' // git derives a different diff than was recorded
+  | 'worktree-path-mismatch' // the report names a worktree this run did not choose
+  | 'empty-diff-mismatch' // the report's emptyDiff disagrees with the derived diff
   | 'head-moved' // the PR head advanced — the once-per-review restart case
   | 'resume-cap'; // this review has already resumed RESUME_MAX times
 
@@ -40,6 +44,8 @@ export interface PreviousReport {
   fetchedSha?: unknown;
   diffSha256?: unknown;
   effort?: unknown;
+  worktreePath?: unknown;
+  emptyDiff?: unknown;
 }
 
 /** What the world looks like now, probed by the caller. */
@@ -61,6 +67,29 @@ export interface ResumeProbes {
   worktreeClean: boolean | null;
   /** The PR's live head OID from the forge, or null when unavailable. */
   liveHeadSha: string | null;
+  /**
+   * The worktree path THIS invocation derived from the PR number — the only
+   * worktree the pipeline will operate on. The recorded `worktreePath` is
+   * consumed by downstream steps (`agent-prompt`'s working_dir,
+   * `build-test --worktree`), and in CI the report sits on disk the
+   * reviewed PR's own code could write during attempt 1 — a forged path
+   * redirects every one of those steps into an attacker-chosen directory
+   * while the verdict still certifies the real head SHA.
+   */
+  worktreePath: string;
+  /**
+   * sha256 of the diff RE-DERIVED from git objects — `git diff` between the
+   * recomputed merge-base and the recorded head, under the same pinned
+   * flags the capture used — or null when it could not be derived. The
+   * recorded hash and the on-disk file are BOTH attacker-writable in CI
+   * (same disk, same attempt-1 code execution), so their agreement proves
+   * self-consistency, not authenticity; git's object store keyed by the
+   * forge-verified head SHA is the term the attacker cannot rewrite to
+   * match.
+   */
+  diffSha256Rederived: string | null;
+  /** The re-derived diff had zero bytes. Null when underivable. */
+  rederivedDiffEmpty: boolean | null;
   /**
    * How many times this review has already resumed. The caller computes the
    * MAX of the resume marker's count and the session ledger's entry count
@@ -133,6 +162,31 @@ export function assessResume(
   }
   if (probes.diffSha256OnDisk !== prev.diffSha256) {
     return { ok: false, reason: 'diff-hash-mismatch' };
+  }
+  // The recorded hash and the disk file agree — but both live on a disk the
+  // reviewed PR's own code could write during attempt 1, so their agreement
+  // is self-consistency, not authenticity. The diff must also be what git
+  // itself derives for the recorded head: a doctored pair passes the check
+  // above and fails this one, because the object store keyed by the
+  // forge-verified head is not attacker-writable to match.
+  if (probes.diffSha256Rederived === null) {
+    return { ok: false, reason: 'diff-underivable' };
+  }
+  if (probes.diffSha256Rederived !== prev.diffSha256) {
+    return { ok: false, reason: 'diff-rederive-mismatch' };
+  }
+  // The report's own routing fields, verified against facts this run
+  // derived itself: a forged worktreePath redirects every downstream step,
+  // and a forged emptyDiff stops the resumed run before any agent launches
+  // — the gate passing by absence.
+  if (
+    typeof prev.worktreePath !== 'string' ||
+    prev.worktreePath !== probes.worktreePath
+  ) {
+    return { ok: false, reason: 'worktree-path-mismatch' };
+  }
+  if ((prev.emptyDiff === true) !== (probes.rederivedDiffEmpty === true)) {
+    return { ok: false, reason: 'empty-diff-mismatch' };
   }
   // An unreachable forge is NOT a head-moved: it is indistinguishable from
   // "unchanged", and the worktree/diff checks above already pin the content.

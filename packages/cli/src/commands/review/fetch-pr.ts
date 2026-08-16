@@ -642,15 +642,67 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // An unreachable forge reads as "unmoved": the worktree and diff hashes pin
   // the content, and presubmit's headDrift re-checks before anything posts.
   let liveHeadSha: string | null = null;
+  let liveBaseRefName: string | null = null;
   try {
-    const oid = (
-      JSON.parse(
-        gh('pr', 'view', prNumber, '--repo', ownerRepo, '--json', 'headRefOid'),
-      ) as { headRefOid?: unknown }
-    ).headRefOid;
-    liveHeadSha = typeof oid === 'string' && oid !== '' ? oid : null;
+    const view = JSON.parse(
+      gh(
+        'pr',
+        'view',
+        prNumber,
+        '--repo',
+        ownerRepo,
+        '--json',
+        'headRefOid,baseRefName',
+      ),
+    ) as { headRefOid?: unknown; baseRefName?: unknown };
+    liveHeadSha =
+      typeof view.headRefOid === 'string' && view.headRefOid !== ''
+        ? view.headRefOid
+        : null;
+    liveBaseRefName =
+      typeof view.baseRefName === 'string' && view.baseRefName !== ''
+        ? view.baseRefName
+        : null;
   } catch {
     liveHeadSha = null;
+    liveBaseRefName = null;
+  }
+  // Re-derive the diff from git objects, keyed on the RECORDED head and the
+  // recomputed merge-base against the FORGE's base ref — never the report's
+  // own mergeBaseSha, which sits on the same attacker-writable disk as the
+  // hash it would be asked to corroborate. Underivable stays null and the
+  // ruling refuses: a resume that cannot prove its input authentic from a
+  // source outside the attempt-1 blast radius does not happen.
+  const recordedSha =
+    prev !== null &&
+    typeof prev.fetchedSha === 'string' &&
+    prev.fetchedSha !== ''
+      ? prev.fetchedSha
+      : null;
+  let diffSha256Rederived: string | null = null;
+  let rederivedDiffEmpty: boolean | null = null;
+  if (recordedSha !== null && liveBaseRefName !== null) {
+    const mb = resolveMergeBase(
+      args.remote,
+      liveBaseRefName,
+      recordedSha,
+      gitProbe,
+    ).sha;
+    if (mb !== null) {
+      try {
+        const buf = gitRaw(
+          ...PINNED_DIFF_CONFIG,
+          'diff',
+          ...PINNED_DIFF_FLAGS,
+          `${mb}..${recordedSha}`,
+        );
+        diffSha256Rederived = createHash('sha256').update(buf).digest('hex');
+        rederivedDiffEmpty = buf.length === 0;
+      } catch {
+        diffSha256Rederived = null;
+        rederivedDiffEmpty = null;
+      }
+    }
   }
   const marker = readResumeMarker(out);
   // The cap reads BOTH counters: the marker is the primary record, and the
@@ -703,6 +755,9 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
     worktreeClean: status === null ? null : status.trim() === '',
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
+    diffSha256Rederived,
+    rederivedDiffEmpty,
+    worktreePath: wt,
     liveHeadSha,
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
