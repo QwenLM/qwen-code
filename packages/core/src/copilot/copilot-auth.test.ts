@@ -8,6 +8,7 @@ import {
   discoverGithubToken,
   exchangeGhuForCapi,
   createCopilotTokenManager,
+  runCopilotDeviceFlow,
 } from './copilot-auth.js';
 
 describe('parseProxyEp', () => {
@@ -299,5 +300,147 @@ describe('CopilotTokenManager', () => {
     await mgr.getSnapshot();
     const dirStat = statSync(join(tempRoot, 'subdir'));
     expect(dirStat.mode & 0o777).toBe(0o700);
+  });
+});
+
+describe('runCopilotDeviceFlow', () => {
+  it('polls device flow and returns ghu_ token', async () => {
+    let pollCount = 0;
+    const mockFetch = (async (url: URL | string, _init?: RequestInit) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.endsWith('/login/device/code')) {
+        return new Response(
+          JSON.stringify({
+            device_code: 'dev123',
+            user_code: 'ABCD-1234',
+            verification_uri: 'https://github.com/login/device',
+            interval: 0, // fast poll for test
+            expires_in: 60,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (u.endsWith('/login/oauth/access_token')) {
+        pollCount++;
+        if (pollCount < 2) {
+          return new Response(
+            JSON.stringify({ error: 'authorization_pending' }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify({ access_token: 'ghu_DEVICEFLOW1234' }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+
+    const events: string[] = [];
+    const result = await runCopilotDeviceFlow({
+      fetchImpl: mockFetch,
+      notify: (e) => {
+        if (e.type === 'device_code') events.push(`code:${e.userCode}`);
+        if (e.type === 'progress') events.push('progress');
+      },
+    });
+    expect(result.token).toBe('ghu_DEVICEFLOW1234');
+    expect(events).toContain('code:ABCD-1234');
+  });
+
+  it('handles slow_down by increasing interval', async () => {
+    let pollCount = 0;
+    const mockFetch = (async (url: URL | string) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.endsWith('/login/device/code')) {
+        return new Response(
+          JSON.stringify({
+            device_code: 'dev456',
+            user_code: 'WXYZ-9999',
+            verification_uri: 'https://github.com/login/device',
+            interval: 0,
+            expires_in: 60,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      pollCount++;
+      if (pollCount === 1) {
+        return new Response(
+          JSON.stringify({ error: 'slow_down', interval: 1 }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({ access_token: 'ghu_SLOWDOWN1234' }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+    }) as typeof fetch;
+
+    const result = await runCopilotDeviceFlow({ fetchImpl: mockFetch });
+    expect(result.token).toBe('ghu_SLOWDOWN1234');
+  });
+
+  it('throws on expired_token', async () => {
+    const mockFetch = (async (url: URL | string) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.endsWith('/login/device/code')) {
+        return new Response(
+          JSON.stringify({
+            device_code: 'dev789',
+            user_code: 'EXPI-RED0',
+            verification_uri: 'https://github.com/login/device',
+            interval: 0,
+            expires_in: 60,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ error: 'expired_token' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    await expect(
+      runCopilotDeviceFlow({ fetchImpl: mockFetch }),
+    ).rejects.toThrow(/expired/i);
+  });
+
+  it('cancel via AbortSignal rejects with "cancelled"', async () => {
+    const ctrl = new AbortController();
+    const mockFetch = (async (url: URL | string) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.endsWith('/login/device/code')) {
+        return new Response(
+          JSON.stringify({
+            device_code: 'dev000',
+            user_code: 'CANC-EL01',
+            verification_uri: 'https://github.com/login/device',
+            interval: 5,
+            expires_in: 60,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ error: 'authorization_pending' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    setTimeout(() => ctrl.abort(), 50);
+    await expect(
+      runCopilotDeviceFlow({ fetchImpl: mockFetch, signal: ctrl.signal }),
+    ).rejects.toThrow(/cancel/i);
   });
 });

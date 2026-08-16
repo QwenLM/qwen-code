@@ -402,13 +402,109 @@ export function createCopilotTokenManager(opts?: {
   return { getSnapshot, forceRefresh, getAvailableModelIds };
 }
 
-export async function runCopilotDeviceFlow(_opts?: {
+const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
+const COPILOT_SCOPE = 'read:user';
+const DEFAULT_COPILOT_DOMAIN = 'github.com';
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Login cancelled'));
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t);
+        reject(new Error('Login cancelled'));
+      },
+      { once: true },
+    );
+  });
+}
+
+export async function runCopilotDeviceFlow(opts?: {
   signal?: AbortSignal;
   domain?: string;
   fetchImpl?: typeof fetch;
   notify?: (event: CopilotDeviceFlowEvent) => void;
 }): Promise<{ token: string }> {
-  throw new Error('not implemented');
+  const domain = opts?.domain ?? DEFAULT_COPILOT_DOMAIN;
+  const f = opts?.fetchImpl ?? fetch;
+  const signal = opts?.signal;
+  const notify = opts?.notify;
+
+  // 1. Request device code
+  const codeRes = await f(`https://${domain}/login/device/code`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: `client_id=${COPILOT_CLIENT_ID}&scope=${COPILOT_SCOPE}`,
+  });
+  if (!codeRes.ok)
+    throw new Error(`Device code request failed: HTTP ${codeRes.status}`);
+  const codeBody = (await codeRes.json()) as {
+    device_code: string;
+    user_code: string;
+    verification_uri: string;
+    interval: number;
+    expires_in: number;
+  };
+
+  // Validate verification_uri is http(s)
+  const parsed = new URL(codeBody.verification_uri);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`Invalid verification_uri protocol: ${parsed.protocol}`);
+  }
+
+  notify?.({
+    type: 'device_code',
+    userCode: codeBody.user_code,
+    verificationUri: parsed.href,
+    intervalSeconds: codeBody.interval,
+    expiresInSeconds: codeBody.expires_in,
+  });
+
+  // 2. Poll for access token
+  let interval = codeBody.interval;
+  const deadline = Date.now() + codeBody.expires_in * 1000;
+  await abortableSleep(interval * 1000, signal); // waitBeforeFirstPoll
+
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new Error('Login cancelled');
+
+    const tokenRes = await f(`https://${domain}/login/oauth/access_token`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: `client_id=${COPILOT_CLIENT_ID}&device_code=${codeBody.device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code`,
+    });
+    const tokenBody = (await tokenRes.json()) as {
+      access_token?: string;
+      error?: string;
+      interval?: number;
+    };
+
+    if (tokenBody.access_token) {
+      return { token: tokenBody.access_token };
+    }
+    if (tokenBody.error === 'expired_token') {
+      throw new Error(
+        'Device code expired. Please re-run /auth and try again.',
+      );
+    }
+    if (tokenBody.error === 'access_denied') {
+      throw new Error('Authorization was denied. Re-run /auth to start over.');
+    }
+    if (tokenBody.error === 'slow_down') {
+      if (typeof tokenBody.interval === 'number') interval = tokenBody.interval;
+      else interval += 5;
+    }
+    await abortableSleep(interval * 1000, signal);
+  }
+  throw new Error('Device flow timed out waiting for authorization');
 }
 
 export type CopilotDeviceFlowEvent =
