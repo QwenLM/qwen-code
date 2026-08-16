@@ -365,6 +365,11 @@ export class ResponsesPipeline {
     if (this.config.extra_body) {
       const requestRecord = apiRequest as unknown as Record<string, unknown>;
       for (const [key, value] of Object.entries(this.config.extra_body)) {
+        // `enable_thinking` is a DashScope/Qwen-specific knob with no meaning
+        // on the Responses API; buildReasoning() above already translates it
+        // into `reasoning.effort` when present, so forwarding it verbatim
+        // would only add an undefined field to the wire body.
+        if (key === 'enable_thinking') continue;
         // apiRequest is built from an object literal, so optional fields
         // like `tools`/`instructions` are already present as keys even when
         // their value is undefined -- check the value, not just key presence,
@@ -380,14 +385,26 @@ export class ResponsesPipeline {
 
   private buildReasoning(): ResponsesApiReasoning | undefined {
     const r = this.config.reasoning;
-    if (r === false || r === undefined) return undefined;
+    if (r === false) return undefined;
+    // `extra_body.enable_thinking` is the DashScope/Qwen-specific on/off
+    // toggle (predates the unified reasoning-effort ladder). It has no
+    // meaning as a literal field on the Responses API and is stripped before
+    // the wire request is sent (see the extra_body merge below), so a config
+    // that only set it -- e.g. a settings.json carried over from another
+    // wire -- would otherwise silently lose reasoning entirely on this wire.
+    const legacyEnableThinking = this.config.extra_body?.['enable_thinking'];
+    if (r === undefined && legacyEnableThinking !== true) return undefined;
 
     const reasoning: ResponsesApiReasoning = {};
     // The Responses API reasoning.effort enum (none, minimal, low, medium,
     // high, xhigh, max) is a superset of the unified ladder, so every tier
     // passes through verbatim with no clamping.
-    if (r.effort) {
+    if (r?.effort) {
       reasoning.effort = r.effort;
+    } else if (legacyEnableThinking === true) {
+      reasoning.effort = 'medium';
+    }
+    if (reasoning.effort) {
       // 'auto' is required to receive reasoning_summary_text.delta events at
       // all; the unified reasoning config has no separate summary knob.
       reasoning.summary = 'auto';

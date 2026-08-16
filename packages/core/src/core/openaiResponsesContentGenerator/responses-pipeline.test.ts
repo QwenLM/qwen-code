@@ -350,6 +350,73 @@ describe('ResponsesPipeline', () => {
       expect(body.reasoning).toBeUndefined();
       expect(body.include).toBeUndefined();
     });
+
+    it('translates a legacy extra_body.enable_thinking into reasoning.effort=medium and strips it from the wire body', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          extra_body: { enable_thinking: true },
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body) as Record<
+        string,
+        unknown
+      >;
+      expect(body['reasoning']).toEqual({ effort: 'medium', summary: 'auto' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+      // `enable_thinking` has no meaning on this wire; it must never appear
+      // top-level on the request, translated or not.
+      expect(body['enable_thinking']).toBeUndefined();
+    });
+
+    it('prefers an explicit reasoning.effort over a legacy extra_body.enable_thinking', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          reasoning: { effort: 'high' },
+          extra_body: { enable_thinking: true },
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      const body = JSON.parse(
+        fetchMock.mock.calls[0]![1].body,
+      ) as ResponsesApiRequest;
+      expect(body.reasoning).toEqual({ effort: 'high', summary: 'auto' });
+    });
+
+    it('omits reasoning when reasoning is false even with a legacy extra_body.enable_thinking set', async () => {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          reasoning: false,
+          extra_body: { enable_thinking: true },
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body) as Record<
+        string,
+        unknown
+      >;
+      expect(body['reasoning']).toBeUndefined();
+      expect(body['include']).toBeUndefined();
+      expect(body['enable_thinking']).toBeUndefined();
+    });
   });
 
   it('maps samplingParams onto temperature/top_p/max_output_tokens', async () => {
