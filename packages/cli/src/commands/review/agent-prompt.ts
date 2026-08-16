@@ -55,6 +55,7 @@ import {
   verifyBudgetMessage,
   writeBudgetStop,
   writeRoundCapStop,
+  hasReviewDeadline,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -139,13 +140,22 @@ interface PlanReport {
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
-  budget?: { agentToolBudget?: unknown };
-  // The two size fields the topology gate reads (#9242). Declared so the
-  // per-chunk build paths can notice a fan-out the plan's own numbers never
-  // asked for; `isTerritoryFanOut` already tolerates the `unknown` via the
-  // `RosterPlan` cast, same bridge `runRoster` uses.
+  /**
+   * The two size fields the topology gate reads (#9242) and the ones
+   * `reverseAuditRoundCap` derives this plan's round-cap tier from — the same
+   * pair, read by two callers for two reasons, which is why one declaration
+   * serves both. Declared even though those functions take `unknown` (they
+   * parse a file, so they validate at runtime whatever the type says) because
+   * the declaration is what makes the coupling visible: without it a rename on
+   * the writing side compiles clean, the per-chunk paths stop noticing a
+   * fan-out the plan never asked for, and every cap here silently collapses to
+   * the fallback tier — a quieter failure than a wrong number.
+   * `isTerritoryFanOut` tolerates the `unknown` via the `RosterPlan` cast, the
+   * same bridge `runRoster` uses.
+   */
   srcDiffLines?: unknown;
   diffLines?: unknown;
+  budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -1993,7 +2003,10 @@ function admitReverseAuditRound(
   fanOutWidth: number,
 ): boolean {
   // The plan's round cap first: deterministic, and cheaper than the
-  // deadline arithmetic. The full cap normally; a reduced cap for a huge
+  // deadline arithmetic. One value per topology (`reverseAuditRoundTier`) —
+  // ten on a 3A diff, where a round is one auditor; five on a 3B one, where
+  // it is one per non-retired chunk; and — only in a run that has a deadline,
+  // since the reduction answers a ceiling — a reduced three for a huge
   // diff, where a single reverse-audit round is ~90 minutes and the full
   // loop cannot finish (measured: the 6-hour CI reviews that posted nothing
   // were 4,000-5,300-line PRs). A round past the cap writes a marker so
@@ -2166,7 +2179,7 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report.budget),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       chunks.length,
     )
   ) {
@@ -2222,7 +2235,10 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
-  const planRoundCap = reverseAuditRoundCap(report.budget);
+  const planRoundCap = reverseAuditRoundCap(
+    report,
+    hasReviewDeadline(process.env),
+  );
   const retirementNote =
     skipped.length === 0
       ? []
@@ -2585,7 +2601,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report.budget),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       1,
     )
   ) {
@@ -2668,7 +2684,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report.budget),
+        reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
         planChunkIds.length,
       )
     )

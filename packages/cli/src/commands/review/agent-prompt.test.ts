@@ -484,6 +484,74 @@ describe('agent-prompt (command boundary)', () => {
     }
   });
 
+  it('takes the round cap from the plan topology at the --chunk gate too', () => {
+    // The fourth of the four cap call sites, and the only one with no tier-10
+    // coverage: a 3A-sized plan can carry chunks (the chunk budget is 400
+    // lines while the 3A gate admits 3200 total), so a round rebuilt or
+    // repaired one --chunk at a time on a small plan reaches THIS gate. A
+    // regression touching only it would stay green suite-wide.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-chunk-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      delete process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+
+      const small = join(dir, 'small.json');
+      writeFileSync(
+        small,
+        JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({
+        plan: small,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 6,
+      });
+      expect(process.exitCode).toBeUndefined();
+      expect(readRecordedPrompts(small).size).toBe(1);
+
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({
+        plan: small,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 11,
+      });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 10');
+
+      const large = join(dir, 'large.json');
+      writeFileSync(
+        large,
+        JSON.stringify({ ...PLAN, srcDiffLines: 900, diffLines: 900 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({
+        plan: large,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 6,
+      });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 5');
+      expect(readRecordedPrompts(large).size).toBe(0);
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('lets --role reverse-audit --chunk N through and keys the record by its chunk', () => {
     // The unit tests build the launch prompt directly, bypassing the guard and the
     // key derivation. This drives the real handler: the guard must let the one legal
@@ -956,6 +1024,111 @@ describe('--round — the CLI bakes the round into the identity line and the key
         );
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('takes the round cap from the CLOCK as well, on a sized huge plan', () => {
+    // Every other cap test here uses the unsized `PLAN` fixture, whose tier is
+    // the LARGE fallback whatever the clock says, or forces a cap by storing
+    // one — so the `hasReviewDeadline(process.env)` argument at all four call
+    // sites was mutation-invisible: hardcoding it to either constant left the
+    // whole suite green. A SIZED huge plan is the only shape where the flag
+    // decides anything.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-clock-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      const before = process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+      const huge = join(dir, 'huge.json');
+      writeFileSync(
+        huge,
+        JSON.stringify({ ...PLAN, srcDiffLines: 5000, diffLines: 5000 }),
+      );
+      try {
+        // No clock: the huge reduction does not apply, so the 3B tier stands
+        // and round 4 builds.
+        delete process.env[DEADLINE_ENV];
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 4 });
+        expect(process.exitCode).toBeUndefined();
+        expect(readRecordedPrompts(huge).size).toBe(1);
+
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 6 });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 5');
+
+        // A clock: the same plan, the same round, refused at the reduced tier.
+        process.env[DEADLINE_ENV] = String(
+          Math.floor(Date.now() / 1000) + 7200,
+        );
+        process.exitCode = undefined;
+        (writeStderrLine as unknown as Mock).mockClear();
+        handler({ plan: huge, role: 'reverse-audit', findings, round: 4 });
+        expect(process.exitCode).toBe(4);
+        expect(stderr()).toContain('round cap is 3');
+      } finally {
+        if (before === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = before;
+      }
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('takes the round cap from the plan’s topology on the chunkless path', () => {
+    // 3A is the topology that actually runs this path — one auditor a round,
+    // the whole diff — and it is the one the tier raises. Both arms use the
+    // same round 6 off the same builder: admitted under the 3A tier, refused
+    // under the 3B one. A flat cap cannot produce both.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-cap-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      delete process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+
+      const small = join(dir, 'small.json');
+      writeFileSync(
+        small,
+        JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({ plan: small, role: 'reverse-audit', findings, round: 6 });
+      expect(process.exitCode).toBeUndefined();
+      expect(readRecordedPrompts(small).size).toBe(1);
+
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({ plan: small, role: 'reverse-audit', findings, round: 11 });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 10');
+
+      const large = join(dir, 'large.json');
+      writeFileSync(
+        large,
+        JSON.stringify({ ...PLAN, srcDiffLines: 900, diffLines: 900 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({ plan: large, role: 'reverse-audit', findings, round: 6 });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 5');
+      expect(readRecordedPrompts(large).size).toBe(0);
+    } finally {
+      process.exitCode = undefined;
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -3744,6 +3917,30 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('next cold check round 6');
   });
 
+  it('the cap in the retirement note is the plan’s tier, not a constant', () => {
+    // The third of the four cap call sites. Same history as the cap-5 test
+    // above, on a 3A-sized plan: round 5's retirement schedules its cold check
+    // for round 6, which the 3A tier ALLOWS — so the note must promise that
+    // check rather than close the certificate. The two tests are the same
+    // scenario with opposite outcomes, which is what makes this site's read of
+    // the plan observable at all.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(4, { 13: DRY, 14: YIELD, 15: YIELD });
+
+    const out = runRound(5);
+    expect(out).toContain('chunk 13 — retired: dry in rounds 3 and 4');
+    expect(out).toContain('next cold check round 6');
+    expect(out).not.toContain('certificate final');
+  });
+
   it('the cold check comes due on parity — the retired chunk is built again', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
@@ -3932,6 +4129,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   it('the default 5-round cap is enforced by the builder, not just prose', () => {
     // Pins the general ROUND CAP enforcement: the mutation `round > cap`
     // → `round > cap && cap === 1` (a sixth round builds) fails here.
+    //
+    // Five because `PLAN` carries no `srcDiffLines`/`diffLines`, so the tier
+    // read is the unsized fallback — deliberately the large tier, which is
+    // what every plan got before tiering. The sized 3A case is the next test.
     answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
     answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
@@ -3947,6 +4148,36 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(msg).toContain('ROUND CAP');
     expect(msg).toContain('round cap is 5');
+  });
+
+  it('a 3A-sized plan runs to ten rounds, not five', () => {
+    // The gate reads the plan's topology tier, so a small diff — where a
+    // round is one auditor, not one per chunk — keeps auditing where the 3B
+    // number would have stopped it. Round 6 is the whole change: it is
+    // refused in the test above and admitted here off the same builder, so a
+    // revert to a single flat cap fails on the admission, not just on the
+    // number in the refusal text.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    for (const r of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      answerRound(r, { 13: YIELD, 14: YIELD, 15: YIELD });
+      expect(process.exitCode).toBeUndefined();
+    }
+    expect(keysOf(6)).not.toHaveLength(0);
+
+    const out = runRound(11);
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(11)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 10');
   });
 
   it('all retired and none due: exit 5, CONVERGED, nothing built, nothing stamped', () => {

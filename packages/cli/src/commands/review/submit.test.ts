@@ -623,6 +623,32 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(posted().comments).toEqual([]);
   });
 
+  it('carries duplicate-dropped Suggestions through the state seam', () => {
+    // The seam strips keys by a destructuring exclusion list, then spreads
+    // the rest into composeReview. The field rides the spread today; if it
+    // ever joins the exclusion list, the posted body loses the duplicate
+    // paragraph — the exact incident shape #9204 fixes — while every direct
+    // composeReview test stays green, because each one bypasses this seam.
+    // The body is the observable here: this fixture brings no plan, so the
+    // missing-plan cap posts COMMENT whatever the counts, and the verdict
+    // side of a duplicates-only run is pinned by the cap-free fixtures in
+    // compose-review.test.ts, which own the transcript scaffolding.
+    const review = file('duplicates.json', {
+      commit_id: 'abc123',
+      comments: [],
+      state: {
+        suggestionsDroppedAsDuplicates: [
+          'R1-1 pin gap — already reported (comment 1)',
+        ],
+        modelId: 'qwen3.7-max',
+      },
+    });
+    runSubmit(authorized({ review }));
+    expect(posted().body).toContain(
+      '1 Suggestion-level finding(s) this review confirmed',
+    );
+  });
+
   it('posts the injected CLI version in the review footer', () => {
     runSubmit(authorized({}), '0.21.2');
 
