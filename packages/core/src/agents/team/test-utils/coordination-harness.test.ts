@@ -529,10 +529,6 @@ describe('TeamCoordinationHarness', () => {
 
     it('canonicalizes a display-form owner before deferred delivery', async () => {
       const h = await createHarness();
-      const task = await createTask(h.teamName, {
-        subject: 'Canonical owner assignment',
-        description: 'Deliver after the existing turn.',
-      });
       const target = await h.spawnTeammate('QA Tester', {
         onMessage: () => 'stay_running',
       });
@@ -544,12 +540,18 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.sendMessage('qa-tester', 'current work', 'leader');
       await target.waitForMessageCount(1);
+      expect(target.getStatus()).toBe(AgentStatus.RUNNING);
+      const task = await createTask(h.teamName, {
+        subject: 'Canonical owner assignment',
+        description: 'Deliver after the existing turn.',
+      });
 
       const result = await tool
         .build({ taskId: task.id, status: 'in_progress', owner: 'QA Tester' })
         .execute(new AbortController().signal);
 
       expect(result.error).toBeUndefined();
+      expect(target.getReceivedMessages()).toHaveLength(1);
       target.goIdle();
       await target.waitForMessageCount(2);
       expect(target.getReceivedMessages()[1]).toContain(
@@ -811,6 +813,54 @@ describe('TeamCoordinationHarness', () => {
       await waitForManagerWork(h.teamManager);
       expect(target.getReceivedMessages()).toHaveLength(2);
       expect(target.getReceivedMessages()[1]).toContain('Revised assignment');
+    });
+
+    it('retries an idle owner after its assignment snapshot goes stale', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      const task = await createTask(h.teamName, {
+        subject: 'Original assignment',
+        description: 'Must not reach the target.',
+      });
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+
+      const gate = gateTaskSnapshotRead(getTaskPath(h.teamName, task.id));
+      try {
+        target.goIdle();
+        await gate.snapshotRead;
+        expect(target.getStatus()).toBe(AgentStatus.IDLE);
+
+        await tool
+          .build({
+            taskId: task.id,
+            subject: 'Current assignment',
+            description: 'Only this content should be delivered.',
+          })
+          .execute(new AbortController().signal);
+        expect(target.getStatus()).toBe(AgentStatus.IDLE);
+      } finally {
+        gate.restore();
+        gate.release();
+      }
+
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(2);
+      expect(target.getReceivedMessages()[1]).toContain('Current assignment');
+      expect(target.getReceivedMessages()[1]).not.toContain(
+        'Original assignment',
+      );
     });
 
     it('delivers multiple persisted assignments in task order without repeating one', async () => {

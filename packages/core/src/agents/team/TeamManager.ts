@@ -1840,7 +1840,14 @@ export class TeamManager {
       status: 'in_progress',
       owner: agentName,
     });
-    if (deliveryEpoch !== this.taskAssignmentDeliveryEpoch) return false;
+    if (deliveryEpoch !== this.taskAssignmentDeliveryEpoch) {
+      // Retry asynchronously through the normal priority-ordered flush.
+      this.fireAndForget(
+        `flushNextMessage(${agentId})`,
+        Promise.resolve().then(() => this.flushNextMessage(agentId, agentName)),
+      );
+      return true;
+    }
 
     const activeIds = new Set(assignments.map((task) => task.id));
     for (const [taskId, owner] of this.deliveredTaskAssignments) {
