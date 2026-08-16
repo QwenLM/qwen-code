@@ -236,9 +236,6 @@ const DRY_RECEIPT_ZH =
   '|无新的?(?:问题|发现)' +
   '|没有(?:发现)?(?:新的?)?问题';
 
-/** The phrase without filler — the marker test's strip (see its comment). */
-const DRY_RECEIPT_PHRASE_CORE = '(?:' + DRY_RECEIPT_EN + DRY_RECEIPT_ZH + ')';
-
 /**
  * The matcher's phrase: the EN alternative carries the filler between
  * phrase and separator (`were found`, `(chunk 13)`); the zh ones do not.
@@ -341,6 +338,23 @@ const NEGATION_MARKER_RE =
 const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
 
 /**
+ * The walk the FORM's vocabulary names — the brief spells the same
+ * family out when it mandates the receipt. A dry clause must carry one of
+ * verbs, or name an object: a clause that names no walk proves none,
+ * whatever its length and whatever markers it dodges (#9213 — the
+ * unbounded hedge class no marker list closes: `overlooked`, `missed`,
+ * `ignored`, `without checking`, 忽略, 略过, 遗漏 …). The test's misses
+ * fail toward AUDIT — a clause whose walk verb the vocabulary does not
+ * name reads `unknown` and the chunk stays hot — the opposite direction
+ * of a marker miss, and the only one the module header declares. One
+ * definition, shared by the walk gate and the marker strip below, so a
+ * change to it cannot apply to one reader and not the other (#9272).
+ */
+const WALK_VERB_SRC =
+  '\\bwalk|\\bverif|\\btrace|\\bexamin|走查|核对|复核|核查|复查|重走';
+const WALK_VERB_RE = new RegExp(WALK_VERB_SRC, 'i');
+
+/**
  * The marker test over the clause. Echoed phrases are stripped with the
  * CORE first — never the filler tail: a greedy tail swallowed a marker
  * riding right after an echo (`no issues found but I skipped …` lost
@@ -349,8 +363,34 @@ const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
  * as a bare one — the exemption blanked a self-admission and retired the
  * chunk on it (#9213) — and an honest clause quoting a marker-carrying
  * label now reads `unknown`, the direction every failure here fails.
+ *
+ * The en strip also refuses a `no <noun>` the clause makes the SUBJECT
+ * of a walk-family verb — `…; no issues were verified`, `no findings
+ * examined this round` — across any unbroken word-run, because adverbs
+ * take a seat between (`no issues at all were verified`): that shape is
+ * the admission that the walk was not done, not a restatement of the
+ * all-clear, and stripping it blanked the bare `\bno\b` marker's whole
+ * domain over these three nouns (#9272 — round 3's bare marker closed
+ * the passive and compound entrances yet these still retired, because
+ * the strip had eaten the `no` before the marker could see it). Echoes
+ * keep stripping: punctuation follows (`no gaps: none.`), the phrase's
+ * own filler (`no issues found, no issues found.`), or a non-walk word —
+ * `found` in `no issues were found` is not the walk's vocabulary. The
+ * `\b` after the noun pins the alternation: without it a refused strip
+ * backtracked the noun (`issues` → `issue`) and stripped THAT, leaving
+ * `s were verified` marker-less. The zh branch needs no guard: 没/未
+ * stay marked whatever follows.
  */
-const PHRASE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'gi');
+const PHRASE_CORE_RE = new RegExp(
+  '(?:' +
+    DRY_RECEIPT_EN +
+    '\\b(?![ \\t]+(?:\\w+[ \\t]+)*(?:' +
+    WALK_VERB_SRC +
+    '))' +
+    DRY_RECEIPT_ZH +
+    ')',
+  'gi',
+);
 function contradictsThePhrase(clause: string): boolean {
   return NEGATION_MARKER_RE.test(clause.replace(PHRASE_CORE_RE, ' '));
 }
@@ -368,20 +408,6 @@ function namesAnObject(clause: string): boolean {
     /\w[\w.-]+\/[\w$-]+\.\w+/.test(clause)
   );
 }
-
-/**
- * The walk the FORM's vocabulary names — the brief spells the same
- * family out when it mandates the receipt. A dry clause must carry one of
- * verbs, or name an object: a clause that names no walk proves none,
- * whatever its length and whatever markers it dodges (#9213 — the
- * unbounded hedge class no marker list closes: `overlooked`, `missed`,
- * `ignored`, `without checking`, 忽略, 略过, 遗漏 …). The test's misses
- * fail toward AUDIT — a clause whose walk verb the vocabulary does not
- * name reads `unknown` and the chunk stays hot — the opposite direction
- * of a marker miss, and the only one the module header declares.
- */
-const WALK_VERB_RE =
-  /\bwalk|\bverif|\btrace|\bexamin|走查|核对|复核|核查|复查|重走/i;
 
 function namesTheWalk(clause: string): boolean {
   const stripped = clause.replace(SATURATED_CLAUSE_RE, ' ');

@@ -669,6 +669,31 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       'a no+verb admission (no verification)',
       'No issues found — I did no verification of the parser or its callers.',
     ],
+    [
+      'a strip-dead noun in the passive seat (no issues were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were verified.',
+    ],
+    [
+      'a strip-dead noun with an adverb between (no issues at all were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues at all were verified.',
+    ],
+    [
+      'a strip-dead noun, findings (no findings were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no findings were verified.',
+    ],
+    [
+      'a strip-dead noun, gaps (no gaps are verified outstanding)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no gaps are verified outstanding.',
+    ],
+    [
+      'a strip-dead noun in a filler-seat clause (there were no issues verified)',
+      'No issues found — there were no issues verified this round across ' +
+        'the reconnect state machine and its call sites.',
+    ],
   ])(
     'an admission stays marked, however the absence-of-problems phrasing tempts an exception: %s (#9272)',
     (_label, leaked) => {
@@ -677,7 +702,10 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       // lexicalized compounds, limiter compounds) showed an exception
       // list over natural language has no last corner — the same lesson
       // as #9213's polarity guard. Each of these names a walk, so
-      // polarity is the only text gate — and it stays armed. The honest
+      // polarity is the only text gate — and it stays armed. The
+      // strip-dead nouns pin the marker strip's own guard: an echoed
+      // `no <noun>` strips, but the same noun as the SUBJECT of a walk
+      // verb keeps its `no`, so the bare marker sees it. The honest
       // mirror reads `unknown` and keeps auditing: the module's declared
       // direction.
       transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
@@ -711,6 +739,23 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.diagnostics).toEqual([
       'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
     ]);
+  });
+
+  it('an echo in a walk verb\u2019s object seat still retires — the guard spares it (#9272)', () => {
+    // The marker strip refuses to blank a `no <noun>` the clause makes
+    // the subject of a walk verb; the same nouns as the verb's OBJECT —
+    // the all-clear the walk produced — keep stripping and retiring.
+    for (const r of [1, 2]) {
+      transcript(
+        record(r, 13, `chunk 13 round ${r} territory walk`),
+        'No issues found — re-walked the scheduler and verified no ' +
+          'issues in it or its callers.',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
   });
 
   it('a Chinese receipt separated by a full-width colon is dry', () => {
