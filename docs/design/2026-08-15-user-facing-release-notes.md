@@ -154,7 +154,9 @@ Deterministic extraction, no model involvement:
   `![alt](url)`, `<img src="url">`, and bare image URLs.
 - Host allowlist (https only): `github.com/user-attachments/`,
   `user-images.githubusercontent.com`,
-  `private-user-images.githubusercontent.com`, `raw.githubusercontent.com`.
+  `private-user-images.githubusercontent.com`, and `raw.githubusercontent.com`
+  pinned to a 40-hex commit-SHA ref — a branch ref stays mutable after
+  publication, so its owner could swap the image in a shipped release.
   Anything else is ignored — the release body must never become a hotlinking
   vector. The camo image proxy is deliberately not allowed even though GitHub
   serves it: its HMAC signs arbitrary external URLs without repository

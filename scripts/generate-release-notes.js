@@ -47,15 +47,21 @@ const IMAGE_HOST_ALLOWLIST = [
   'github.com/user-attachments/',
   'user-images.githubusercontent.com/',
   'private-user-images.githubusercontent.com/',
-  'raw.githubusercontent.com/',
 ];
-const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g;
-// Quoted HTML attributes legally allow whitespace and Markdown
-// metacharacters inside src; the capture must refuse them or a crafted
-// value breaks out of the ![alt](url) interpolation in renderReleaseNotesV2.
-const HTML_IMAGE_RE = /<img\b[^>]*\bsrc=["'](https?:\/\/[^"'\s()<>]+)["']/gi;
+// raw.githubusercontent.com serves whatever its ref points at today, so a
+// branch ref lets its owner swap images in an already-published release;
+// only commit-SHA refs share the immutability of the hosts above.
+const RAW_IMAGE_PREFIX = 'https://raw.githubusercontent.com/';
+// Captured URLs are interpolated verbatim into ![alt](url), so every URL
+// capture class refuses Markdown-active characters or a crafted value
+// breaks out of the image syntax in renderReleaseNotesV2. The HTML match is
+// non-greedy and src must not follow a word character or hyphen, so the
+// first true src attribute wins instead of a later data-src.
+const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^"'\s()<>`]+)\)/g;
+const HTML_IMAGE_RE =
+  /<img\b[^>]*?(?<![\w-])src=["'](https?:\/\/[^"'\s()<>[\]`]+)["']/gi;
 const BARE_IMAGE_URL_RE =
-  /(?<![(!"'=\w])(https?:\/\/[^\s"'<>()]+\.(?:png|jpe?g|gif|webp|avif))(?=[\s)"'<]|$)/gi;
+  /(?<![(!"'=\w])(https?:\/\/[^\s"'<>()`]+\.(?:png|jpe?g|gif|webp|avif))(?=[\s)"'<]|$)/gi;
 
 export function buildPullRequestQuery(numbers) {
   const fields = numbers
@@ -157,6 +163,16 @@ function parseNewContributors(body) {
   return contributors;
 }
 
+// Conventional-commit types routed to a category heading that names the
+// type. Doubles as the appendix strip set: any other type keeps its prefix
+// because the Internal Changes heading alone does not name it.
+const TYPE_CATEGORIES = {
+  feat: 'Features',
+  fix: 'Bug Fixes',
+  perf: 'Performance',
+  docs: 'Documentation',
+};
+
 export function classifyChange(entry) {
   const labels = (entry.labels || []).map((label) =>
     typeof label === 'string' ? label.toLowerCase() : label.name.toLowerCase(),
@@ -194,28 +210,29 @@ export function classifyChange(entry) {
   const type = /^(\w+)(?:\([^)]*\))?:/
     .exec(entry.title.trim())?.[1]
     ?.toLowerCase();
-  if (type === 'feat') {
-    return 'Features';
-  }
-  if (type === 'fix') {
-    return 'Bug Fixes';
-  }
-  if (type === 'perf') {
-    return 'Performance';
-  }
-  if (type === 'docs') {
-    return 'Documentation';
-  }
-  return 'Internal Changes';
+  return TYPE_CATEGORIES[type] ?? 'Internal Changes';
 }
 
 export function isAllowedImageUrl(url) {
   if (!/^https:\/\//i.test(url)) {
     return false;
   }
+  if (url.startsWith(RAW_IMAGE_PREFIX)) {
+    // Path shape is owner/repo/ref/…; only a 40-hex ref pins the content.
+    const ref = url.slice(RAW_IMAGE_PREFIX.length).split('/')[2] ?? '';
+    return /^[0-9a-f]{40}$/i.test(ref);
+  }
   return IMAGE_HOST_ALLOWLIST.some((prefix) =>
     url.startsWith(`https://${prefix}`),
   );
+}
+
+// PR-derived text is interpolated verbatim into Markdown: brackets re-form
+// links, backticks open code spans, and a trailing backslash escapes the
+// interpolated syntax that follows. Stripping keeps the text inert.
+function stripMarkdownHazards(text) {
+  // Brackets first: removing one can expose a trailing backslash.
+  return text.replace(/[[\]`]/g, '').replace(/\\+$/, '');
 }
 
 /**
@@ -252,7 +269,10 @@ export function extractImages(
       continue;
     }
     seen.add(url);
-    images.push({ url, alt: alt.replace(/\s+/g, ' ').trim() });
+    images.push({
+      url,
+      alt: stripMarkdownHazards(alt.replace(/\s+/g, ' ').trim()),
+    });
   }
   return images;
 }
@@ -268,6 +288,9 @@ function validateModelText(value, label, maxLength) {
   if (
     /[<>]/.test(text) ||
     /&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);/i.test(text) ||
+    // Backslash escapes would hide "]" from the bracket checks below, so no
+    // escape may appear; without one, a link label cannot contain "]".
+    /\\/.test(text) ||
     /\[[^\]]*\]\([^)]*\)/.test(text) ||
     // Reference definitions arm shortcut links in sibling model-text fields.
     /^\[[^\]]*\]:/.test(text) ||
@@ -276,11 +299,14 @@ function validateModelText(value, label, maxLength) {
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text) ||
     /(^|[^\w/])@[A-Za-z0-9-]+(?:\/[A-Za-z0-9_.-]+)?/.test(text) ||
     /(^|[^\w])#\d+\b/.test(text) ||
-    /(\*\*|__|`)/.test(text) ||
+    // Single markers format too (*em*, ~~del~~), and a ~~~ intro opens a
+    // code fence that swallows the rest of the release.
+    /([*~]|__|`)/.test(text) ||
     /^#/.test(text) ||
     /^([-_*])( *\1){2,}$/.test(text) ||
     /^[-*+]\s/.test(text) ||
-    /^\d{1,3}[.)]\s/.test(text)
+    // CommonMark ordered-list markers run to nine digits.
+    /^\d{1,9}[.)]\s/.test(text)
   ) {
     throw new Error(`${label} must be plain text without links or HTML.`);
   }
@@ -1127,16 +1153,7 @@ export function renderReleaseNotesV2({
   return lines.join('\n');
 }
 
-// The types generate-changelog.js formatEntry strips; anything else keeps
-// its prefix because the Internal Changes heading alone does not name it.
-const APPENDIX_STRIP_TYPES = new Set([
-  'feat',
-  'fix',
-  'perf',
-  'docs',
-  'refactor',
-  'revert',
-]);
+const APPENDIX_STRIP_TYPES = new Set(Object.keys(TYPE_CATEGORIES));
 
 /**
  * Appendix lines use the conventional-commit subject with its redundant type
@@ -1146,10 +1163,14 @@ const APPENDIX_STRIP_TYPES = new Set([
  */
 export function normalizeAppendixTitle(title) {
   const match = /^(\w+)(?:\(([^)]*)\))?!?:\s*(.+)$/.exec(title.trim());
-  if (!match || !APPENDIX_STRIP_TYPES.has(match[1].toLowerCase())) {
-    return title.trim();
-  }
-  return match[2] ? `${match[2]}: ${match[3]}` : match[3];
+  const text =
+    !match || !APPENDIX_STRIP_TYPES.has(match[1].toLowerCase())
+      ? title.trim()
+      : match[2]
+        ? `${match[2]}: ${match[3]}`
+        : match[3];
+  // Titles are PR-derived and interpolated verbatim, like image alt text.
+  return stripMarkdownHazards(text);
 }
 
 function renderAppendixLine(entry) {

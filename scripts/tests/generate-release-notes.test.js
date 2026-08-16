@@ -209,7 +209,7 @@ describe('isAllowedImageUrl', () => {
     'https://github.com/user-attachments/assets/abc-123',
     'https://user-images.githubusercontent.com/1/x.png',
     'https://private-user-images.githubusercontent.com/1/x.png',
-    'https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/x.png',
+    'https://raw.githubusercontent.com/QwenLM/qwen-code/0123456789abcdef0123456789abcdef01234567/docs/x.png',
   ])('accepts %s', (url) => {
     expect(isAllowedImageUrl(url)).toBe(true);
   });
@@ -218,6 +218,9 @@ describe('isAllowedImageUrl', () => {
     // camo signs arbitrary external URLs with a deployment-wide key, so it
     // would re-admit every host the allowlist exists to exclude.
     'https://camo.githubusercontent.com/dead/beef',
+    // Branch refs are mutable: the repo owner can swap the image in an
+    // already-published release.
+    'https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/x.png',
     'http://github.com/user-attachments/assets/abc',
     'https://evil.example.com/github.com/user-attachments/assets/abc',
     'https://evil.example.com/x.png',
@@ -237,7 +240,7 @@ describe('extractImages', () => {
       '### Evidence (Before & After)',
       `![Before](${ATTACHMENT})`,
       '<img src="https://user-images.githubusercontent.com/9/shot.png" width="400">',
-      `Bare link: https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/after.png`,
+      `Bare link: https://raw.githubusercontent.com/QwenLM/qwen-code/0123456789abcdef0123456789abcdef01234567/docs/after.png`,
     ].join('\n');
 
     expect(extractImages(body, { maxPerEntry: 3 })).toEqual([
@@ -247,7 +250,7 @@ describe('extractImages', () => {
         alt: '',
       },
       {
-        url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/main/docs/after.png',
+        url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/0123456789abcdef0123456789abcdef01234567/docs/after.png',
         alt: '',
       },
     ]);
@@ -282,6 +285,44 @@ describe('extractImages', () => {
 
     expect(extractImages(breakout)).toEqual([]);
     expect(extractImages(spaced)).toEqual([]);
+  });
+
+  it('drops markdown image URLs carrying Markdown-active characters', () => {
+    const unbalanced = `![x](${ATTACHMENT}(extra)`;
+    const backticked = '![x](' + ATTACHMENT + '`suffix)';
+
+    expect(extractImages(unbalanced)).toEqual([]);
+    expect(extractImages(backticked)).toEqual([]);
+  });
+
+  it('drops bare image URLs whose extension is split by a backtick', () => {
+    expect(
+      extractImages('see https://github.com/user-attachments/abc`.png'),
+    ).toEqual([]);
+  });
+
+  it('captures the src attribute, not a data-src stand-in', () => {
+    const real = 'https://user-images.githubusercontent.com/9/shot.png';
+    for (const tag of [
+      `<img src="${real}" data-src="${ATTACHMENT_2}">`,
+      `<img data-src="${ATTACHMENT_2}" src="${real}">`,
+    ]) {
+      expect(extractImages(tag)).toEqual([{ url: real, alt: '' }]);
+    }
+    expect(extractImages(`<img data-src="${ATTACHMENT_2}">`)).toEqual([]);
+  });
+
+  it('neutralizes alt text that would break the interpolated image', () => {
+    expect(extractImages(`![before\\](${ATTACHMENT})`)).toEqual([
+      { url: ATTACHMENT, alt: 'before' },
+    ]);
+    expect(extractImages(`![a[b](${ATTACHMENT})`)).toEqual([
+      { url: ATTACHMENT, alt: 'ab' },
+    ]);
+    // Stripping the bracket exposes a trailing backslash that must go too.
+    expect(extractImages(`![a\\[](${ATTACHMENT})`)).toEqual([
+      { url: ATTACHMENT, alt: 'a' },
+    ]);
   });
 
   it('does not treat ordinary links as images', () => {
@@ -326,11 +367,22 @@ describe('normalizeAppendixTitle', () => {
       'keep workspace picker suggestions closed',
     ],
     ['feat(core)!: drop legacy flag', 'core: drop legacy flag'],
-    ['refactor(core): rework session storage', 'core: rework session storage'],
+    [
+      'refactor(core): rework session storage',
+      'refactor(core): rework session storage',
+    ],
     ['docs: explain session search', 'explain session search'],
+    [
+      'fix: see [docs](https://attacker.example/q)',
+      'see docs(https://attacker.example/q)',
+    ],
     ['Update README', 'Update README'],
-    // Types the changelog's formatEntry does not strip keep their prefix:
-    // the Internal Changes heading alone does not name ci/test/security.
+    // Types that classifyChange routes to Internal Changes keep their
+    // prefix: the Internal Changes heading alone does not name them.
+    [
+      'revert: fix crash when opening settings',
+      'revert: fix crash when opening settings',
+    ],
     ['ci: bump action cache', 'ci: bump action cache'],
     ['security: patch CVE-2026-1234', 'security: patch CVE-2026-1234'],
     ['test: cover retry paths', 'test: cover retry paths'],
@@ -391,6 +443,22 @@ describe('renderReleaseNotesV2', () => {
     tag: 'v1.1.0',
     repo: 'QwenLM/qwen-code',
   };
+
+  it('renders PR titles in the appendix without live links', () => {
+    const markdown = renderReleaseNotesV2({
+      entries: [entry(5, 'fix: see [docs](https://attacker.example/q)')],
+      summaries: new Map(),
+      themes: [],
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(markdown).not.toContain('[docs]');
+    expect(markdown).toContain(
+      `see docs(https://attacker.example/q) ([#5](${PR(5)}))`,
+    );
+  });
 
   it('renders the bilingual digest, catch-all, and collapsed appendix', () => {
     const markdown = renderReleaseNotesV2(base);
@@ -880,6 +948,45 @@ describe('generateAiContent themes', () => {
     ]);
   });
 
+  it('drops intros built on escapes, long list markers, and tilde fences', async () => {
+    const entries = [1, 2, 3].map((number) =>
+      entry(number, `feat: change ${number}`),
+    );
+
+    const result = await generateAiContent(
+      entries,
+      themeComplete([
+        {
+          title: 'A',
+          titleZh: '甲',
+          // Escaped brackets hide "]" from the label checks.
+          intro: '[a\\]]: //evil.example/phish',
+          introZh: '',
+          items: [1],
+        },
+        {
+          title: 'B',
+          titleZh: '乙',
+          intro: '2025. This release ships improvements.',
+          introZh: '',
+          items: [2],
+        },
+        {
+          title: 'C',
+          titleZh: '丙',
+          intro: '~~~',
+          introZh: '',
+          items: [3],
+        },
+      ]),
+    );
+
+    expect(result.themes.map((theme) => theme.intro)).toEqual(['', '', '']);
+    expect(result.warnings).toEqual([
+      'Theme intro fallback for 3 theme field(s); the intro was dropped.',
+    ]);
+  });
+
   it('does not count an invisible Chinese intro fallback', async () => {
     const entries = [entry(1, 'feat: one')];
 
@@ -1126,6 +1233,52 @@ describe('generateAiContent', () => {
       ]),
     );
     expect(result.warnings).toHaveLength(3);
+  });
+
+  it('rejects escaped-bracket links and formatting markers in summaries', async () => {
+    const entries = [
+      entry(1, 'feat: original one'),
+      entry(2, 'fix: original two'),
+      entry(3, 'docs: original three'),
+    ];
+    const complete = async (request) => {
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: [
+            {
+              pr: 1,
+              summary: 'Click [a\\]](//evil.example) now',
+              summaryZh: '摘要一。',
+            },
+            { pr: 2, summary: 'See [a\\]] here', summaryZh: '摘要二。' },
+            {
+              pr: 3,
+              summary: 'Ship the *fast* path for ~~legacy~~ parsing',
+              summaryZh: '摘要三。',
+            },
+          ],
+        });
+      }
+      if (request.kind === 'highlights') {
+        return JSON.stringify({ highlights: [] });
+      }
+      return JSON.stringify({ themes: [] });
+    };
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'feat: original one'],
+        [2, 'fix: original two'],
+        [3, 'docs: original three'],
+      ]),
+    );
+    expect(result.warnings).toEqual([
+      'Summary fallback for #1: Summary for pull request 1 must be plain text without links or HTML.',
+      'Summary fallback for #2: Summary for pull request 2 must be plain text without links or HTML.',
+      'Summary fallback for #3: Summary for pull request 3 must be plain text without links or HTML.',
+    ]);
   });
 
   it('drops invalid highlights without losing the complete list', async () => {
