@@ -42,7 +42,8 @@ type ViewLevel =
 type MainOption =
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
-  | 'CUSTOM_PROVIDER';
+  | 'CUSTOM_PROVIDER'
+  | 'GITHUB_COPILOT';
 
 // ---------------------------------------------------------------------------
 // Static data
@@ -73,6 +74,15 @@ const MAIN_ITEMS = [
       'Manually connect a local server, proxy, or unsupported provider',
     ),
     value: 'CUSTOM_PROVIDER' as MainOption,
+  },
+  {
+    key: 'GITHUB_COPILOT',
+    title: t('GitHub Copilot'),
+    label: t('GitHub Copilot'),
+    description: t(
+      'Route claude-* / gpt-5* via Copilot CAPI (uses your GitHub token)',
+    ),
+    value: 'GITHUB_COPILOT' as MainOption,
   },
 ];
 
@@ -253,6 +263,18 @@ export function AuthDialog(): React.JSX.Element {
         );
         pushView('provider-setup');
         break;
+      case 'GITHUB_COPILOT': {
+        const copilotProvider = findProviderById('copilot');
+        if (!copilotProvider) break;
+        setupFlow.start(
+          copilotProvider,
+          undefined,
+          existingEnv,
+          getExistingModelIds(copilotProvider),
+        );
+        pushView('provider-setup');
+        break;
+      }
       default:
         break;
     }
