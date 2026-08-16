@@ -21,6 +21,10 @@ import { classifyHeavy } from './lib/heavy.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile } from './lib/paths.js';
 import { NULL_DEVICE } from './lib/diff-flags.js';
+import { buildDiffPlan } from './lib/diff-plan.js';
+import { buildPlanReport } from './lib/report.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -3120,6 +3124,19 @@ describe('fetch-pr run-session ledger wiring', () => {
   });
 });
 
+// The plan payload a genuine capture of the resume fixtures' diff records:
+// the ruling re-plans the re-derived bytes under this invocation's context
+// and compares the report field for field, so the fixture must carry what a
+// real fetch-pr wrote — built through the same functions, with the line
+// count the gitRaw mock answers every `git show` with (the diff's own five
+// lines).
+function resumePlanFields(diffBytes: string): Record<string, unknown> {
+  return buildPlanReport(buildDiffPlan(diffBytes, 400), () => 5, {
+    operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+    hasDeadline: hasReviewDeadline(process.env),
+  }) as unknown as Record<string, unknown>;
+}
+
 describe('fetch-pr --resume', () => {
   const OUT = '/tmp/fetch-report.json';
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
@@ -3136,9 +3153,12 @@ describe('fetch-pr --resume', () => {
       worktreePath: '.qwen/tmp/review-pr-42',
       diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
       mergeBaseSha: 'baseb45eb45e',
+      baseRefName: 'main',
+      headRefName: 'feat/x',
+      baseFetchFailed: false,
       auditSince: '2026-08-12T00:00:00.000Z',
       fetchedAt: '2026-08-13T00:00:00.000Z',
-      chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
+      ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
   }
@@ -3674,6 +3694,121 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
+  it("refuses a forged plan payload — the round cap is the attacker's to choose", async () => {
+    // The report's budget feeds the reverse-audit round cap at every
+    // admission gate; the ruling re-plans the re-derived bytes and compares
+    // the payload whole, so a rewritten `reverseAuditRounds` (or any plan
+    // field the launches consume) is a mismatch, however consistent it
+    // reads with its siblings.
+    const forged = {
+      ...(resumePlanFields(DIFF_BYTES)['budget'] as Record<string, unknown>),
+      reverseAuditRounds: 3,
+    };
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ budget: forged });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'plan-mismatch' },
+    ]);
+  });
+
+  it('refuses a file kind rewritten to light — the invariant agents vanish', async () => {
+    const files = (resumePlanFields(DIFF_BYTES)['files'] as unknown[]).map(
+      (f) => ({ ...(f as Record<string, unknown>), kind: 'docs' }),
+    );
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ files });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'plan-mismatch' },
+    ]);
+  });
+
+  it('refuses a report claiming the base fetch failed — this run just fetched it', async () => {
+    // `baseFetchFailed: true` degrades the base tree and the merge-base
+    // identity source downstream; the passing re-derivation has proven the
+    // base fetchable now, so the claim is a forgery aimed at the
+    // verification machinery of the very PR that planted it.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ baseFetchFailed: true });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'base-fetch-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged incremental delta — its diffBase welds into the probe base', async () => {
+    // Attached to an otherwise genuine full-range report: `effective` without
+    // `upToDate` contradicts the re-derived capture, and Agent 7 welds
+    // `diffBase` unquoted into its `--base` whenever the shape stands.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({
+          incremental: {
+            since: 'a'.repeat(40),
+            effective: true,
+            diffBase: 'f00df00df00d',
+          },
+        });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'incremental-delta' },
+    ]);
+  });
+
+  it('refuses a forged baseRefName — the rules load would resolve nothing', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ baseRefName: 'no-such-branch' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'base-ref-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged headRefName', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ headRefName: 'evil/head' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'head-ref-mismatch' },
+    ]);
+  });
+
   it('refuses when the base fetch failed — the left side is attempt-1-writable', async () => {
     const { resolveMergeBase } = await import('./lib/merge-base.js');
     vi.mocked(resolveMergeBase).mockImplementation(() => ({
@@ -3844,9 +3979,12 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       worktreePath: '.qwen/tmp/review-pr-42',
       diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
       mergeBaseSha: 'baseb45eb45e',
+      baseRefName: 'main',
+      headRefName: 'feat/x',
+      baseFetchFailed: false,
       auditSince: '2026-08-12T00:00:00.000Z',
       fetchedAt: '2026-08-13T00:00:00.000Z',
-      chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
+      ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
   }

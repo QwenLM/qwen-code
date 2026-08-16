@@ -30,6 +30,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
@@ -684,6 +685,50 @@ function reportChunksTile(chunks: unknown, diffText: string): boolean {
 }
 
 /**
+ * The plan fields the report carries and the resumed launches consume.
+ * Compared whole against a re-planning of the re-derived diff: the chunk
+ * tiling check proves line ranges only, while territory weighting reads the
+ * chunks' file spans, the roster reads `kind`/`heavy`, and the budgets and
+ * the reverse-audit round cap re-derive from the tallies at every gate.
+ */
+const PLAN_REPORT_FIELDS = [
+  'diffLines',
+  'diffChars',
+  'srcDiffLines',
+  'testDiffLines',
+  'docsDiffLines',
+  'generatedDiffLines',
+  'chunks',
+  'files',
+  'budget',
+] as const;
+
+function reportPlanMatches(
+  prev: PreviousReport,
+  rederivedText: string,
+  headSha: string,
+  maxChunkLines: number,
+): boolean {
+  try {
+    const rederived = buildPlanReport(
+      buildDiffPlan(rederivedText, maxChunkLines),
+      (path) => fileLineCount(headSha, path),
+      {
+        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+        hasDeadline: hasReviewDeadline(process.env),
+      },
+    );
+    const recorded = prev as Record<string, unknown>;
+    return PLAN_REPORT_FIELDS.every((field) =>
+      isDeepStrictEqual(recorded[field], rederived[field]),
+    );
+  } catch {
+    // A re-derived diff the planner rejects cannot corroborate any plan.
+    return false;
+  }
+}
+
+/**
  * The `--resume` fast path: rule on the interrupted attempt's state and, when
  * it holds, continue it — every probe is a fact this command gathers itself
  * (git, gh, file hashes, the CLI-written marker), never the orchestrator's
@@ -703,6 +748,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // the content, and presubmit's headDrift re-checks before anything posts.
   let liveHeadSha: string | null = null;
   let liveBaseRefName: string | null = null;
+  let liveHeadRefName: string | null = null;
   try {
     const view = JSON.parse(
       gh(
@@ -712,9 +758,13 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         '--repo',
         ownerRepo,
         '--json',
-        'headRefOid,baseRefName',
+        'headRefOid,headRefName,baseRefName',
       ),
-    ) as { headRefOid?: unknown; baseRefName?: unknown };
+    ) as {
+      headRefOid?: unknown;
+      headRefName?: unknown;
+      baseRefName?: unknown;
+    };
     liveHeadSha =
       typeof view.headRefOid === 'string' && view.headRefOid !== ''
         ? view.headRefOid
@@ -723,9 +773,14 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
       typeof view.baseRefName === 'string' && view.baseRefName !== ''
         ? view.baseRefName
         : null;
+    liveHeadRefName =
+      typeof view.headRefName === 'string' && view.headRefName !== ''
+        ? view.headRefName
+        : null;
   } catch {
     liveHeadSha = null;
     liveBaseRefName = null;
+    liveHeadRefName = null;
   }
   // Worktree identity BEFORE any worktree answer is trusted: the `.git`
   // pointer file lives inside the attempt-1-writable tree, and a relinked
@@ -808,6 +863,22 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         rederivedText = null;
       }
     }
+  }
+  // The resumed launches consume the WHOLE plan payload — chunk file spans,
+  // per-file kinds and heavy flags, the tool budget, the round cap — so
+  // re-plan the re-derived bytes under this invocation's context and compare
+  // the result against the report field for field. The re-planning reads
+  // post-image line counts from the object store (`git show <head>:<path>`),
+  // the same source the capture used; a forged kind/heavy/budget field the
+  // range-only chunk check cannot see is a mismatch here.
+  let planReportMatches: boolean | null = null;
+  if (rederivedText !== null && prev !== null && recordedSha !== null) {
+    planReportMatches = reportPlanMatches(
+      prev,
+      rederivedText,
+      recordedSha,
+      args.maxChunkLines,
+    );
   }
   const marker = readResumeMarker(out);
   // The cap reads BOTH counters: the marker is the primary record, and the
@@ -908,11 +979,14 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     worktreePath: wt,
     diffPathAbsolute: resolve(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     liveHeadSha,
+    liveBaseRefName,
+    liveHeadRefName,
     mergeBaseSha: rederivedMergeBase,
     chunksTile:
       rederivedText !== null
         ? reportChunksTile(prev?.chunks, rederivedText)
         : null,
+    planReportMatches,
     nowMs: Date.now(),
     graftsAbsent,
     resumeCount: Math.max(markerResumes, ledgerResumes),

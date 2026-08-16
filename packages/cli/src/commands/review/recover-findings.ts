@@ -20,7 +20,13 @@
 // hard failure is missing transcript infrastructure — a resume with no
 // evidence to read should say so rather than print an empty recovery.
 
-import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
@@ -209,7 +215,12 @@ export function recoverFindings(
       : undefined;
   const sinceMs = statSync(planPath).mtimeMs;
 
-  const built = readRecordedPrompts(planPath);
+  // Fenced like the two sibling reads below: nothing clears the record dir,
+  // and the CI retry re-runs the review at the SAME plan path, so an
+  // unfenced read enumerates keys earlier attempts built — `missingKeys`
+  // would name obligations this run does not owe, and a resumed orchestrator
+  // relaunching them spins up agents whose prompts it cannot even build.
+  const built = readRecordedPrompts(planPath, sinceMs);
   // The current session has launched nothing yet when this runs — that is
   // the point of running it — so its missing transcript dir is the expected
   // state, not the infrastructure failure it would be for check-coverage.
@@ -297,15 +308,23 @@ export function recoverFindings(
       continue;
     }
     const path = join(recordDir, name);
+    // lstat, never stat: a symlink is not the file it points at. `statSync`
+    // would fence on the TARGET's mtime — attacker-chosen — and the read
+    // the resumed orchestrator makes would follow the link out of the
+    // record dir entirely, `resolve()` being lexical. Only a regular file
+    // of this dir can be a findings list this run may hand on.
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(path);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
     // The run-epoch fence every reader here applies: nothing clears the
     // record dir, so a PREVIOUS review of the same PR leaves its rounds'
     // findings lists behind, and handing one to a resumed run would restore
     // a foreign attempt's state as this one's.
-    try {
-      if (statSync(path).mtimeMs < sinceMs) continue;
-    } catch {
-      continue;
-    }
+    if (st.mtimeMs < sinceMs) continue;
     if (!corroboratedFindings.has(resolve(path))) continue;
     const m = ROUND_IN_KEY_RE.exec(key);
     findingsFiles.push({

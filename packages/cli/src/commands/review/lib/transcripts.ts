@@ -691,7 +691,14 @@ export function readRunTranscripts(
       out.push(rec);
     }
   }
-  return out;
+  // Run-wide reads fail CLOSED on a missing session stamp. The acceptance of
+  // unstamped records exists for older harness writes on the LIVE path; a
+  // run-wide reader only ever meets transcripts a run new enough to keep the
+  // session ledger produced, and those carry stamps — while a planted
+  // transcript in the same blast radius pairs by shape alone unless a stamp
+  // it does not have is demanded. Invisible evidence re-owes the work, the
+  // failure direction every reader here takes.
+  return out.filter((rec) => rec.recordedSession !== '');
 }
 
 /**

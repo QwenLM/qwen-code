@@ -29,6 +29,9 @@ const prev = () => ({
   host: null,
   diffPathAbsolute: DIFF_PATH,
   mergeBaseSha: MERGE_BASE,
+  baseRefName: 'main',
+  headRefName: 'feat/x',
+  baseFetchFailed: false,
   auditSince: '2026-01-01T00:00:00.000Z',
   fetchedAt: '2026-01-01T00:00:00.000Z',
   chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
@@ -47,8 +50,11 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   worktreePath: WT,
   diffPathAbsolute: DIFF_PATH,
   liveHeadSha: SHA,
+  liveBaseRefName: 'main',
+  liveHeadRefName: 'feat/x',
   mergeBaseSha: MERGE_BASE,
   chunksTile: true,
+  planReportMatches: true,
   nowMs: Date.now(),
   graftsAbsent: true,
   resumeCount: 0,
@@ -446,5 +452,103 @@ describe('assessResume — every report field the pipeline consumes is compared'
       ok: false,
       reason: 'window-corrupt',
     });
+  });
+
+  it('refuses a report claiming the base fetch failed — the re-derivation disproves it', () => {
+    // `baseFetchFailed: true` degrades the base tree and the merge-base
+    // identity source downstream; a passing re-derivation has just proven
+    // the base fetchable, so the disabling direction is refused.
+    expect(
+      assessResume({ ...prev(), baseFetchFailed: true }, probes()),
+    ).toEqual({ ok: false, reason: 'base-fetch-mismatch' });
+  });
+
+  it('refuses a forged incremental delta attached to a genuine report', () => {
+    // `effective` without `upToDate` claims a delta-scoped capture the
+    // full-range re-derivation contradicts, and `diffBase` is welded into
+    // Agent 7's probe base unquoted whenever the shape stands.
+    expect(
+      assessResume(
+        {
+          ...prev(),
+          incremental: { since: SHA, effective: true, diffBase: SHA },
+        },
+        probes(),
+      ),
+    ).toEqual({ ok: false, reason: 'incremental-delta' });
+  });
+
+  it('accepts the incremental shapes that carry no delta and no weld', () => {
+    // `upToDate: true` and `effective: false` records scope nothing and weld
+    // nothing — Agent 7's predicate is exactly the shape refused above.
+    expect(
+      assessResume(
+        {
+          ...prev(),
+          incremental: { since: SHA, effective: true, upToDate: true },
+        },
+        probes(),
+      ),
+    ).toEqual({ ok: true });
+    expect(
+      assessResume(
+        {
+          ...prev(),
+          incremental: {
+            since: SHA,
+            effective: false,
+            reason: 'not-an-ancestor',
+          },
+        },
+        probes(),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it('refuses when the plan payload is not what the diff re-plans to', () => {
+    expect(assessResume(prev(), probes({ planReportMatches: false }))).toEqual({
+      ok: false,
+      reason: 'plan-mismatch',
+    });
+  });
+
+  it('refuses while the diff is underivable and the plan comparison unknown', () => {
+    expect(
+      assessResume(
+        prev(),
+        probes({ diffSha256Rederived: null, planReportMatches: null }),
+      ),
+    ).toEqual({ ok: false, reason: 'diff-underivable' });
+  });
+
+  it('refuses a forged baseRefName — the rules load reads it', () => {
+    expect(
+      assessResume({ ...prev(), baseRefName: 'no-such-branch' }, probes()),
+    ).toEqual({ ok: false, reason: 'base-ref-mismatch' });
+  });
+
+  it('refuses a report with no recorded baseRefName when the forge answered', () => {
+    const { baseRefName: _dropped, ...rest } = prev();
+    expect(assessResume(rest, probes())).toEqual({
+      ok: false,
+      reason: 'base-ref-mismatch',
+    });
+  });
+
+  it('refuses a forged headRefName', () => {
+    expect(
+      assessResume({ ...prev(), headRefName: 'evil/head' }, probes()),
+    ).toEqual({ ok: false, reason: 'head-ref-mismatch' });
+  });
+
+  it('does NOT refuse ref names on an unreachable forge — content pins it', () => {
+    // Same fail-open as head-moved: unreachable is indistinguishable from
+    // unmoved, and the worktree/diff checks have already pinned the input.
+    expect(
+      assessResume(
+        { ...prev(), baseRefName: 'no-such-branch' },
+        probes({ liveBaseRefName: null, liveHeadRefName: null }),
+      ),
+    ).toEqual({ ok: true });
   });
 });

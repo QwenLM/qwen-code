@@ -745,10 +745,15 @@ export function clearRoundStamps(planPath: string): void {
  * verdict, and the round builder refuses further rounds once ANY stop marker
  * stands. The attacker pays only the cap a genuine stop would also impose,
  * and buys the silence of exactly the audit rounds that would have found the
- * malicious hunk. The stamps are the admission evidence only the builder
- * writes — one per round — so a cap with no stamp for every round it claims
- * is a plant. Callers that clear the stamps (the resume hygiene) must check
- * BEFORE clearing, or this reads false for a genuine stop too.
+ * malicious hunk. The stamps raise the bar — a plant that writes only the
+ * marker fails here, and a genuine stop carries one stamp per admitted
+ * round — but they are NOT a forgery proof: they live beside the marker
+ * under the same permissions, so a planter that writes the marker can write
+ * matching stamps and self-corroborate. Closing that takes the run state
+ * outside the attempt-1 blast radius. A cap with no stamp for every round
+ * it claims is still refused. Callers that clear the stamps (the resume
+ * hygiene) must check BEFORE clearing, or this reads false for a genuine
+ * stop too.
  */
 export function stampsCorroborateRoundCap(
   planPath: string,

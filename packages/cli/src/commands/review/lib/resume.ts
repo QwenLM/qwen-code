@@ -40,10 +40,15 @@ export type ResumeRefusal =
   | 'grafts-present' // info/grafts could redirect the re-derivation's base
   | 'diff-underivable' // the diff could not be re-derived, or not trusted
   | 'diff-rederive-mismatch' // git derives a different diff than was recorded
+  | 'base-fetch-mismatch' // the report claims a base fetch failure this run disproved
   | 'merge-base-mismatch' // the report's mergeBaseSha is not the recomputed one
+  | 'incremental-delta' // the report claims a delta scope the capture cannot have
   | 'worktree-path-mismatch' // the report names a worktree this run did not choose
   | 'diff-path-mismatch' // the report names a diff path this run did not choose
   | 'chunks-mismatch' // the report's chunks do not tile the re-derived diff
+  | 'plan-mismatch' // the report's plan payload is not what the diff re-plans to
+  | 'base-ref-mismatch' // the report's baseRefName is not the forge's live one
+  | 'head-ref-mismatch' // the report's headRefName is not the forge's live one
   | 'window-corrupt' // auditSince/fetchedAt unparsable or in the future
   | 'empty-diff-mismatch' // the report's emptyDiff disagrees with the derived diff
   | 'head-moved' // the PR head advanced — the once-per-review restart case
@@ -68,6 +73,42 @@ export interface PreviousReport {
   auditSince?: unknown;
   fetchedAt?: unknown;
   chunks?: unknown;
+  /**
+   * The report claims the base branch could not be fetched. Downstream
+   * consumers key their degraded shapes on exactly `=== true` — the base
+   * tree refuses and the merge-base identity source degrades to none — so
+   * the ruling refuses the claim whenever the re-derivation it just ran
+   * proves the base fetchable now.
+   */
+  baseFetchFailed?: unknown;
+  /**
+   * The recorded ref names the resumed run's rules load and base fetch route
+   * through; the forge's live names are the compared facts.
+   */
+  baseRefName?: unknown;
+  headRefName?: unknown;
+  /**
+   * The incremental-scoping decision, present when the run was launched with
+   * `--since`. An EFFECTIVE delta (not up-to-date) scopes the captured diff
+   * to `diffBase..head`, which the full-range re-derivation can neither
+   * prove nor continue; `diffBase` is welded into Agent 7's probe base
+   * unquoted, so an unrefused forgery rides into the probe command.
+   */
+  incremental?: unknown;
+  /**
+   * The plan payload the resumed launches consume — chunk file spans,
+   * per-file kinds and heavy flags, the tool budget and the reverse-audit
+   * round cap all derive from these. Re-derived from the diff bytes this
+   * run hashed, and compared whole; see the `planReportMatches` probe.
+   */
+  diffLines?: unknown;
+  diffChars?: unknown;
+  srcDiffLines?: unknown;
+  testDiffLines?: unknown;
+  docsDiffLines?: unknown;
+  generatedDiffLines?: unknown;
+  files?: unknown;
+  budget?: unknown;
 }
 
 /** What the world looks like now, probed by the caller. */
@@ -106,6 +147,15 @@ export interface ResumeProbes {
   worktreeClean: boolean | null;
   /** The PR's live head OID from the forge, or null when unavailable. */
   liveHeadSha: string | null;
+  /**
+   * The PR's live base ref name from the forge, or null when unavailable.
+   * The resumed run's rules load reads `<remote>/<baseRefName>` from the
+   * report — a forged name resolves no rules, silently enforcing none over
+   * the diff, so the recorded name is compared against the forge's.
+   */
+  liveBaseRefName: string | null;
+  /** The PR's live head ref name from the forge, or null when unavailable. */
+  liveHeadRefName: string | null;
   /**
    * The worktree path THIS invocation derived from the PR number — the only
    * worktree the pipeline will operate on. The recorded `worktreePath` is
@@ -158,6 +208,19 @@ export interface ResumeProbes {
    * Null when the diff is underivable, false when the chunks are malformed.
    */
   chunksTile: boolean | null;
+  /**
+   * The report's full plan payload — files, budget, chunk entries and the
+   * line/char tallies — equals what the planner derives from the re-derived
+   * diff bytes under this invocation's context. The resumed launches
+   * consume every part of it: chunk file spans weight the territory, file
+   * kinds and heavy flags pick the roster and the invariant agents, the
+   * budget sets tool ceilings, and the reverse-audit round cap re-derives
+   * from it at every admission gate. Tiling alone (`chunksTile`) proves the
+   * ranges only; a forged `kind`, `heavy` or budget field suppresses
+   * exactly the scrutiny a malicious hunk owes. Null when the diff is
+   * underivable.
+   */
+  planReportMatches: boolean | null;
   /**
    * The invocation's wall clock. The report's `auditSince`/`fetchedAt`
    * open cleanup's bypass-write audit window; a forged-future value blinds
@@ -310,11 +373,42 @@ export function assessResume(
   if (probes.diffSha256Rederived !== prev.diffSha256) {
     return { ok: false, reason: 'diff-rederive-mismatch' };
   }
+  // The report's `baseFetchFailed` degrades the resumed run where the
+  // consumers key on it — the base tree refuses, and the merge-base identity
+  // source falls back to none — so a value of true disables verification
+  // machinery on the very PR that planted it. The re-derivation reaching
+  // here has itself proven the base fetchable now, so the claim is either a
+  // forgery or a stale capture; either way the continuation does not carry
+  // it. (The reverse forgery — false over a real failure — dies earlier as
+  // `diff-underivable`: a failed base fetch leaves the re-derivation null.)
+  if (prev.baseFetchFailed === true) {
+    return { ok: false, reason: 'base-fetch-mismatch' };
+  }
   // The report's merge-base is consumed as the revert/A-B base downstream;
   // compare it against the one this run recomputed against the forge's base
   // ref, never against itself.
   if (prev.mergeBaseSha !== probes.mergeBaseSha) {
     return { ok: false, reason: 'merge-base-mismatch' };
+  }
+  // An effective delta (not up-to-date) scopes the captured diff to
+  // `diffBase..head` — but the re-derivation that reached this point proved
+  // the captured bytes are the FULL merge-base range, so the claim
+  // contradicts a fact this run derived. Consumed it is either way:
+  // Agent 7's probe base welds `diffBase` — a field no comparison reaches —
+  // whenever `effective === true && upToDate !== true`, exactly the shape
+  // refused here. (`upToDate: true` and `effective: false` shapes carry no
+  // delta and no weld; the full-range capture they describe is the one the
+  // re-derivation proved.)
+  const incremental = prev.incremental as
+    | { effective?: unknown; upToDate?: unknown }
+    | undefined;
+  if (
+    typeof incremental === 'object' &&
+    incremental !== null &&
+    incremental.effective === true &&
+    incremental.upToDate !== true
+  ) {
+    return { ok: false, reason: 'incremental-delta' };
   }
   // The report's own routing fields, verified against facts this run
   // derived itself: a forged worktreePath redirects every downstream step,
@@ -336,6 +430,34 @@ export function assessResume(
   // guarantee ran at plan time only, and the plan is attempt-1-writable.
   if (probes.chunksTile !== true) {
     return { ok: false, reason: 'chunks-mismatch' };
+  }
+  // Tiling proves the ranges only. The resumed launches consume the WHOLE
+  // plan — chunk file spans, per-file kinds and heavy flags, the tool
+  // budget, the round cap — so the ruling re-plans the re-derived bytes and
+  // compares the payload field for field; a disagreement is a forged or
+  // stale plan, and either re-runs.
+  if (probes.planReportMatches !== true) {
+    return { ok: false, reason: 'plan-mismatch' };
+  }
+  // The resumed run's rules load reads `<remote>/<baseRefName>` from the
+  // report, and the fetch path re-reads it when the base fetch failed; a
+  // forged name resolves nothing, and "no rules found" is indistinguishable
+  // from a repo that has none — the project's rules would silently not
+  // apply to the diff under review. Compared against the forge's live
+  // names; an unreachable forge reads as unmoved, exactly like the
+  // head-moved fail-open below — the content checks have already pinned
+  // the input.
+  if (
+    probes.liveBaseRefName !== null &&
+    prev.baseRefName !== probes.liveBaseRefName
+  ) {
+    return { ok: false, reason: 'base-ref-mismatch' };
+  }
+  if (
+    probes.liveHeadRefName !== null &&
+    prev.headRefName !== probes.liveHeadRefName
+  ) {
+    return { ok: false, reason: 'head-ref-mismatch' };
   }
   if (!windowSound(prev, probes.nowMs)) {
     return { ok: false, reason: 'window-corrupt' };

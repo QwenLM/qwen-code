@@ -269,11 +269,14 @@ describe('wasGivenTheDiff', () => {
 });
 
 describe('readRunTranscripts — the run across its sessions', () => {
-  // A minimal valid transcript: launch prompt only.
-  const transcript = (agentId: string): string =>
+  // A minimal valid transcript: launch prompt only. Stamped with its owning
+  // session, as the harness writes them — run-wide reads fail closed on a
+  // missing stamp, so an unstamped fixture no longer models a real record.
+  const transcript = (agentId: string, sessionId = 'S1'): string =>
     JSON.stringify({
       agentId,
       agentName: 'general-purpose',
+      sessionId,
       type: 'user',
       message: { role: 'user', parts: [{ text: `launch ${agentId}` }] },
     }) + '\n';
@@ -315,7 +318,7 @@ describe('readRunTranscripts — the run across its sessions', () => {
 
   it('unions prior-session transcripts, marked fromPriorSession', () => {
     const plan = planWithLedger('S0', 'S1');
-    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0', 'S0'));
     file('agent-a1.jsonl', transcript('a1'));
     const recs = readRunTranscripts(plan, undefined, ENV);
     expect(recs.map((r) => [r.agentId, r.fromPriorSession === true])).toEqual([
@@ -329,7 +332,7 @@ describe('readRunTranscripts — the run across its sessions', () => {
     // session's transcripts do not exist to any reader.
     const plan = join(dir, 'qwen-review-pr-7-fetch.json');
     writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
-    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0', 'S0'));
     file('agent-a1.jsonl', transcript('a1'));
     const recs = readRunTranscripts(plan, undefined, ENV);
     expect(recs.map((r) => r.agentId)).toEqual(['a1']);
@@ -344,7 +347,7 @@ describe('readRunTranscripts — the run across its sessions', () => {
 
   it('still throws when the CURRENT session dir is absent', () => {
     const plan = planWithLedger('S0', 'S1');
-    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0', 'S0'));
     expect(() =>
       readRunTranscripts(plan, undefined, {
         QWEN_CODE_PROJECT_DIR: dir,
@@ -355,7 +358,7 @@ describe('readRunTranscripts — the run across its sessions', () => {
 
   it('applies the since fence to prior-session records too', () => {
     const plan = planWithLedger('S0', 'S1');
-    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0', 'S0'));
     const past = new Date(Date.now() - 3600_000);
     utimesSync(join(dir, 'subagents', 'S0', 'agent-a0.jsonl'), past, past);
     file('agent-a1.jsonl', transcript('a1'));
@@ -435,7 +438,7 @@ describe('readRunTranscripts — the run across its sessions', () => {
     // fixture writes prior files before endsAtMs, so deleting the clamp
     // shipped green.
     const plan = planWithLedger('S0', 'S1');
-    priorFile('S0', 'agent-late.jsonl', transcript('late'));
+    priorFile('S0', 'agent-late.jsonl', transcript('late', 'S0'));
     // The prior attempt's window closed at the S1 entry (now + 1500 in the
     // ledger fixture); stamp the file well past it.
     const future = new Date(Date.now() + 3600_000);
@@ -477,7 +480,7 @@ describe('readRunTranscripts — the run across its sessions', () => {
     const plan = planWithLedger('S0', 'S0', 'S1');
     // A prior session that exists on disk: the accessor skips a ledgered id
     // whose directory is absent or symlinked, so the fixture must be real.
-    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0', 'S0'));
     expect(priorSessionDirs(plan, ENV).map((p) => p.dir)).toEqual([
       join(dir, 'subagents', 'S0'),
     ]);
@@ -485,10 +488,11 @@ describe('readRunTranscripts — the run across its sessions', () => {
 });
 
 describe('readRunTranscripts — currentDirOptional', () => {
-  const transcript = (agentId: string): string =>
+  const transcript = (agentId: string, sessionId = 'S1'): string =>
     JSON.stringify({
       agentId,
       agentName: 'general-purpose',
+      sessionId,
       type: 'user',
       message: { role: 'user', parts: [{ text: `launch ${agentId}` }] },
     }) + '\n';
@@ -501,7 +505,7 @@ describe('readRunTranscripts — currentDirOptional', () => {
     mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
     writeFileSync(
       join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
-      transcript('a0'),
+      transcript('a0', 'S0'),
     );
 
     const env = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S-new' };
@@ -536,10 +540,11 @@ describe('readRunTranscripts — currentDirOptional', () => {
 });
 
 describe('readRunTranscripts — containment and fault handling', () => {
-  const transcript = (agentId: string): string =>
+  const transcript = (agentId: string, sessionId = 'S1'): string =>
     JSON.stringify({
       agentId,
       agentName: 'general-purpose',
+      sessionId,
       type: 'user',
       message: { role: 'user', parts: [{ text: `launch ${agentId}` }] },
     }) + '\n';
@@ -568,7 +573,10 @@ describe('readRunTranscripts — containment and fault handling', () => {
     const plan = planWithLedger('S0', 'S1');
     const outside = join(dir, 'outside');
     mkdirSync(outside, { recursive: true });
-    writeFileSync(join(outside, 'agent-foreign.jsonl'), transcript('foreign'));
+    writeFileSync(
+      join(outside, 'agent-foreign.jsonl'),
+      transcript('foreign', 'S0'),
+    );
     symlinkSync(outside, join(dir, 'subagents', 'S0'));
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
     file('agent-a1.jsonl', transcript('a1'));
@@ -587,7 +595,7 @@ describe('readRunTranscripts — containment and fault handling', () => {
       mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
       writeFileSync(
         join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
-        transcript('a0'),
+        transcript('a0', 'S0'),
       );
       const cur = join(dir, 'subagents', 'S1');
       mkdirSync(cur, { recursive: true });
