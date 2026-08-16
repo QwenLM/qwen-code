@@ -23,6 +23,7 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
+import { COPILOT_SENTINEL_BASE_URL } from '../copilot/copilot-fetch.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -157,6 +158,11 @@ export function resolveModelConfig(
   // Special handling for Qwen OAuth
   if (authType === AuthType.QWEN_OAUTH) {
     return resolveQwenOAuthConfig(input, warnings);
+  }
+
+  // Special handling for GitHub Copilot CAPI
+  if (authType === AuthType.USE_COPILOT) {
+    return resolveCopilotConfig(input, warnings);
   }
 
   // Get auth-specific env var mappings.
@@ -365,6 +371,70 @@ function resolveQwenOAuthConfig(
     authType: AuthType.QWEN_OAUTH,
     model: resolvedModel,
     apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+    proxy,
+    ...generationConfig,
+  };
+
+  return { config, sources, warnings };
+}
+
+/**
+ * Default model slug for GitHub Copilot CAPI. Copilot model routing is
+ * resolved downstream by copilot-route.ts; this is only the fallback when
+ * the caller does not specify a model.
+ */
+const DEFAULT_COPILOT_MODEL = 'claude-opus-4.7';
+
+/**
+ * Special resolver for GitHub Copilot CAPI authentication.
+ *
+ * Copilot uses a dynamic token (fetched via the Copilot token manager) and a
+ * sentinel base URL that copilot-fetch.ts rewrites to the real token-issued
+ * endpoint at request time. Model routing (messages/responses/chat wire) is
+ * resolved downstream by copilot-route.ts, so unlike Qwen OAuth we do not
+ * enforce an allowed-models set here.
+ */
+function resolveCopilotConfig(
+  input: ModelConfigSourcesInput,
+  warnings: string[],
+): ModelConfigResolutionResult {
+  const { cli, settings, proxy, modelProvider } = input;
+  const sources: ConfigSources = {};
+
+  const requestedModel = cli?.model || settings?.model;
+  const resolvedModel = requestedModel || DEFAULT_COPILOT_MODEL;
+  const modelSource = requestedModel
+    ? cli?.model
+      ? cliSource('--model')
+      : settingsSource('model.name')
+    : defaultSource(`fallback to '${DEFAULT_COPILOT_MODEL}'`);
+
+  sources['model'] = modelSource;
+  sources['apiKey'] = computedSource('Copilot dynamic token');
+  sources['baseUrl'] = computedSource('Copilot sentinel (rewritten at fetch)');
+  sources['authType'] = computedSource('provided by caller');
+
+  if (proxy) {
+    sources['proxy'] = computedSource('Config.getProxy()');
+  }
+
+  // Resolve generation config from settings and modelProvider
+  const generationConfig = resolveGenerationConfig(
+    settings?.generationConfig,
+    modelProvider?.generationConfig,
+    AuthType.USE_COPILOT,
+    resolvedModel,
+    sources,
+  );
+
+  // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
+  applyTimeoutEnvOverride(input.env, generationConfig, sources, modelProvider);
+
+  const config: ContentGeneratorConfig = {
+    authType: AuthType.USE_COPILOT,
+    model: resolvedModel,
+    apiKey: 'COPILOT_DYNAMIC_TOKEN',
+    baseUrl: COPILOT_SENTINEL_BASE_URL,
     proxy,
     ...generationConfig,
   };
