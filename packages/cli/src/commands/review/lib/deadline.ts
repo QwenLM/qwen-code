@@ -180,7 +180,13 @@ export function claimRetirementDegradeNote(
   try {
     mkdirSync(dir, { recursive: true });
     try {
-      if (statSync(file).mtimeMs < runEpochMs(planPath)) {
+      // The STRICT plan mtime, not the slack-adjusted epoch (#9272): the
+      // slack exists for `Date.now()`-stamped artifacts, and a claim file
+      // fenced by it would re-admit a dead run's claim written in the two
+      // seconds before a re-capture — silently suppressing the retried
+      // run's NOTE. The sibling fence in retirement.ts reads the strict
+      // mtime for the same reason.
+      if (statSync(file).mtimeMs < statSync(planPath).mtimeMs) {
         rmSync(file, { force: true });
       }
     } catch {

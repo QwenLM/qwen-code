@@ -661,8 +661,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       '未发现问题——没有回归，只走查了解析器与调用点。',
     ],
     [
-      'an un-examined admission past hyphenated jargon',
-      'No issues found — re-walked the scheduler; the fail-open path ' +
+      'an un-examined admission (unexamined)',
+      'No issues found — re-walked the scheduler; the fallback path ' +
         'went unexamined.',
     ],
     [

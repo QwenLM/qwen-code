@@ -6,6 +6,8 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -267,6 +269,32 @@ describe('the round-cost estimate — measured when it can be', () => {
     const later = new Date(Date.now() + 3_600_000);
     utimesSync(p, later, later);
     expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+  });
+
+  it('claimRetirementDegradeNote fences on the STRICT plan mtime — a claim seconds before a re-capture is stale (#9272)', () => {
+    // The slack-adjusted epoch would re-admit the dead run's claim here:
+    // the claim lands, the retry re-captures the plan one second later,
+    // and the retried run's NOTE must still print.
+    const p = plan();
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    const oneSecondLater = new Date(Date.now() + 1_000);
+    utimesSync(p, oneSecondLater, oneSecondLater);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+  });
+
+  it('claimRetirementDegradeNote fails OPEN on any non-EEXIST error — silence is the only wrong answer (#9272)', () => {
+    // An unwritable record dir faults the `wx` create with EACCES; the
+    // claim must still report printable, or the degrade NOTE is swallowed
+    // exactly when the filesystem is the thing that's broken.
+    const p = plan();
+    const dir = promptRecordDir(p);
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o555);
+    try {
+      expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 
   it('ignores stamps older than the plan — a previous run of the same PR', () => {
