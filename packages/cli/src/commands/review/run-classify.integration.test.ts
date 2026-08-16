@@ -13,7 +13,14 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyRunTarget } from './run.js';
@@ -58,6 +65,44 @@ describe('classifyRunTarget — canonical file pins', () => {
     process.chdir(join(repo, 'pkg'));
     expect(classifyRunTarget('deep/x.ts')).toEqual(fromRoot);
     expect(classifyRunTarget('./deep/x.ts')).toEqual(fromRoot);
+  });
+
+  it('a symlinked prefix pins the same name — on disk and not yet on disk', () => {
+    // macOS's `/tmp` is a symlink to `/private/tmp`, so a path typed under it
+    // relativises against a `--show-toplevel` root that shares no prefix with
+    // it: the pin used to fall back to the whole typed path flattened while
+    // the child, which canonicalises, wrote `src_foo.ts`. The poll then never
+    // matched and the run reported "no composed verdict was produced" over a
+    // review that had already run.
+    const link = join(realpathSync(mkdtempSync(join(tmpdir(), 'rc-link-'))), 'l');
+    symlinkSync(repo, link);
+    try {
+      writeFileSync(join(repo, 'src/foo.ts'), 'export const a = 1;\n');
+      expect(classifyRunTarget(join(link, 'src/foo.ts'))).toEqual({
+        kind: 'file',
+        base: 'src_foo.ts',
+      });
+      // And a file the review is about to CREATE — `realpathSync` throws on
+      // the leaf, so the canonicalisation has to resolve the ancestor that
+      // exists. Reviewing a brand-new untracked file is a supported target.
+      expect(classifyRunTarget(join(link, 'src/not-yet.ts'))).toEqual({
+        kind: 'file',
+        base: 'src_not-yet.ts',
+      });
+    } finally {
+      rmSync(link, { force: true });
+    }
+  });
+
+  it('a root-level ..foo.ts is inside the repo, not an escape', () => {
+    // `rel.startsWith('..')` reads a perfectly ordinary filename as a walk out
+    // of the repository. What escapes is `..` itself or a FIRST SEGMENT of
+    // `..`.
+    writeFileSync(join(repo, '..foo.ts'), 'export const a = 1;\n');
+    expect(classifyRunTarget(join(repo, '..foo.ts'))).toEqual({
+      kind: 'file',
+      base: 'foo.ts',
+    });
   });
 
   it('a path outside the repo keeps its typed spelling rather than a .. walk', () => {

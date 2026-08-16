@@ -502,7 +502,13 @@ export function runSubmit(
       // launching command can still override the env (and a hijacked
       // orchestrator can forge the marker outright via the API) — the same
       // forgeable posture DESIGN.md records for the cache path.
-      process.env['QWEN_CODE_MODEL'],
+      // The PROVIDER-QUALIFIED identity when the runtime publishes one
+      // (`<model>@<8-hex of authType+baseUrl>`): a bare model id is unique
+      // only inside one provider configuration, and two of them exposing the
+      // same name would otherwise pass each other's same-model gate and skip
+      // code neither reviewed. Falls back to the bare id for a runtime that
+      // publishes none.
+      process.env['QWEN_CODE_MODEL_IDENTITY'] ?? process.env['QWEN_CODE_MODEL'],
     ));
   } catch (err) {
     throw new Error(
