@@ -5,6 +5,7 @@
  */
 
 import { ESLint } from 'eslint';
+import { rmSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -288,6 +289,14 @@ describe('eslint cli serve boundary rules', () => {
       "import { createRequire } from 'node:module';",
     );
     await expectServeBoundaryError(acp, "import moduleBuiltin from 'module';");
+    await expectServeBoundaryError(
+      acp,
+      "export { createRequire } from 'node:module';",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { return import('node:module'); }",
+    );
   });
 
   // Round-8 entrances (#8084): each spelling below reached serve/ while
@@ -320,9 +329,18 @@ describe('eslint cli serve boundary rules', () => {
   });
 
   it('rejects process.getBuiltinModule in guarded trees fail-closed', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
     await expectServeBoundaryError(
-      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      acp,
       "const mod = process.getBuiltinModule('node:module');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "const mod = process['getBuiltinModule']('node:module');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "const mod = globalThis.process.getBuiltinModule('node:module');",
     );
   });
 
@@ -347,6 +365,26 @@ describe('eslint cli serve boundary rules', () => {
       'packages/cli/src/acp-integration/boundary-fixture.ts',
       "export async function load() { await import(' DATA:text/javascript,export default 1'); }",
     );
+  });
+
+  it('rejects control-character and symlinked serve paths', async () => {
+    const utils = 'packages/cli/src/utils/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      utils,
+      "export async function load() { await import('../ser\\tve/index.js'); }",
+    );
+
+    const link = path.join(repoRoot, 'packages/cli/src/utils/serve-link.js');
+    rmSync(link, { force: true });
+    try {
+      symlinkSync('../serve/index.ts', link);
+      await expectServeBoundaryError(
+        utils,
+        "export async function load() { await import('./serve-link.js'); }",
+      );
+    } finally {
+      rmSync(link, { force: true });
+    }
   });
 
   // Codex self-review: vitest loaders reached through an alias evade the

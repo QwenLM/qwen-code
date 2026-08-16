@@ -31,6 +31,7 @@
  */
 'use strict';
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,6 +53,15 @@ function decodeSpecifier(specifier) {
     return decodeURIComponent(specifier);
   } catch {
     return undefined;
+  }
+}
+
+function resolvePath(candidate) {
+  const resolved = path.resolve(candidate);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
   }
 }
 
@@ -113,11 +123,12 @@ export default {
       // leading/trailing whitespace (`import(' DATA:...')` still loads) —
       // detect schemes on the trimmed, lowercased form. Non-URL specifiers
       // (relative/bare) are NOT trimmed: Node resolves those verbatim.
-      const lower = raw.trim().toLowerCase();
+      const normalized = raw.replace(/[\t\n\r]/g, '');
+      const lower = normalized.trim().toLowerCase();
 
-      // node: builtins never touch serve/ — except the `module` builtin,
-      // which hands out createRequire (handled by the ImportDeclaration
-      // visitor); harmless here because node: URLs resolve to builtins.
+      if (lower === 'module' || lower === 'node:module') return 'unknown';
+
+      // Other node: builtins never touch serve/.
       if (lower.startsWith('node:')) return 'outside';
 
       // data: URLs can embed imports of arbitrary files — a guarded tree
@@ -129,8 +140,8 @@ export default {
       // URL).
       if (lower.startsWith('file:')) {
         try {
-          const resolved = path.resolve(
-            fileURLToPath(stripUrlSuffixes(raw.trim())),
+          const resolved = resolvePath(
+            fileURLToPath(stripUrlSuffixes(normalized.trim())),
           );
           return isInServeDir(resolved, serveDir) ? 'inside' : 'unknown';
         } catch {
@@ -140,22 +151,24 @@ export default {
 
       // Root-absolute paths map straight to the filesystem — fail closed
       // unless provably outside serve.
-      if (raw.startsWith('/')) {
-        const decoded = decodeSpecifier(stripUrlSuffixes(raw));
+      if (normalized.startsWith('/')) {
+        const decoded = decodeSpecifier(stripUrlSuffixes(normalized));
         if (decoded === undefined) return 'unknown';
-        return isInServeDir(path.resolve(decoded), serveDir)
+        return isInServeDir(resolvePath(decoded), serveDir)
           ? 'inside'
           : 'unknown';
       }
 
-      const cleaned = decodeSpecifier(stripUrlSuffixes(raw));
+      const cleaned = decodeSpecifier(stripUrlSuffixes(normalized));
       if (cleaned === undefined) return 'unknown';
 
       // Relative specifiers resolve against the importing file.
       if (cleaned.startsWith('./') || cleaned.startsWith('../')) {
-        const resolved = path.resolve(fileDir, cleaned);
+        const resolved = resolvePath(path.join(fileDir, cleaned));
         return isInServeDir(resolved, serveDir) ? 'inside' : 'outside';
       }
+
+      if (cleaned.startsWith('#')) return 'unknown';
 
       // Bare specifiers: real packages resolve elsewhere, but a tsconfig
       // baseUrl (packages/cli) makes `src/serve/...` resolve into serve/
@@ -214,12 +227,34 @@ export default {
      *  ANY object identifier (alias-proof — the caller asserts safety). */
     function memberCall(node, objectNames, propertyPattern) {
       const callee = node.callee;
+      const property =
+        callee.type === 'MemberExpression' && !callee.computed
+          ? callee.property.type === 'Identifier'
+            ? callee.property.name
+            : undefined
+          : callee.type === 'MemberExpression' &&
+              callee.computed &&
+              callee.property.type === 'Literal' &&
+              typeof callee.property.value === 'string'
+            ? callee.property.value
+            : undefined;
       return (
         callee.type === 'MemberExpression' &&
         callee.object.type === 'Identifier' &&
         (objectNames === null || objectNames.includes(callee.object.name)) &&
-        callee.property.type === 'Identifier' &&
-        propertyPattern.test(callee.property.name)
+        property !== undefined &&
+        propertyPattern.test(property)
+      );
+    }
+
+    function isProcessObject(node) {
+      return (
+        (node.type === 'Identifier' && node.name === 'process') ||
+        (node.type === 'MemberExpression' &&
+          node.property.type === 'Identifier' &&
+          node.property.name === 'process' &&
+          node.object.type === 'Identifier' &&
+          (node.object.name === 'globalThis' || node.object.name === 'global'))
       );
     }
 
@@ -293,7 +328,23 @@ export default {
 
         // process.getBuiltinModule(...) hands out module objects
         // (createRequire) without any import statement (round-8 entrance).
-        if (memberCall(node, ['process'], /^getBuiltinModule$/)) {
+        if (
+          memberCall(node, ['process'], /^getBuiltinModule$/) ||
+          (callee.type === 'MemberExpression' &&
+            isProcessObject(callee.object) &&
+            ((callee.property.type === 'Identifier' &&
+              callee.property.name === 'getBuiltinModule') ||
+              (callee.computed &&
+                callee.property.type === 'Literal' &&
+                callee.property.value === 'getBuiltinModule'))) ||
+          (callee.type === 'Identifier' &&
+            callee.name === 'getBuiltinModule') ||
+          (memberCall(node, ['Reflect'], /^apply$/) &&
+            node.arguments[0]?.type === 'MemberExpression' &&
+            isProcessObject(node.arguments[0].object) &&
+            node.arguments[0].property.type === 'Identifier' &&
+            node.arguments[0].property.name === 'getBuiltinModule')
+        ) {
           reportUnknown(node);
           return;
         }
