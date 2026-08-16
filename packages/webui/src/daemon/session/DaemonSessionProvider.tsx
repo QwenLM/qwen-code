@@ -278,6 +278,11 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  for (const diagnostic of current.unrecognizedDiagnostics) {
+    for (const recordId of diagnostic.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -302,7 +307,7 @@ function materializeTranscriptHistory(
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId: history.toolBlockByCallId,
     permissionBlockByRequestId: history.permissionBlockByRequestId,
-    // History pages come from older daemon versions are exactly the
+    // History pages can carry frames recorded by newer daemon versions, exactly
     // forward-compat case the sidechannel exists for (#8823); keep them
     // instead of dropping the throwaway store's diagnostics.
     unrecognizedDiagnostics: history.unrecognizedDiagnostics,

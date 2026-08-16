@@ -4124,6 +4124,20 @@ describe('DaemonSessionProvider', () => {
           index < UNRECOGNIZED_DIAGNOSTICS_LIMIT - 1;
           index++
         ) {
+          if (index === 0) {
+            yield {
+              id: 100,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'mystery_kind_from_newer_daemon_overlap',
+                  _meta: { 'qwen.session.recordId': 'record-overlap' },
+                },
+              },
+            };
+            continue;
+          }
           yield {
             id: 100 + index,
             v: 1,
@@ -4158,6 +4172,17 @@ describe('DaemonSessionProvider', () => {
             },
           },
         })),
+        {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'mystery_kind_from_newer_daemon_overlap',
+              _meta: { 'qwen.session.recordId': 'record-overlap' },
+            },
+          },
+        },
       ],
       hasMore: false,
     });
@@ -4195,6 +4220,22 @@ describe('DaemonSessionProvider', () => {
       expect.objectContaining({ debugReason: 'unrecognized_session_update' }),
     );
     expect(diagnostics[1]).toEqual(
+      expect.objectContaining({
+        debugReason: 'unrecognized_session_update',
+        sourceRecordIds: ['record-overlap'],
+      }),
+    );
+    expect(
+      diagnostics.filter((entry) =>
+        entry.sourceRecordIds?.includes('record-overlap'),
+      ),
+    ).toHaveLength(1);
+    expect(
+      diagnostics.filter((entry) =>
+        entry.sourceRecordIds?.includes('record-old-1'),
+      ),
+    ).toHaveLength(1);
+    expect(diagnostics[2]).toEqual(
       expect.objectContaining({ debugReason: 'unrecognized_event' }),
     );
   });
