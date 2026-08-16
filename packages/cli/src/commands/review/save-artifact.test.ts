@@ -68,7 +68,7 @@ const verdict = {
   // the validator's absent-means-zero default.
   deferredCount: 2,
   // Also non-default on purpose, for the same reason.
-  bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: false },
+  bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -309,15 +309,15 @@ describe('saveReviewArtifact', () => {
     ['not an object', 'trimmed'],
     [
       'a negative section count',
-      { sections: -1, deferralList: false, truncated: false },
+      { sections: -1, deferralList: false, fold: false, truncated: false },
     ],
     [
       'a fractional section count',
-      { sections: 1.5, deferralList: false, truncated: false },
+      { sections: 1.5, deferralList: false, fold: false, truncated: false },
     ],
     [
       'a non-boolean deferralList',
-      { sections: 1, deferralList: 'yes', truncated: false },
+      { sections: 1, deferralList: 'yes', fold: false, truncated: false },
     ],
     [
       'a non-boolean truncated',
@@ -331,6 +331,7 @@ describe('saveReviewArtifact', () => {
       'a non-boolean fold',
       { sections: 1, deferralList: false, fold: 'yes', truncated: false },
     ],
+    ['a falsy non-null bodyTrim', false],
   ] as const)('refuses a present bodyTrim carrying %s', (_label, bad) => {
     // Same reasoning as deferredCount above: the absent-means-default arm
     // exists for pre-budget composed files, and it must not become a

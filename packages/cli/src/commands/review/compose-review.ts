@@ -21,6 +21,7 @@
 // real); this owns only the bookkeeping that follows from the counts.
 
 import type { CommandModule } from 'yargs';
+import MarkdownIt from 'markdown-it';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -610,72 +611,145 @@ function withMarker(line: string): string {
 }
 
 /**
- * The block left OPEN at the end of `text`, decided by CommonMark's
- * block grammar rather than substring parity: a fence opens only at line
- * start (at most three leading spaces, and a backtick fence's info string
- * may carry no backtick) and closes only on a line of the SAME character
- * at least as long as the opener; `<!--` at line start opens an HTML
- * comment; `<script`/`<pre`/`<style`/`<textarea` open a raw block until
- * their closing tag. Inside any open block everything is content — no
- * nested openers. Parity over the whole cut models none of this: it
- * counted mid-line mentions no renderer opens, missed four-backtick
- * fences, and read comment content as fences — appending "closers" that
- * OPENED the block which swallowed the tail they were meant to protect.
+ * The block left OPEN at the end of `text` — decided by markdown-it, the
+ * block grammar the page renders with, and not by a hand model of it.
+ * Three rounds of hand models each shipped a new class of divergence:
+ * closers counted by parity that no renderer opens, then parity itself
+ * falsified, then container-nested openers, one-line self-closed comments,
+ * a spaced `</script >`, and the `<?` / `<!A` / CDATA block types. The
+ * parser names the swallowing block; `noticeRidesClean` proves a candidate
+ * closer against the rendered page before it ships.
  */
-type OpenBlockAtEnd =
-  | { kind: 'fence'; char: '`' | '~'; len: number; lineStart: number }
-  | { kind: 'comment'; lineStart: number }
-  | { kind: 'html1'; tag: string; lineStart: number };
+interface OpenBlockAtEnd {
+  /** Candidate closers, natural fit first. Each one is verified. */
+  closers: string[];
+  /** Offset of the open block's first line within `text`. */
+  blockStart: number;
+}
 
-function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
-  let open: OpenBlockAtEnd | null = null;
+const blockGrammar = new MarkdownIt({ html: true });
+
+/** Locates the protected tail in a probe parse; no cut content carries it. */
+const NOTICE_SENTINEL = 'QWENREVIEWCUTSENTINEL';
+
+/**
+ * Whether the protected tail rides clean after `cut` + `closer`, decided
+ * the way the page decides, at both of its layers. The markdown layer: no
+ * fence or raw HTML block may extend over the tail — GFM runs either to
+ * the end of the document. The browser layer: an unclosed comment or
+ * raw-text element swallows every tag after it in the emitted HTML,
+ * INCLUDING one the markdown layer closed its block around — a comment
+ * opened inside a blockquote ends with the blockquote at the page's next
+ * blank line, but the browser still runs it to the next `-->` — so the
+ * rendered HTML is scanned for the state a browser is in at the tail.
+ */
+function noticeRidesClean(cut: string, closer: string): boolean {
+  const probe = `${cut}${closer}\n\n${NOTICE_SENTINEL}`;
+  const tokens = blockGrammar.parse(probe, {});
+  let noticed = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok.type === 'inline' && tok.content.includes(NOTICE_SENTINEL)) {
+      noticed = tokens[i - 1]?.type === 'paragraph_open';
+      break;
+    }
+    if (
+      (tok.type === 'fence' || tok.type === 'html_block') &&
+      tok.content.includes(NOTICE_SENTINEL)
+    ) {
+      return false;
+    }
+  }
+  if (!noticed) return false;
+  const html = blockGrammar.render(probe);
+  const at = html.indexOf(NOTICE_SENTINEL);
+  return at !== -1 && browserSwallowOpen(html.slice(0, at)) === null;
+}
+
+/**
+ * The swallow a browser is still inside at the end of `html`, or null when
+ * it reads ordinary content there. Comments run to `-->`, script, style
+ * and textarea to their closing tag, and whatever opens first owns — the
+ * rest of the html is its content.
+ */
+function browserSwallowOpen(html: string): string | null {
+  const lower = html.toLowerCase();
+  const swallows: ReadonlyArray<readonly [string, string, number]> = [
+    ['<!--', '-->', 4],
+    ['<script', '</script', 7],
+    ['<style', '</style', 6],
+    ['<textarea', '</textarea', 9],
+  ];
   let i = 0;
   for (;;) {
-    const nl = text.indexOf('\n', i);
-    const lineEnd = nl === -1 ? text.length : nl;
-    let line = text.slice(i, lineEnd);
-    if (line.endsWith('\r')) line = line.slice(0, -1);
-    const indent = /^ */.exec(line)![0].length;
-    const content = line.slice(indent);
-    if (open === null) {
-      if (indent <= 3) {
-        const fence = /^(`{3,}|~{3,})(.*)$/.exec(content);
-        if (fence && !(fence[1].startsWith('`') && fence[2].includes('`'))) {
-          open = {
-            kind: 'fence',
-            char: fence[1].charAt(0) as '`' | '~',
-            len: fence[1].length,
-            lineStart: i,
-          };
-        } else if (content.startsWith('<!--')) {
-          open = { kind: 'comment', lineStart: i };
-        } else {
-          const html1 = /^<(script|pre|style|textarea)(?=[\s>]|$)/i.exec(
-            content,
-          );
-          if (html1) {
-            open = {
-              kind: 'html1',
-              tag: html1[1].toLowerCase(),
-              lineStart: i,
-            };
-          }
-        }
+    let at = -1;
+    let openerLen = 0;
+    let closer = '';
+    for (const [tag, close, len] of swallows) {
+      const pos = lower.indexOf(tag, i);
+      if (pos !== -1 && (at === -1 || pos < at)) {
+        at = pos;
+        openerLen = len;
+        closer = close;
       }
-    } else if (open.kind === 'fence') {
-      if (indent <= 3) {
-        let n = 0;
-        while (n < content.length && content.charAt(n) === open.char) n++;
-        if (n >= open.len && /^[\t ]*$/.test(content.slice(n))) open = null;
-      }
-    } else if (open.kind === 'comment') {
-      if (content.includes('-->')) open = null;
-    } else if (/<\/(script|pre|style|textarea)\s*>/i.test(content)) {
-      open = null;
     }
-    if (nl === -1) return open;
-    i = nl + 1;
+    if (at === -1) return null;
+    const end = lower.indexOf(closer, at + openerLen);
+    if (end === -1) return closer;
+    i = end + closer.length;
   }
+}
+
+function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
+  if (noticeRidesClean(text, '')) return null;
+  const tokens = blockGrammar.parse(text, {});
+  // An unclosed fence or raw block extends to the end of the document, so
+  // nothing follows it: the swallower is the last fence/raw token there is.
+  let swallow: (typeof tokens)[number] | null = null;
+  for (const tok of tokens) {
+    if (tok.type === 'fence' || tok.type === 'html_block') swallow = tok;
+  }
+  if (swallow === null || swallow.map === null) {
+    // Something swallows, but nothing recognisable: fail closed over the
+    // whole cut rather than ship an unverified closer.
+    return { closers: [], blockStart: 0 };
+  }
+  let blockStart = 0;
+  for (let l = 0; l < swallow.map[0]; l++) {
+    const nl = text.indexOf('\n', blockStart);
+    if (nl === -1) break;
+    blockStart = nl + 1;
+  }
+  if (swallow.type === 'fence') {
+    const run = swallow.markup.charAt(0).repeat(swallow.markup.length);
+    const lineEnd = text.indexOf('\n', blockStart);
+    const line = text.slice(blockStart, lineEnd === -1 ? text.length : lineEnd);
+    const prefixAt = line.indexOf(run);
+    // The closer must stand where the opener stood: a fence nested in a
+    // list or blockquote is not closed by a column-0 line — that line
+    // leaves the container and OPENS a new fence over the tail.
+    const prefix = prefixAt === -1 ? '' : line.slice(0, prefixAt);
+    const closers = [`\n${prefix}${run}`];
+    if (prefix) closers.push(`\n${run}`);
+    return { closers, blockStart };
+  }
+  const firstLine = swallow.content.split('\n', 1)[0] ?? '';
+  const opener = firstLine.trimStart();
+  if (opener.startsWith('<!--')) {
+    // The one-line form reaches the page as RAW text and closes the
+    // comment there; a bare `-->` line renders escaped and closes nothing.
+    return { closers: ['\n-->', '\n<!-- -->'], blockStart };
+  }
+  if (opener.startsWith('<?')) return { closers: ['\n?>'], blockStart };
+  if (opener.startsWith('<![CDATA[')) {
+    return { closers: ['\n]]>'], blockStart };
+  }
+  if (/^<![a-z]/i.test(opener)) return { closers: ['\n>'], blockStart };
+  const raw1 = /^<(script|pre|style|textarea)\b/i.exec(opener);
+  if (raw1) {
+    return { closers: [`\n</${raw1[1].toLowerCase()}>`], blockStart };
+  }
+  return { closers: [], blockStart };
 }
 
 /** The plan's PR identity, when it names one — the base for comment anchors. */
@@ -2036,45 +2110,62 @@ function composeReviewBody(
       0,
       Math.max(0, bodyBudget - tail.length - CLOSER_RESERVE),
     );
-    // A loop, not one pass: the cut can only orphan a HIGH surrogate (it
-    // takes a prefix, so no low half is ever separated from a high that
-    // precedes it in the same string), but text the model quoted may already
-    // carry unpaired highs of its own — `…x\uD800\u{20000}` cut inside the
-    // pair leaves `…x\uD800\uD800`, and removing one still posts a lone
-    // half. Text with an unpaired LOW is left as the author wrote it: that
-    // half was already unpaired before this budget touched anything.
-    while (
-      cut.length > 0 &&
-      /[\uD800-\uDBFF]/.test(cut.charAt(cut.length - 1))
-    ) {
-      cut = cut.slice(0, -1);
-    }
-    // Close what the cut left open, decided by the block grammar in
-    // `openBlockAtEnd`. A blocker quoting code in a fenced block is the
-    // ordinary shape of a blocker, and GFM extends an unclosed fence or
-    // HTML block to the end of the document: the truncation notice and the
-    // footer then render INSIDE a multi-thousand-line code block, and the
-    // author reads a truncated body as a complete review. The machine
-    // channels read raw text and never cared; this is for the human reading
-    // the PR page. One block can be open at the end of the cut — never two
-    // — and a fence whose closer would not fit the reserve loses its whole
-    // block: the cut moves back before the opener and scans again.
+    // Close what the cut left open, decided by the renderer's own block
+    // grammar (`openBlockAtEnd`), with every closer verified against the
+    // rendered page before it ships. A blocker quoting code in a fenced
+    // block is the ordinary shape of a blocker, and GFM extends an
+    // unclosed fence or raw HTML block to the end of the document — and a
+    // browser extends an unclosed comment or raw-text element past
+    // everything that follows — so an unbalanced cut renders the
+    // truncation notice and the footer INSIDE a block the body never
+    // meant to end on, and the author reads a truncated body as a complete
+    // review. The machine channels read raw text and never cared; this is
+    // for the human reading the PR page.
     let closer = '';
     for (;;) {
+      // A loop, not one pass: the cut can only orphan a HIGH surrogate (it
+      // takes a prefix, so no low half is ever separated from a high that
+      // precedes it in the same string), but text the model quoted may
+      // already carry unpaired highs of its own — `…x\uD800\u{20000}` cut
+      // inside the pair leaves `…x\uD800\uD800`, and removing one still
+      // posts a lone half. Text with an unpaired LOW is left as the author
+      // wrote it: that half was already unpaired before this budget
+      // touched anything. The strip re-runs every pass — the shave and the
+      // rewind below re-expose the edge.
+      while (
+        cut.length > 0 &&
+        /[\uD800-\uDBFF]/.test(cut.charAt(cut.length - 1))
+      ) {
+        cut = cut.slice(0, -1);
+      }
       const open = openBlockAtEnd(cut);
       if (open === null) break;
-      const c =
-        open.kind === 'fence'
-          ? `\n${open.char.repeat(open.len)}`
-          : open.kind === 'comment'
-            ? '\n-->'
-            : `\n</${open.tag}>`;
-      if (c.length <= CLOSER_RESERVE) {
-        closer = c;
+      const room = bodyBudget - tail.length - cut.length;
+      const chosen = open.closers.find(
+        (c) => c.length <= room && noticeRidesClean(cut, c),
+      );
+      if (chosen) {
+        closer = chosen;
         break;
       }
-      cut = cut.slice(0, open.lineStart);
+      // Nothing that fits closes the block. When only the reserve stands
+      // in the way, spend the difference off the cut and keep the block —
+      // its evidence is the author's only copy, and shaving a few
+      // characters costs less than the rewind below costs whole.
+      const shortest = Math.min(...open.closers.map((c) => c.length));
+      if (
+        Number.isFinite(shortest) &&
+        shortest > room &&
+        cut.length - (shortest - room) > open.blockStart
+      ) {
+        cut = cut.slice(0, cut.length - (shortest - room));
+        continue;
+      }
+      // Otherwise the block is lost: the cut moves back before the opener
+      // and scans again — the rewind can expose an earlier open block.
+      cut = cut.slice(0, open.blockStart);
     }
+
     bodyTrim.truncated = true;
     noteTrimmedRanks(droppedRanks);
     remediation.push(

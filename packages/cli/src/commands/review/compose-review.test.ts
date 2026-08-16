@@ -5248,22 +5248,68 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   const countOf = (haystack: string, needle: string): number =>
     haystack.split(needle).length - 1;
-  // The oracle for every closer the cut appends is the RENDERED page, not
-  // a balance count over the raw text: GFM extends an unclosed fence or
-  // HTML block to the end of the document, so a body whose counts agree
-  // with themselves can still render the truncation notice inside a code
-  // block — the exact shape the parity closers shipped. Where a real
-  // renderer puts the notice is the fact under test.
+  // The oracle for every closer the cut appends is the RENDERED page, at
+  // both of its layers, not a balance count over the raw text. Markdown
+  // layer: GFM extends an unclosed fence or raw HTML block to the end of
+  // the document, so the notice must parse to its own paragraph token, not
+  // ride as fence/raw-block content. Browser layer: an unclosed comment or
+  // raw-text element in the emitted HTML swallows every tag after it —
+  // including one the markdown layer CLOSED its block around (a comment
+  // opened inside a blockquote still runs, in the page, until the next
+  // `-->`) — so the HTML before the notice must leave no swallow open. A
+  // body whose counts agree with themselves can fail either layer — the
+  // exact shape the parity closers shipped. Where a real renderer puts the
+  // notice is the fact under test.
   const page = new MarkdownIt({ html: true });
+  /** True when a browser would still be inside a swallow at html's end. */
+  const browserSwallowOpen = (html: string): boolean => {
+    const lower = html.toLowerCase();
+    const swallows = [
+      ['<!--', '-->'],
+      ['<script', '</script'],
+      ['<style', '</style'],
+      ['<textarea', '</textarea'],
+    ] as const;
+    let i = 0;
+    for (;;) {
+      let at = -1;
+      let openerLen = 0;
+      let closer = '';
+      for (const [tag, close] of swallows) {
+        const pos = lower.indexOf(tag, i);
+        if (pos !== -1 && (at === -1 || pos < at)) {
+          at = pos;
+          openerLen = tag.length;
+          closer = close;
+        }
+      }
+      if (at === -1) return false;
+      const end = lower.indexOf(closer, at + openerLen);
+      if (end === -1) return true;
+      i = end + closer.length;
+    }
+  };
   const noticeOutsideCode = (body: string): boolean => {
-    const html = page.render(body);
-    const at = html.indexOf('was TRUNCATED to fit');
-    if (at === -1) return false;
-    const before = html.slice(0, at);
-    return (
-      countOf(before, '<pre>') === countOf(before, '</pre>') &&
-      countOf(before, '<!--') === countOf(before, '-->')
-    );
+    const tokens = page.parse(body, {});
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (
+        (tok.type === 'fence' || tok.type === 'html_block') &&
+        tok.content.includes('was TRUNCATED to fit')
+      ) {
+        return false;
+      }
+      if (
+        tok.type === 'inline' &&
+        tok.content.includes('was TRUNCATED to fit')
+      ) {
+        if (tokens[i - 1]?.type !== 'paragraph_open') return false;
+        const html = page.render(body);
+        const at = html.indexOf('was TRUNCATED to fit');
+        return !browserSwallowOpen(html.slice(0, at));
+      }
+    }
+    return false;
   };
   const nit = (i: number): DeferredEntry => ({
     file: `f${i}.ts`,
@@ -5413,6 +5459,11 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // that looks for one direction cannot report a regression that produces
     // the other.
     expect(LONE_SURROGATE.test(r.body)).toBe(false);
+    // The rung-3 notice guard (`droppedRanks.length > 0`) had no oracle:
+    // deleting it rode a keep:1 "did not fit (0 section(s))" notice above
+    // the cut of EVERY rank-less truncation — empty subject, zero count.
+    // No rank was dropped here, so no trim notice may ride at all.
+    expect(r.body).not.toContain('was trimmed to fit');
     // This exit owes its own stderr line; no other push carries the
     // sentence, and deleting it left the suite green.
     expect(r.remediation.join('\n')).toContain(
@@ -5465,12 +5516,37 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain('was TRUNCATED to fit');
     expect(LONE_SURROGATE.test(r.body)).toBe(false);
     expect(r.body.includes('\uFFFD')).toBe(false);
+    // And no over-strip: every astral character BEFORE the boundary
+    // survives the cut whole. A widened loop that stripped complete pairs
+    // and unpaired lows alike spent the entire band with every test green.
+    expect(r.body.includes('\u{20000}')).toBe(true);
     expect(r.bodyTrim.truncated).toBe(true);
     // The truncation exit owes its own stderr line, and no other push
     // carries this sentence.
     expect(r.remediation.join('\n')).toContain(
       'so the posted body is truncated',
     );
+  });
+
+  it('leaves an unpaired low surrogate at the cut exactly as the author wrote it', () => {
+    // The strip loop owes HIGH halves only: a prefix cut can only orphan a
+    // high. A low at the boundary was already unpaired in the author's
+    // text — rewriting it is not balancing, it is spending the author's
+    // bytes. No fixture carried a low, so widening the strip to both
+    // halves shipped green while it deleted every astral character back to
+    // the last BMP one.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['A'.repeat(60_000) + '\uDC00'.repeat(20_000)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    const junction = r.body.indexOf('\n\n⚠️ This review body was TRUNCATED');
+    expect(junction).toBeGreaterThan(0);
+    // The cut landed inside the low band and handed one straight to the
+    // tail: nothing stripped it.
+    expect(r.body.charAt(junction - 1)).toBe('\uDC00');
   });
 
   it('clears a run of lone high surrogates the cut exposes', () => {
@@ -5867,6 +5943,103 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain('</textarea>');
     expect(r.body).toContain('was TRUNCATED to fit');
   });
+
+  it('closes a 12-backtick fence by shaving the cut, not by spending the block', () => {
+    // The closer of a ≥12-tick fence overruns the 12-char reserve by
+    // `len − 11` characters. Both guards of that branch had no fixture:
+    // dropping the rewind shipped the swallowed notice green, and always
+    // appending the over-long closer shipped a body over the limit green
+    // (the ledger's safety margin absorbed it). Rewinding past the opener
+    // spends the blocker's only-copy quoted code whole, where shaving the
+    // difference off the cut keeps it.
+    const deepTicks =
+      'q:\n' + '`'.repeat(12) + '\n' + 'const x = 1;\n'.repeat(6_000);
+    const r = composeReview(base({ bodyCriticals: [deepTicks] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    // The block survived — the shave spent one character of the cut, not
+    // the fence.
+    expect(r.body).toContain('const x = 1;');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a fence nested in a list item where a column-0 closer opens a new one', () => {
+    // The closer must stand where the opener stood: a column-0 line leaves
+    // the list item and OPENS a document-level fence over the tail — the
+    // shape the line-start scan shipped.
+    const listed =
+      'quoted in a list:\n- item\n  ```ts\n' + '  const x = 1;\n'.repeat(5_000);
+    const r = composeReview(base({ bodyCriticals: [listed] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a comment nested in a blockquote — an opener the line-start scan never saw', () => {
+    // A `>`-prefixed line opens the comment INSIDE the blockquote; the
+    // scan that matched only column-0 `<!--` saw nothing, appended no
+    // closer, and the rendered page commented out the notice, the footer
+    // and the ledger marker. The closer itself must reach the page as RAW
+    // text: a bare `-->` line renders escaped (`--&gt;`) and closes
+    // nothing in the browser — hence the one-line comment form.
+    const quoted =
+      'quote follows:\n> <!-- reviewer note\n' +
+      '> quoted line\n'.repeat(8_000);
+    const r = composeReview(base({ bodyCriticals: [quoted] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('appends nothing for a comment closed on its opening line', () => {
+    // `<!-- x -->` is a COMPLETE block. The parity scan still read it as
+    // open and posted a stray visible `-->` — one more `-->` than `<!--`
+    // on the page.
+    const commented = 'note:\n<!-- x -->\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [commented] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(countOf(r.body, '<!--')).toBe(countOf(r.body, '-->'));
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('keeps a script block open past a spaced closer — the parser, not a pattern, decides', () => {
+    // markdown-it and micromark both close a type-1 block only on the
+    // LITERAL tag; `</script >` is content. The hand regex accepted it,
+    // decided the block closed, and the page swallowed the tail.
+    const scripted =
+      'raw:\n<script>\nvar a = 1;\n</script >\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [scripted] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('</script>');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it.each([
+    ['a processing instruction', '<?php\necho 1;\n', '\n?>'],
+    ['a markup declaration', '<!ELEMENT review EMPTY\n', '\n>'],
+    ['a CDATA section', '<![CDATA[raw data\n', '\n]]>'],
+  ])(
+    'closes %s the cut left open — raw blocks the parity scan never modelled',
+    (_shape, opener, closerText) => {
+      // HTML block types 3/4/5 extend to their terminator; the scan
+      // modelled none of them, so the notice rendered inside the raw
+      // block to the end of the document.
+      const rawBlock = `raw:\n${opener}` + 'x'.repeat(70_000);
+      const r = composeReview(base({ bodyCriticals: [rawBlock] }));
+      expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+      expect(r.bodyTrim.truncated).toBe(true);
+      expect(noticeOutsideCode(r.body)).toBe(true);
+      expect(r.body).toContain(closerText);
+      expect(r.body).toContain('was TRUNCATED to fit');
+    },
+  );
 
   it('ranks the plan-gate disclosures with the not-reviewed ones, not with the deferral list', () => {
     // `deferredBlock`, `testPlanBlock` and `repositoryContextBlock` all
