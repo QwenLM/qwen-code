@@ -41,6 +41,30 @@ export interface BudgetInput {
   diffLines: number;
 }
 
+/**
+ * The two facts about the machine that the round cap depends on.
+ *
+ * Both are resolved by the capture command and passed in rather than read
+ * here: this module has no imports, and a budget that loaded settings or
+ * inspected `process.env` would make every caller's tests depend on the
+ * machine they run on. They arrive together because they answer the same
+ * question from two sides — how many reverse-audit rounds this plan may run.
+ */
+export interface BudgetContext {
+  /**
+   * The standing `review.reverseAuditRounds` setting, when the operator set a
+   * usable one — a settings value, not an environment one. It can only lower
+   * the round tier; see `cappedRoundTier`.
+   */
+  operatorRoundCap?: number;
+  /**
+   * Is `QWEN_REVIEW_DEADLINE_EPOCH` set to something the gates will honour?
+   * This decides whether the huge tier's finishability reduction applies at
+   * all; see `HUGE_REVERSE_AUDIT_ROUNDS`.
+   */
+  hasDeadline?: boolean;
+}
+
 export interface ReviewBudget {
   /**
    * How many of the low tier's directed angles to walk (Step 3C, A–F).
@@ -112,15 +136,19 @@ export interface ReviewBudget {
    * one number: the same cap cannot price a single agent and a 19-way
    * fan-out. In a time-budgeted CI run the deadline gate already refuses a
    * round that will not fit; this static cap is the belt it works under and
-   * the ONLY bound a local run (no deadline) has. The huge tier is reduced
-   * to three, not two — not because two cannot converge (the all-dry
+   * the ONLY bound a local run (no deadline) has — which is also why the huge
+   * tier's reduction does not apply to such a run at all: with no ceiling to
+   * fit inside there is nothing for it to answer, so a huge diff without a
+   * deadline reads the 3B tier. Where a deadline does exist the huge tier is
+   * reduced to three, not two — not because two cannot converge (the all-dry
    * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
    * cap of two or more, since the convergence check runs before the cap
    * gate) but to buy hot chunks one extra audit round before the cap.
    *
    * The budget tunes how many rounds the loop runs, never whether it runs:
-   * the reverse audit is a dimension of the high-effort contract. The CLI
-   * only ever writes one of the three tier values here.
+   * the reverse audit is a dimension of the high-effort contract. What the CLI
+   * writes here is a tier value, or — when the operator set a
+   * `review.reverseAuditRounds` ceiling below it — that ceiling.
    */
   reverseAuditRounds: number;
 }
@@ -161,6 +189,18 @@ export const LARGE_REVERSE_AUDIT_ROUNDS = 5;
  * loop. Not a convergability minimum: the all-dry rounds-1-and-2 shape
  * reaches CONVERGED under any cap of two or more, because the reverse
  * audit's convergence check runs before the round-cap gate.
+ *
+ * **Applied only when the run has a deadline.** This is not a claim that a
+ * huge diff converges sooner — it plainly does not; it has more defects and
+ * more territory, and on the recall axis it deserves MORE rounds than a small
+ * one, not fewer. It is a claim about a wall: five ~90-minute rounds do not
+ * fit a six-hour CI ceiling, and a review killed mid-flight posts nothing at
+ * all, so three rounds reported beat five rounds lost (measured; DESIGN.md —
+ * The six-hour timeouts). Where no wall exists — a local run with no
+ * `QWEN_REVIEW_DEADLINE_EPOCH` — the premise is absent and so is the
+ * reduction: a huge diff is then just a large 3B diff and gets the 3B tier.
+ * Trading recall away to fit a ceiling that is not there is a pure loss, and
+ * the tier this reduction cuts from is the one where recall matters most.
  */
 export const HUGE_REVERSE_AUDIT_ROUNDS = 3;
 
@@ -239,14 +279,22 @@ export function isTerritoryFanOut(plan: DiffSize): boolean {
  * which would have let a hand-edited huge plan reach the SMALL tier through
  * the very clamp `reverseAuditRoundCap` adds to prevent it.
  */
-export function reverseAuditRoundTier(size: DiffSize): number {
+export function reverseAuditRoundTier(
+  size: DiffSize,
+  hasDeadline: boolean,
+): number {
   const src = size?.srcDiffLines;
   const total = size?.diffLines;
   if (!usableLineCount(src) || !usableLineCount(total)) {
     return LARGE_REVERSE_AUDIT_ROUNDS;
   }
   const effective = effectiveLines(src, total);
-  if (effective >= HUGE_DIFF_FLOOR) return HUGE_REVERSE_AUDIT_ROUNDS;
+  // The huge reduction is a ruling about fitting inside a wall, so it applies
+  // only where there is one. Without a clock a huge diff is simply a large 3B
+  // diff and gets the 3B tier — see `HUGE_REVERSE_AUDIT_ROUNDS`.
+  if (effective >= HUGE_DIFF_FLOOR) {
+    return hasDeadline ? HUGE_REVERSE_AUDIT_ROUNDS : LARGE_REVERSE_AUDIT_ROUNDS;
+  }
   // The validated pair, not `size` again. Re-reading the raw object here would
   // give the huge gate and the topology gate two independent derivations of
   // the same two numbers inside one function — which is exactly the shape of
@@ -255,6 +303,51 @@ export function reverseAuditRoundTier(size: DiffSize): number {
   return isTerritoryFanOut({ srcDiffLines: src, diffLines: total })
     ? LARGE_REVERSE_AUDIT_ROUNDS
     : SMALL_REVERSE_AUDIT_ROUNDS;
+}
+
+/**
+ * The round cap to record, given the topology tier and what the operator asked
+ * for — **the operator may only lower it.**
+ *
+ * The asymmetry is the whole design of this knob, and it is not timidity about
+ * letting people configure things. Raising is refused because a single
+ * configurable number is precisely what tiering removed: a round is one agent
+ * on a small diff and ~90 minutes on a huge one, so one operator-chosen count
+ * is wrong for at least one topology, and the topology it is most wrong for is
+ * the one whose cap exists to stop six-hour reviews that post nothing.
+ * Lowering carries no such hazard — it can only end the loop sooner.
+ *
+ * The two ways an operator actually means "run it longer" both have direct
+ * expressions elsewhere, and neither is a round count: "I have more wall clock
+ * than the huge tier assumes" is a review deadline, which the admission gate
+ * already prices a round against; "keep going while it is still finding real
+ * defects" is a property of the findings, not of a number chosen in advance.
+ *
+ * Below `HUGE_REVERSE_AUDIT_ROUNDS` is refused too, for the reason
+ * `reverseAuditRoundCap` refuses it in a plan — though not the reason an
+ * earlier draft of this gave. A cap of **one** refuses the convergence pair's
+ * second member, so the loop cannot produce the two dry audits convergence is
+ * defined by and every run stops non-converged. A cap of **two** does let an
+ * all-dry loop converge (the convergence check runs before the cap gate), but
+ * it leaves no round at all for a loop that reports anything, so the first
+ * finding makes the stop non-converged. Either way the purchase is a capped
+ * verdict rather than a cheaper review.
+ */
+export function cappedRoundTier(
+  size: DiffSize,
+  operatorCap: number | undefined,
+  hasDeadline: boolean,
+): number {
+  const tier = reverseAuditRoundTier(size, hasDeadline);
+  if (
+    typeof operatorCap !== 'number' ||
+    !Number.isInteger(operatorCap) ||
+    operatorCap < HUGE_REVERSE_AUDIT_ROUNDS ||
+    operatorCap >= tier
+  ) {
+    return tier;
+  }
+  return operatorCap;
 }
 
 /**
@@ -314,8 +407,16 @@ const LINES_PER_TOOL_CALL = 20;
  * that lands on its floor costs one under-walked small diff. It fails toward the
  * cheap end on purpose — the floors are the *minimum* work, not the maximum, so
  * a garbled input still walks three angles and still verifies.
+ *
+ * `context` carries the two facts about the machine the round cap depends on;
+ * see `BudgetContext`. Nothing else in the budget is tunable from outside, and
+ * that stays true: the rest of these fields size the work a review owes, and a
+ * caller who can shrink them is a caller who shrinks them.
  */
-export function reviewBudget(input: BudgetInput): ReviewBudget {
+export function reviewBudget(
+  input: BudgetInput,
+  context: BudgetContext = {},
+): ReviewBudget {
   const src = sane(input.srcDiffLines);
   const total = sane(input.diffLines);
 
@@ -350,7 +451,11 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
     // tier from it would record the SMALL tier's ten rounds for a plan whose
     // size failed to arrive, where the flat cap recorded five. The tier does
     // its own usability check precisely so this call can hand it the truth.
-    reverseAuditRounds: reverseAuditRoundTier(input),
+    reverseAuditRounds: cappedRoundTier(
+      input,
+      context.operatorRoundCap,
+      context.hasDeadline === true,
+    ),
   };
 }
 
@@ -362,7 +467,12 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
  * not the schedule's).
  *
  * It takes the whole plan, not `plan.budget`, because the accepted range is
- * now the plan's **own topology tier** rather than a global band. What that
+ * now the plan's **own topology tier** rather than a global band — and
+ * `hasDeadline` because that tier is clock-dependent on a huge diff (3 with a
+ * deadline, 5 without). A reader that sees a different clock than the capture
+ * did therefore clamps against a different band, which is safe in the
+ * direction that matters: a plan captured without a clock and read under one
+ * is cut to the shorter tier, never the reverse. What that
  * buys, stated as what actually happens rather than as a slogan:
  *
  *  - **A hand-edited plan cannot cross tiers.** The field is CLI-written and
@@ -382,18 +492,22 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
  *    overriding a number the plan states, which is the one thing a reader of
  *    a CLI-written field must not do.
  *  - It does **not** always err toward more auditing. A field-less **huge**
- *    plan now reads 3 where the flat fallback read 5 — deliberately less: the
- *    huge tier is a finishability ruling, and the reviews it exists for are
- *    the ones that ran six hours and posted nothing.
+ *    plan reads 3 where the flat fallback read 5 — deliberately less — but
+ *    only in a run that has a deadline; without one the huge tier is 5 and the
+ *    fallback is unchanged. The reduction is a finishability ruling, and the
+ *    reviews it exists for are the ones that ran six hours and posted nothing.
  *
  * The range stays floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the smallest cap
  * the CLI ever writes. A value of one or two is out of band (a hand-edited
- * plan): honouring it would force a non-converged round-cap stop where the
- * full loop would have kept auditing, so it too falls back to the tier —
- * never less.
+ * plan): one cannot reach convergence at all, and two leaves no round for a
+ * loop that reports anything — see `cappedRoundTier` for why neither buys a
+ * cheaper review. Both fall back to the tier, never less.
  */
-export function reverseAuditRoundCap(plan: unknown): number {
-  const tier = reverseAuditRoundTier((plan ?? {}) as DiffSize);
+export function reverseAuditRoundCap(
+  plan: unknown,
+  hasDeadline: boolean,
+): number {
+  const tier = reverseAuditRoundTier((plan ?? {}) as DiffSize, hasDeadline);
   const v = (plan as { budget?: { reverseAuditRounds?: unknown } } | undefined)
     ?.budget?.reverseAuditRounds;
   return typeof v === 'number' &&

@@ -55,6 +55,7 @@ import {
   verifyBudgetMessage,
   writeBudgetStop,
   writeRoundCapStop,
+  hasReviewDeadline,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -2004,7 +2005,8 @@ function admitReverseAuditRound(
   // The plan's round cap first: deterministic, and cheaper than the
   // deadline arithmetic. One value per topology (`reverseAuditRoundTier`) —
   // ten on a 3A diff, where a round is one auditor; five on a 3B one, where
-  // it is one per non-retired chunk; a reduced three for a huge
+  // it is one per non-retired chunk; and — only in a run that has a deadline,
+  // since the reduction answers a ceiling — a reduced three for a huge
   // diff, where a single reverse-audit round is ~90 minutes and the full
   // loop cannot finish (measured: the 6-hour CI reviews that posted nothing
   // were 4,000-5,300-line PRs). A round past the cap writes a marker so
@@ -2177,7 +2179,7 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       chunks.length,
     )
   ) {
@@ -2233,7 +2235,10 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
-  const planRoundCap = reverseAuditRoundCap(report);
+  const planRoundCap = reverseAuditRoundCap(
+    report,
+    hasReviewDeadline(process.env),
+  );
   const retirementNote =
     skipped.length === 0
       ? []
@@ -2596,7 +2601,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       1,
     )
   ) {
@@ -2679,7 +2684,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report),
+        reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
         planChunkIds.length,
       )
     )
