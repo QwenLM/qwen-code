@@ -78,18 +78,23 @@ interface AoneWorkitem {
  * scheme is never swallowed by the scp branch.
  */
 export function parseRemoteUrl(url: string): RepoIdentity | null {
-  // Strip (in order) a query string / fragment, any trailing slashes, and an
-  // optional `.git` suffix. The query/fragment strip comes first because
-  // query-string credentials (`?private_token=…`, a real CI pattern) would
-  // otherwise become part of the repo coordinate and echo unredacted into
-  // meta's stdout and the refusal messages. `[\s\S]*` (not `.`) eats
-  // newlines too: git stores and re-emits newline-bearing remote URLs, and
-  // a plain `.*$` stops at the first `\n`, letting `?private_token=SECRET\n`
-  // survive the strip and leak through the refusal message. Slashes go
-  // before `.git` so two or more trailing slashes after `.git` (`…/p.git//`)
-  // cannot defeat the suffix strip. Git accepts all of these shapes.
+  // Clean (order matters): strip any userinfo FIRST — it may itself contain
+  // `?` or `#` (`https://user:pa?ss@host/…`), and a query-first strip would
+  // truncate it mid-credential, making a parseable origin unparseable (and
+  // leaking the prefix through the refusal message). Then the query string
+  // / fragment: query-string credentials (`?private_token=…`, a real CI
+  // pattern) would otherwise become part of the repo coordinate and echo
+  // unredacted into meta's stdout and the refusal messages. `[\s\S]*` (not
+  // `.`) eats newlines too: git stores and re-emits newline-bearing remote
+  // URLs, and a plain `.*$` stops at the first `\n`, letting
+  // `?private_token=SECRET\n` survive the strip and leak through the
+  // refusal message. Finally trailing slashes before `.git`, so two or more
+  // trailing slashes after `.git` (`…/p.git//`) cannot defeat the suffix
+  // strip. Git accepts all of these shapes.
   const cleaned = url
     .trim()
+    .replace(/\/\/[^@/]+@/, '//')
+    .replace(/^[^@/]+@/, '')
     .replace(/[?#][\s\S]*$/, '')
     .replace(/\/+$/, '')
     .replace(/\.git$/, '');
@@ -116,17 +121,21 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
 }
 
 /** Redact a URL before putting it in a message — the raw secret must not
- *  reach stderr/logs/the transcript. Covers the userinfo prefix in both the
- *  URL form (`//user:token@`) and the scp form (`user:token@host:…`, common
- *  for `insteadOf`/token-bearing origins), AND the query/fragment channel:
+ *  reach stderr/logs/the transcript. ORDER MATTERS: the userinfo
+ *  substitutions run BEFORE the query/fragment strip — a userinfo that
+ *  itself contains `?` or `#` (`https://user:pa?ss@host/…`, which git
+ *  stores and re-emits fine) would otherwise be truncated mid-credential,
+ *  leaving no `@` for either regex, and the username + secret prefix would
+ *  reach the message. Covers the userinfo prefix in both the URL form
+ *  (`//user:token@`) and the scp form (`user:token@host:…`, common for
+ *  `insteadOf`/token-bearing origins), AND the query/fragment channel:
  *  `?private_token=…` origins carry no `@`, so a userinfo-only redaction
- *  would echo them — parseRemoteUrl strips them on its success path for the
- *  same reason, and a parse REFUSAL must not undo that defense. */
+ *  would echo them. */
 function redactUrl(url: string): string {
   return url
-    .replace(/[?#][\s\S]*$/, '')
     .replace(/\/\/[^@/]+@/, '//<redacted>@')
-    .replace(/^[^@/]+@/, '<redacted>@');
+    .replace(/^[^@/]+@/, '<redacted>@')
+    .replace(/[?#][\s\S]*$/, '');
 }
 
 function mrView(
@@ -283,18 +292,38 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     const target = view.targetBranch ?? 'master';
     // The target branch is SERVER-controlled metadata reaching git's argv.
-    // A dash-leading branch name is creatable by full-refname push, and
-    // `git fetch origin --upload-pack=<payload>` would execute the
-    // attacker-named program on the remote host with the reviewer's own
-    // credentials. Refuse it outright; the `--` below also ends option
-    // parsing for whatever reaches the fetch.
-    if (target.startsWith('-')) {
+    // Refuse it outright unless it can only be read as a plain branch name;
+    // the `--` below also ends option parsing for whatever reaches the
+    // fetch, but the guard must close EVERY argv channel, not just options:
+    //  - dash-leading: parses as an option — `git fetch origin
+    //    --upload-pack=<payload>` executes the attacker-named program on
+    //    the remote host with the reviewer's credentials (creatable by
+    //    full-refname push);
+    //  - leading `+`: parses as a FORCE refspec after `--` — `+master`
+    //    silently fetches the wrong head (stale evidence, no WARNING);
+    //  - colon: `src:dst` refspec shape — `+master:__qwen-review-diff-…`
+    //    force-moves the just-fetched throwaway ref (the served diff
+    //    carries master's change, not the MR's), and `+b:<local-branch>`
+    //    force-overwrites a reviewer-local branch.
+    if (
+      target.startsWith('-') ||
+      target.startsWith('+') ||
+      target.includes(':')
+    ) {
       throw new Error(
         `refusing target branch ${JSON.stringify(target)} from the MR ` +
-          `metadata — a branch name must not start with '-'`,
+          `metadata — a branch name must not start with '-' or '+', or ` +
+          `contain ':'`,
       );
     }
-    const ref = `__qwen-review-diff-${prNumber}`;
+    // The throwaway ref is suffixed with the pid: two concurrent fetchDiff
+    // runs for the same MR in one clone (two /review sessions; a review
+    // worktree shares refs/heads with the main clone) would otherwise
+    // share the name — session A's finally-delete kills session B between
+    // fetch and diff (`unknown revision` mid-review), and a pre-existing
+    // local branch of the reserved name is force-moved by the `+` fetch,
+    // then deleted, reflog and all (fsck dangling-commit recovery only).
+    const ref = `__qwen-review-diff-${prNumber}-${process.pid}`;
     try {
       // Force-fetch (`+`): a stale throwaway ref left by an interrupted
       // earlier run would otherwise make this fetch fail whenever the MR head

@@ -264,14 +264,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       body: fetchMeta.body,
     };
     // The base ref is server-controlled metadata reaching git's argv through
-    // the base fetch below. The fetch probe passes `--`, but refuse a
-    // dash-leading name outright — like aone.fetchDiff's target branch — so
+    // the base fetch below. The fetch probe passes `--`, but that only ends
+    // OPTION parsing — refuse anything that can read as more than a plain
+    // branch name (the fetchDiff target guard's comment names each channel:
+    // dash-leading option, `+` force refspec, `src:dst` colon refspec), so
     // a hostile platform value dies here with the metadata rolled back, not
     // inside a git invocation.
-    if (meta.baseRefName.startsWith('-')) {
+    if (
+      meta.baseRefName.startsWith('-') ||
+      meta.baseRefName.startsWith('+') ||
+      meta.baseRefName.includes(':')
+    ) {
       throw new Error(
         `refusing base ref ${JSON.stringify(meta.baseRefName)} from the ` +
-          `platform metadata — a branch name must not start with '-'`,
+          `platform metadata — a branch name must not start with '-' or ` +
+          `'+', or contain ':'`,
       );
     }
   } catch (err) {

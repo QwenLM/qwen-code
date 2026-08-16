@@ -134,6 +134,41 @@ describe('aoneReader.resolveRepo', () => {
     expect(message).toContain('solo');
     expect(message).not.toContain('SECRET');
   });
+
+  it('parses a userinfo that itself contains ? or # (strip order)', () => {
+    // A query-first strip truncates `user:pa?ss@` mid-credential — no `@`
+    // survives, the origin becomes unparseable, and the prefix leaks into
+    // the refusal. Userinfo goes FIRST, so this origin parses.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'https://user:pa?ss@gitlab.alibaba-inc.com/g/p.git';
+      return '';
+    });
+    expect(aoneReader.resolveRepo()).toEqual({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+    });
+  });
+
+  it('never leaks a ?-bearing userinfo prefix through a refusal', () => {
+    // Same shape, unparseable target (single segment): the refusal message
+    // must not carry the username or secret prefix.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'https://user:pa?ss@code.alibaba-inc.com/solo.git';
+      return '';
+    });
+    let message = '';
+    try {
+      aoneReader.resolveRepo();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('cannot parse the origin remote');
+    expect(message).not.toContain('user');
+    expect(message).not.toContain('pa?ss');
+  });
 });
 
 describe('aoneReader.getCommentBody', () => {
@@ -218,13 +253,17 @@ describe('aoneReader.fetchDiff', () => {
     });
     gitRawMock.mockReturnValue(Buffer.from('diff --git a/x b/x\n', 'latin1'));
     const diff = aoneReader.fetchDiff(7, 'g/p');
+    // The throwaway ref carries a pid suffix: concurrent fetchDiff runs for
+    // the same MR in one clone must not share the name (one session's
+    // finally-delete would kill the other mid-review).
+    const refRe = /^__qwen-review-diff-7-\d+$/;
     // The diff capture spreads the pinned diff config/flags (an un-pinned
     // `color.diff=always` would make every `diff --git` unrecognisable).
     expect(gitRawMock).toHaveBeenCalledWith(
       ...PINNED_DIFF_CONFIG,
       'diff',
       ...PINNED_DIFF_FLAGS,
-      'base-sha..__qwen-review-diff-7',
+      expect.stringMatching(/^base-sha\.\.__qwen-review-diff-7-\d+$/),
     );
     expect(diff).toBe('diff --git a/x b/x\n');
     // The MR head is FORCE-fetched (a stale throwaway ref from an interrupted
@@ -233,7 +272,9 @@ describe('aoneReader.fetchDiff', () => {
     expect(gitMock).toHaveBeenCalledWith(
       'fetch',
       'origin',
-      '+refs/merge-requests/7/head:__qwen-review-diff-7',
+      expect.stringMatching(
+        /^\+refs\/merge-requests\/7\/head:__qwen-review-diff-7-\d+$/,
+      ),
     );
     // `--` ends option parsing: the target branch is server-controlled MR
     // metadata and must never reach git as an option.
@@ -242,7 +283,7 @@ describe('aoneReader.fetchDiff', () => {
     expect(gitMock).toHaveBeenCalledWith(
       'branch',
       '-D',
-      '__qwen-review-diff-7',
+      expect.stringMatching(refRe),
     );
   });
 
@@ -265,6 +306,25 @@ describe('aoneReader.fetchDiff', () => {
       'origin',
       expect.stringContaining('--upload-pack'),
     );
+    expect(gitRawMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses the refspec channel too — `+` force and `src:dst` colon shapes', () => {
+    // `--` ends OPTION parsing, but git still reads a refspec after it: a
+    // leading `+` force-fetches the wrong head (stale evidence), and a
+    // colon shape force-moves the throwaway ref or a reviewer-local branch.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
+      return '';
+    });
+    for (const target of ['+master', '+master:__qwen-review-diff-7', 'a:b']) {
+      a1JsonMock.mockReturnValue({
+        mergeRequest: { sourceBranch: 'sha', targetBranch: target },
+      });
+      expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+        /must not start with '-' or '\+', or contain ':'/,
+      );
+    }
     expect(gitRawMock).not.toHaveBeenCalled();
   });
 
@@ -295,7 +355,9 @@ describe('aoneReader.fetchDiff', () => {
       ...PINNED_DIFF_CONFIG,
       'diff',
       ...PINNED_DIFF_FLAGS,
-      '__qwen-review-diff-7~1..__qwen-review-diff-7',
+      expect.stringMatching(
+        /^__qwen-review-diff-7-\d+~1\.\.__qwen-review-diff-7-\d+$/,
+      ),
     );
     // The fallback is DISCLOSED: a multi-commit MR gets only its last
     // commit as the diff, and the skill must not review a silent fragment.

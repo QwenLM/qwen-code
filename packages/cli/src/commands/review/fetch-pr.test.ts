@@ -364,6 +364,29 @@ describe('fetch-pr report assembly', () => {
     expect(reportCall).toBeUndefined();
   });
 
+  it('refuses the refspec channel on baseRefName too (+ and colon)', async () => {
+    // `--` ends option parsing, but a leading `+` or `src:dst` shape still
+    // parses as a (force) refspec after it — same channels as
+    // aone.fetchDiff's target guard.
+    for (const baseRefName of ['+main', '+main:victim', 'src:dst']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(
+        /must not start with '-' or '\+', or contain ':'/,
+      );
+    }
+  });
+
   it('refuses a non-positive pr_number before any side effect', async () => {
     // `/^\d+$/` once admitted '0'; the guard promises a POSITIVE integer
     // and must reject before detection, auth, and the worktree lease.
