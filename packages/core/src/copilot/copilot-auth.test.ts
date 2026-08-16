@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseProxyEp, discoverGithubToken } from './copilot-auth.js';
+import {
+  parseProxyEp,
+  discoverGithubToken,
+  exchangeGhuForCapi,
+} from './copilot-auth.js';
 
 describe('parseProxyEp', () => {
   it('extracts and rewrites proxy-ep from ghu_-minted token', () => {
@@ -91,5 +95,83 @@ describe('discoverGithubToken', () => {
     );
     const result = await discoverGithubToken({ overridePath: file });
     expect(result.token).toBe('ghu_VSCODE1234');
+  });
+});
+
+function makeMockFetch(responses: Array<{ status: number; body: unknown }>): {
+  fetch: typeof fetch;
+  calls: Array<{ url: string; headers: Record<string, string> }>;
+} {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  let i = 0;
+  const mockFetch = (async (url: URL | string, init?: RequestInit) => {
+    calls.push({
+      url: typeof url === 'string' ? url : url.toString(),
+      headers: (init?.headers as Record<string, string>) ?? {},
+    });
+    const res = responses[Math.min(i++, responses.length - 1)];
+    return new Response(JSON.stringify(res.body), {
+      status: res.status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  return { fetch: mockFetch, calls };
+}
+
+describe('exchangeGhuForCapi', () => {
+  it('exchanges ghu_ for CAPI bearer', async () => {
+    const { fetch, calls } = makeMockFetch([
+      {
+        status: 200,
+        body: {
+          token: 'tid=abc;proxy-ep=proxy.individual.githubcopilot.com',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        },
+      },
+    ]);
+    const result = await exchangeGhuForCapi('ghu_TEST1234', {
+      fetchImpl: fetch,
+    });
+    expect(result.bearer).toContain('tid=');
+    expect(result.endpointsApi).toBe(
+      'https://api.individual.githubcopilot.com',
+    );
+    expect(result.expiresAtMs).toBeGreaterThan(Date.now());
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('api.github.com/copilot_internal/v2/token');
+    expect(calls[0].headers['Authorization']).toBe('token ghu_TEST1234');
+  });
+
+  it('4xx short-circuits (no retry)', async () => {
+    const { fetch, calls } = makeMockFetch([
+      { status: 401, body: { error: 'bad token' } },
+    ]);
+    await expect(
+      exchangeGhuForCapi('ghu_BAD', { fetchImpl: fetch }),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('throws on non-ghu_ prefix', async () => {
+    await expect(exchangeGhuForCapi('gho_NOTGHU')).rejects.toThrow();
+  });
+
+  it('uses parseProxyEp for endpointsApi when proxy-ep present', async () => {
+    const { fetch } = makeMockFetch([
+      {
+        status: 200,
+        body: {
+          token: 'tid=abc;proxy-ep=proxy.enterprise.githubcopilot.com',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          endpoints: { api: 'https://fallback.example.com' },
+        },
+      },
+    ]);
+    const result = await exchangeGhuForCapi('ghu_TEST', { fetchImpl: fetch });
+    // parseProxyEp wins over endpoints.api
+    expect(result.endpointsApi).toBe(
+      'https://api.enterprise.githubcopilot.com',
+    );
   });
 });

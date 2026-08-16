@@ -149,11 +149,66 @@ export async function discoverGithubToken(opts?: {
   );
 }
 
+export class CopilotExchangeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CopilotExchangeError';
+  }
+}
+
+const DEFAULT_GITHUB_API_BASE = 'https://api.github.com';
+
+interface CopilotTokenEnvelope {
+  token: string;
+  expires_at: number;
+  refresh_in?: number;
+  endpoints?: { api?: string; proxy?: string; telemetry?: string };
+}
+
 export async function exchangeGhuForCapi(
-  _ghu: string,
-  _opts?: { fetchImpl?: typeof fetch; githubApiBase?: string },
+  ghu: string,
+  opts?: { fetchImpl?: typeof fetch; githubApiBase?: string },
 ): Promise<{ bearer: string; endpointsApi: string; expiresAtMs: number }> {
-  throw new Error('not implemented');
+  if (!ghu.startsWith('ghu_')) {
+    throw new CopilotExchangeError(
+      'Token must have ghu_ prefix for CAPI exchange',
+    );
+  }
+  const f = opts?.fetchImpl ?? fetch;
+  const base = opts?.githubApiBase ?? DEFAULT_GITHUB_API_BASE;
+  const url = `${base}/copilot_internal/v2/token`;
+
+  const res = await f(url, {
+    headers: {
+      Authorization: `token ${ghu}`,
+      Accept: 'application/json',
+      'User-Agent': 'qwen-code-copilot/0.1',
+    },
+  });
+
+  if (res.status >= 400 && res.status < 500) {
+    const body = await res.text();
+    throw new CopilotExchangeError(
+      `CAPI exchange failed: HTTP ${res.status} ${body}`,
+    );
+  }
+  if (!res.ok) {
+    throw new CopilotExchangeError(`CAPI exchange failed: HTTP ${res.status}`);
+  }
+
+  const envelope = (await res.json()) as CopilotTokenEnvelope;
+  const proxyEp = parseProxyEp(envelope.token);
+  const endpointsApi = proxyEp ?? envelope.endpoints?.api ?? '';
+  if (!endpointsApi) {
+    throw new CopilotExchangeError(
+      'CAPI envelope missing endpoints.api and token has no proxy-ep',
+    );
+  }
+  return {
+    bearer: envelope.token,
+    endpointsApi,
+    expiresAtMs: envelope.expires_at * 1000,
+  };
 }
 
 export function parseProxyEp(bearer: string): string | null {
