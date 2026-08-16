@@ -6296,6 +6296,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
   });
 
+  it('keeps availableSkillDetails verbatim on pumped session_update frames (#9234)', async () => {
+    // Mirror of the SSE redaction tests: the SDK/browser surface strips
+    // `_meta.availableSkillDetails`, but the /acp surface must keep
+    // delivering it untouched — desktop clients parse the skill bodies
+    // for display/editing.
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    const got = takeFrames(sess, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const skillDetails = [
+      { name: 'bugfix', body: 'skill body', filePath: '/skills/bugfix' },
+    ];
+    bridge.queues.get('sess-1')?.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'help', description: 'Help' }],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: skillDetails,
+          },
+        },
+      },
+    });
+    const frames = (await got) as Array<{
+      method: string;
+      params: {
+        sessionId: string;
+        update: { _meta?: { availableSkillDetails?: unknown } };
+      };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'help', description: 'Help' }],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: skillDetails,
+          },
+        },
+      },
+    });
+  });
+
   it('session/load while a session/close is in-flight → rejected (TOCTOU guard)', async () => {
     let releaseClose: () => void = () => {};
     bridge.closeGate = new Promise<void>((r) => (releaseClose = r));

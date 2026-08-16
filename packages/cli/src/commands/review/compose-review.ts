@@ -66,6 +66,7 @@ import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
+  LEDGER_ID_READBACK,
   serializeLedger,
   type Ledger,
   type LedgerFinding,
@@ -74,6 +75,7 @@ import {
   CRITICAL_PREFIX,
   LEADING_INVISIBLE_RE,
   SUGGESTION_PREFIX,
+  carriedClaimLine,
   countInlineFindings,
   severityOf,
   stripSeverityPrefix,
@@ -85,6 +87,8 @@ import {
   isFooterSafeModelId,
   rendersAsNothing,
   reviewFooter,
+  stripCommentMarkerLines,
+  stripFooterSpans,
   stripForUnattributedPost,
   stripReviewFooter,
 } from './lib/review-footer.js';
@@ -359,8 +363,13 @@ export interface ComposeReviewInput {
    * toward `C` exactly like anchored Criticals.
    */
   bodyCriticals?: string[];
-  /** Suggestions discarded as unanchorable (offline validation or 422). */
-  suggestionsDiscarded?: number;
+  /**
+   * Suggestions discarded as unanchorable (offline validation or 422). A
+   * count, as the Step 7 prose prescribes; the list form that older skill
+   * revisions wrote — `[]`, or one entry per discarded item — is accepted
+   * and counted by its length.
+   */
+  suggestionsDiscarded?: number | readonly unknown[];
   /**
    * Suggestions this review confirmed but did not re-post because they are
    * already reported on the PR (a prior round, or a concurrent reviewer) —
@@ -738,6 +747,12 @@ function formatCannotTell(
 // body-Critical-only input into an APPROVE that dropped the only blocker.
 function toCount(value: unknown, field: string): number {
   if (value === undefined || value === null) return 0;
+  // The Step 7 prose prescribes a COUNT for these fields —
+  // `suggestionsDiscarded` above all — but runs following older skill
+  // revisions wrote the LIST of discarded items and used to die at this gate
+  // after hours of analysis. Its length IS the count, so count it rather than
+  // refuse: `[]` is zero, `["a", "b"]` is two.
+  if (Array.isArray(value)) return value.length;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new TypeError(
       `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,
@@ -3043,16 +3058,6 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /**
- * A carried-forward finding names its ORIGINAL id right after the severity
- * marker — `**[Critical]** R1-2: the same claim, re-reported`. Step 6 already
- * mandates re-reporting a still-standing entry under the id it has; reading
- * that id back here is what makes the machine ledger agree with the report it
- * rides in, instead of renumbering the entry to a fresh `R<round>-<n>` the
- * report never used.
- */
-const CARRIED_ID_RE = /^(R\d+-\d+)[:.)\]]?(?=\s|$)\s*/;
-
-/**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
  * never reach either input (they are terminal-only), so the ledger holds only
@@ -3079,10 +3084,17 @@ export function buildLedger(
     taken.add(id);
     return id;
   };
-  /** The first line of what follows the severity marker, minus any carried id. */
+  /**
+   * The first line of what follows the severity marker, minus any carried id.
+   * A carried-forward finding names its ORIGINAL id right after the marker —
+   * `**[Critical]** R1-2: the same claim, re-reported` — and reading it back
+   * here is what makes the machine ledger agree with the report it rides in,
+   * instead of renumbering the entry to a fresh `R<round>-<n>` the report
+   * never used.
+   */
   const titleOf = (rest: string): { id?: string; title: string } => {
     const line = rest.split('\n')[0].trim();
-    const carried = CARRIED_ID_RE.exec(line);
+    const carried = LEDGER_ID_READBACK.exec(line);
     return {
       id: carried?.[1],
       title: (carried ? line.slice(carried[0].length) : line).trim(),
@@ -3110,17 +3122,20 @@ export function buildLedger(
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
     if (!sev) continue;
-    const body = typeof c.body === 'string' ? c.body : '';
-    // The title strips through the same fixpoint chain the post transform
-    // uses — markers, forged footer lines, footer spans, in any order —
-    // because the ledger rides the posted body as an HTML comment the
-    // autofix grep reads. Leading render-nothing residue goes too: a marker
-    // followed by a newline — or an invisible comment, or a Cf run — puts
-    // the title text past it, and residue left between the marker and a
-    // carried id would defeat the id anchor and silently renumber the
-    // finding while the posted comment still shows the old id.
+    // carriedClaimLine is the ONE readback statement shared with presubmit's
+    // carried-id extractor — marker + separator (newline-consuming) + first
+    // line. Strip forged footer spans and leading render-nothing residue off
+    // it before titleOf: the ledger rides the posted body as an HTML comment
+    // the autofix grep reads, and residue between the marker and a carried id
+    // would defeat the id anchor and silently renumber the finding.
+    const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
     const { id: carried, title } = titleOf(
-      stripForUnattributedPost(body).replace(LEADING_INVISIBLE_RE, ''),
+      claim === null
+        ? ''
+        : stripFooterSpans(stripCommentMarkerLines(claim)).replace(
+            LEADING_INVISIBLE_RE,
+            '',
+          ),
     );
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({

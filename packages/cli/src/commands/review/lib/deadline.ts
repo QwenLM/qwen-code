@@ -181,7 +181,7 @@ const RUN_EPOCH_SLACK_MS = 2000;
  * run. An unstatable plan disables the fence — fail open, like every other
  * malformed input this module reads.
  */
-function runEpochMs(planPath: string): number {
+export function runEpochMs(planPath: string): number {
   try {
     return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
   } catch {
@@ -682,14 +682,17 @@ export function writeBudgetStop(
 }
 
 /**
- * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
- * marker older than the plan's own capture — a previous run's refusal, left
- * behind by a kill before cleanup, must not cap a verdict on a stop that
- * did not happen in this run (see `runEpochMs`). A marker without a numeric
- * `atMs` cannot prove which run it belongs to and is treated the same way —
- * only this module writes markers, and it always dates them.
+ * The budget-stop marker on disk, whichever run wrote it — shape-checked,
+ * never fenced. A marker without a string `entry` and numeric `atMs` cannot
+ * prove what it is and reads as none; only this module writes markers, and
+ * it always dates them.
+ *
+ * The verdict consumers read through the fenced `readBudgetStop` below;
+ * this unfenced read exists for the one consumer whose purpose is the
+ * OPPOSITE of the fence — cleanup's retention, where a previous run's
+ * marker is exactly the evidence to keep (#9213 on #9206).
  */
-export function readBudgetStop(planPath: string): BudgetStop | null {
+export function readBudgetStopUnfenced(planPath: string): BudgetStop | null {
   try {
     const raw = readFileSync(
       join(promptRecordDir(planPath), STOP_FILE),
@@ -700,8 +703,7 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
       typeof parsed !== 'object' ||
       parsed === null ||
       typeof (parsed as BudgetStop).entry !== 'string' ||
-      typeof (parsed as BudgetStop).atMs !== 'number' ||
-      (parsed as BudgetStop).atMs < runEpochMs(planPath)
+      typeof (parsed as BudgetStop).atMs !== 'number'
     ) {
       return null;
     }
@@ -712,15 +714,34 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
 }
 
 /**
- * Remove any stop marker beside the prompt records. Called when the loop
- * reaches a clean end that outranks an earlier same-run refusal — a
+ * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
+ * marker older than the plan's own capture — a previous run's refusal, left
+ * behind by a kill before cleanup, must not cap a verdict on a stop that
+ * did not happen in this run (see `runEpochMs`).
+ */
+export function readBudgetStop(planPath: string): BudgetStop | null {
+  const stop = readBudgetStopUnfenced(planPath);
+  if (stop === null || stop.atMs < runEpochMs(planPath)) return null;
+  return stop;
+}
+
+/**
+ * Remove THIS RUN's stop marker beside the prompt records. Called when the
+ * loop reaches a clean end that outranks an earlier same-run refusal — a
  * CONVERGED exit after an over-cap round was refused: the marker would
  * otherwise survive (nothing else unlinks it) and cap a verdict the audit
- * legitimately converged. Missing file and unlink errors are swallowed —
- * the file was the thing to be rid of.
+ * legitimately converged. A marker a PREVIOUS run wrote is left alone: a
+ * converged RE-REVIEW must not unlink the very evidence the next cleanup
+ * keys its retention on (#9213 on #9206) — the verdict side is already
+ * safe from it (the fenced reader drops it), so keeping it costs nothing.
+ * An undateable marker cannot prove it belongs to this run and stays too.
+ * Missing file and unlink errors are swallowed — the file was the thing to
+ * be rid of.
  */
 export function clearBudgetStop(planPath: string): void {
   try {
+    const stop = readBudgetStopUnfenced(planPath);
+    if (stop === null || stop.atMs < runEpochMs(planPath)) return;
     rmSync(join(promptRecordDir(planPath), STOP_FILE), { force: true });
   } catch {
     // Best-effort: a marker we could not remove still only caps a verdict,
