@@ -13,8 +13,16 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
+import {
+  UIActionsContext,
+  type UIActions,
+} from '../contexts/UIActionsContext.js';
+import type { Config ,
+  AuthType,
+  DEFAULT_QWEN_MODEL,
+  CopilotTokenNotFoundError,
+  type DiscoveredToken,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getFilteredQwenModels } from '../models/availableModels.js';
@@ -27,6 +35,18 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
   DescriptiveRadioButtonSelect: vi.fn(() => null),
 }));
+
+// Mock discoverGithubToken so the Copilot auto-switch tests can control
+// whether a cached GitHub token is found without touching the filesystem.
+const { mockDiscoverGithubToken } = vi.hoisted(() => ({
+  mockDiscoverGithubToken:
+    vi.fn<(opts?: { overridePath?: string }) => Promise<DiscoveredToken>>(),
+}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return { ...actual, discoverGithubToken: mockDiscoverGithubToken };
+});
 
 // Helper to create getAvailableModelsForAuthType mock
 const createMockGetAvailableModelsForAuthType = () =>
@@ -46,6 +66,7 @@ const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
   settingsValue: Partial<LoadedSettings> | undefined = undefined,
+  uiActionsValue: Partial<UIActions> | undefined = undefined,
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -103,17 +124,25 @@ const renderComponent = (
     addItem: vi.fn(),
   } as unknown as UIState['historyManager'];
 
-  const renderResult = render(
+  const tree = (
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={mockConfig}>
         <UIStateContext.Provider
           value={{ historyManager: mockHistoryManager } as unknown as UIState}
         >
-          <ModelDialog {...combinedProps} />
+          {uiActionsValue ? (
+            <UIActionsContext.Provider value={uiActionsValue as UIActions}>
+              <ModelDialog {...combinedProps} />
+            </UIActionsContext.Provider>
+          ) : (
+            <ModelDialog {...combinedProps} />
+          )}
         </UIStateContext.Provider>
       </ConfigContext.Provider>
-    </SettingsContext.Provider>,
+    </SettingsContext.Provider>
   );
+
+  const renderResult = render(tree);
 
   return {
     ...renderResult,
@@ -1859,6 +1888,124 @@ describe('<ModelDialog />', () => {
       (m) => m.id === DEFAULT_QWEN_MODEL,
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
+  });
+
+  it('opens AuthDialog instead of switching when a non-Copilot user picks a Copilot model with no cached token', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const openAuthDialog = vi.fn();
+    mockDiscoverGithubToken.mockRejectedValue(
+      new CopilotTokenNotFoundError('no token'),
+    );
+
+    const { props, mockHistoryManager } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4.7',
+            label: 'Claude Opus (Copilot)',
+            authType: AuthType.USE_COPILOT,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+      } as unknown as Partial<Config>,
+      undefined,
+      {
+        auth: { openAuthDialog } as unknown as UIActions['auth'],
+      } as unknown as Partial<UIActions>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
+    });
+
+    // Proactively checked for a cached GitHub token.
+    expect(mockDiscoverGithubToken).toHaveBeenCalledTimes(1);
+    // No token → must NOT switch the model.
+    expect(switchModel).not.toHaveBeenCalled();
+    // Instead, open AuthDialog so the user can complete device flow.
+    expect(openAuthDialog).toHaveBeenCalledTimes(1);
+    // The model dialog closes so AuthDialog is the only dialog visible.
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    // A history item explains why the dialog closed.
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining('Copilot'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('auto-switches to Copilot auth when a non-Copilot user picks a Copilot model and a GitHub token is cached', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const openAuthDialog = vi.fn();
+    mockDiscoverGithubToken.mockResolvedValue({
+      token: 'ghu_test-token',
+      source: 'test',
+    });
+
+    const { props, mockConfig } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4.7',
+            label: 'Claude Opus (Copilot)',
+            authType: AuthType.USE_COPILOT,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_COPILOT,
+          model: 'claude-opus-4.7',
+        })),
+      } as unknown as Partial<Config>,
+      undefined,
+      {
+        auth: { openAuthDialog } as unknown as UIActions['auth'],
+      } as unknown as Partial<UIActions>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
+    });
+
+    // Proactively checked for a cached GitHub token.
+    expect(mockDiscoverGithubToken).toHaveBeenCalledTimes(1);
+    // Token found → switchModel proceeds (it triggers refreshAuth internally,
+    // which recreates the content generator with the Copilot wrapper).
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_COPILOT,
+      'claude-opus-4.7',
+      { baseUrl: undefined },
+    );
+    // AuthDialog must NOT open — the switch succeeded.
+    expect(openAuthDialog).not.toHaveBeenCalled();
+    // Dialog closes after the successful switch.
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    // Verify mockConfig is the one we passed (for type safety).
+    expect(mockConfig).toBeDefined();
   });
 });
 

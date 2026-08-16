@@ -16,6 +16,8 @@ import {
   isImageCapable,
   parseVisionModelSetting,
   resolveModelId,
+  discoverGithubToken,
+  CopilotTokenNotFoundError,
   type AvailableModel as CoreAvailableModel,
   type Config,
   type ContentGeneratorConfig,
@@ -27,6 +29,7 @@ import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
@@ -315,6 +318,7 @@ export function ModelDialog({
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
+  const uiActions = useContext(UIActionsContext);
   const settings = useSettings();
 
   // Local error state for displaying errors within the dialog
@@ -1015,6 +1019,41 @@ export function ModelDialog({
           selectedBaseUrl = parsed.baseUrl;
         }
 
+        // Auto-switch auth when a non-Copilot user picks a Copilot model.
+        // Copilot models are exempt from API-key validation, so switchModel
+        // succeeds — but the first LLM request fails with
+        // CopilotTokenNotFoundError if no GitHub token is cached. Proactively
+        // discover the token here: if found, proceed with the switch
+        // (switchModel triggers refreshAuth, which recreates the content
+        // generator with the Copilot wrapper). If not found, close the
+        // model dialog and open AuthDialog so the user can complete device
+        // flow instead of hitting a cryptic error on the next prompt.
+        if (
+          selectedAuthType === AuthType.USE_COPILOT &&
+          authType !== AuthType.USE_COPILOT
+        ) {
+          try {
+            await discoverGithubToken();
+          } catch (e) {
+            if (e instanceof CopilotTokenNotFoundError) {
+              uiState?.historyManager.addItem(
+                {
+                  type: 'info' as const,
+                  text: t(
+                    'No GitHub Copilot token found. Complete /auth to set up Copilot.',
+                  ),
+                },
+                Date.now(),
+              );
+              closeLatchRef.current = true;
+              onClose();
+              uiActions?.auth?.openAuthDialog();
+              return;
+            }
+            throw e;
+          }
+        }
+
         selectionInFlightRef.current = true;
         try {
           await config.switchModel(selectedAuthType, modelId, {
@@ -1098,6 +1137,7 @@ export function ModelDialog({
       availableModelEntries,
       persistScope,
       reportAuxiliaryModelSelection,
+      uiActions,
     ],
   );
 
