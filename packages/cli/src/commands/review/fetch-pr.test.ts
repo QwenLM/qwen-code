@@ -13,6 +13,7 @@ import {
   isCollapsedFromUpstream,
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { DEADLINE_ENV } from './lib/deadline.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
 describe('classifyHeavy', () => {
@@ -337,6 +338,61 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
   });
+
+  it('records the round cap its capture wiring writes — huge tier only with a clock (#9256)', async () => {
+    // plan-diff and capture-local pin this wiring in their own handlers; the
+    // fetch-pr side had no assertion because this harness steers the lightest
+    // real path (no merge base → no diff). Override the two mocks that steer
+    // it into a real diff instead: a resolvable merge base and a raw diff
+    // buffer. A handler that forgot the deadline read — or the capture-time
+    // tier call — would keep every budget unit test green and this one red.
+    const mergeBase = vi.mocked(
+      (await import('./lib/merge-base.js')).resolveMergeBase,
+    );
+    const gitRawMock = vi.mocked((await import('./lib/git.js')).gitRaw);
+    mergeBase.mockReturnValue({ sha: 'beef0000', baseFetchFailed: false });
+    gitRawMock.mockReturnValue(Buffer.from(makeHugeDiff()));
+
+    const before = process.env[DEADLINE_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      producerMocks.writeFileSync.mockClear();
+      const noClock = await reportFor({});
+      expect(noClock.srcDiffLines).toBeGreaterThanOrEqual(3000);
+      expect(noClock.budget.reverseAuditRounds).toBe(5);
+
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      producerMocks.writeFileSync.mockClear();
+      const withClock = await reportFor({});
+      expect(withClock.budget.reverseAuditRounds).toBe(3);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
+  });
+
+  // A 9,000-line single-file addition — effective size well past the huge
+  // floor, in the same shape plan-diff's harness uses.
+  function makeHugeDiff(): string {
+    const n = 9000;
+    const body: string[] = [];
+    while (body.length < n) {
+      body.push(`+function f${body.length}() {`);
+      for (let k = 0; k < 8 && body.length < n; k++)
+        body.push(`+  const x = ${k};`);
+      body.push('+}');
+      body.push('+');
+    }
+    body.length = n;
+    return [
+      'diff --git a/src/huge.ts b/src/huge.ts',
+      '--- /dev/null',
+      '+++ b/src/huge.ts',
+      `@@ -0,0 +1,${n} @@`,
+      ...body,
+      '',
+    ].join('\n');
+  }
 
   it('preserves the earliest window opening across drift restarts of the same PR', async () => {
     // A drift restart reruns fetch-pr and overwrites this report; the audit
