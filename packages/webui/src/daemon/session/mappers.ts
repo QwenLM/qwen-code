@@ -322,9 +322,17 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        // The daemon stamps `titleSource` on both rename (manual) and
+        // auto-title (auto) publications; keep it so `/clear` can tell a
+        // user-chosen name from a generated one (#8977). Unknown values are
+        // dropped rather than guessed.
+        const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
           displayName: getString(data, 'displayName'),
+          ...(titleSource === 'manual' || titleSource === 'auto'
+            ? { titleSource }
+            : {}),
         }));
       }
       break;

@@ -364,4 +364,44 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.commands).toEqual([]);
     expect(next.skills).toEqual([]);
   });
+
+  it('keeps titleSource from session_metadata_updated so /clear can tell manual names (#8977)', () => {
+    const base = { status: 'connected' as const, workspaceCwd: '/workspace' };
+
+    const manual = applyEvent(base, {
+      v: 1,
+      type: 'session_metadata_updated',
+      data: {
+        sessionId: 's1',
+        displayName: 'My session',
+        titleSource: 'manual',
+      },
+    });
+    expect(manual.displayName).toBe('My session');
+    expect(manual.titleSource).toBe('manual');
+
+    // An auto-title publication overwrites the source — a later /clear must
+    // NOT carry a generated name forward.
+    const auto = applyEvent(manual, {
+      v: 1,
+      type: 'session_metadata_updated',
+      data: {
+        sessionId: 's1',
+        displayName: 'Fix login bug',
+        titleSource: 'auto',
+      },
+    });
+    expect(auto.displayName).toBe('Fix login bug');
+    expect(auto.titleSource).toBe('auto');
+
+    // Older daemons publish no titleSource: keep the previous knowledge
+    // rather than guessing.
+    const unknown = applyEvent(manual, {
+      v: 1,
+      type: 'session_metadata_updated',
+      data: { sessionId: 's1', displayName: 'Renamed again' },
+    });
+    expect(unknown.displayName).toBe('Renamed again');
+    expect(unknown.titleSource).toBe('manual');
+  });
 });

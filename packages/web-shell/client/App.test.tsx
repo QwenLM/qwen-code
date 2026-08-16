@@ -54,7 +54,6 @@ type ChatEditorTestProps = {
   onSubmit: (
     text: string,
     images?: { data: string; media_type: string }[],
-    files?: { name: string; media_type: string; text: string }[],
     commitAccepted?: () => void,
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
@@ -237,11 +236,6 @@ const {
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
-      branchSession: vi.fn().mockResolvedValue({
-        sessionId: 'branch-1',
-        displayName: 'Historical branch',
-        switchStarted: true,
-      }),
       submitPermission: vi.fn().mockResolvedValue(true),
       clearGoal: vi.fn().mockResolvedValue(undefined),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
@@ -334,7 +328,6 @@ const {
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
-        onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
       } | null,
@@ -486,8 +479,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
   };
 });
 
-vi.mock('@qwen-code/sdk/daemon', () => {
-  class DaemonHttpError extends Error {
+vi.mock('@qwen-code/sdk/daemon', () => ({
+  DaemonHttpError: class DaemonHttpError extends Error {
     constructor(
       readonly status: number,
       readonly body: unknown,
@@ -495,23 +488,13 @@ vi.mock('@qwen-code/sdk/daemon', () => {
     ) {
       super(message);
     }
-  }
-  return {
-    DaemonHttpError,
-    DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
-    isDaemonTurnError: (error: unknown) =>
-      typeof error === 'object' &&
-      error !== null &&
-      (error as { _daemonTurnError?: unknown })._daemonTurnError === true,
-    isStaleBranchPointError: (error: unknown): boolean =>
-      error instanceof DaemonHttpError &&
-      error.status === 409 &&
-      typeof error.body === 'object' &&
-      error.body !== null &&
-      (error.body as Record<string, unknown>)['code'] ===
-        'branch_point_invalid',
-  };
-});
+  },
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
+  isDaemonTurnError: (error: unknown) =>
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { _daemonTurnError?: unknown })._daemonTurnError === true,
+}));
 
 vi.mock('./hooks/useMessages', () => ({
   useMessages: () => testState.messages,
@@ -571,13 +554,6 @@ vi.mock('./components/ChatEditor', async () => {
           restoreImages: (
             images: readonly { data: string; media_type: string }[],
           ) => void;
-          restoreFiles: (
-            files: readonly {
-              name: string;
-              media_type: string;
-              text: string;
-            }[],
-          ) => void;
           restoreInputAnnotations: (
             inputAnnotations: readonly DaemonInputAnnotation[],
           ) => void;
@@ -616,13 +592,11 @@ vi.mock('./components/ChatEditor', async () => {
             testState.prompt = text;
           },
           restoreImages: () => undefined,
-          restoreFiles: () => undefined,
           restoreInputAnnotations: editorRestoreInputAnnotations,
           submit: (input) => {
             const accepted = props.onSubmit(
               input?.text ?? testState.prompt,
               testState.promptImages,
-              undefined,
               editorCommit,
               testState.inputAnnotations
                 ? { inputAnnotations: testState.inputAnnotations }
@@ -650,23 +624,12 @@ vi.mock('./components/ChatEditor', async () => {
               'data-preparing': props.isPreparing ? 'true' : 'false',
               onClick: () => {
                 if (testState.inputAnnotations) {
-                  props.onSubmit(
-                    testState.prompt,
-                    undefined,
-                    undefined,
-                    editorCommit,
-                    {
-                      inputAnnotations: testState.inputAnnotations,
-                    },
-                  );
+                  props.onSubmit(testState.prompt, undefined, editorCommit, {
+                    inputAnnotations: testState.inputAnnotations,
+                  });
                   return;
                 }
-                props.onSubmit(
-                  testState.prompt,
-                  undefined,
-                  undefined,
-                  editorCommit,
-                );
+                props.onSubmit(testState.prompt, undefined, editorCommit);
               },
               type: 'button',
             },
@@ -735,7 +698,6 @@ vi.mock('./components/MessageList', async () => {
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
-        onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
         welcomeHeader?: React.ReactNode;
@@ -4600,11 +4562,6 @@ beforeEach(() => {
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
-  mockSessionActions.branchSession.mockResolvedValue({
-    sessionId: 'branch-1',
-    displayName: 'Historical branch',
-    switchStarted: true,
-  });
   mockSessionActions.submitPermission.mockResolvedValue(undefined);
   mockSessionActions.clearGoal.mockResolvedValue(undefined);
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
@@ -5098,7 +5055,6 @@ describe('App shell command queueing', () => {
       accepted = testState.latestChatEditorProps?.onSubmit(
         '!echo hi',
         undefined,
-        undefined,
         editorCommit,
       );
       await vi.waitFor(() => {
@@ -5141,7 +5097,6 @@ describe('App shell command queueing', () => {
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit(
         '!echo hi',
-        undefined,
         undefined,
         editorCommit,
       );
@@ -6568,239 +6523,6 @@ describe('App read-only local commands mid-turn', () => {
 });
 
 describe('App session callbacks', () => {
-  it('forwards an Assistant checkpoint and returns the pending branch request', async () => {
-    const branch = deferred<{
-      sessionId: string;
-      displayName: string;
-      switchStarted: boolean;
-    }>();
-    mockSessionActions.branchSession.mockReturnValue(branch.promise);
-    renderApp();
-    await flush();
-
-    let request: void | Promise<void>;
-    let duplicate: void | Promise<void>;
-    act(() => {
-      request =
-        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
-      duplicate =
-        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
-    });
-
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'checkpoint-1',
-    );
-    expect(request!).toBeInstanceOf(Promise);
-    expect(duplicate).toBe(request);
-    expect(mockSessionActions.branchSession).toHaveBeenCalledTimes(1);
-
-    branch.resolve({
-      sessionId: 'branch-1',
-      displayName: 'Historical branch',
-      switchStarted: true,
-    });
-    await act(async () => {
-      await request;
-    });
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        text: expect.stringContaining('Historical branch') as string,
-      }),
-    ]);
-  });
-
-  it('does not report a concurrent branch request as a failure', async () => {
-    const branch = deferred<{
-      sessionId: string;
-      displayName: string;
-      switchStarted: boolean;
-    }>();
-    mockSessionActions.branchSession
-      .mockReturnValueOnce(branch.promise)
-      .mockRejectedValueOnce(
-        new DOMException(
-          'A branch request is already in progress',
-          'InvalidStateError',
-        ),
-      );
-    const onToast = vi.fn();
-    renderApp({ onToast });
-    await flush();
-
-    let first: void | Promise<void>;
-    let second: void | Promise<void>;
-    act(() => {
-      first =
-        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
-      second =
-        testState.latestMessageListProps?.onBranchSession?.('checkpoint-2');
-    });
-
-    await act(async () => {
-      await second;
-    });
-    expect(onToast).not.toHaveBeenCalled();
-
-    branch.resolve({
-      sessionId: 'branch-1',
-      displayName: 'Historical branch',
-      switchStarted: true,
-    });
-    await act(async () => {
-      await first;
-    });
-  });
-
-  it('does not claim a late branch result switched sessions', async () => {
-    mockSessionActions.branchSession.mockResolvedValue({
-      sessionId: 'branch-1',
-      displayName: 'Historical branch',
-      switchStarted: false,
-    });
-    renderApp();
-    await flush();
-
-    await act(async () => {
-      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
-    });
-
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ type: 'status' }),
-    ]);
-  });
-
-  it('reloads the transcript when a historical checkpoint becomes stale', async () => {
-    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    mockConnection.capabilities.features = ['session_transcript_pagination'];
-    mockSessionActions.branchSession.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        { code: 'branch_point_invalid' },
-        'Invalid branch point',
-      ),
-    );
-    const onToast = vi.fn();
-    renderApp({ onToast });
-    await flush();
-
-    await act(async () => {
-      await testState.latestMessageListProps?.onBranchSession?.(
-        'stale-checkpoint',
-      );
-    });
-
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'stale-checkpoint',
-    );
-    expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
-      expect.any(AbortSignal),
-    );
-    expect(onToast).toHaveBeenCalledWith(
-      'error',
-      'This response is no longer on the active history path. The transcript has been refreshed.',
-    );
-  });
-
-  it('does not reload an unrelated session when the branch source was switched away', async () => {
-    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    mockConnection.capabilities.features = ['session_transcript_pagination'];
-    let rejectBranch!: (error: unknown) => void;
-    mockSessionActions.branchSession.mockReturnValue(
-      new Promise((_resolve, reject) => {
-        rejectBranch = reject;
-      }),
-    );
-    const onToast = vi.fn();
-    const { rerender } = renderApp({ onToast });
-    await flush();
-
-    let request: void | Promise<void>;
-    act(() => {
-      request =
-        testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
-    });
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'stale-checkpoint',
-    );
-
-    // The user switches to another session before the branch call returns.
-    act(() => {
-      mockConnection.sessionId = 'session-2';
-      rerender({ onToast });
-    });
-    await flush();
-
-    await act(async () => {
-      rejectBranch(
-        new DaemonHttpError(
-          409,
-          { code: 'branch_point_invalid' },
-          'Invalid branch point',
-        ),
-      );
-      await request;
-    });
-
-    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
-    expect(onToast).toHaveBeenCalledWith('error', 'Failed to branch session.');
-  });
-
-  it('skips the stale-recovery toast when a switch lands during the reload', async () => {
-    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    mockConnection.capabilities.features = ['session_transcript_pagination'];
-    mockSessionActions.branchSession.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        { code: 'branch_point_invalid' },
-        'Invalid branch point',
-      ),
-    );
-    let rejectReload!: (error: unknown) => void;
-    mockSessionActions.reloadSession.mockReturnValue(
-      new Promise((_resolve, reject) => {
-        rejectReload = reject;
-      }),
-    );
-    const onToast = vi.fn();
-    const { rerender } = renderApp({ onToast });
-    await flush();
-
-    let request: void | Promise<void>;
-    act(() => {
-      request =
-        testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
-    });
-    await vi.waitFor(() =>
-      expect(mockSessionActions.reloadSession).toHaveBeenCalled(),
-    );
-
-    // The user switches away while the recovery reload is in flight, and the
-    // superseded load then rejects.
-    act(() => {
-      mockConnection.sessionId = 'session-2';
-      rerender({ onToast });
-    });
-    await flush();
-
-    await act(async () => {
-      rejectReload(new DOMException('Session load superseded', 'AbortError'));
-      await request;
-    });
-
-    expect(onToast).not.toHaveBeenCalledWith(
-      'error',
-      'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
-    );
-    expect(onToast).not.toHaveBeenCalledWith(
-      'error',
-      'This response is no longer on the active history path. The transcript has been refreshed.',
-    );
-  });
-
   it('binds the main composer Voice target to its active secondary session', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
@@ -10294,6 +10016,72 @@ describe('App session callbacks', () => {
     await act(async () => clear.resolve());
   });
 
+  it('carries a manual session name over /clear onto the next session (#8977)', async () => {
+    // A manually renamed session loses its name when /clear starts the
+    // successor session: the new session is untitled and the auto-titler
+    // names it after the first turn. The manual name must be re-applied as
+    // soon as the successor exists.
+    mockConnection.sessionId = 'session-1';
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'My manual name';
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-2';
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalled();
+      });
+    });
+    // The cleared connection drops the session id (the real clearSession
+    // does this via setConnection; the mock leaves it to the test).
+    mockConnection.sessionId = undefined;
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+          'My manual name',
+        );
+      });
+    });
+  });
+
+  it('does not carry an auto-generated title over /clear (#8977)', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.titleSource = 'auto';
+    mockConnection.displayName = 'Fix login bug';
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-2';
+      return { sessionId: 'session-2' };
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/clear');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalled();
+      });
+    });
+    mockConnection.sessionId = undefined;
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+          'echo hi',
+        );
+      });
+    });
+    // The successor stays untitled: an auto title is never propagated.
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
   it('focuses the composer after loading an existing session', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -10604,7 +10392,6 @@ describe('App session callbacks', () => {
     expect(rawEnqueuePrompt).toHaveBeenCalledWith(
       '',
       images,
-      undefined,
       undefined,
       undefined,
     );
@@ -11761,7 +11548,6 @@ describe('App session callbacks', () => {
       accepted = testState.latestChatEditorProps?.onSubmit(
         'first prompt',
         undefined,
-        undefined,
         commitAccepted,
       );
     });
@@ -12127,130 +11913,6 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
       'first',
       expect.objectContaining({
-        optimisticUserMessage: false,
-        retry: true,
-      }),
-    );
-  });
-
-  it('carries file attachments through a cancelled turn-error retry restoration', async () => {
-    let approveRetry: (() => void) | undefined;
-    let admissionCount = 0;
-    const onSubmitBefore = vi.fn(() => {
-      admissionCount += 1;
-      if (admissionCount === 1) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        approveRetry = resolve;
-      });
-    });
-    const files = [
-      { name: 'app.log', media_type: 'text/plain', text: 'SECRET=1' },
-    ];
-    const { container, rerender } = renderApp({ onSubmitBefore });
-    await flush();
-
-    await act(async () => {
-      testState.latestChatEditorProps?.onSubmit(
-        'first',
-        undefined,
-        files,
-        undefined,
-      );
-      await Promise.resolve();
-    });
-    act(() => {
-      testState.blocks = [
-        {
-          kind: 'error',
-          source: 'turn_error',
-          id: 'turn-error-1',
-          promptId: 'prompt-first',
-        },
-      ];
-      rerender({ onSubmitBefore });
-    });
-    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
-
-    mockSessionActions.sendPrompt.mockClear();
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
-        ?.click();
-    });
-    act(() => {
-      mockConnection.loadingTranscript = true;
-      rerender({ onSubmitBefore });
-    });
-
-    const allowBPrompt = vi.fn().mockResolvedValue(undefined);
-    act(() => {
-      mockConnection.sessionId = 'session-2';
-      mockConnection.workspaceCwd = '/tmp/project-2';
-      testState.blocks = [];
-      testState.ownerVersion += 1;
-      mockConnection.loadingTranscript = false;
-      rerender({ onSubmitBefore: allowBPrompt });
-    });
-    const otherFiles = [
-      { name: 'b.log', media_type: 'text/plain', text: 'OTHER=1' },
-    ];
-    await act(async () => {
-      testState.latestChatEditorProps?.onSubmit(
-        'second',
-        undefined,
-        otherFiles,
-        undefined,
-      );
-      await Promise.resolve();
-    });
-    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
-      'second',
-      expect.objectContaining({ files: otherFiles }),
-    );
-    await act(async () => {
-      approveRetry?.();
-      await Promise.resolve();
-    });
-    // The gate resolved after the session switched away — the cancelled
-    // retry must NOT resubmit; only 'second' has been sent so far.
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
-
-    act(() => {
-      mockConnection.sessionId = 'session-1';
-      mockConnection.workspaceCwd = '/tmp/project';
-      testState.blocks = [
-        {
-          kind: 'error',
-          source: 'turn_error',
-          id: 'turn-error-1',
-          promptId: 'prompt-first',
-        },
-      ];
-      testState.ownerVersion += 1;
-      rerender({ onSubmitBefore });
-    });
-    await flush();
-
-    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
-    mockSessionActions.sendPrompt.mockClear();
-    const allowRetry = vi.fn().mockResolvedValue(undefined);
-    rerender({ onSubmitBefore: allowRetry });
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
-      'first',
-      expect.objectContaining({
-        files: [
-          expect.objectContaining({
-            name: 'app.log',
-            media_type: 'text/plain',
-            text: 'SECRET=1',
-          }),
-        ],
         optimisticUserMessage: false,
         retry: true,
       }),
@@ -13350,15 +13012,9 @@ describe('App session callbacks', () => {
     await flush();
 
     act(() => {
-      testState.latestChatEditorProps?.onSubmit(
-        'hello',
-        images,
-        undefined,
-        editorCommit,
-        {
-          inputAnnotations,
-        },
-      );
+      testState.latestChatEditorProps?.onSubmit('hello', images, editorCommit, {
+        inputAnnotations,
+      });
     });
     await flush();
     mockSessionActions.sendPrompt.mockClear();
@@ -13442,7 +13098,6 @@ describe('App session callbacks', () => {
 
     expect(rawEnqueuePrompt).toHaveBeenCalledWith(
       'queued',
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -17864,7 +17519,6 @@ describe('App prompt send failure retry', () => {
       testState.latestChatEditorProps?.onSubmit(
         'hello',
         undefined,
-        undefined,
         editorCommit,
       );
     });
@@ -17893,7 +17547,6 @@ describe('App prompt send failure retry', () => {
     act(() => {
       testState.latestChatEditorProps?.onSubmit(
         'hello',
-        undefined,
         undefined,
         editorCommit,
       );
@@ -17992,7 +17645,6 @@ describe('App prompt send failure retry', () => {
       testState.latestChatEditorProps?.onSubmit(
         '@file.ts fix',
         undefined,
-        undefined,
         editorCommit,
         { inputAnnotations },
       );
@@ -18040,15 +17692,9 @@ describe('App prompt send failure retry', () => {
     await flush();
 
     act(() => {
-      testState.latestChatEditorProps?.onSubmit(
-        'hello',
-        images,
-        undefined,
-        editorCommit,
-        {
-          inputAnnotations,
-        },
-      );
+      testState.latestChatEditorProps?.onSubmit('hello', images, editorCommit, {
+        inputAnnotations,
+      });
     });
     testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
     await act(async () => {
@@ -18076,60 +17722,6 @@ describe('App prompt send failure retry', () => {
       expect.objectContaining({
         images,
         inputAnnotations,
-        optimisticUserMessage: false,
-      }),
-    );
-  });
-
-  it('retries a rejected failed prompt with its file attachment intact', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    const firstSend = deferred<void>();
-    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
-      testState.blocks = [{ id: 'u1', kind: 'user' }];
-      return firstSend.promise;
-    });
-    const files = [
-      { name: 'app.log', media_type: 'text/plain', text: 'SECRET=1' },
-    ];
-    renderApp();
-    await flush();
-
-    act(() => {
-      testState.latestChatEditorProps?.onSubmit(
-        'hello',
-        undefined,
-        files,
-        editorCommit,
-      );
-    });
-    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
-    await act(async () => {
-      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
-      await Promise.resolve();
-    });
-
-    expect(
-      document.querySelector('[data-testid="failed-prompt-retry"]')
-        ?.textContent,
-    ).toBe('u1');
-
-    await act(async () => {
-      document
-        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
-        ?.click();
-      await Promise.resolve();
-    });
-
-    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
-      'hello',
-      expect.objectContaining({
-        files: [
-          expect.objectContaining({
-            name: 'app.log',
-            media_type: 'text/plain',
-            text: 'SECRET=1',
-          }),
-        ],
         optimisticUserMessage: false,
       }),
     );
@@ -18426,7 +18018,6 @@ describe('App prompt send failure retry', () => {
     await vi.waitFor(() => {
       expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
         'hello',
-        undefined,
         undefined,
         undefined,
       );
@@ -18867,7 +18458,6 @@ describe('App prompt send failure retry', () => {
       'hello',
       undefined,
       undefined,
-      undefined,
     );
     expect(
       container.querySelector('[data-testid="failed-prompt-retry"]')
@@ -18988,7 +18578,6 @@ describe('App prompt send failure retry', () => {
     });
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
       'hello',
-      undefined,
       undefined,
       undefined,
     );
