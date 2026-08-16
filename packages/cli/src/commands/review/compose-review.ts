@@ -1764,32 +1764,56 @@ function composeReviewBody(
     if (full === '' || full.length <= bodyBudget) return full;
     const footerTail = footer === '' ? '' : `\n\n${footer}`;
     /** The English-only body: no fold, so nothing here is duplicated. */
-    const enOnly = (ps: Bi[], note: string): string =>
-      `${ps.map((p) => p.en).join(sep)}${note}${footerTail}`;
+    const enOnly = (ps: Bi[]): string =>
+      `${ps.map((p) => p.en).join(sep)}${footerTail}`;
     // A monolingual body (attribution off, or a translation identical to its
     // English) has no fold to drop. Every rung below still measures the same
     // string — `enOnly` and `assemble` agree when there is no fold — but
     // nothing may CLAIM a translation was dropped, in the body or on stderr:
     // that is the false-record class this budget exists to refuse.
-    const hadFold = full !== enOnly(parts, '');
-    /** What the body says about the fold it dropped. */
-    const foldNote = (sections: number): string =>
+    const hadFold = full !== enOnly(parts);
+    /**
+     * What the body says about the fold it dropped — a notice at the TOP,
+     * beside the trim notice and above the text it describes. Appended at
+     * the bottom it was 64,000 characters below the body it qualifies, and
+     * the skill's promise that every trim is disclosed at the top of the
+     * body was false for this one.
+     */
+    const foldNote = (sections: number, cut: boolean): Bi[] =>
       !hadFold
-        ? ''
-        : `\n\n⚠️ The Chinese translation of this body was dropped to fit ` +
-          `GitHub's ${BODY_MAX_CHARS}-character review limit; the English ` +
-          `text above is complete${
-            sections > 0
-              ? ' apart from the sections the notice at the top names'
-              : ''
-          }.`;
-    const noteFoldDropped = (sections: number): void => {
+        ? []
+        : [
+            {
+              keep: 1,
+              en:
+                `⚠️ The Chinese translation of this body was dropped to fit ` +
+                `GitHub's ${BODY_MAX_CHARS}-character review limit; the ` +
+                `English text below is ${
+                  cut
+                    ? 'truncated as well — see the notice at the end'
+                    : `complete${
+                        sections > 0
+                          ? ' apart from the sections the notice below names'
+                          : ''
+                      }`
+                }.`,
+              // Never rendered — this notice exists only on paths that have
+              // already dropped the fold — but a `Bi` without it is a lie
+              // about the shape, and the next edit would find no zh to keep.
+              zh:
+                `⚠️ 为适配 GitHub ${BODY_MAX_CHARS} 字符的评审正文上限，` +
+                `本正文的中文翻译已被丢弃。`,
+            },
+          ];
+    const noteFoldDropped = (sections: number, cut: boolean): void => {
       if (!hadFold) return;
       bodyTrim.fold = true;
       remediation.push(
         `body budget: the bilingual fold was dropped to fit GitHub's ` +
           `${BODY_MAX_CHARS}-character review limit — the English body is ` +
-          `complete${sections > 0 ? ' apart from the trimmed sections' : ''}`,
+          (cut
+            ? `truncated as well; read the complete text in the terminal report`
+            : `complete${sections > 0 ? ' apart from the trimmed sections' : ''}`),
       );
     };
 
@@ -1797,9 +1821,9 @@ function composeReviewBody(
     // so dropping it costs the author no content at all, where every rung
     // below costs a finding or a disclosure. With no fold, `foldOnly` IS the
     // body that just overflowed, so this rung cannot fire.
-    const foldOnly = enOnly(parts, foldNote(0));
+    const foldOnly = enOnly([...foldNote(0, false), ...parts]);
     if (hadFold && foldOnly.length <= bodyBudget) {
-      noteFoldDropped(0);
+      noteFoldDropped(0, false);
       return foldOnly;
     }
 
@@ -1824,26 +1848,31 @@ function composeReviewBody(
       survivors = survivors.filter((p) => p.trim !== rank);
       droppedRanks.push(rank);
       droppedSections += going;
-      const trimmed = enOnly(
-        [trimNote(droppedRanks, droppedSections, false), ...survivors],
-        foldNote(droppedSections),
-      );
+      const trimmed = enOnly([
+        ...foldNote(droppedSections, false),
+        trimNote(droppedRanks, droppedSections, false),
+        ...survivors,
+      ]);
       if (trimmed.length <= bodyBudget) {
         bodyTrim.sections = droppedSections;
         bodyTrim.deferralList = droppedRanks.includes(1);
         noteTrimmedRanks(droppedRanks);
-        noteFoldDropped(droppedSections);
+        noteFoldDropped(droppedSections, false);
         return trimmed;
       }
     }
     bodyTrim.sections = droppedSections;
     bodyTrim.deferralList = droppedRanks.includes(1);
-    noteFoldDropped(droppedSections);
+    // The fold is gone here too — this rung renders English only — but the
+    // body it produces is CUT, so neither the notice nor the stderr line may
+    // call the English text complete.
+    noteFoldDropped(droppedSections, true);
     // Rung 3 — a real cut. What remains is un-trimmable by policy: the
     // blockers, the undecided blockers, the sentences that qualify the
     // verdict. Order it by `keep` so the cut spends prose the author already
     // has before it spends this round's only-copy blockers.
     const head = [
+      ...foldNote(droppedSections, true),
       ...(droppedRanks.length > 0
         ? [trimNote(droppedRanks, droppedSections, true)]
         : []),

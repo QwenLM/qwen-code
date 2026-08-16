@@ -5007,9 +5007,11 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.body).toContain('was TRUNCATED to fit');
     expect(r.body).toContain(FOOTER);
-    // No half-open fold — COUNTED, not merely present-or-absent: a body
-    // carrying one opener and two closers passed the boolean form.
-    expect(countOf(r.body, '<details>')).toBe(countOf(r.body, '</details>'));
+    // Rung 3 renders English only, so the posted body carries NO fold
+    // markup at all — the earlier `open === close` form compared 0 to 0 on
+    // this fixture and passed under a mutant that appended a bare opener.
+    expect(countOf(r.body, '<details>')).toBe(0);
+    expect(countOf(r.body, '</details>')).toBe(0);
     // Two-sided: the cut can only orphan a high surrogate, but an oracle
     // that looks for one direction cannot report a regression that produces
     // the other.
@@ -5139,7 +5141,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain('Deferred under the convergence posture');
     expect(r.body).toContain('Not reviewed: security');
     expect(r.body).not.toContain('<details>');
-    expect(r.body).toContain('Chinese translation of this body was dropped');
+    expect(r.body.startsWith('⚠️ The Chinese translation')).toBe(true);
     // The zero-rank arm of the fold notice and of its stderr line: no trim
     // notice exists, so neither may point at one.
     expect(r.body).not.toContain('apart from the sections');
@@ -5172,9 +5174,13 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.bodyTrim.fold).toBe(true);
     expect(r.bodyTrim.sections).toBeGreaterThan(0);
     expect(r.bodyTrim.deferralList).toBe(true);
-    expect(r.body).toContain('Chinese translation of this body was dropped');
-    expect(r.body).toContain(
-      'apart from the sections the notice at the top names',
+    // Both notices ride at the TOP, fold first, and each describes what the
+    // other left: appended at the bottom the fold notice sat 64,000
+    // characters below the body it qualifies.
+    expect(r.body.startsWith('⚠️ The Chinese translation')).toBe(true);
+    expect(r.body).toContain('apart from the sections the notice below names');
+    expect(r.body.indexOf('The Chinese translation')).toBeLessThan(
+      r.body.indexOf('This body was trimmed to fit'),
     );
     const budgetLines = r.remediation.filter((l) =>
       l.startsWith('body budget:'),
@@ -5186,6 +5192,36 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(budgetLines[1]).toContain(
       'the English body is complete apart from the trimmed sections',
     );
+  });
+
+  it('a truncated bilingual body discloses its fold too, and calls nothing complete', () => {
+    // The reorder put the fold-drop record on the way INTO the cut, where
+    // it recorded `fold: true` and pushed "the English body is complete" —
+    // on a body cut mid-blocker, whose text disclosed no fold at all. The
+    // stderr line is persisted, so that was a durable false record.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { han: true }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      bodyCriticals: ['C'.repeat(70_000)],
+      deferredSuggestions: [nit(1), nit(2)],
+      unreviewedDimensions: ['security — gap'],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.fold).toBe(true);
+    expect(r.bodyTrim.truncated).toBe(true);
+    // Disclosed in the body, at the top, and honest about the cut.
+    expect(r.body.startsWith('⚠️ The Chinese translation')).toBe(true);
+    expect(r.body).toContain('the English text below is truncated as well');
+    expect(r.body).toContain('was TRUNCATED to fit');
+    const budget = r.remediation
+      .filter((l) => l.startsWith('body budget:'))
+      .join('\n');
+    expect(budget).toContain('the English body is truncated as well');
+    expect(budget).not.toContain('the English body is complete');
   });
 
   it('does not reorder a body it never cuts', () => {
