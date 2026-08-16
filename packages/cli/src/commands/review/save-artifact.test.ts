@@ -67,6 +67,8 @@ const verdict = {
   // Non-zero on purpose: the copy test then proves passthrough, not just
   // the validator's absent-means-zero default.
   deferredCount: 2,
+  // Also non-default on purpose, for the same reason.
+  bodyTrim: { sections: 2, deferralList: true, truncated: false },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -302,6 +304,54 @@ describe('saveReviewArtifact', () => {
       expect(existsSync(paths.out)).toBe(false);
     },
   );
+
+  it.each([
+    ['not an object', 'trimmed'],
+    [
+      'a negative section count',
+      { sections: -1, deferralList: false, truncated: false },
+    ],
+    [
+      'a fractional section count',
+      { sections: 1.5, deferralList: false, truncated: false },
+    ],
+    [
+      'a non-boolean deferralList',
+      { sections: 1, deferralList: 'yes', truncated: false },
+    ],
+    [
+      'a non-boolean truncated',
+      { sections: 1, deferralList: false, truncated: 1 },
+    ],
+  ] as const)('refuses a present bodyTrim carrying %s', (_label, bad) => {
+    // Same reasoning as deferredCount above: the absent-means-default arm
+    // exists for pre-budget composed files, and it must not become a
+    // laundering path for a present record that says nothing true.
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, bodyTrim: bad });
+
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/bodyTrim/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('reads an absent or null bodyTrim as untrimmed — a pre-budget composed file must still save', () => {
+    const paths = fixture();
+    const { bodyTrim: _absent, ...preBudget } = verdict;
+    for (const composed of [preBudget, { ...verdict, bodyTrim: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.bodyTrim,
+      ).toEqual({
+        sections: 0,
+        deferralList: false,
+        truncated: false,
+      });
+      rmSync(paths.out, { force: true });
+    }
+  });
 
   it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
     // Null rides the same absence semantics compose-review's own toCount

@@ -3063,6 +3063,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
+      bodyTrim: { sections: 0, deferralList: false, truncated: false },
       lowSignal: null,
       ...over,
     });
@@ -4899,11 +4900,43 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // The blocker survives whole; the deferral display is gone, counted.
     expect(r.body).toContain(blocker);
     expect(r.body).not.toContain('Deferred under the convergence posture');
-    expect(r.body).toContain('1 disclosure section(s) were trimmed');
+    expect(r.body).toContain('(1 section(s))');
+    expect(r.body).toContain('the deferred-findings list did not fit');
     // The operator gets the same fact on stderr, not only the PR page.
     expect(r.remediation.some((line) => line.startsWith('body budget:'))).toBe(
       true,
     );
+  });
+
+  it('trims the deferral display ALONE when that is enough — the order is observable', () => {
+    // Without this shape the ordering policy has no guard: a mutant that
+    // makes the not-reviewed disclosures yield WITH the deferral display
+    // (trim 2 → 1) leaves a byte-identical body whenever both must go, so
+    // the whole suite passed under it. Here dropping rank 1 alone fits, so
+    // rank 2 must survive.
+    const blocker = 'B'.repeat(64_200);
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        bodyCriticals: [blocker],
+        deferredSuggestions: [nit(1), nit(2), nit(3)],
+        unreviewedDimensions: ['security'],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain(blocker);
+    expect(r.body).not.toContain('Deferred under the convergence posture');
+    expect(r.body).toContain('Not reviewed: security');
+    expect(r.body).toContain('(1 section(s))');
+    expect(r.body).toContain('the deferred-findings list did not fit');
+    expect(r.bodyTrim).toEqual({
+      sections: 1,
+      deferralList: true,
+      truncated: false,
+    });
+    // The verdict line must not claim a list the body does not carry.
+    expect(verdictLine(r)).toContain('trimmed from the body');
+    expect(verdictLine(r)).not.toContain('listed in the body');
   });
 
   it('trims the not-reviewed disclosures only after the deferral display', () => {
@@ -4920,7 +4953,11 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain(blocker);
     expect(r.body).not.toContain('Deferred under the convergence posture');
     expect(r.body).not.toContain('Not reviewed:');
-    expect(r.body).toContain('2 disclosure section(s) were trimmed');
+    expect(r.body).toContain('(2 section(s))');
+    expect(r.body).toContain(
+      'the deferred-findings list and the not-reviewed and non-blocking disclosures did not fit',
+    );
+    expect(r.bodyTrim.sections).toBe(2);
   });
 
   it('truncates as a last resort rather than composing a body GitHub rejects', () => {
@@ -4940,6 +4977,22 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // No half-open fold, and no lone surrogate at the cut.
     expect(r.body.includes('<details>')).toBe(r.body.includes('</details>'));
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
+  });
+
+  it('never cuts a surrogate pair when it truncates', () => {
+    // The ASCII truncation case could not fail this guard: every cut landed
+    // on a single code unit. An astral-plane blocker (CJK Extension B here,
+    // as real as an emoji in a quoted log line) puts a surrogate pair on the
+    // boundary, where removing the guard leaves a lone high surrogate in the
+    // posted body.
+    const r = composeReview(
+      base({ bodyCriticals: ['\u{20000}'.repeat(40_000)] }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain('was TRUNCATED to fit');
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.body)).toBe(false);
+    expect(r.body.includes('\uFFFD')).toBe(false);
+    expect(r.bodyTrim.truncated).toBe(true);
   });
 
   it('holds room for the ledger marker, so the POSTED body still fits', () => {

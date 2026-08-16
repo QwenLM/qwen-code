@@ -298,6 +298,19 @@ describe('bundled review skill', () => {
       'the deferral display first, the not-reviewed disclosures second',
     );
     expect(body).toContain('You do not shorten anything yourself to help it');
+    // Where a trimmed section can still be read is not uniform, and the
+    // generalized promise ("stays whole in the artifact") is false for the
+    // disclosures: the artifact persists findings, counts and the trimmed
+    // body. Pin the split, and the terminal-summary duty it creates.
+    expect(body).toContain(
+      '**a finding it trims stays whole in the findings artifact**',
+    );
+    expect(body).toContain(
+      '**A trimmed disclosure section is not a finding and has no other durable copy**',
+    );
+    expect(body).toContain(
+      '**say in your Step 6 terminal summary what was trimmed and what it said.**',
+    );
   });
 
   it('routes both remote-resolution paths through match-remote', () => {

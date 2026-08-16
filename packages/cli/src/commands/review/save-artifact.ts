@@ -239,7 +239,34 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.deferredCount must be a non-negative integer.',
     );
   }
+  // Absent reads as "no trim", the same absence semantics the sibling count
+  // gets: a composed file written before the body budget shipped carries no
+  // `bodyTrim`, and a mid-upgrade save must not fail over a record of
+  // something that did not happen. A PRESENT value of the wrong shape is
+  // refused like every other field here.
+  const rawTrim = verdict['bodyTrim'] ?? {
+    sections: 0,
+    deferralList: false,
+    truncated: false,
+  };
+  const trim = object(rawTrim, 'Composed verdict.bodyTrim');
+  if (
+    typeof trim['sections'] !== 'number' ||
+    !Number.isInteger(trim['sections']) ||
+    trim['sections'] < 0 ||
+    typeof trim['deferralList'] !== 'boolean' ||
+    typeof trim['truncated'] !== 'boolean'
+  ) {
+    throw new Error(
+      'Composed verdict.bodyTrim must carry a non-negative integer `sections` and boolean `deferralList` / `truncated`.',
+    );
+  }
   return {
+    bodyTrim: {
+      sections: trim['sections'],
+      deferralList: trim['deferralList'],
+      truncated: trim['truncated'],
+    },
     event: event(verdict['event'], 'Composed verdict.event'),
     body: string(verdict['body'], 'Composed verdict.body'),
     baseEvent: event(verdict['baseEvent'], 'Composed verdict.baseEvent'),
