@@ -171,7 +171,6 @@ type FetchPrResult = PlanReport & {
    */
   prDescriptionHasHan: boolean;
   /**
-<<<<<<< HEAD
    * Where this round's content-verdict candidate landed — the per-file
    * `(base, head)` blob pairs of everything the plan covers, plus the commit
    * anchor. Step 8 promotes it into the review cache on a clean high-effort
@@ -179,7 +178,7 @@ type FetchPrResult = PlanReport & {
    * survive a rebase. Absent when the capture had no diff to describe.
    */
   cacheCandidatePath?: string;
-=======
+  /**
    * The model this ROUND started under — the runtime identity at capture
    * time, stamped here because nothing else in the flow remembers it.
    *
@@ -232,7 +231,6 @@ type FetchPrResult = PlanReport & {
    * class the skill retries.
    */
   incremental?: IncrementalDecision;
->>>>>>> origin/review-incremental/2-local-anchor
 };
 
 export interface IncrementalDecision {
@@ -1277,12 +1275,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute,
     diffSha256,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-<<<<<<< HEAD
     ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
-=======
     ...(roundModelId ? { reviewModelId: roundModelId } : {}),
     ...(anchor ? { incremental: anchor.incremental } : {}),
->>>>>>> origin/review-incremental/2-local-anchor
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
       operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
       hasDeadline: hasReviewDeadline(process.env),
