@@ -13751,7 +13751,7 @@ describe('createAcpSessionBridge', () => {
       const factory: ChannelFactory = async () =>
         makeChannel({
           extMethodImpl: async (method) => {
-            if (method !== 'qwen/control/session/branch') return {};
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
             await new Promise<void>((resolve) => {
               releaseBranch = resolve;
             });
@@ -13787,7 +13787,7 @@ describe('createAcpSessionBridge', () => {
       const factory: ChannelFactory = async () =>
         makeChannel({
           extMethodImpl: async (method) => {
-            if (method !== 'qwen/control/session/branch') return {};
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
             return { newSessionId: 'branch-1', title: 'Branch 1' };
           },
           resumeSessionImpl: () => ({}),
@@ -22263,7 +22263,7 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () =>
           makeChannel({
             extMethodImpl: (method) => {
-              if (method !== 'qwen/control/session/branch') return {};
+              if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
               branchExtMethodSawReservation =
                 contexts.at(-1)?.operation === 'branch';
               return { newSessionId: 'branch-1', title: 'Branch 1' };
@@ -22305,7 +22305,7 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () =>
           makeChannel({
             extMethodImpl: (method) => {
-              if (method === 'qwen/control/session/branch') {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
                 throw new Error('branch failed');
               }
               return {};
@@ -22874,6 +22874,41 @@ describe('createAcpSessionBridge', () => {
       expect((metaEvent?.data as { displayName: string }).displayName).toBe(
         'Test Session',
       );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('publishes titleSource auto when the caller stamps it (#8977)', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Machine name',
+        titleSource: 'auto',
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) => e.type === 'session_metadata_updated',
+      );
+      expect(
+        (metaEvent?.data as { titleSource?: string }).titleSource,
+      ).toBe('auto');
 
       await bridge.closeSession(session.sessionId);
       await drain;

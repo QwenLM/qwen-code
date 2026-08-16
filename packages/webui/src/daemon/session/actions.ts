@@ -431,6 +431,10 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
+        // The name source is session-scoped like the name itself: a switch
+        // must not leak the previous session's `manual` stamp onto the next
+        // session's auto-generated title (#8977).
+        titleSource: undefined,
         error: undefined,
         errorStatus: undefined,
         missingSession: false,
@@ -1260,19 +1264,26 @@ export function createDaemonSessionActions({
       }
     },
 
-    async renameSession(displayName) {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Rename session failed',
-        'rename_session',
-      );
+    async renameSession(displayName, opts) {
+      const session = sessionRef.current;
+      if (!session) {
+        const error = new Error('Daemon session is not connected');
+        throw opts?.silent
+          ? error
+          : dispatchActionError(
+              addNotice,
+              'Rename session failed',
+              error,
+              'rename_session',
+            );
+      }
       try {
         return await withActionTimeout(
           session.updateMetadata({ displayName }),
           'Rename session timed out',
         );
       } catch (error) {
+        if (opts?.silent) throw error;
         throw dispatchActionError(
           addNotice,
           'Rename session failed',

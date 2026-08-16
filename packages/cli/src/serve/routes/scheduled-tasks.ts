@@ -540,6 +540,7 @@ function registerScheduledTaskCrudRoutes(
         try {
           bridge.updateSessionMetadata(boundSessionId, {
             displayName: scheduledTaskSessionName(nameResult.value ?? prompt),
+            titleSource: 'auto',
           });
         } catch {
           // metadata update is non-critical
@@ -916,6 +917,7 @@ function registerScheduledTaskCrudRoutes(
       try {
         bridge.updateSessionMetadata(updated.sessionId, {
           displayName: scheduledTaskSessionName(updated.name ?? updated.prompt),
+          titleSource: 'auto',
         });
       } catch {
         // non-critical — the schedule change already persisted
