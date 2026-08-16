@@ -4,7 +4,7 @@ import json
 import os
 import re
 
-EV = "/Users/wenshao/pr9228-verify/evidence/container"
+EV = os.environ.get("EV","/Users/wenshao/pr9228-verify/evidence/container")
 B = "\033[1m"; R = "\033[31m"; G = "\033[32m"; N = "\033[0m"; D = "\033[90m"; Y = "\033[33m"
 POOL_HISTORY_MB = 890  # the PR's measured re-download on the real pool
 

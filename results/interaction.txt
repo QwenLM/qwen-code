@@ -1,0 +1,9 @@
+variant      arm    wipe-rc   ckout-rc  MB       heal?     retry-rc / MB / verdict
+none         base   0         0         307.0    n/a       wiped .git; -
+none         head   0         0         0.1      n/a       kept .git; -
+nopack       base   0         0         307.0    n/a       wiped .git; -
+nopack       head   0         0         307.1    n/a       kept .git; -
+ghostref     base   0         0         307.0    n/a       wiped .git; -
+ghostref     head   0         0         0.1      n/a       kept .git; -
+unshallow    base   0         0         307.0    n/a       wiped .git; -
+unshallow    head   0         1         529.4    ran       kept .git; rc=0 / 307.0 MB / heal-rc=0

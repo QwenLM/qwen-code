@@ -5,7 +5,7 @@ import os
 import re
 import sys
 
-EV = "/Users/wenshao/pr9228-verify/evidence/container"
+EV = os.environ.get("EV", "/Users/wenshao/pr9228-verify/evidence/container")
 TAG = sys.argv[1] if len(sys.argv) > 1 else "full"
 B = "\033[1m"; R = "\033[31m"; G = "\033[32m"; Y = "\033[33m"; C = "\033[36m"; N = "\033[0m"; D = "\033[90m"
 
@@ -64,7 +64,8 @@ def top_level(block):
 
 
 def main():
-    print(f"{B}PR #9228 — three consecutive jobs on ONE reusable self-hosted workspace{N}")
+    print(f"{B}PR #9228 @ {os.environ.get('HEAD_SHA','?')} vs base {os.environ.get('BASE_SHA','?')} — "
+          f"three consecutive jobs on ONE reusable self-hosted workspace{N}")
     print(f"{D}Ubuntu 24.04 container · real actions/checkout@df4cb1c (v6.0.3) · real 1.1 GB")
     print(f"qwen-code history served over git smart-HTTP · wipe script taken verbatim from each arm's serve-ab.yml{N}")
     print()
@@ -126,6 +127,14 @@ def main():
         elif "rc=1" in line:
             mark = D
         print(f"   {mark}{line}{N}" if mark else f"   {line}")
+
+    ipath = os.path.join(EV, "interaction", "results.txt")
+    if os.path.exists(ipath) and os.environ.get("SHOW_INTERACTION"):
+        print()
+        print(f"{B}5. #9220's corrupt shared .git, handed to the next job through each wipe{N}")
+        for line in open(ipath).read().rstrip().split("\n"):
+            col = R if " head " in line and " 1 " in line.split("MB")[0] else ""
+            print(f"   {col}{line}{N}" if col else f"   {line}")
 
 
 if __name__ == "__main__":

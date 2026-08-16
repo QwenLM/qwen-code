@@ -39,8 +39,8 @@ workspace top level:
     tsconfig.json
     vitest.config.ts
 root .git present: yes
-root .git bytes: 323728545
-root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+root .git bytes: 328656463
+root .git objects: count: 0 size: 0 in-pack: 174719 packs: 1 size-pack: 318931 prune-packable: 0 garbage: 0 size-garbage: 0 
 planted post-checkout hook present: no
 worktree files tracked-present: 37
 stale sentinels still present:
@@ -96,8 +96,8 @@ workspace top level:
     tsconfig.json
     vitest.config.ts
 root .git present: yes
-root .git bytes: 323728651
-root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+root .git bytes: 328656569
+root .git objects: count: 0 size: 0 in-pack: 174719 packs: 1 size-pack: 318931 prune-packable: 0 garbage: 0 size-garbage: 0 
 planted post-checkout hook present: yes
 worktree files tracked-present: 42
 stale sentinels still present:
@@ -111,8 +111,8 @@ hook fire log: 0 line(s)
 workspace top level:
     .git
 root .git present: yes
-root .git bytes: 323728651
-root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+root .git bytes: 328656569
+root .git objects: count: 0 size: 0 in-pack: 174719 packs: 1 size-pack: 318931 prune-packable: 0 garbage: 0 size-garbage: 0 
 planted post-checkout hook present: yes
 worktree files tracked-present: 0
 stale sentinels still present:
@@ -128,8 +128,8 @@ workspace top level:
     base
     head
 root .git present: yes
-root .git bytes: 323728651
-root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+root .git bytes: 328656569
+root .git objects: count: 0 size: 0 in-pack: 174719 packs: 1 size-pack: 318931 prune-packable: 0 garbage: 0 size-garbage: 0 
 planted post-checkout hook present: yes
 worktree files tracked-present: 2
 stale sentinels still present:
@@ -180,8 +180,8 @@ workspace top level:
     tsconfig.json
     vitest.config.ts
 root .git present: yes
-root .git bytes: 323729114
-root .git objects: count: 0 size: 0 in-pack: 173593 packs: 1 size-pack: 314138 prune-packable: 0 garbage: 0 size-garbage: 0 
+root .git bytes: 328657032
+root .git objects: count: 0 size: 0 in-pack: 174719 packs: 1 size-pack: 318931 prune-packable: 0 garbage: 0 size-garbage: 0 
 planted post-checkout hook present: yes
 worktree files tracked-present: 37
 stale sentinels still present:

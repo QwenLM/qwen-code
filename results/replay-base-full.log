@@ -1,12 +1,12 @@
-== arm=base rate=0B/s server=http://127.0.0.1:8229 pid=8457
+== arm=base rate=0B/s server=http://127.0.0.1:8518 pid=3686
 == JOB 1 (ci.yml Test): actions/checkout at the workspace root, fetch-depth 0
-== checkout[job1-root-full] ref=main path=. depth=0 rc=0 12.1s
+== checkout[job1-root-full] ref=main path=. depth=0 rc=0 30.1s
 == planting the leftovers a previous serve-ab run would have left
 == JOB 2 (serve-ab.yml ab, arm=base): ownership restore + wipe + A/B checkouts
 == step[ownership] rc=0 0.1s  (/verify/harness/steps/base/ownership.sh)
-== step[wipe] rc=0 0.1s  (/verify/harness/steps/base/wipe.sh)
-== checkout[job2-head] ref=900221ea15f5cb14e1d6a53fb80103f61a823c75 path=head depth=1 rc=0 3.1s
-== checkout[job2-base] ref=3119d53e4d922f1f906535f6f70c155ea44df875 path=base depth=1 rc=0 3.1s
-== JOB 3 (next ci.yml Test on the same runner): checkout at root, fetch-depth 0
-== checkout[job3-root-full] ref=main path=. depth=0 rc=0 12.2s
+== step[wipe] rc=0 0.2s  (/verify/harness/steps/base/wipe.sh)
+== checkout[job2-head] ref=415d9804c41ad511af5c6d667ad8e8fd28d662e9 path=head depth=1 rc=0 6.3s
+== checkout[job2-base] ref=f7f78fab4ae9cdff4d33f7fd175554f22cefd9e6 path=base depth=1 rc=0 6.1s
+== JOB 3 (next ci.yml Test on the same runner): checkout at root, fetch-depth 0 [link=0B/s]
+== checkout[job3-root-full] ref=main path=. depth=0 rc=0 27.1s
 == done
