@@ -581,11 +581,17 @@ async function waitForSessionDrain(
   operation: Promise<void>,
   timeoutMs: number,
   kind: 'close' | 'restore',
+  displayTimeoutMs?: number,
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Session ${kind} timed out after ${timeoutMs}ms`)),
+      () =>
+        reject(
+          new Error(
+            `Session ${kind} timed out after ${displayTimeoutMs ?? timeoutMs}ms`,
+          ),
+        ),
       timeoutMs,
     );
     timer.unref();
@@ -4619,6 +4625,10 @@ class QwenAgent implements Agent {
           ? drainTimeoutMs
           : Math.max(1, conditionalDrainDeadline - Date.now()),
         'close',
+        // Report the shared budget, not the phase-2 residue — a residue like
+        // "1ms" hides that the settle phase consumed the budget and sends
+        // oncall grepping for a timeout setting that does not exist.
+        drainTimeoutMs,
       );
 
       const blockedByHolds = await this.runExclusiveHistoryMutation(

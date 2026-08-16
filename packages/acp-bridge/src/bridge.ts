@@ -149,6 +149,7 @@ import {
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   isValidTrustedModelPrompt,
+  sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -2505,9 +2506,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // even if some client id is still registered. This is a deferred explicit
     // kill, so incomplete child reporting must not turn it into ordinary
     // cleanup or leave it pending forever.
+    //
+    // `activeWorkCloseInFlight` must stay excluded (the auto-close candidacy
+    // gate used to cover it): the reaper can be mid-probe on this same entry,
+    // holding the child's close gate for up to `ACTIVE_WORK_CLOSE_TIMEOUT_MS`.
+    // A kill fired in that window reaches `beginClose()` as 'Session close is
+    // already in progress', and `killSession` escalates any close error to a
+    // channel kill — taking down every sibling session with it. The in-flight
+    // probe resolves this entry one way or the other; if it retains, the
+    // tombstone completes on the next settle event.
     if (
       byId.get(entry.sessionId) === entry &&
       !entry.closing &&
+      !entry.activeWorkCloseInFlight &&
       entry.spawnOwnerWantedKill &&
       entry.attachCount === 0
     ) {
@@ -2617,9 +2628,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
           sessionId: entry.sessionId,
           [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
-          drainTimeoutMs: Math.max(
-            1,
-            Math.floor(ACTIVE_WORK_CLOSE_TIMEOUT_MS * 0.8),
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS,
           ),
         }),
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
@@ -5015,7 +5025,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionClose,
         {
           sessionId: entry.sessionId,
-          drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+          drainTimeoutMs: sessionCloseDrainBudgetMs(initTimeoutMs),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
         },
       );
@@ -6298,7 +6308,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 SERVE_CONTROL_EXT_METHODS.sessionClose,
                 {
                   sessionId: req.sessionId,
-                  drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+                  drainTimeoutMs: sessionCloseDrainBudgetMs(initTimeoutMs),
                 },
               ),
               initTimeoutMs,

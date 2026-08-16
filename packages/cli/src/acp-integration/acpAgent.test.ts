@@ -2829,6 +2829,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(snapshots.at(-1)?.[1]).toMatchObject({
       sessions: [{ sessionId: 'legacy-active-work-session', holds: [] }],
     });
+    let closeGateHeld = false;
+    lastSessionMock?.beginClose.mockImplementation(() => {
+      closeGateHeld = true;
+      return () => {
+        closeGateHeld = false;
+      };
+    });
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
         sessionId: 'legacy-active-work-session',
@@ -2841,6 +2848,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).not.toHaveBeenCalled();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(closeGateHeld).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2878,6 +2886,22 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ? [{ category: 'shell', id: 'background-shells' }]
         : [],
     );
+    // A refusal must leave the retained Session's in-flight generation
+    // untouched: the abort loop runs only after the re-check authorizes
+    // teardown.
+    const controller = new AbortController();
+    const abort = vi.spyOn(controller, 'abort');
+    (
+      agent as unknown as {
+        generationControllers: Map<
+          string,
+          { sessionId: string; controller: AbortController }
+        >;
+      }
+    ).generationControllers.set('active-generation', {
+      sessionId: 'active-work-close-race',
+      controller,
+    });
 
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
@@ -2891,6 +2915,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalledOnce();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld).toBe(false);
 
@@ -2914,6 +2939,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.initialize({ clientCapabilities: {} });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let closeGateHeld = false;
+    lastSessionMock?.beginClose.mockImplementation(() => {
+      closeGateHeld = true;
+      return () => {
+        closeGateHeld = false;
+      };
+    });
     lastSessionMock?.collectActiveWorkHolds.mockReturnValue([]);
     lastSessionMock?.waitForActiveTurnsToSettle
       .mockImplementationOnce(
@@ -2929,7 +2961,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         drainTimeoutMs: 1_000,
       });
       await Promise.all([
-        expect(close).rejects.toThrow('Session close timed out after 400ms'),
+        // The message reports the shared budget, not the phase-2 residue.
+        expect(close).rejects.toThrow('Session close timed out after 1000ms'),
         vi.advanceTimersByTimeAsync(1_000),
       ]);
     } finally {
@@ -2937,6 +2970,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
+    expect(closeGateHeld).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a conditional close when the settle phase exceeds the shared budget', async () => {
+    await setupSessionMocks('active-work-close-settle-timeout');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let closeGateHeld = false;
+    lastSessionMock?.beginClose.mockImplementation(() => {
+      closeGateHeld = true;
+      return () => {
+        closeGateHeld = false;
+      };
+    });
+    lastSessionMock?.collectActiveWorkHolds.mockReturnValue([]);
+    // A turn that never settles must not hang the close forever: the phase-1
+    // cap rejects it and releases the gate, leaving queued work untouched.
+    // Once-only: the end-of-test dispose must fall back to the default
+    // (resolving) mock or `agentPromise` never completes.
+    lastSessionMock?.waitForActiveTurnsToSettle.mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const close = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'active-work-close-settle-timeout',
+        onlyIfUnheld: true,
+        drainTimeoutMs: 1_000,
+      });
+      await Promise.all([
+        expect(close).rejects.toThrow('Session close timed out after 1000ms'),
+        vi.advanceTimersByTimeAsync(1_000),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
+    expect(closeGateHeld).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;

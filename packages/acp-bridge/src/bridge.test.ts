@@ -117,6 +117,7 @@ import {
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
 
 function deferred<T>(): {
@@ -417,6 +418,116 @@ describe('createAcpSessionBridge', () => {
         ).resolves.toBe(false);
         await bridge.detachClient(attacher.sessionId, attacher.clientId);
 
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('defers a tombstoned kill while a conditional close probe is in flight', async () => {
+      // The reaper ignores clientIds, so it can start a conditional-close
+      // probe on a tombstoned entry whose stale attacher never detached. The
+      // probe holds the child's close gate for up to the round-trip timeout;
+      // a kill fired in that window reaches the child as 'Session close is
+      // already in progress' and `killSession` escalates any close error to a
+      // channel kill, taking every sibling session down with it.
+      const probe = deferred<Record<string, unknown>>();
+      let conditionalCloseCalls = 0;
+      let forcedCloseCalls = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            conditionalCloseCalls++;
+            return await probe.promise;
+          }
+          forcedCloseCalls++;
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      try {
+        const owner = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attacher = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: owner.sessionId, holds: [] },
+        ]);
+
+        await expect(
+          bridge.killSession(owner.sessionId, {
+            requireZeroAttaches: true,
+          }),
+        ).resolves.toBe(false);
+        await vi.waitFor(() => expect(conditionalCloseCalls).toBe(1));
+
+        // The stale attacher's late teardown detach must not fire the
+        // deferred kill into the in-flight probe.
+        await bridge.detachClient(attacher.sessionId, attacher.clientId);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(forcedCloseCalls).toBe(0);
+        expect(handle.killed).toBe(false);
+        expect(bridge.sessionCount).toBe(1);
+
+        // The probe refuses: the entry is retained and the in-flight flag
+        // clears, so the tombstone is not stuck — the next idle report
+        // completes the kill through the ordinary deferred path.
+        probe.resolve({ closed: false, holds: [agentHold('turn-1')] });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(forcedCloseCalls).toBe(0);
+        expect(bridge.sessionCount).toBe(1);
+
+        await sendActiveWorkSnapshot(handle, 2, [
+          { sessionId: owner.sessionId, holds: [] },
+        ]);
+        await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+        expect(forcedCloseCalls).toBe(1);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('does not escalate a deferred kill while a force close is in flight', async () => {
+      // A close already under way holds `entry.closing`; a deferred kill
+      // fired into it takes killSession's closing branch, which force-kills
+      // the whole channel. The detach that completes the tombstone must
+      // leave the in-flight close alone.
+      const closeGate = deferred<Record<string, unknown>>();
+      let forcedCloseCalls = 0;
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          forcedCloseCalls++;
+          return await closeGate.promise;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      try {
+        const owner = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attacher = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await expect(
+          bridge.killSession(owner.sessionId, {
+            requireZeroAttaches: true,
+          }),
+        ).resolves.toBe(false);
+
+        const close = bridge.closeSession(owner.sessionId);
+        await vi.waitFor(() => expect(forcedCloseCalls).toBe(1));
+
+        await bridge.detachClient(attacher.sessionId, attacher.clientId);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(handle.killed).toBe(false);
+        expect(bridge.sessionCount).toBe(1);
+
+        closeGate.resolve({ closed: true, holds: [] });
+        await close;
         expect(bridge.sessionCount).toBe(0);
       } finally {
         await bridge.shutdown();
@@ -777,7 +888,7 @@ describe('createAcpSessionBridge', () => {
       expect(closeCalls[0]).toMatchObject({
         sessionId: session.sessionId,
         [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
-        drainTimeoutMs: Math.floor(ACTIVE_WORK_CLOSE_TIMEOUT_MS * 0.8),
+        drainTimeoutMs: sessionCloseDrainBudgetMs(ACTIVE_WORK_CLOSE_TIMEOUT_MS),
       });
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
 
@@ -10692,7 +10803,7 @@ describe('createAcpSessionBridge', () => {
         method: SERVE_CONTROL_EXT_METHODS.sessionClose,
         params: {
           sessionId: 'restore-cleanup-fails',
-          drainTimeoutMs: 8_000,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
         },
       });
       // An uncertain cleanup is the outcome an operator most needs to see,
@@ -10744,7 +10855,7 @@ describe('createAcpSessionBridge', () => {
         method: SERVE_CONTROL_EXT_METHODS.sessionClose,
         params: {
           sessionId: sibling.sessionId,
-          drainTimeoutMs: 8_000,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
         },
       });
       expect(bridge.sessionCount).toBe(0);
@@ -23286,7 +23397,7 @@ describe('createAcpSessionBridge', () => {
         method: 'qwen/control/session/close',
         params: {
           sessionId: session.sessionId,
-          drainTimeoutMs: 8_000,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
           requireFlush: true,
         },
       });
