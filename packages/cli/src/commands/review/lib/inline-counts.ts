@@ -43,6 +43,30 @@ export function severityOf(
   return null;
 }
 
+/**
+ * The claim line a marked finding leads with: the severity marker, any
+ * colon/whitespace right after it, and every line past the first stripped.
+ * Null when the body opens with neither marker — `submit` refuses to post an
+ * unmarked finding, so an unmarked body is not a finding and has no claim
+ * line to read back.
+ *
+ * The ONE statement of the readback strip. compose-review's ledger builder
+ * and presubmit's carried-id extractor both feed this line to
+ * `LEDGER_ID_READBACK`, so the no-marker decision and the slice order can no
+ * longer drift between the write side and the read sides — the drift the
+ * shared regex removed for the id half (#9212 review).
+ */
+export function carriedClaimLine(body: string): string | null {
+  const sev = severityOf({ body });
+  if (!sev) return null;
+  const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+  const rest = body
+    .trimStart()
+    .slice(marker.length)
+    .replace(/^:?\s*/, '');
+  return rest.split('\n')[0].trim();
+}
+
 /** How many drafted comments open with each severity marker. */
 export function countInlineFindings(comments: readonly DraftedComment[]): {
   criticalsInline: number;

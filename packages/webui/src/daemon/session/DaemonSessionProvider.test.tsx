@@ -19,7 +19,10 @@ import type {
   DaemonUnrecognizedDiagnostic,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
+} from '@qwen-code/sdk/daemon';
 import {
   DaemonSessionProvider,
   useDaemonActions,
@@ -4113,23 +4116,48 @@ describe('DaemonSessionProvider', () => {
         ],
         liveJournal: [],
       },
+      events: async function* liveDiagnostics(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        for (
+          let index = 0;
+          index < UNRECOGNIZED_DIAGNOSTICS_LIMIT - 1;
+          index++
+        ) {
+          yield {
+            id: 100 + index,
+            v: 1,
+            type: `mystery_live_event_${index}`,
+            data: { label: `live-${index}` },
+          };
+        }
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
     });
     sdkMocks.sessions.push(session);
     sdkMocks.getSessionTranscriptPage.mockResolvedValue({
       v: 1,
       sessionId: session.sessionId,
       events: [
-        {
-          id: 1,
+        ...[1, 2].map((id) => ({
+          id,
           v: 1,
           type: 'session_update',
           data: {
             update: {
-              sessionUpdate: 'mystery_kind_from_newer_daemon',
-              _meta: { 'qwen.session.recordId': 'record-old' },
+              sessionUpdate: `mystery_kind_from_newer_daemon_${id}`,
+              _meta: { 'qwen.session.recordId': `record-old-${id}` },
             },
           },
-        },
+        })),
       ],
       hasMore: false,
     });
@@ -4153,16 +4181,21 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(history?.hasMore).toBe(true);
-    expect(diagnostics).toHaveLength(0);
+    await vi.waitFor(() =>
+      expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT - 1),
+    );
 
     await act(async () => {
       await history?.loadMore();
       await flushPromises();
     });
 
-    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics).toHaveLength(UNRECOGNIZED_DIAGNOSTICS_LIMIT);
     expect(diagnostics[0]).toEqual(
       expect.objectContaining({ debugReason: 'unrecognized_session_update' }),
+    );
+    expect(diagnostics[1]).toEqual(
+      expect.objectContaining({ debugReason: 'unrecognized_event' }),
     );
   });
 

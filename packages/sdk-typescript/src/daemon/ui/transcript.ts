@@ -116,6 +116,7 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
+    files?: Array<{ name: string; mimeType: string }>;
     meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
@@ -131,6 +132,9 @@ export function appendLocalUserTranscriptMessage(
   );
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
+  }
+  if (opts.files && opts.files.length > 0) {
+    (block as DaemonTextTranscriptBlock).files = [...opts.files];
   }
   appendBlock(next, block);
   next.activeUserBlockId = block.id;

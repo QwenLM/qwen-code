@@ -6265,6 +6265,54 @@ describe('Session', () => {
       );
     });
 
+    it('embeds text file resource blocks as File reference parts', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'text',
+            text: 'check this log\n\n@attachment:///app.log',
+          },
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///app.log',
+              mimeType: 'text/plain',
+              text: 'line1\nline2',
+            },
+          },
+        ],
+      });
+
+      const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+        typeof vi.fn
+      >;
+      const request = sendMessageStream.mock.calls[0]?.[1] as {
+        message: Array<Record<string, unknown>>;
+      };
+      const parts = request.message;
+      expect(
+        parts.some(
+          (p) =>
+            typeof p['text'] === 'string' &&
+            (p['text'] as string).includes(
+              'File: attachment:///app.log\nline1\nline2',
+            ),
+        ),
+      ).toBe(true);
+      expect(
+        parts.some(
+          (p) =>
+            typeof p['text'] === 'string' &&
+            (p['text'] as string).includes('@attachment:///app.log'),
+        ),
+      ).toBe(true);
+    });
+
     it('degrades an oversized inline image to a text placeholder before sending to the model', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];
