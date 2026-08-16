@@ -1,22 +1,26 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { extractInlineScript } from './index-html-test-utils';
 
 function installBootWatchdog(): void {
-  const html = readFileSync(resolve(__dirname, 'index.html'), 'utf8');
-  const script = Array.from(
-    html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g),
-  )
-    .map((match) => match[1] ?? '')
-    .find((source) => source.includes('data-boot-fallback'));
-
-  if (!script) throw new Error('Boot watchdog script not found');
-  new Function(script)();
+  new Function(extractInlineScript('data-boot-fallback'))();
 }
 
 function fallback(): Element | null {
   return document.querySelector('[data-boot-fallback]');
+}
+
+function resourceErrorEvent(src: string, message?: string): Event {
+  const script = document.createElement('script');
+  script.src = src;
+  document.body.appendChild(script);
+  // Real resource-load failures fire a bare, non-bubbling Event; the
+  // watchdog listens in the capture phase precisely so it still sees them.
+  const event = message
+    ? new ErrorEvent('error', { message })
+    : new Event('error');
+  script.dispatchEvent(event);
+  return event;
 }
 
 describe('boot watchdog', () => {
@@ -27,22 +31,60 @@ describe('boot watchdog', () => {
 
   it('shows the fallback when a module script fails to load', () => {
     installBootWatchdog();
-    const script = document.createElement('script');
-    script.src = 'http://localhost:5173/main.tsx';
-    document.body.appendChild(script);
-
-    script.dispatchEvent(
-      new ErrorEvent('error', {
-        message: 'Failed to load resource: 504 (Outdated Optimize Dep)',
-        bubbles: true,
-      }),
+    resourceErrorEvent(
+      'http://localhost:5173/main.tsx',
+      'Failed to load resource: 504 (Outdated Optimize Dep)',
     );
 
     const box = fallback();
     expect(box).not.toBeNull();
     expect(box?.textContent).toContain('Web Shell 加载失败');
     expect(box?.textContent).toContain('504 (Outdated Optimize Dep)');
+    expect(box?.textContent).toContain('http://localhost:5173/main.tsx');
     expect(box?.querySelector('button')?.textContent).toContain('Reload');
+  });
+
+  it('shows the fallback for a message-less resource error event', () => {
+    installBootWatchdog();
+    resourceErrorEvent('http://localhost:5173/main.tsx');
+
+    const box = fallback();
+    expect(box).not.toBeNull();
+    expect(box?.textContent).toContain('http://localhost:5173/main.tsx');
+  });
+
+  it('captures pre-fallback errors and rejections in the panel', () => {
+    installBootWatchdog();
+    window.dispatchEvent(
+      new ErrorEvent('error', { message: 'second failure' }),
+    );
+    const rejection = new Event('unhandledrejection');
+    Object.defineProperty(rejection, 'reason', {
+      value: new Error('rejection reason'),
+    });
+    window.dispatchEvent(rejection);
+    resourceErrorEvent('http://localhost:5173/main.tsx');
+
+    const pre = fallback()?.querySelector('pre');
+    expect(pre).not.toBeNull();
+    expect(pre?.textContent).toContain('second failure');
+    expect(pre?.textContent).toContain('rejection reason');
+  });
+
+  it('keeps the specific early reason when the grace timer later fires', () => {
+    installBootWatchdog();
+    resourceErrorEvent(
+      'http://localhost:5173/main.tsx',
+      'Failed to load resource: 504 (Outdated Optimize Dep)',
+    );
+    expect(fallback()?.textContent).toContain('504 (Outdated Optimize Dep)');
+
+    vi.advanceTimersByTime(15_001);
+
+    // The specific resource reason must not be overwritten by the generic
+    // timeout copy.
+    expect(fallback()?.textContent).toContain('504 (Outdated Optimize Dep)');
+    expect(fallback()?.textContent).not.toContain('did not start within');
   });
 
   it('shows the fallback when the app never mounts within the grace period', () => {
@@ -54,6 +96,18 @@ describe('boot watchdog', () => {
     const box = fallback();
     expect(box).not.toBeNull();
     expect(box?.textContent).toContain('did not start');
+  });
+
+  it('does not clobber the app when a resource fails after mount', () => {
+    installBootWatchdog();
+    const app = document.createElement('div');
+    app.setAttribute('data-app', '');
+    document.getElementById('root')?.appendChild(app);
+
+    resourceErrorEvent('http://localhost:5173/lazy-chunk.tsx');
+
+    expect(fallback()).toBeNull();
+    expect(document.getElementById('root')?.firstElementChild).toBe(app);
   });
 
   it('stays silent once the app has mounted', () => {

@@ -1,19 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { extractInlineScript } from './index-html-test-utils';
 
 function installMeasureGuard(
   measure: (...args: unknown[]) => unknown,
 ): Performance {
-  const html = readFileSync(resolve(__dirname, 'index.html'), 'utf8');
-  const script = Array.from(
-    html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g),
-  )
-    .map((match) => match[1] ?? '')
-    .find((source) => source.includes('performance.measure ='));
-
-  if (!script) throw new Error('Performance measure guard not found');
-
+  const script = extractInlineScript('performance.measure =');
   const performance = { measure };
   Function('performance', 'DOMException', script)(performance, DOMException);
   return performance as Performance;
