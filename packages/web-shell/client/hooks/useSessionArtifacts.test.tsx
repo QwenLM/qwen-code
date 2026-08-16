@@ -225,19 +225,32 @@ describe('useSessionArtifacts', () => {
     // A transient `Failed to fetch` on an automatic refresh is noise the user
     // cannot act on. The panel keeps last-good artifacts when it has them,
     // clears `loading`, and exposes no error state.
+    //
+    // Every mocked load is a deferred settled explicitly inside `act` (and
+    // awaited there), the same shape the pre-existing tests in this file
+    // use: flushing with a bare microtask left the hook's refresh
+    // continuation off the commit under full-suite parallel load, making
+    // the last-good assertions intermittently see `artifacts === []`
+    // (#7427 review).
+    const load1 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const load2 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const load3 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const load4 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const load5 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     sdkMock.actions.loadArtifacts
-      .mockRejectedValueOnce(new Error('Failed to fetch'))
-      .mockResolvedValueOnce({ artifacts: [artifact('current-artifact')] })
-      .mockRejectedValueOnce(new Error('Failed to fetch'))
-      .mockRejectedValueOnce(new Error('Failed to fetch'))
-      .mockResolvedValueOnce({ artifacts: [artifact('recovered-artifact')] });
+      .mockReturnValueOnce(load1.promise)
+      .mockReturnValueOnce(load2.promise)
+      .mockReturnValueOnce(load3.promise)
+      .mockReturnValueOnce(load4.promise)
+      .mockReturnValueOnce(load5.promise);
 
     await renderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
 
     // Automatic refresh #1: initial mount fails before any last-good data exists.
     await act(async () => {
-      await Promise.resolve();
+      load1.reject(new Error('Failed to fetch'));
+      await load1.promise.catch(() => undefined);
     });
     expect(latestState?.loading).toBe(false);
     expect(latestState?.error).toBeNull();
@@ -248,7 +261,8 @@ describe('useSessionArtifacts', () => {
     await rerenderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     await act(async () => {
-      await Promise.resolve();
+      load2.resolve({ artifacts: [artifact('current-artifact')] });
+      await load2.promise;
     });
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'current-artifact',
@@ -263,7 +277,8 @@ describe('useSessionArtifacts', () => {
     await rerenderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
     await act(async () => {
-      await Promise.resolve();
+      load3.reject(new Error('Failed to fetch'));
+      await load3.promise.catch(() => undefined);
     });
     expect(latestState?.loading).toBe(false);
     expect(latestState?.error).toBeNull();
@@ -276,7 +291,8 @@ describe('useSessionArtifacts', () => {
     await rerenderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(4);
     await act(async () => {
-      await Promise.resolve();
+      load4.reject(new Error('Failed to fetch'));
+      await load4.promise.catch(() => undefined);
     });
     expect(latestState?.loading).toBe(false);
     expect(latestState?.error).toBeNull();
@@ -293,7 +309,8 @@ describe('useSessionArtifacts', () => {
     await rerenderHookHost();
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(5);
     await act(async () => {
-      await Promise.resolve();
+      load5.resolve({ artifacts: [artifact('recovered-artifact')] });
+      await load5.promise;
     });
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'recovered-artifact',
@@ -301,15 +318,18 @@ describe('useSessionArtifacts', () => {
   });
 
   it('ignores loading cleanup from superseded artifact refresh failures', async () => {
+    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const staleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const finalLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     sdkMock.actions.loadArtifacts
-      .mockResolvedValueOnce({ artifacts: [artifact('current-artifact')] })
+      .mockReturnValueOnce(initialLoad.promise)
       .mockReturnValueOnce(staleLoad.promise)
-      .mockResolvedValueOnce({ artifacts: [artifact('replacement')] });
+      .mockReturnValueOnce(finalLoad.promise);
 
     await renderHookHost();
     await act(async () => {
-      await Promise.resolve();
+      initialLoad.resolve({ artifacts: [artifact('current-artifact')] });
+      await initialLoad.promise;
     });
 
     sdkMock.artifactsVersion = 1;
@@ -318,21 +338,55 @@ describe('useSessionArtifacts', () => {
 
     sdkMock.artifactsVersion = 2;
     await rerenderHookHost();
+    // The stale failure lands while the superseding load is still in
+    // flight — the requestId guard must keep its cleanup from clearing
+    // `loading` prematurely (R2-2, #7427 review).
     await act(async () => {
-      await Promise.resolve();
+      staleLoad.reject(new Error('Failed to fetch'));
+      await staleLoad.promise.catch(() => undefined);
+    });
+    expect(latestState?.loading).toBe(true);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+
+    await act(async () => {
+      finalLoad.resolve({ artifacts: [artifact('replacement')] });
+      await finalLoad.promise;
     });
     expect(latestState?.loading).toBe(false);
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'replacement',
     ]);
+  });
 
+  it('refreshes when the prompt settles from waiting to idle (#7427)', async () => {
+    // `'waiting'` is a real prompt status (queued prompt / observer text
+    // deltas before any generation signal); the settling trigger must not
+    // be specialized to `'streaming'` (#7427 review).
+    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const settleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockReturnValueOnce(settleLoad.promise);
+    sdkMock.promptStatus = 'waiting';
+
+    await renderHookHost();
     await act(async () => {
-      staleLoad.reject(new Error('Failed to fetch'));
-      await staleLoad.promise.catch(() => undefined);
+      initialLoad.resolve({ artifacts: [artifact('current-artifact')] });
+      await initialLoad.promise;
     });
-    expect(latestState?.loading).toBe(false);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+
+    sdkMock.promptStatus = 'idle';
+    await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      settleLoad.resolve({ artifacts: [artifact('settled-artifact')] });
+      await settleLoad.promise;
+    });
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
-      'replacement',
+      'settled-artifact',
     ]);
   });
 });
