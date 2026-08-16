@@ -7,7 +7,8 @@
 // `qwen review scratch-tree`: a private copy of the PR head for one verifier to
 // mutate, so the tree everyone else is READING stays exactly as the PR left it.
 //
-// Step 4's verifier is the one review agent whose job requires writing code: it
+// Step 4's verifier was the last review step still writing into the shared tree
+// (Agent 7's efficacy probe has had a disposable sibling since #6832): it
 // writes a probe, runs it, applies the one-line fix the finding implies to show
 // the probe flips, and restores. Until now it did all of that in the shared
 // review worktree — the tree `working_dir` pins every other agent to as well.
@@ -36,7 +37,7 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -45,6 +46,7 @@ import {
   scratchLabel,
   scratchWorktreePath,
 } from './lib/paths.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -102,8 +104,22 @@ export interface ScratchTreeArgs {
   out?: string;
 }
 
+/**
+ * `git`, with the user's hooks out of the way.
+ *
+ * A scratch tree is a LINKED worktree, so its hooks resolve to the common dir —
+ * the user's own `.git/hooks`. `git worktree add` and `checkout` both fire
+ * `post-checkout` from there, which means this command would run whatever hooks
+ * that repository has (and whatever a probe managed to write into it) as a side
+ * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
+ * that holds no hooks is the whole fix for OUR invocations; what a probe does
+ * with its own shell is the probe's business, and the report says plainly that
+ * the common dir is shared rather than isolated.
+ */
+const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
+
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', [...NO_HOOKS, ...args], { cwd, encoding: 'utf8' });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
@@ -148,6 +164,16 @@ function resetScratchTree(tree: string, headSha: string): boolean {
     // lives, and rebuilding it every call is the cost this reuse path exists to
     // avoid.
     git(tree, 'clean', '-ffd');
+    // `checkout --force` silently skips a file carrying the skip-worktree bit,
+    // and `clean` never touches tracked files — so a probe that set the bit
+    // (directly, or via `git sparse-checkout`) and then edited the file leaves
+    // a mutant that survives the reset with `git status` reading empty. The
+    // sha check cannot see it. Refusing here sends the caller down the
+    // discard-and-rebuild path, which is guaranteed clean.
+    const hidden = gitOut(tree, 'ls-files', '-v')
+      .split('\n')
+      .some((line) => /^[a-zS]/.test(line));
+    if (hidden) return false;
     return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
@@ -200,10 +226,13 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   // call found it and can never be confused with anything this call did.
   const residue = worktreeResidue(worktree);
   const sharedTreeResidue = residue.paths;
-  const residueNote =
-    sharedTreeResidue.length > 0
+  const residueNote = residue.unmeasured
+    ? ` NOTE: whether the shared review worktree is clean could not be measured (git status ` +
+      `failed: ${residue.unmeasured}). An unmeasured tree is not a clean one — if a later read ` +
+      'of it surprises you, check the path against `git show HEAD:<path>` before believing it.'
+    : sharedTreeResidue.length > 0
       ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue
-          .map(inertPath)
+          .map((path) => shellQuotePath(inertPath(path)))
           .join(', ')} ` +
         `${sharedTreeResidue.length === 1 ? 'is' : 'are'} not in ${headSha.slice(0, 9)}` +
         (residue.total > sharedTreeResidue.length
@@ -223,6 +252,20 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 
   const tree = scratchWorktreePath(worktree, label);
   if (existsSync(tree) && resetScratchTree(tree, headSha)) {
+    // The reset spares ignored paths — that is what keeps the farm cheap — and
+    // `node_modules` is exactly where a probe is told it may install. So the
+    // farm is the one ignored path that does NOT survive a reuse: anything a
+    // previous probe added there would otherwise resolve as a dependency for
+    // every later probe in this shard, which is a wrong verdict carrying a
+    // deterministic source tag. Re-linking costs a second; trusting it costs a
+    // verdict.
+    try {
+      rmSync(resolve(tree, 'node_modules'), { recursive: true, force: true });
+    } catch {
+      // Could not clear it: `farmDependencies` then reports what it finds, and
+      // the marker check keeps a farm this code did not build from being
+      // certified as one.
+    }
     const dependencies = farmDependencies(tree, worktree);
     return {
       available: true,
@@ -233,8 +276,11 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       sharedTreeResidue,
       sharedTreeResidueTotal: residue.total,
       note:
-        `your scratch tree is at ${tree}, restored to ${headSha.slice(0, 9)} ` +
-        `(reusing the one an earlier call created — anything you left in it is gone).` +
+        `your scratch tree is at ${shellQuotePath(tree)}, restored to ${headSha.slice(0, 9)} ` +
+        '(reusing the one an earlier call created — every tracked file is back at ' +
+        'the commit and every untracked file you wrote is gone; GITIGNORED paths ' +
+        'are deliberately spared, which is what keeps the dependency farm, so a ' +
+        'build cache or a `dist/` from your last probe is still there).' +
         dependencyNote(dependencies) +
         residueNote,
     };
@@ -275,10 +321,14 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     sharedTreeResidue,
     sharedTreeResidueTotal: residue.total,
     note:
-      `your scratch tree is at ${tree}, checked out at ${headSha.slice(0, 9)}. ` +
+      `your scratch tree is at ${shellQuotePath(tree)}, checked out at ${headSha.slice(0, 9)}. ` +
       'Write your probe there, mutate there, apply the candidate fix there; the ' +
       'review worktree stays read-only. `cleanup` sweeps this at the end of the ' +
-      'review.' +
+      'review. It is a LINKED worktree, so its working tree is yours alone but ' +
+      "the repository state behind it — hooks, config, refs — is the user's own " +
+      'repository: this command runs its own git with hooks disabled, and you ' +
+      'should treat anything under `git rev-parse --git-common-dir` as shared, ' +
+      'not scratch.' +
       dependencyNote(dependencies) +
       residueNote,
   };
@@ -350,7 +400,7 @@ function dependencyNote(dependencies: {
   return (
     ` ${farm.linked} dependencies linked in` +
     (farm.failed > 0
-      ? `, ${farm.failed} could not be — a harness that cannot resolve a package is an environment gap, not a finding.`
+      ? `, ${farm.failed} could not be${farm.linked === 0 ? ' — so a JS unit harness may not start here' : ''}: a harness that cannot resolve a package is an environment gap, not a finding, and never a reason to probe in the review worktree instead.`
       : '.')
   );
 }

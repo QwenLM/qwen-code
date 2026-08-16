@@ -1102,6 +1102,15 @@ function worktreeEvidenceBlock(
         'step of filing a Critical against it.)',
     );
   }
+  if (residue?.unmeasured) {
+    parts.push(
+      '',
+      `**Whether it is clean could not be measured** (\`git status\` failed: ` +
+        `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
+        'anything that surprises you in this tree as unverified until you have ' +
+        'checked it against `git show HEAD:<path>`.',
+    );
+  }
   if (residue && residue.paths.length > 0) {
     const unlisted = residue.total - residue.paths.length;
     parts.push(
@@ -1120,7 +1129,11 @@ function worktreeEvidenceBlock(
         'not from the file on disk; where that command answers that the path is not ' +
         'in HEAD, it was written into the tree after the commit, which settles it. ' +
         'Say in your return that you saw them, so the orchestrator can have the ' +
-        'tree cleared.',
+        'tree cleared — by shape: `git checkout HEAD -- <path>` for a tracked ' +
+        'file, `rm -rf <path>` for anything untracked, and `git rm --cached ' +
+        '<path>` first for a path STAGED as new or a staged rename, which ' +
+        '`git checkout HEAD --` cannot match at all (a staged rename is listed ' +
+        'under both of its names, and both need clearing).',
     );
   }
   return parts;
@@ -1328,7 +1341,8 @@ export function buildRoleBrief(
     }),
   );
 
-  // The verifier is the review's one WRITING agent, so it gets a tree of its own
+  // The verifier is the last writing step without a tree of its own (Agent 7's
+  // efficacy probe has had one since #6832), so it gets one here
   // — the command welded in with its path and its per-shard label, the way Agent
   // 7's build-test invocation is, because a probe run in the shared worktree is
   // read by the next round's auditors as the PR's own code (#9207).
@@ -1346,10 +1360,13 @@ export function buildRoleBrief(
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
-          'Stand it up the first time a finding needs a run, and again whenever you ' +
-          'want it pristine: every call hands back the commit under review, with ' +
-          "the review worktree's `node_modules` linked in so a unit harness starts " +
-          'without an install.',
+          'Stand it up the first time a finding needs a run, and again to reset it ' +
+          'between findings: every call puts every tracked file back at the commit ' +
+          "under review and deletes what you wrote, with the review worktree's " +
+          '`node_modules` linked in so a unit harness starts without an install. ' +
+          'GITIGNORED paths are spared — that is what keeps the dependency farm, ' +
+          'and it means a build cache or a `dist/` from your last probe survives ' +
+          'the reset; clear those yourself when a probe turns on them.',
         '',
         '```bash',
         // Quoted, like every other path this file prints into a command: an
@@ -2746,6 +2763,13 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // think it is. Cheap enough to do unconditionally (one `git status` per call,
   // not per agent) and silent on a clean tree, which is every healthy run.
   const residue = worktreeResidueOf(report);
+  if (residue.unmeasured) {
+    writeStderrLine(
+      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+        `${residue.unmeasured}). Every brief built by this call says so; an unmeasured tree is ` +
+        'not a clean one.',
+    );
+  }
   if (residue.paths.length > 0) {
     const unlisted = residue.total - residue.paths.length;
     writeStderrLine(

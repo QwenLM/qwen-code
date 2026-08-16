@@ -16,6 +16,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -396,9 +397,17 @@ function scratchWorktreesOf(worktree: string): string[] {
   let entries: string[];
   try {
     entries = readdirSync(parent);
-  } catch {
-    // No temp dir at all: a review whose worktree was never created, or one
-    // already cleaned. Nothing to sweep, and nothing worth reporting.
+  } catch (err) {
+    // ENOENT is the ordinary case: a review whose worktree was never created,
+    // or one already cleaned. Anything else means the sweep did not happen —
+    // and a silent skip leaks a full checkout per shard while stdout goes on to
+    // announce "Nothing to clean", so it is disclosed the way the side-file
+    // sweep below discloses its own read failures.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      writeStderrLine(
+        `Failed to read ${parent} for scratch worktrees: ${(err as Error).message}`,
+      );
+    }
     return [];
   }
   return entries
@@ -466,6 +475,23 @@ export function runCleanup(target: string): void {
     // path that does not exist, and nothing outside the review's own temp dir
     // can match the prefix.
     for (const path of scratchWorktreesOf(wt)) {
+      // A dangling symlink at a family path is invisible to `releaseWorktree`
+      // (its `existsSync` follows the link, so it reports "never existed" and
+      // its `rmSync` never runs) — and it would still block the next review's
+      // `git worktree add` with `already exists`. `lstatSync` sees the link
+      // itself, and `rmSync` unlinks it rather than following it, which is the
+      // same reasoning `discardWorktree` documents for its own leftovers.
+      try {
+        if (!existsSync(path) && lstatSync(path).isSymbolicLink()) {
+          rmSync(path, { force: true });
+          writeStdoutLine(`Removed scratch worktree link: ${path}`);
+          removedAny = true;
+          continue;
+        }
+      } catch {
+        // Not a symlink, or gone between the two calls: fall through to the
+        // ordinary release below.
+      }
       report('scratch worktree', path);
     }
     // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),

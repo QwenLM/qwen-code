@@ -36,9 +36,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 
 describe('runScratchTree', () => {
   let repo: string;
+  // See `lib/worktree.test.ts`: a polluted host gitconfig makes the fixture
+  // commit throw, and every test here errors before it asserts anything.
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
   let worktree: string;
   let headSha: string;
 
@@ -49,6 +53,7 @@ describe('runScratchTree', () => {
     runScratchTree({ worktree, label });
 
   beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
     repo = mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-'));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
@@ -66,7 +71,10 @@ describe('runScratchTree', () => {
     git(repo, 'worktree', 'add', '--detach', '-q', worktree, headSha);
   });
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
 
   it('stands up a sibling tree at the commit under review', () => {
     const r = run();
@@ -177,6 +185,79 @@ describe('runScratchTree', () => {
     expect(existsSync(nested)).toBe(false);
   });
 
+  it('refuses to call a tree pristine when skip-worktree hides a mutant', () => {
+    // `checkout --force` silently skips a file carrying the bit and `clean`
+    // never touches tracked files, so the mutant survives with `git status`
+    // reading empty and the sha still matching. The reset has to notice and
+    // hand the caller the rebuild path instead.
+    const first = run();
+    execFileSync('git', ['update-index', '--skip-worktree', 'a.ts'], {
+      cwd: first.path!,
+    });
+    writeFileSync(join(first.path!, 'a.ts'), 'MUTANT\n');
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false); // rebuilt, not "reset"
+    expect(readFileSync(join(second.path!, 'a.ts'), 'utf8')).toBe(
+      'export const x = 1;\n',
+    );
+  });
+
+  it('rebuilds when the leftover has a .git that git cannot use', () => {
+    // A gitfile whose admin dir is gone (a killed cleanup, a `worktree prune`)
+    // passes the registration gate and fails inside the reset — the catch must
+    // take it to discard-and-rebuild rather than let the throw escape.
+    const first = run();
+    writeFileSync(join(first.path!, '.git'), 'gitdir: /nowhere/at/all\n');
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false);
+    expect(
+      execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: second.path!,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe(headSha);
+  });
+
+  it("never fires the user repository's hooks", () => {
+    // The scratch tree is a LINKED worktree, so its hooks resolve to the common
+    // dir — the user's own `.git/hooks`. `worktree add` and `checkout` both run
+    // `post-checkout` from there, which would make creating or resetting a
+    // scratch tree execute whatever that repository holds.
+    const log = join(repo, 'hook.log');
+    const hook = join(repo, '.git', 'hooks', 'post-checkout');
+    mkdirSync(dirname(hook), { recursive: true });
+    writeFileSync(hook, `#!/bin/sh\necho fired >> ${log}\n`);
+    chmodSync(hook, 0o755);
+
+    run(); // creation path
+    run(); // reset path
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it('replaces a node_modules it did not build rather than trusting it', () => {
+    // `clean -ffd` spares ignored paths to keep the farm — which equally spares
+    // whatever a probe installed or planted there. Certifying that as the farm
+    // makes every later probe in the shard resolve imports through it.
+    mkdirSync(join(worktree, 'node_modules', 'vitest'), { recursive: true });
+    const first = run();
+    expect(first.dependencies).toMatchObject({ linked: 1 });
+    writeFileSync(
+      join(first.path!, 'node_modules', 'planted-stub.js'),
+      'module.exports = 1;\n',
+    );
+
+    const second = run();
+    expect(second.reused).toBe(true);
+    expect(
+      existsSync(join(second.path!, 'node_modules', 'planted-stub.js')),
+    ).toBe(false);
+    expect(existsSync(join(second.path!, 'node_modules', 'vitest'))).toBe(true);
+  });
+
   it('refuses a label that flattens to nothing rather than sharing one tree', () => {
     // `???` and `!!!` are two different non-empty labels with no path-safe
     // character between them: a fallback would put both shards in one tree —
@@ -188,7 +269,7 @@ describe('runScratchTree', () => {
     }
   });
 
-  it('keeps the farm on reuse, and says the farm was already there', () => {
+  it('rebuilds the farm on reuse rather than inheriting it', () => {
     mkdirSync(join(worktree, 'node_modules', 'vitest'), { recursive: true });
     const first = run();
     expect(first.dependencies).toEqual({
@@ -199,13 +280,13 @@ describe('runScratchTree', () => {
 
     const second = run();
     expect(second.reused).toBe(true);
+    // Re-linked rather than trusted: `node_modules` is the one ignored path a
+    // reuse does not inherit, because it is where a probe may install.
     expect(second.dependencies).toEqual({
-      linked: 0,
+      linked: 1,
       failed: 0,
-      alreadyPresent: true,
+      alreadyPresent: false,
     });
-    expect(second.note).toContain('`node_modules` was already in place');
-    // The farm the reset spared is the whole point of reusing the tree.
     expect(existsSync(join(second.path!, 'node_modules', 'vitest'))).toBe(true);
   });
 
@@ -238,8 +319,16 @@ describe('runScratchTree', () => {
       try {
         const r = run();
         expect(r.available).toBe(true);
-        expect(r.dependencies).toBeNull();
-        expect(r.note).toContain("Linking the review worktree's dependencies");
+        // Counted, not swallowed and not thrown: the farm is best-effort, and
+        // "0 linked, 1 failed" is the honest shape — never "the review worktree
+        // has no node_modules", which sends the verifier to install a tree that
+        // only needed a retry.
+        expect(r.dependencies).toEqual({
+          linked: 0,
+          failed: 1,
+          alreadyPresent: false,
+        });
+        expect(r.note).toContain('could not be');
         expect(r.note).not.toContain('has no `node_modules`');
       } finally {
         chmodSync(nm, 0o755);

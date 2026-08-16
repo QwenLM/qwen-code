@@ -439,7 +439,7 @@ Three deliberate limits:
 
 ## Why the verifier writes in a tree nobody reads
 
-The review's agents are readers. One is not: the Step 4 verifier writes a probe file, runs it, applies the one-line fix the finding implies to show the probe flips, and restores. Its brief has always ended that procedure with "leave the tree as you found it", and verifiers obey it — the tree is clean by the time they return.
+The review's agents are readers, with two exceptions that write in order to measure: Agent 7's test-efficacy probe, which has run in a disposable sibling worktree since #6832, and the Step 4 verifier — which did not. It writes a probe file, runs it, applies the one-line fix the finding implies to show the probe flips, and restores. Its brief has always ended that procedure with "leave the tree as you found it", and verifiers obey it — the tree is clean by the time they return.
 
 That rule closes the wrong window. Every agent is pinned to the same worktree by `working_dir`, and the reverse-audit loop is **pipelined**: round _k_'s verifiers are launched in the same response as round _k+1_'s auditors, precisely so nobody waits on a verdict the next round does not need. So the interval in which a probe's mutant sits in the tree is the interval in which auditors are reading that tree. Restoring afterwards makes the residue transient; it does not make it invisible, and a reader cannot tell a transient mutation from the PR's own code — that is what "reading the working tree" means.
 

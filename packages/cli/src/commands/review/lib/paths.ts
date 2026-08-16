@@ -175,11 +175,17 @@ export function scratchWorktreePrefix(worktree: string): string {
  * the label exists to prevent, reached through the sanitiser.
  */
 export function scratchLabel(label: string): string {
-  return label
-    .replace(/[^A-Za-z0-9._-]/g, '_')
-    .replace(/\.\.+/g, '_')
-    .replace(/^[._]+/, '')
-    .slice(0, 64);
+  return (
+    label
+      .replace(/[^A-Za-z0-9._-]/g, '_')
+      .replace(/\.\.+/g, '_')
+      // Leading `.`/`_` would make a hidden directory; a leading `-` is worse
+      // than cosmetic — the label is welded into `scratch-tree --label <it>`,
+      // and yargs reads `-rm` as flags, so the command dies before it can
+      // report while the brief still shows a label.
+      .replace(/^[._-]+/, '')
+      .slice(0, 64)
+  );
 }
 
 /** Local branch ref name for a fetched PR head. */
@@ -238,10 +244,16 @@ export function tmpPrefix(target: string): string {
  * reach a terminal from any of the three.
  */
 export function inertPath(p: string): string {
-  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
-  // control sequence in a filename must not reach a terminal either); U+2500 is
-  // the roster separator glyph; the backtick would close the Markdown code span
-  // these paths are rendered inside, letting the tail of a filename run as
-  // markup in the file the agent treats as authoritative.
-  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
+  // `\p{Cc}` covers every control character (newlines, tabs, ESC — a terminal
+  // control sequence in a filename must not reach a terminal either); `\p{Cf}`
+  // covers the INVISIBLE ones that survive it — bidi overrides and isolates
+  // (U+202A-202E, U+2066-2069) can reverse the rendering of the rest of the
+  // line, and zero-width joiners and the BOM hide characters inside a path a
+  // reader is being asked to judge; `\p{Zl}`/`\p{Zp}` are the line and
+  // paragraph separators, which open a new line in the Markdown the same way a
+  // newline does. U+2500 is the roster separator glyph, and the backtick would
+  // close the Markdown code span these paths are rendered inside, letting the
+  // tail of a filename run as markup in the file the agent treats as
+  // authoritative.
+  return p.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u2500`]+/gu, ' ');
 }

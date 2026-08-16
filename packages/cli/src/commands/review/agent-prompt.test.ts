@@ -70,6 +70,7 @@ import {
   SHELL_MODEL_LAYERS,
 } from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   readRecordedPrompts,
   briefPath,
@@ -1339,6 +1340,12 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     // the tree those agents are about to read is not the commit they think it
     // is. A real git worktree, because `git status` is the oracle.
     const dir = mkdtempSync(join(tmpdir(), 'ap-residue-'));
+    // Ambient host git config (a global `commit.gpgsign` with no key, a
+    // `core.hooksPath` that fails) makes the fixture commit throw and reddens
+    // this test for reasons the branch never touched — the incident
+    // `isolateHostGitConfig` exists for, and what every sibling real-git suite
+    // already guards against.
+    const gitIsolation = isolateHostGitConfig();
     try {
       const git = (...args: string[]) =>
         execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
@@ -1373,8 +1380,18 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
       expect(brief).toContain('And right now it is not clean');
       expect(brief).toContain('`a.ts`');
+      // Every launch class gets the residue, not just the one role this test
+      // used to inspect: Agent 7 turns residue into pre-confirmed
+      // `[build]`/`[test]` findings, and the verifier must act on it.
+      expect(readFileSync(briefPath(plan, '7'), 'utf8')).toContain(
+        'And right now it is not clean',
+      );
+      expect(readFileSync(briefPath(plan, '1b'), 'utf8')).toContain(
+        'And right now it is not clean',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
+      gitIsolation.dispose();
     }
   });
 

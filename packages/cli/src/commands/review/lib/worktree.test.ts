@@ -23,6 +23,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isolateHostGitConfig } from './test-utils.js';
 import {
   exposeDependencies,
   worktreeCreateFailureDetail,
@@ -31,11 +32,18 @@ import {
 
 describe('worktreeResidue', () => {
   let repo: string;
+  // Ambient host git config makes the fixture commit throw — a global
+  // `commit.gpgsign` with no usable key, a `core.hooksPath` that prompts — and
+  // the suite then fails for reasons the branch never touched (the incident
+  // `isolateHostGitConfig` was written for). Every sibling real-git suite
+  // isolates; these do too.
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
   const git = (...args: string[]) =>
     execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
 
   beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
     repo = mkdtempSync(join(tmpdir(), 'qwen-residue-'));
     git('init', '-q', '-b', 'main');
     git('config', 'user.email', 't@t.t');
@@ -46,7 +54,10 @@ describe('worktreeResidue', () => {
     git('commit', '-qm', 'head');
   });
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
 
   it('is empty for the tree a review actually reads', () => {
     expect(worktreeResidue(repo)).toEqual({ paths: [], total: 0 });
@@ -70,9 +81,23 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(repo)).toEqual({ paths: [], total: 0 });
   });
 
-  it('reports the NEW path of a rename, not the arrow line', () => {
+  it('reports BOTH names of a rename — the restore needs the one that is gone', () => {
+    // The destination is what sits in the tree; the original is what is missing
+    // from it, and `git checkout HEAD -- <dest>` cannot restore a name the
+    // report never yielded. Reporting only the destination left the reader with
+    // a staged `D <orig>` it had never been told about.
     git('mv', 'a.ts', 'b.ts');
-    expect(worktreeResidue(repo).paths).toEqual(['b.ts']);
+    expect(worktreeResidue(repo).paths.sort()).toEqual(['a.ts', 'b.ts']);
+  });
+
+  it('reports STAGED residue, which is the shape a probe leaves with `git add`', () => {
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    writeFileSync(join(repo, 'staged-new.ts'), 'x\n');
+    git('add', 'a.ts', 'staged-new.ts');
+    expect(worktreeResidue(repo).paths.sort()).toEqual([
+      'a.ts',
+      'staged-new.ts',
+    ]);
   });
 
   it('hands back names that survive being turned into commands', () => {
@@ -111,25 +136,44 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(repo, 3).total).toBe(20);
   });
 
-  it('says "clean" rather than throwing when git cannot answer', () => {
-    // A diagnostic that throws fails the build it is only commenting on.
-    expect(worktreeResidue(join(repo, 'no-such-dir'))).toEqual({
-      paths: [],
-      total: 0,
-    });
+  it('says UNMEASURED, not clean, when git cannot answer', () => {
+    // A diagnostic that throws fails the build it is only commenting on — but
+    // one that returns "clean" for a check that never ran is worse: the
+    // overload case (a status too big for the buffer) is the one where the tree
+    // is dirtiest, and both renderers used to read the empty list as pristine.
+    const gone = worktreeResidue(join(repo, 'no-such-dir'));
+    expect(gone.paths).toEqual([]);
+    expect(gone.unmeasured).toBeTruthy();
     const notARepo = mkdtempSync(join(tmpdir(), 'qwen-not-a-repo-'));
     try {
-      expect(worktreeResidue(notARepo)).toEqual({ paths: [], total: 0 });
+      expect(worktreeResidue(notARepo).unmeasured).toBeTruthy();
     } finally {
       rmSync(notARepo, { recursive: true, force: true });
     }
+    // A clean tree carries no reason — that is what makes the two states
+    // distinguishable at the renderers.
+    expect(worktreeResidue(repo).unmeasured).toBeUndefined();
   });
 });
 
 describe('exposeDependencies', () => {
+  // Every fixture here mkdtemps; without this they accumulated in $TMPDIR on
+  // every local and CI run, unlike the block above which cleans up.
+  const made: string[] = [];
+  const tmp = (prefix: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    made.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    for (const dir of made.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('links top-level and scoped packages, counting what it linked', () => {
-    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
+    const root = tmp('expose-root-');
+    const probe = tmp('expose-probe-');
     const nm = join(root, 'node_modules');
     mkdirSync(join(nm, 'plain-pkg'), { recursive: true });
     mkdirSync(join(nm, '@scope', 'inner-pkg'), { recursive: true });
@@ -139,10 +183,11 @@ describe('exposeDependencies', () => {
     const got = exposeDependencies(probe, root);
 
     expect(got).toEqual({ linked: 2, failed: 0, alreadyPresent: false });
-    expect(readdirSync(join(probe, 'node_modules')).sort()).toEqual([
-      '@scope',
-      'plain-pkg',
-    ]);
+    expect(
+      readdirSync(join(probe, 'node_modules'))
+        .filter((e) => !e.startsWith('.'))
+        .sort(),
+    ).toEqual(['@scope', 'plain-pkg']);
     expect(
       lstatSync(join(probe, 'node_modules', 'plain-pkg')).isSymbolicLink(),
     ).toBe(true);
@@ -159,8 +204,8 @@ describe('exposeDependencies', () => {
     // the root farm fails to resolve exactly the package that could not be
     // hoisted. Measured on this repo: a scratch tree with 1 560 root packages
     // linked still could not resolve `@testing-library/react` for a UI probe.
-    const root = mkdtempSync(join(tmpdir(), 'expose-ws-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-ws-probe-'));
+    const root = tmp('expose-ws-root-');
+    const probe = tmp('expose-ws-probe-');
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ workspaces: ['packages/*'] }),
@@ -191,21 +236,39 @@ describe('exposeDependencies', () => {
     expect(existsSync(join(probe, 'packages', 'absent'))).toBe(false);
   });
 
-  it('leaves an already-built probe farm untouched', () => {
-    const root = mkdtempSync(join(tmpdir(), 'expose-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-probe-'));
+  it('leaves a farm THIS code built untouched, and rebuilds one it did not', () => {
+    // The marker is the difference between "the packages I linked last time"
+    // and "whatever a probe left in the one directory it is allowed to install
+    // into". `alreadyPresent` off bare existence certified a planted module
+    // stub as the dependency farm for every later probe in that tree.
+    const root = tmp('expose-root-');
+    const probe = tmp('expose-probe-');
     mkdirSync(join(root, 'node_modules', 'plain-pkg'), { recursive: true });
-    mkdirSync(join(probe, 'node_modules', 'standing-pkg'), { recursive: true });
 
-    // `alreadyPresent` is the half `{0, 0}` alone cannot say: a farm that was
-    // already standing and a source with nothing linkable read identically,
-    // and the two want opposite things said to the verifier.
+    expect(exposeDependencies(probe, root)).toMatchObject({
+      linked: 1,
+      alreadyPresent: false,
+    });
+    // Second call over the farm it just built: reused, nothing re-linked.
     expect(exposeDependencies(probe, root)).toEqual({
       linked: 0,
       failed: 0,
       alreadyPresent: true,
     });
-    expect(readdirSync(join(probe, 'node_modules'))).toEqual(['standing-pkg']);
+
+    // Now the planted shape: a `node_modules` this code did not build.
+    const planted = tmp('expose-planted-');
+    mkdirSync(join(planted, 'node_modules', 'planted-stub'), {
+      recursive: true,
+    });
+    expect(exposeDependencies(planted, root)).toMatchObject({
+      linked: 1,
+      alreadyPresent: false,
+    });
+    expect(existsSync(join(planted, 'node_modules', 'planted-stub'))).toBe(
+      false,
+    );
+    expect(existsSync(join(planted, 'node_modules', 'plain-pkg'))).toBe(true);
   });
 
   it('does not call an EMPTY farm dir a standing farm', () => {
@@ -213,8 +276,8 @@ describe('exposeDependencies', () => {
     // gitignored, so a scratch tree's reset spares it. Counting it as
     // "already in place" flips the note from "no harness will start here" to
     // "harness ready" with nothing having changed in between.
-    const root = mkdtempSync(join(tmpdir(), 'expose-empty-root-'));
-    const probe = mkdtempSync(join(tmpdir(), 'expose-empty-probe-'));
+    const root = tmp('expose-empty-root-');
+    const probe = tmp('expose-empty-probe-');
     mkdirSync(join(root, 'node_modules'), { recursive: true });
     writeFileSync(join(root, 'node_modules', '.package-lock.json'), '{}');
     mkdirSync(join(probe, 'node_modules'), { recursive: true });

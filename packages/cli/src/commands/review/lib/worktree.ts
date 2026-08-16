@@ -25,9 +25,11 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
+  type Dirent,
   type Stats,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -59,6 +61,13 @@ export function discardWorktree(cwd: string, tree: string): SweepResult {
     encoding: 'utf8',
   });
   rmSync(tree, { recursive: true, force: true });
+  // And clear the ADMIN entry the two steps above can leave behind. A tree
+  // whose `.git` gitfile is broken makes `worktree remove` fail; `rmSync` then
+  // takes the directory, but `.git/worktrees/<name>` survives, and the next
+  // `worktree add` at that path refuses with "missing but already registered".
+  // `prune` only drops entries whose working tree is gone, so it cannot touch a
+  // live one — including this review's own.
+  spawnSync('git', ['worktree', 'prune'], { cwd, encoding: 'utf8' });
   return sweep;
 }
 
@@ -73,6 +82,15 @@ export interface WorktreeResidue {
    * next round reads.
    */
   total: number;
+  /**
+   * Why the check could not run, when it could not. An empty list means "clean"
+   * ONLY when this is absent: a `git status` that died — ENOBUFS on a tree so
+   * dirty its output passed the buffer, a repository git refused to read — used
+   * to be indistinguishable from a pristine tree, and the overload case is
+   * exactly the one where the answer matters. Both renderers say "could not be
+   * measured" instead of "clean" when this is set.
+   */
+  unmeasured?: string;
 }
 
 /**
@@ -126,19 +144,29 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
-    return { paths: [], total: 0 };
+    const why = r.error
+      ? ((r.error as NodeJS.ErrnoException).code ?? r.error.message)
+      : `git status exited ${r.status}`;
+    return { paths: [], total: 0, unmeasured: why };
   }
   const records = r.stdout.split('\0').filter((rec) => rec.length > 0);
   const paths: string[] = [];
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
     // `XY <path>` — the status letters are noise to a reader; the path is what
-    // it has to act on. A rename or copy spends a SECOND record on the original
-    // path, which is not residue in its own right (the destination is what sits
-    // in the tree), so it is consumed here rather than reported.
+    // it has to act on. A rename or copy spends a SECOND record on the ORIGINAL
+    // path, and both names are reported: the destination is what sits in the
+    // tree, and the original is what is missing from it, so a restore needs
+    // both. Reporting only the destination left the reader with a `D <orig>`
+    // it had never been given the name of.
     const status = rec.slice(0, 2);
     paths.push(rec.slice(3));
-    if (status.includes('R') || status.includes('C')) i++;
+    if (
+      (status.includes('R') || status.includes('C')) &&
+      i + 1 < records.length
+    ) {
+      paths.push(records[++i]);
+    }
   }
   return { paths: paths.slice(0, cap), total: paths.length };
 }
@@ -188,26 +216,43 @@ export function exposeDependencies(
   const done: DependencyFarm = { linked: 0, failed: 0, alreadyPresent: false };
   if (probeTree === dependencyRoot) return done;
   farmNodeModules(dependencyRoot, probeTree, done);
+  let members: string[] = [];
   try {
-    for (const pkg of readWorkspacePackages(dependencyRoot).packages) {
-      // Only for a member the disposable tree holds. A workspace the tree does
-      // not contain has nothing to resolve FROM, and creating its directory
-      // just to hang a `node_modules` off it would put a path in the tree that
-      // its commit does not have.
-      if (!existsSync(join(probeTree, pkg.dir))) continue;
-      farmNodeModules(
-        join(dependencyRoot, pkg.dir),
-        join(probeTree, pkg.dir),
-        done,
-      );
-    }
+    members = readWorkspacePackages(dependencyRoot).packages.map((p) => p.dir);
   } catch {
     // The workspace graph is an optimization on top of the root farm: a
     // manifest that will not read costs the tree its nested packages, never
     // the farm it already has.
   }
+  for (const dir of members) {
+    // Only for a member the disposable tree holds. A workspace the tree does
+    // not contain has nothing to resolve FROM, and creating its directory just
+    // to hang a `node_modules` off it would put a path in the tree that its
+    // commit does not have.
+    if (!existsSync(join(probeTree, dir))) continue;
+    // Per member, not around the loop: one unreadable member used to abort the
+    // walk, so every alphabetically later member silently went unfarmed while
+    // `failed` stayed 0 and the caller reported success.
+    try {
+      farmNodeModules(join(dependencyRoot, dir), join(probeTree, dir), done);
+    } catch {
+      done.failed++;
+    }
+  }
   return done;
 }
+
+/**
+ * The file a farm this code built leaves behind, so a later call can tell its
+ * own work from anything else that happens to sit at that path.
+ *
+ * `node_modules` is gitignored, which is what lets a scratch tree's reset spare
+ * it — and equally what lets a probe's own `npm install`, a killed install, or
+ * a planted module stub survive that reset. Without a marker the reuse path
+ * certified any non-empty directory as "the farm already in place", and every
+ * later probe in that shard resolved its imports through whatever was there.
+ */
+const FARM_MARKER = '.qwen-review-farm';
 
 /**
  * One directory's `node_modules`, mirrored entry by entry.
@@ -230,21 +275,46 @@ function farmNodeModules(
   const target = join(targetDir, 'node_modules');
   if (!existsSync(source)) return;
   if (existsSync(target)) {
-    // A standing farm counts only if it holds something. An EMPTY `node_modules`
-    // is what a previous call leaves behind when the source had nothing
-    // linkable, and it is gitignored, so the reset spares it — without the
-    // emptiness check the second call would report "already in place" (harness
-    // ready) about the exact state the first call correctly called unusable.
-    try {
-      if (readdirSync(target).length > 0) done.alreadyPresent = true;
-    } catch {
-      // Unreadable: not a farm anyone can rely on, so not one to claim.
+    // A standing farm counts only if THIS code built it: the marker is the
+    // difference between "the packages I linked last time" and "whatever a
+    // probe left in the one directory it is allowed to install into". Anything
+    // else at that path is cleared and re-linked, because a probe's leftover
+    // module resolving as a dependency is a wrong verdict with a deterministic
+    // source tag on it.
+    if (existsSync(join(target, FARM_MARKER))) {
+      done.alreadyPresent = true;
+      return;
     }
+    try {
+      rmSync(target, { recursive: true, force: true });
+    } catch {
+      // Cannot clear it: leave it, and report nothing linked rather than
+      // claiming a farm this code did not build.
+      done.failed++;
+      return;
+    }
+  }
+  try {
+    mkdirSync(target);
+  } catch {
+    // Same best-effort contract as the per-entry steps below: a farm that
+    // cannot be created costs a harness, and must not throw out of the run
+    // that asked for it.
+    done.failed++;
     return;
   }
-  mkdirSync(target);
   const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(source, { withFileTypes: true });
+  } catch {
+    // The source is the SHARED review worktree: a concurrent `npm ci` there can
+    // unlink it between the `existsSync` above and this read.
+    done.failed++;
+    return;
+  }
+  const before = done.linked;
+  for (const entry of entries) {
     if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
     const sourceEntry = join(source, entry.name);
     const targetEntry = join(target, entry.name);
@@ -292,6 +362,18 @@ function farmNodeModules(
       } catch {
         done.failed++;
       }
+    }
+  }
+  // Marked only when something was actually linked. A farm of zero packages is
+  // not one a later call should reuse — the killed-install shape (a
+  // `node_modules` holding one lockfile) produces exactly that, and certifying
+  // it sends the verifier into a `vitest: not found` the note promised it had
+  // avoided.
+  if (done.linked > before) {
+    try {
+      writeFileSync(join(target, FARM_MARKER), `${resolve(sourceDir)}\n`);
+    } catch {
+      // No marker: the next call rebuilds the farm. Costly, never wrong.
     }
   }
 }

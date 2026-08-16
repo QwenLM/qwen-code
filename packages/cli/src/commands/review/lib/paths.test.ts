@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
+  inertPath,
   tmpFile,
   probeWorktreePath,
   scratchLabel,
@@ -144,5 +145,38 @@ describe('scratchWorktreePrefix', () => {
         scratchWorktreePrefix(worktreePath(7)),
       ),
     ).toBe(false);
+  });
+});
+
+describe('inertPath', () => {
+  // The only sanitizer between a git-reported (PR- or agent-controlled) path
+  // and three sinks that render it: a brief the agent treats as its whole
+  // instructions, the roster's separator lines, and the orchestrator's
+  // terminal. The character class IS the safety property.
+  it('flattens everything that could act rather than name', () => {
+    expect(inertPath('a\nb.ts')).toBe('a b.ts');
+    expect(inertPath('a\u001b[31mb.ts')).toBe('a [31mb.ts');
+    expect(inertPath('a`b.ts')).toBe('a b.ts');
+    // The roster separator glyph — a filename must not be able to forge a
+    // block boundary in the text an orchestrator pastes to an agent.
+    expect(inertPath('a\u2500b.ts')).toBe('a b.ts');
+    // Invisible formatting: a bidi override reverses the rendering of
+    // everything after it, and a zero-width joiner hides characters inside a
+    // path a reader is being asked to judge.
+    expect(inertPath('a\u202eb.ts')).toBe('a b.ts');
+    expect(inertPath('a\u200bb.ts')).toBe('a b.ts');
+    expect(inertPath('a\ufeffb.ts')).toBe('a b.ts');
+    // Line and paragraph separators open a new Markdown line like a newline.
+    expect(inertPath('a\u2028b.ts')).toBe('a b.ts');
+  });
+
+  it('leaves an ordinary path exactly as it is', () => {
+    // A sanitizer that mangles the common case makes every rendered path
+    // unusable as the command argument the reader is told to run.
+    expect(inertPath('packages/cli/src/a-b_c.test.ts')).toBe(
+      'packages/cli/src/a-b_c.test.ts',
+    );
+    expect(inertPath('caf\u00e9.ts')).toBe('caf\u00e9.ts');
+    expect(inertPath('my probe.ts')).toBe('my probe.ts');
   });
 });
