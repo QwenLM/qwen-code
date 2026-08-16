@@ -985,7 +985,7 @@ export function renderLedgerSection(ledger: Ledger): string {
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`` : ''}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — validate it is an ancestor of the fetched head before scoping to it.` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`` : ''}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — when Step 1's recovered-anchor check rules a re-run admissible, pass it as \`--since <sha>\` on a \`fetch-pr\` re-run, which validates it against the fetched history and scopes the diff and plan; never run git against an anchor yourself.` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped

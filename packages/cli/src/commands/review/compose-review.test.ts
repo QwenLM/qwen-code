@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
@@ -337,6 +338,34 @@ function transcript(
     join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
     lines.join('\n') + '\n',
   );
+}
+
+/**
+ * Move one agent's transcript into a ledgered PRIOR session — the shape a
+ * resumed run reads.
+ *
+ * The records are re-stamped with the owning session (a transcript copied
+ * into another session's directory is not that session's evidence, and
+ * production refuses the misplaced shape), and the ledger is written by the
+ * real writer so the entries carry the plan mtime they are keyed on. The
+ * current attempt is stamped last and its resume recorded: reading prior
+ * evidence at all requires that authorization.
+ */
+function rehomeToPriorSession(planPath: string, file: string): void {
+  mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  const from = join(dir, 'subagents', 'S1', file);
+  writeFileSync(
+    join(dir, 'subagents', 'S0', file),
+    readFileSync(from, 'utf8').replaceAll(
+      '"sessionId":"S1"',
+      '"sessionId":"S0"',
+    ),
+  );
+  rmSync(from, { force: true });
+  const now = Date.now();
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+  recordResume(planPath, ENV, now + 1500);
 }
 
 /**
@@ -766,14 +795,26 @@ describe('composeReview — modeled-system defect-layer cap', () => {
   ];
   const walked = (...ids: string[]) =>
     ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
-  // A genuine reverse-audit auditor: the identity line, a real diff read
-  // (so `diffToolCalls > 0`), and the given receipts as its final text.
-  const auditor = (id: string, receipts: string) =>
-    transcript(id, `${IDENTITY}\nread_file(file_path="${DIFF}")`, {
+  // A GENUINE auditor: launched with the prompt the CLI recorded for the
+  // role, and it opened the brief that prompt points at (plus a real diff
+  // read, receipts as final text). A receipt only counts from one of these —
+  // otherwise a compliant sibling's floor could carry a hand-written
+  // auditor's claims. (The earlier fixture matched on a bare IDENTITY
+  // constant; the gate no longer accepts that shape.)
+  const auditor = (id: string, receipts: string) => {
+    const planPath = join(dir, 'plan.json');
+    const brief = briefPath(planPath, 'reverse-audit');
+    const launch =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    transcript(id, launch, {
       toolCalls: 1,
       range: [0, 100],
+      opens: [brief],
       text: receipts,
     });
+  };
   const markedPlan = (domains: string[]) =>
     coveredPlan(['verify', 'reverse-audit'], {
       repositoryContext: sentinel(domains),
@@ -6118,5 +6159,70 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(performance.now() - t0).toBeLessThan(2000);
     // The multi-line entry still collapses to one list item.
     expect(r.body).toContain('comment 102 (b.ts) — body truncated');
+  });
+});
+
+describe('composeReview — a resumed run is continuity, not a coverage gap', () => {
+  it('stays APPROVE and renders the non-capping continuity note', () => {
+    // The interrupted attempt's chunk-1 agent, re-homed into session S0 and
+    // named by the run ledger; the current session covers the rest. The
+    // recovered work COUNTS as reviewed: no cap, no "Not reviewed:" entry —
+    // a capping entry here downgraded every clean resumed run to COMMENT,
+    // permanently, since the prior records never leave the ledger.
+    // Build the input FIRST: `base()`'s object literal evaluates its
+    // `planPath: coveredPlan()` default even when the caller overrides it,
+    // and `coveredPlan()` rewrites the current session's chunk-1 record —
+    // which would then supersede the prior one and (correctly) stop counting
+    // as recovered work.
+    const input = base({});
+    rehomeToPriorSession(input.planPath as string, 'agent-a1.jsonl');
+
+    const r = composeReview(input);
+    expect(r.event).toBe('APPROVE');
+    // The EXACT joined body, not a substring: on the approve path the
+    // separator is chosen per-render, and continuity is the only block
+    // present here. Asserted as a whole, a separator that forgot this block
+    // glues the note onto the verdict sentence with a single space; asserted
+    // with `toContain`, that reads identically.
+    expect(r.body).toBe(
+      'No issues found. LGTM! ✅\n\n' +
+        'Resumed run (not a gap): 1 agent result(s) from the interrupted ' +
+        'earlier attempt were re-certified from the harness records and ' +
+        'counted as reviewed.\n\n' +
+        '_— test-model via Qwen Code /review (vunknown)_',
+    );
+    expect(r.body).not.toContain('Not reviewed: review continuity');
+    expect(r.body).not.toContain('Partially reviewed');
+  });
+});
+
+describe('composeReview — continuity renders on every verdict', () => {
+  /**
+   * A resumed run: chunk-1's agent re-homed to the ledgered prior session.
+   *
+   * `base()`'s object literal evaluates its `planPath: coveredPlan()` default
+   * even when the caller overrides it, and `coveredPlan()` REWRITES
+   * `subagents/S1/agent-a1.jsonl` — so the move must happen after `base()`
+   * has been built, not before. Callers pass the input through here.
+   */
+  function resumedInput(
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    const input = base(over);
+    const p = input.planPath as string;
+    rehomeToPriorSession(p, 'agent-a1.jsonl');
+    return input;
+  }
+
+  it('renders on REQUEST_CHANGES', () => {
+    const r = composeReview(resumedInput({ criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+
+  it('renders on COMMENT', () => {
+    const r = composeReview(resumedInput({ suggestionsInline: 1 }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
   });
 });

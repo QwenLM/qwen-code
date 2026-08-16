@@ -830,6 +830,75 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
   });
 
+  it('rolls back session/fork through the bridge generation that created it', async () => {
+    let releaseFork!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    primaryBridge.branchSession = vi.fn(async (sessionId) => {
+      await forkGate;
+      return {
+        sessionId: 'forked-primary-session',
+        workspaceCwd: '/ws',
+        attached: false,
+        clientId: 'forked-primary-client',
+        state: {},
+        displayName: 'Forked primary session',
+        forkedFrom: { sessionId, displayName: sessionId },
+      };
+    });
+    const pending = sendWsRequests('/acp', [
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { workspaceCwd: '/ws' },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'session/fork',
+        params: { sessionId: 'primary-session' },
+      },
+    ]);
+    await vi.waitFor(() =>
+      expect(primaryBridge.branchSession).toHaveBeenCalledOnce(),
+    );
+
+    const replacementBridge = makeBridge();
+    const entry = workspaceRegistry.primaryEntry;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    workspaceRegistry.activateReplacement(
+      entry,
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: replacementBridge,
+      }),
+      'policy-2',
+    );
+    releaseFork();
+
+    const responses = await pending;
+    expect(responses[1]).toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(primaryBridge.killSession).toHaveBeenCalledWith(
+      'forked-primary-session',
+      { requireZeroAttaches: true },
+    );
+    expect(replacementBridge.killSession).not.toHaveBeenCalled();
+  });
+
   it('uses the registry generation guard for qualified ACP mounts', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440184';
     let releaseContext!: () => void;
