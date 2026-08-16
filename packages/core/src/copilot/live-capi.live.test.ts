@@ -10,7 +10,7 @@ import {
 import { routeForModel } from './copilot-route.js';
 
 const describeLive =
-  process.env.COPILOT_LIVE_TEST === '1' ? describe : describe.skip;
+  process.env['COPILOT_LIVE_TEST'] === '1' ? describe : describe.skip;
 
 describeLive('live CAPI', () => {
   let hasToken = false;
@@ -21,7 +21,7 @@ describeLive('live CAPI', () => {
     } catch {
       hasToken = false;
     }
-    if (process.env.COPILOT_LIVE_TEST === '1' && !hasToken) {
+    if (process.env['COPILOT_LIVE_TEST'] === '1' && !hasToken) {
       throw new Error('COPILOT_LIVE_TEST=1 set but no ghu_/gho_ token found');
     }
   });
