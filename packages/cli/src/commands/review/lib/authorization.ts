@@ -83,6 +83,15 @@ export interface WriteAuthorizationRequest {
    * skill's own review.)
    */
   host?: string;
+  /**
+   * The standing `review.severityFloor` setting, raw, resolved by the caller
+   * from operator scopes. Passed through to the same args re-parse this gate
+   * already performs, so an authorised write can also recover the OPERATOR'S
+   * posting floor (flag or configured) from the CLI's verbatim record —
+   * rather than trusting the model-transcribed state field for a policy the
+   * model layer is precisely what enforcement distrusts.
+   */
+  defaultSeverityFloor?: string;
 }
 
 /**
@@ -96,6 +105,15 @@ export interface WriteAuthorizationRequest {
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
+  /**
+   * The posting floor the RECORDED arguments carry (explicit flag beats the
+   * configured setting beats the `auto` default) — present only when this
+   * gate actually parsed the record, i.e. never on the `--user-authorized`
+   * short-circuit or a missing-record refusal. `submit` prefers it over the
+   * state JSON's floor: the record is the operator's verbatim input, the
+   * state is the model's transcription of it.
+   */
+  recordedSeverityFloor?: 'critical' | 'suggestion' | 'auto';
 } {
   if (req.userAuthorized) {
     return { ok: true, why: 'the user asked for this review to be published' };
@@ -126,7 +144,10 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     };
   }
 
-  const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
+  const verdict = parseReviewArgs(raw, {
+    comment: req.defaultComment,
+    severityFloor: req.defaultSeverityFloor,
+  });
   if (!verdict.comment.effective) {
     // The refusal must name the REAL blocker. When comment was requested —
     // by the flag or the standing `review.comment` setting — but the target
@@ -195,5 +216,6 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     why: verdict.comment.requested
       ? `\`--comment\` was in the review arguments for #${authorisedPr}`
       : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
+    recordedSeverityFloor: verdict.severityFloor,
   };
 }

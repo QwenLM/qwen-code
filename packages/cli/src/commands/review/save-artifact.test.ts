@@ -305,6 +305,42 @@ describe('saveReviewArtifact', () => {
     },
   );
 
+  it.each([
+    ['a string', 'junk'],
+    ['a negative index', [-1]],
+    ['a fraction', [1.5]],
+  ])(
+    'refuses a present floorEnforced of the wrong shape (%s)',
+    (_label, bad) => {
+      // Same discipline as deferredCount: the absence default must not
+      // swallow a PRESENT malformed value into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, floorEnforced: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/floorEnforced/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('reads an absent floorEnforced as empty — a pre-enforcement composed file must still save', () => {
+    const paths = fixture();
+    const { floorEnforced: _absent, ...preEnforcement } = verdict;
+    writeJson(paths.composed, preEnforcement);
+    saveReviewArtifact({
+      ...paths,
+      target: 'local',
+      effort: 'medium',
+    });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.floorEnforced).toEqual([]);
+  });
+
   it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
     // Null rides the same absence semantics compose-review's own toCount
     // boundary gives this field's siblings.

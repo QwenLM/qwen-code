@@ -6025,7 +6025,7 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.body).not.toContain('Suggestions are inline.');
   });
 
-  it('merges enforced entries after the model deferrals — one list, one count', () => {
+  it('merges enforced entries and model deferrals into one list, one count', () => {
     const r = compose({
       severityFloor: 'critical',
       deferredSuggestions: [
@@ -6041,5 +6041,108 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.deferredCount).toBe(3);
     expect(r.body).toContain('model deferred this');
     expect(r.body).toContain('rename the flag');
+  });
+
+  it('leaves a deterministic-source Suggestion inline — the floor excludes it by source', () => {
+    // SKILL Step 6: a [build]/[test]/[probe] finding is pre-confirmed and the
+    // floor excludes it by its source field. The inline channel carries no
+    // source, so the tag convention decides — the same predicate the
+    // body-Critical scan reads deterministic by.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        {
+          path: 'src/retry.ts',
+          line: 42,
+          body: '**[Suggestion]** [test] mutation survivor on the retry guard',
+        },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    // The deterministic finding still posts — it is the ledger's only entry
+    // after the plain Suggestion moved to the deferral list.
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings.map((f) => f.file)).toEqual(['src/retry.ts']);
+  });
+
+  it('normalises the floor exactly as the licence block does — case and whitespace', () => {
+    // Mutation guard: deleting the shared trim/lowercase must fail here —
+    // the state field arrives model-transcribed on both entry paths.
+    for (const floor of ['CRITICAL', ' critical ']) {
+      const r = compose({ severityFloor: floor as never });
+      expect(r.floorEnforced).toEqual([1, 2]);
+    }
+  });
+
+  it('keeps the model entry when the same finding rides both channels', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      deferredSuggestions: [
+        {
+          file: 'c.ts',
+          line: 9,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'model kept this record',
+        },
+      ],
+    });
+    // The inline comment still leaves the posting set…
+    expect(r.floorEnforced).toEqual([0]);
+    // …but the list holds ONE record for the finding — the model's.
+    expect(r.deferredCount).toBe(1);
+    expect(r.body).toContain('model kept this record');
+    expect(r.body).not.toContain('rename the flag');
+  });
+
+  it('renders enforced entries ahead of the cap, never truncated behind model deferrals', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      file: `m${i}.ts`,
+      line: i + 1,
+      source: 'review' as const,
+      severity: 'Suggestion' as const,
+      title: `model deferral ${i}`,
+    }));
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      deferredSuggestions: many,
+    });
+    expect(r.deferredCount).toBe(21);
+    // The CLI-moved entry is IN the rendered list — the disclosure note must
+    // never point at a list that truncated away the entries it names.
+    expect(r.body).toContain('rename the flag');
+    expect(r.body).toContain('and 1 more');
+  });
+
+  it('omits an unusable line and falls back on an all-marker body', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        { path: 'b.ts', line: 0, body: '**[Suggestion]** zero-line anchor' },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]**' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    // The reroute path bypasses the consistency gate by construction, so its
+    // own guards are the only protection against a `b.ts:0` locator or a
+    // null title reaching the posted record.
+    expect(r.body).not.toContain('b.ts:0');
+    expect(r.body).toContain('zero-line anchor');
+    expect(r.body).toContain('(comment carried no text)');
   });
 });

@@ -179,7 +179,8 @@ function normalizeInlineComments(
 function authorization(
   args: SubmitArgs,
   defaultComment: boolean,
-): { ok: boolean; why: string } {
+  defaultSeverityFloor?: string,
+): ReturnType<typeof reviewWriteAuthorization> {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
     defaultComment,
@@ -190,6 +191,7 @@ function authorization(
     // child inherits an operator-exported GH_HOST, so that is where this
     // write would route — and what the gate must bind.
     host: resolveGhHost(args.host),
+    defaultSeverityFloor,
   });
 }
 
@@ -408,6 +410,12 @@ export function runSubmit(
     attribution?: boolean;
     /** The standing `review.comment` setting, for the authorization gate. */
     defaultComment?: boolean;
+    /**
+     * The standing `review.severityFloor` setting, raw — handed to the
+     * authorization gate's args re-parse so the floor enforcement below can
+     * prefer the OPERATOR'S recorded floor over the state's transcription.
+     */
+    defaultSeverityFloor?: string;
   } = {},
 ): void {
   const { attribution = true, defaultComment = false } = opts;
@@ -437,7 +445,7 @@ export function runSubmit(
     );
   }
 
-  const auth = authorization(args, defaultComment);
+  const auth = authorization(args, defaultComment, opts.defaultSeverityFloor);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
@@ -496,6 +504,32 @@ export function runSubmit(
       attribution,
     ),
   };
+
+  // The operator's floor, from the CLI's verbatim record — never only the
+  // state's transcription of it. The gate above already re-parsed the
+  // recorded arguments (explicit flag beats the configured setting beats
+  // `auto`); the state field is a model-written copy of that same policy,
+  // and a copy that can drift must not be what decides whether enforcement
+  // stands down. Recorded value wins whenever the record was parsed; the
+  // `--user-authorized` short-circuit and test paths carry none and leave
+  // the state's value in place — the same fail-open the enforcement itself
+  // applies.
+  if (
+    auth.recordedSeverityFloor !== undefined &&
+    payload.state != null &&
+    payload.state.severityFloor !== auth.recordedSeverityFloor
+  ) {
+    writeStderrLine(
+      `Severity floor: using the recorded ` +
+        `${JSON.stringify(auth.recordedSeverityFloor)} over the state's ` +
+        `${JSON.stringify(payload.state.severityFloor ?? null)} — the ` +
+        `CLI's record of the invocation outranks the state JSON.`,
+    );
+    payload = {
+      ...payload,
+      state: { ...payload.state, severityFloor: auth.recordedSeverityFloor },
+    };
+  }
 
   // The verdict, computed here. It was never in the payload.
   let event: string;
@@ -703,6 +737,7 @@ export const submitCommand: CommandModule = {
     runSubmit(argv as unknown as SubmitArgs, cliVersion, {
       attribution: review.attribution,
       defaultComment: review.comment,
+      defaultSeverityFloor: review.severityFloor,
     });
   },
 };

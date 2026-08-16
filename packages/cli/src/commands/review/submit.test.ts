@@ -1101,6 +1101,83 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(out.floorEnforced).toBe(1);
   });
 
+  it('reports floor enforcement in the dry run, not only after the write', () => {
+    // The sibling field cappedBy has exactly this seam test; the dry run is
+    // the operator's preview, and a preview that omits the override invites
+    // posting a set the operator never saw described.
+    const review = file('floor-dry.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+      },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review, dryRun: true })));
+    expect(ghMock).not.toHaveBeenCalled();
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      posted: boolean;
+      wouldPost: boolean;
+      floorEnforced: number;
+    };
+    expect(out.posted).toBe(false);
+    expect(out.wouldPost).toBe(true);
+    expect(out.floorEnforced).toBe(1);
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('Floor enforcement'),
+      ),
+    ).toBe(true);
+  });
+
+  it("the recorded floor outranks the state's transcription", () => {
+    // The state's severityFloor is a model-written copy of the operator's
+    // policy; the gate's args re-parse recovers the verbatim one. A state
+    // claiming `suggestion` (posture off) while the record says
+    // `--severity-floor critical` must enforce — the copy does not get to
+    // stand enforcement down.
+    // No withVerifyEnv: it exports a session id, which (correctly) disables
+    // the skillArgs test seam this test authorises through. The explicit
+    // recorded floor needs no plan or round either — enforcement at
+    // `critical` fires at any round, and the missing-plan caps only soften
+    // the event, which this test does not assert.
+    const review = file('floor-recorded.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        severityFloor: 'suggestion',
+      },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-args.txt',
+          '6771 --comment --severity-floor critical',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('using the recorded'),
+      ),
+    ).toBe(true);
+  });
+
   it('rejects a line that is not a positive whole number', () => {
     // Every one of these 422s, and a 422 discards every blocker in the review.
     for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {

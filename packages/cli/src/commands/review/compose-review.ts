@@ -358,16 +358,25 @@ function splitDeferralChannel(raw: unknown): {
  * path — is left inline instead (fail open; `submit`'s consistency gate
  * refuses pathless comments before anything posts anyway).
  */
+/**
+ * The ONE statement of the floor normalisation, shared by the enforcement
+ * gate and `composeReviewBody`'s licence block. Both run over the same
+ * `severityFloor` in a single compose call, feeding two decisions the
+ * enforcement docstring requires to agree ("fires ONLY where the deferral
+ * licence already holds") — two restatements is the predicate-drift class
+ * `lib/inline-counts.ts`'s header exists to prevent.
+ */
+function normalizeSeverityFloor(value: unknown): unknown {
+  return typeof value === 'string' ? value.trim().toLowerCase() : value;
+}
+
 export function floorEnforcedReroute(
   severityFloor: unknown,
   contextUnavailable: boolean,
   prevRound: number,
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
 ): { indices: number[]; entries: DeferredEntry[] } {
-  const floor =
-    typeof severityFloor === 'string'
-      ? severityFloor.trim().toLowerCase()
-      : severityFloor;
+  const floor = normalizeSeverityFloor(severityFloor);
   const enforced =
     floor === 'critical' ||
     (floor === 'auto' && !contextUnavailable && prevRound >= 5);
@@ -376,10 +385,19 @@ export function floorEnforcedReroute(
   const entries: DeferredEntry[] = [];
   drafted.forEach((c, i) => {
     if (severityOf(c) !== 'suggestion') return;
+    const body = typeof c.body === 'string' ? c.body : '';
+    // The floor excludes deterministic findings — by their source (SKILL
+    // Step 6: a `[build]`/`[test]`/`[probe]` finding is pre-confirmed and
+    // the posture leaves it inline at any floor). The inline channel
+    // carries no source field, so the tag convention decides, through the
+    // same predicate the body-Critical scan reads deterministic by; a
+    // false positive (prose that merely mentions a tag) leaves the
+    // comment inline — the fail-open direction of every other arm here.
+    if (DETERMINISTIC_TAG_RE.test(body)) return;
     const file =
       typeof c.path === 'string' && c.path.trim() !== '' ? c.path : null;
     if (file === null) return;
-    const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
+    const claim = carriedClaimLine(body);
     indices.push(i);
     entries.push({
       file,
@@ -1079,7 +1097,23 @@ function composeReviewBody(
   // malformed. Enforcement fires only under conditions where the deferral
   // licence below already holds, so the merge can never create an
   // unlicensed state that the model's own entries did not.
-  const deferredSuggestions = [...modelDeferred, ...reroute.entries];
+  //
+  // Two merge disciplines, both review-round findings on this very diff:
+  // a constructed entry whose (file, line) the model ALSO deferred is
+  // dropped — the model's copy is the richer record (a real source field),
+  // and listing the same finding twice would make `deferredCount` and the
+  // verdict line overcount; its index stays in `reroute.indices`, because
+  // the inline comment still must not post. And the enforced entries come
+  // FIRST: the rendered list is capped at MAX_DEFERRED_SUGGESTION_LINES,
+  // and an enforcement note pointing at a list that truncated away every
+  // entry it names would be a disclosure contradicting its own record.
+  const modelDeferredKeys = new Set(
+    modelDeferred.map((e) => `${e.file} ${e.line ?? ''}`),
+  );
+  const freshEnforced = reroute.entries.filter(
+    (e) => !modelDeferredKeys.has(`${e.file} ${e.line ?? ''}`),
+  );
+  const deferredSuggestions = [...freshEnforced, ...modelDeferred];
   for (const stray of relocatedCriticals) {
     bodyCriticals.push(stray);
   }
@@ -1104,10 +1138,7 @@ function composeReviewBody(
   // refusal here would lose the whole round over a field that changes no
   // output on a zero-deferral run, the exact outcome the licence block is
   // written to avoid. Model-transcribed prose is not a NaN count.
-  const floorRaw =
-    typeof input.severityFloor === 'string'
-      ? input.severityFloor.trim().toLowerCase()
-      : input.severityFloor;
+  const floorRaw = normalizeSeverityFloor(input.severityFloor);
   const floorKnown =
     floorRaw === 'critical' || floorRaw === 'suggestion' || floorRaw === 'auto';
   const floorAbsent = !floorKnown;
@@ -2222,12 +2253,17 @@ function composeReviewBody(
   // with the drafted set the orchestrator saw. Not a cap: the finding is
   // recorded two lines down; what changed is the posting surface, and the
   // policy that changed it is the operator's own floor.
+  // Counted by the moved COMMENTS (`indices`), not the constructed entries:
+  // a finding the model both deferred and left drafted was still moved out
+  // of the inline set, even though the dedup above kept only the model's
+  // richer record in the list — and the sentence stays true either way,
+  // which is why it does not assert the drafted set had failed to defer.
   const floorEnforcedNote: Bi[] =
-    reroute.entries.length > 0
+    reroute.indices.length > 0
       ? [
           {
-            en: `${reroute.entries.length} Suggestion(s) were drafted inline past the resolved critical posting floor; the CLI moved them into the deferral list below (floor enforcement — the drafted set had not deferred them).`,
-            zh: `${reroute.entries.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论；CLI 已将其移入下方延后清单（下限强制执行——草稿集未自行延后）。`,
+            en: `${reroute.indices.length} Suggestion(s) were drafted inline past the resolved critical posting floor; the CLI moved them into the deferral list below (floor enforcement).`,
+            zh: `${reroute.indices.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论；CLI 已将其移入下方延后清单（下限强制执行）。`,
           },
         ]
       : [];
