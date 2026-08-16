@@ -4,6 +4,7 @@
 // guard, widens permissions, moves GH_TOKEN to job-level env, or drops
 // persist-credentials would ship without any other test to catch it.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +22,18 @@ const minimizeJob = doc.jobs.minimize;
 const steps = minimizeJob.steps;
 const checkoutStep = steps.find((s) => s.uses?.startsWith('actions/checkout'));
 const minimizeStep = steps.find((s) => s.name?.includes('Minimize comments'));
+
+function runMinimizableStateFilter(payload) {
+  assert.ok(minimizeStep, 'minimize step must exist');
+  const filter = [...minimizeStep.run.matchAll(/--jq '([^']+)'/g)]
+    .map((match) => match[1])
+    .find((candidate) => candidate.includes('.data.node'));
+  assert.ok(filter, 'minimizable state jq filter must exist');
+  return execFileSync('jq', ['-c', filter], {
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
+  }).trim();
+}
 
 describe('auto-minimize-spam: repository guard', () => {
   it('gates the job on the canonical repository', () => {
@@ -115,10 +128,23 @@ describe('auto-minimize-spam: event fast path', () => {
       minimizeStep.run,
       /ALL_CANDIDATES="\$\{EVENT_COMMENT_LOGIN\}"\$'\\t'"\$\{EVENT_COMMENT_NODE_ID\}"/,
     );
-    assert.match(
-      minimizeStep.run,
-      /--jq 'if \.data\.node == null then "missing" else \.data\.node\.isMinimized end'[\s\S]*\|\| printf 'missing'/,
+    assert.equal(
+      runMinimizableStateFilter({ data: { node: null } }),
+      '"missing"',
     );
+    assert.equal(
+      runMinimizableStateFilter({
+        data: { node: { isMinimized: false } },
+      }),
+      'false',
+    );
+    assert.equal(
+      runMinimizableStateFilter({
+        data: { node: { isMinimized: true } },
+      }),
+      'true',
+    );
+    assert.match(minimizeStep.run, /\|\| printf 'missing'/);
     assert.doesNotMatch(minimizeStep.run, /2>\/dev\/null/);
     assert.match(
       minimizeStep.run,
