@@ -6000,7 +6000,7 @@ describe('triage skips the autofix bot’s own bookkeeping issues (#9264)', () =
     // match a substring pin.
     const doc = parse(workflow);
     expect(flat(doc.jobs.triage.if)).toContain(
-      `github.event_name == 'issues' && github.event.issue.user.login != ${botIdentity}`,
+      `(github.event_name == 'issues' && github.event.issue.user.login != ${botIdentity}) || (github.event_name == 'workflow_dispatch'`,
     );
   });
 
@@ -6010,7 +6010,7 @@ describe('triage skips the autofix bot’s own bookkeeping issues (#9264)', () =
     // same issue even though its own job skips.
     const doc = parse(workflow);
     expect(flat(doc.jobs.triage.concurrency.group)).toContain(
-      `github.event_name == 'issues' && github.event.issue.user.login == ${botIdentity}`,
+      `!startsWith(github.event.comment.body, '@qwen-code /triage'))) || (github.event_name == 'issues' && github.event.issue.user.login == ${botIdentity}`,
     );
   });
 
