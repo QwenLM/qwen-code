@@ -328,8 +328,9 @@ let artifactsComplete = false;
 export function hostStateFor(code: string | undefined): string | null {
   switch (code) {
     case 'EMFILE':
-    case 'ENFILE':
       return 'this process is out of file descriptors';
+    case 'ENFILE':
+      return 'the system file table is full';
     case 'ENOSPC':
       return 'the filesystem is full';
     case 'EDQUOT':
@@ -668,19 +669,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         (m.settledBy === 'until-match' ||
           m.settledBy === 'timeout' ||
           m.settledBy === 'fixed-delay');
-      // The png clear needs the manifest to have CLAIMED a png: either the
-      // png rung itself or a recorded pngPath. An ans-only manifest says
-      // this tool never wrote one, so whatever sits at <out>.png belongs to
-      // someone else — and clearing it on the next run against the same
-      // --out (the documented reuse shape) destroyed a foreign file the
-      // previous run had deliberately spared.
-      // The evidence rung ALONE: this writer pairs `evidence: 'ans-only'`
-      // with `pngPath: null`, so the string-pngPath disjunct was
-      // unreachable for anything it produces — and where it did fire, on a
-      // signature-passing but internally inconsistent manifest, it cleared
-      // a foreign <out>.png on an ans-only rung (probe-reproduced),
-      // contradicting this guard's own invariant.
-      manifestHadPng = shaped && m.evidence === 'png';
+      // The png clear needs the manifest to have CLAIMED a png: the
+      // evidence rung AND a recorded pngPath naming THIS <out>.png. An
+      // ans-only manifest says this tool never wrote one, so whatever sits
+      // at <out>.png belongs to someone else — and clearing it on the next
+      // run against the same --out (the documented reuse shape) destroyed
+      // a foreign file the previous run had deliberately spared.
+      // The evidence rung ALONE is one signature rung short: every png-rung
+      // manifest this writer produces records that exact path, so a
+      // signature-passing manifest whose pngPath names ANOTHER file is
+      // internally inconsistent, and it deleted a foreign <out>.png its
+      // pngPath never named (probe-reproduced) — the same harm the
+      // ans-only half of this guard closes.
+      manifestHadPng = shaped && m.evidence === 'png' && m.pngPath === pngPath;
     } catch {
       // ANY read failure means the capture signature could not be verified —
       // including fd exhaustion (EMFILE/ENFILE), which is transient under
@@ -832,11 +833,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
   }
   if (args.keys !== undefined) {
-    if (
-      !Array.isArray(args.keys) ||
-      args.keys.some((k) => typeof k !== 'string')
-    ) {
-      refuse('--keys must be strings.');
+    if (!Array.isArray(args.keys)) {
+      refuse('--keys must be given exactly once, as strings.');
+      return;
+    }
+    if (args.keys.some((k) => typeof k !== 'string')) {
+      // yargs's default --no-X negation parses an array option to [false]
+      // (probed on this repo's yargs): the caller supplied no key tokens
+      // at all, so the refusal says THAT — the sibling flags' negation
+      // message — not "must be strings", which sends an agent consumer
+      // inspecting tokens it never passed.
+      refuse(
+        args.keys.every((k) => typeof k === 'boolean')
+          ? '--keys must be given exactly once, as strings.'
+          : '--keys must be strings.',
+      );
       return;
     }
     // An EXACTLY empty token types nothing (`send-keys ''` is a no-op), and
@@ -894,15 +905,23 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // — the artifacts stop being clearable and every re-run refuses on the
   // collision instead. Measured from the arguments, before the window
   // opens, with room left for the fields this run adds later.
-  const embedded = JSON.stringify({
-    command: args.command,
-    keys: args.keys,
-    ready: args.ready,
-    until: args.until,
-    cwd: args.cwd,
-    ansPath,
-    pngPath,
-  }).length;
+  // In BYTES, not code units: the bound and the reader enforcing it count
+  // UTF-8 bytes, and `.length` counts UTF-16 code units — multibyte
+  // arguments between half the cap in characters and the cap in bytes
+  // passed this gate and were rejected by the reader on the next run
+  // (probe-reproduced with CJK --keys tokens).
+  const embedded = Buffer.byteLength(
+    JSON.stringify({
+      command: args.command,
+      keys: args.keys,
+      ready: args.ready,
+      until: args.until,
+      cwd: args.cwd,
+      ansPath,
+      pngPath,
+    }),
+    'utf8',
+  );
   if (embedded > MAX_MANIFEST_BYTES / 2) {
     refuse(
       `the arguments would not fit a readable manifest: they serialize to ` +
@@ -1533,11 +1552,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );
-  } else if (pngStamp.existed) {
-    // Something this run did not write occupies the png path, and the clear
-    // phase spared it deliberately. Rendering would replace it — the same
-    // silent destruction the .ans/.json collision refuses over — so the
-    // ladder stops at the text rung and says why.
+  } else if (pngStamp.existed || occupied(pngPath)) {
+    // Something this run did not write occupies the png path — sitting
+    // there since the pre-window stamp, or claimed DURING the window, the
+    // same mid-window escape writeArtifact's changed() closes for the .ans
+    // and the manifest. Rendering would replace it — the same silent
+    // destruction the .ans/.json collision refuses over — so the ladder
+    // stops at the text rung and says why.
     degradations.push(
       `${pngPath} holds a file this capture did not write — no image ` +
         'rendered; clear it or pick another --out for a png rung',
@@ -1613,11 +1634,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // reader can tell WHY the ladder stopped. A spawn that never ran
       // (EMFILE, a binary vanishing between probe and render) has neither
       // status nor signal — its reason lives in r.error.
+      // Bounded like everything else that rides into the manifest: a
+      // newline-free wall of freeze stderr (up to FREEZE_MAX_BUFFER of it)
+      // otherwise flowed into degradedBecause verbatim and pushed the
+      // manifest past the reader cap a successful run must stay under —
+      // probe-reproduced: the next run then refused to verify it.
       const errTail = `${r.stderr ?? ''} ${r.stdout ?? ''}`
         .trim()
         .split('\n')
         .slice(-2)
-        .join(' ');
+        .join(' ')
+        .slice(0, 2048);
       const why =
         r.status === 0
           ? 'exited 0 but wrote no image'
