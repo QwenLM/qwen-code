@@ -35,6 +35,7 @@ import type { TeamContext } from '../agents/team/types.js';
 import type { FakeBackend } from '../agents/team/test-utils/fake-backend.js';
 import type { FakeAgent } from '../agents/team/test-utils/fake-agent.js';
 import { formatAgentId } from '../agents/team/teamHelpers.js';
+import { updateTask } from '../agents/team/tasks.js';
 
 // ─── Mock Storage ──────────────────────────────────────────
 
@@ -228,6 +229,10 @@ describe('Team lifecycle E2E', () => {
       });
       expect(blockResult.error).toBeUndefined();
     }
+    await updateTask('lifecycle', task1Id, {
+      status: 'in_progress',
+      owner: 'leader',
+    });
 
     // Teammates are spawned BEFORE the ownership update below: since
     // #9282, task_update refuses to assign to a teammate that does

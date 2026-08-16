@@ -540,6 +540,10 @@ describe('TeamCoordinationHarness', () => {
         subject: 'No dying delivery',
         description: 'Shutdown beats assignment',
       });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
       await h.spawnTeammate('alice', { onMessage: () => {} });
       h.teamManager.markShutdownRequested('alice');
 
@@ -551,9 +555,106 @@ describe('TeamCoordinationHarness', () => {
       expect(result.error).toBeDefined();
 
       const reloaded = await getTask(h.teamName, task.id);
-      expect(reloaded?.status).toBe('pending');
-      expect(reloaded?.owner).toBeUndefined();
+      expect(reloaded?.status).toBe('in_progress');
+      expect(reloaded?.owner).toBe('leader');
       expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
+    it('canonicalizes display-name owners before persisting and dispatching', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Display name',
+        description: 'Use canonical owner identity',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('Alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'Alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      await h.waitForMessages('alice', 1);
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('alice');
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
+    });
+
+    it('rejects assigning to a teammate that already terminated', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'No terminal delivery',
+        description: 'Terminated agents cannot receive work',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      const alice = await h.spawnTeammate('alice', { onMessage: () => {} });
+      alice.abort();
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('no longer active');
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('leader');
+    });
+
+    it('does not reject completion that restates a shutdown-pending owner', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Finish during shutdown',
+        description: 'Completion does not dispatch',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      h.teamManager.markShutdownRequested('alice');
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'completed',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+      expect((await getTask(h.teamName, task.id))?.status).toBe('completed');
+    });
+
+    it('queues the assignment prompt for a busy owner', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Busy owner',
+        description: 'Queue this while busy',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      const alice = await h.spawnTeammate('alice', {
+        onMessage: () => 'stay_running',
+      });
+      await alice.waitForStatus(AgentStatus.RUNNING);
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      expect(alice.getReceivedMessages()).toHaveLength(0);
+      alice.goIdle();
+      await h.waitForMessages('alice', 1);
+      expect(alice.getReceivedMessages()[0]).toContain('Queue this while busy');
     });
   });
 

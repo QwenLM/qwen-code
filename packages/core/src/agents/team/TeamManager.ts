@@ -1834,6 +1834,13 @@ export class TeamManager {
         `for that teammate.`
       );
     }
+    const agent = this.getAgentFromBackend(member.agentId);
+    if (!agent || isTerminalStatus(agent.getStatus())) {
+      return (
+        `Cannot assign to "${ownerName}": that teammate is no longer ` +
+        `active and cannot receive assignments.`
+      );
+    }
     return undefined;
   }
 
@@ -1854,6 +1861,7 @@ export class TeamManager {
     if (this._shutdownPending.has(member.name)) return false;
     const agent = this.getAgentFromBackend(member.agentId);
     if (!agent) return false;
+    if (isTerminalStatus(agent.getStatus())) return false;
     this.enqueueWithIdentity(member.agentId, agent, this.buildTaskPrompt(task));
     return true;
   }

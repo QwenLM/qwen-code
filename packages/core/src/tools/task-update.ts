@@ -23,6 +23,7 @@ import {
   isTeammate,
   resolveActiveTeamName,
 } from '../agents/team/identity.js';
+import { sanitizeName } from '../agents/team/teamHelpers.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
   isPlanRequiredTeammatePreApprovalAllowedTool,
@@ -375,6 +376,10 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       this.params.status === 'in_progress' && this.params.owner === undefined
         ? getAgentName()
         : undefined;
+    const explicitOwner =
+      this.params.owner === undefined
+        ? undefined
+        : sanitizeName(this.params.owner);
 
     if (
       this.params.status === 'in_progress' &&
@@ -403,8 +408,15 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // persisting any other assignment would report success for a task
     // that can never arrive.
     const teamManager = this.config.getTeamManager?.() ?? null;
-    if (this.params.owner && teamManager) {
-      const refusal = teamManager.validateTaskOwner(this.params.owner);
+    const nextOwner = explicitOwner ?? autoOwner ?? existing?.owner;
+    const nextStatus = this.params.status ?? existing?.status;
+    if (
+      explicitOwner &&
+      teamManager &&
+      nextStatus === 'in_progress' &&
+      nextOwner !== teammateCallerName
+    ) {
+      const refusal = teamManager.validateTaskOwner(explicitOwner);
       if (refusal) {
         return {
           llmContent: refusal,
@@ -421,7 +433,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         taskId,
         {
           status: this.params.status,
-          owner: this.params.owner ?? autoOwner,
+          owner: explicitOwner ?? autoOwner,
           subject: this.params.subject,
           description: this.params.description,
           activeForm: this.params.activeForm,
@@ -464,14 +476,24 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     const statusBecameInProgress =
       this.params.status === 'in_progress' &&
       existing?.status !== 'in_progress';
+    const existingOwner = existing?.owner
+      ? sanitizeName(existing.owner)
+      : undefined;
     if (
       teamManager &&
       task.status === 'in_progress' &&
       task.owner &&
       task.owner !== teammateCallerName &&
-      (task.owner !== existing?.owner || statusBecameInProgress)
+      (task.owner !== existingOwner || statusBecameInProgress)
     ) {
-      await teamManager.dispatchAssignedTask(task);
+      const dispatched = await teamManager.dispatchAssignedTask(task);
+      if (!dispatched) {
+        const msg =
+          `Task #${taskId} was updated (status: ${task.status}, ` +
+          `owner: ${task.owner}), but the assignment prompt could not ` +
+          `be delivered. Reassign the task or respawn the teammate.`;
+        return { llmContent: msg, returnDisplay: msg, error: { message: msg } };
+      }
     }
 
     // Mirror dependency edges so auto-claim and completion-unblock
