@@ -29,8 +29,11 @@ export async function exchangeGhuForCapi(
   throw new Error('not implemented');
 }
 
-export function parseProxyEp(_bearer: string): string | null {
-  throw new Error('not implemented');
+export function parseProxyEp(bearer: string): string | null {
+  const match = bearer.match(/proxy-ep=([^;]+)/);
+  if (!match) return null;
+  const host = match[1].replace(/^proxy\./, 'api.');
+  return `https://${host}`;
 }
 
 export function createCopilotTokenManager(_opts?: {
