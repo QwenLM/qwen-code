@@ -360,6 +360,45 @@ describe('useSessionArtifacts', () => {
     ]);
   });
 
+  it('ignores stale success from superseded artifact refreshes', async () => {
+    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const staleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const finalLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockReturnValueOnce(staleLoad.promise)
+      .mockReturnValueOnce(finalLoad.promise);
+
+    await renderHookHost();
+    await act(async () => {
+      initialLoad.resolve({ artifacts: [artifact('current-artifact')] });
+      await initialLoad.promise;
+    });
+
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+    sdkMock.artifactsVersion = 2;
+    await rerenderHookHost();
+
+    await act(async () => {
+      staleLoad.resolve({ artifacts: [artifact('stale-artifact')] });
+      await staleLoad.promise;
+    });
+    expect(latestState?.loading).toBe(true);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+
+    await act(async () => {
+      finalLoad.resolve({ artifacts: [artifact('replacement')] });
+      await finalLoad.promise;
+    });
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'replacement',
+    ]);
+  });
+
   it('refreshes when the version returns to a previously-seen value (#7427)', async () => {
     // The version effect's previous-value bookkeeping must survive a
     // NON-MONOTONIC sequence: starting at a non-zero version, a return to a
