@@ -405,124 +405,139 @@ export function containmentRuling(
 }
 
 /**
- * What one file contributes to a ruling.
+ * What one HUNK contributes to a ruling.
  *
  * Two facts, because the two sides of a diff are comparable in different ways.
  * The captures share a head tree, so their NEW-side line numbers name the same
  * lines and compare as numbers. Their OLD sides are different trees — the
  * anchor and the merge base — so old-side line numbers name nothing in common
  * and deletions compare only by CONTENT.
+ *
+ * The pairing is what makes the content comparison sound. Held per FILE, a
+ * `-X` the PR displays in one hunk cleared a `-X` the delta performs thirty
+ * lines away in another — a line displayed nowhere near where the delta
+ * deletes it. Locality is available (the head tree is shared, which is the
+ * same fact the range check already rests on), so it is used: a deletion is
+ * matched only against hunks that ENCLOSE the hunk performing it.
  */
-interface FileSection {
-  /** New-side ranges, one per hunk. */
-  ranges: Array<[number, number]>;
-  /** Contents of the hunk bodies' `-` lines, marker stripped. */
+interface HunkFacts {
+  /** New-side range of this hunk. */
+  range: [number, number];
+  /** Contents of this hunk body's `-` lines, marker stripped. */
   deletions: string[];
 }
 
-/** `path -> section`, via the shared parser. Null if it found nothing in a
+/** `path -> hunks`, via the shared parser. Null if it found nothing in a
  *  non-empty diff, which is the "could not rule" state. */
-function sectionsOf(diffText: string): Map<string, FileSection> | null {
+function sectionsOf(diffText: string): Map<string, HunkFacts[]> | null {
   const { files } = parseDiff(diffText);
   if (diffText.trim() !== '' && files.length === 0) return null;
   // Split once: `containmentRuling` runs on every incremental capture, and
   // re-splitting per hunk made it quadratic in the diff size.
   const lines = diffText.split('\n');
-  const out = new Map<string, FileSection>();
+  const out = new Map<string, HunkFacts[]>();
   for (const f of files) {
     // A section with no hunk at all — a mode change, a binary replacement, a
-    // pure rename — carries nothing to compare. It enters EMPTY so the path
-    // check still runs: each used to pass vacuously, which is how a delta
-    // whose only content is a file the PR's own diff never mentions became
-    // the scope.
-    const section = out.get(f.path) ?? { ranges: [], deletions: [] };
+    // pure rename — carries nothing to compare. It enters as an EMPTY list so
+    // the path check still runs: each used to pass vacuously, which is how a
+    // delta whose only content is a file the PR's own diff never mentions
+    // became the scope.
+    const hunks = out.get(f.path) ?? [];
     for (const h of f.hunks) {
       // A pure deletion (`newCount === 0`) sits BETWEEN two post-image lines;
       // `parseDiff` already clamps its range to the junction, and comparing
       // that junction against a covering hunk is what keeps a deletion the
       // PR's own diff performs from being refused.
-      section.ranges.push([h.newStart, h.newEnd]);
+      const deletions: string[] = [];
       // Body lines only. `diffStart` is the `@@` header's own 1-based line
       // number, so the body begins at that index and ends at `diffEnd - 1`;
       // starting at the header would read `---` file metadata as a deletion.
       for (let i = h.diffStart; i < h.diffEnd; i++) {
         const line = lines[i];
         if (line !== undefined && line.startsWith('-')) {
-          section.deletions.push(line.slice(1));
+          deletions.push(line.slice(1));
         }
       }
+      hunks.push({ range: [h.newStart, h.newEnd], deletions });
     }
-    out.set(f.path, section);
+    out.set(f.path, hunks);
   }
   return out;
 }
 
 /** The containment loop over already-parsed sections. */
 function sectionsContained(
-  inner: Map<string, FileSection>,
-  outer: Map<string, FileSection>,
+  inner: Map<string, HunkFacts[]>,
+  outer: Map<string, HunkFacts[]>,
 ): boolean {
-  for (const [file, section] of inner) {
+  for (const [file, hunks] of inner) {
     const covering = outer.get(file);
     if (!covering) return false;
     // A delta section with nothing comparable — a mode change, a pure rename,
-    // a binary replacement — carries no range and no deletion, so both loops
-    // below iterate zero times and the section passes vacuously. That is the
-    // right answer only when the PR's own section is equally contentless (two
-    // binary sections, say). When the covering section HAS hunks, the delta is
+    // a binary replacement — carries no hunk at all, so the loop below iterates
+    // zero times and the section passes vacuously. That is the right answer
+    // only when the PR's own section is equally contentless (two binary
+    // sections, say). When the covering section HAS hunks, the delta is
     // asserting a change of a kind the PR's diff does not show — an "undo per
     // feedback" round that reverts round 1's `chmod +x` is exactly this shape —
     // and vacuous truth is the wrong verdict for it.
-    if (
-      section.ranges.length === 0 &&
-      section.deletions.length === 0 &&
-      covering.ranges.length > 0
-    ) {
-      return false;
-    }
-    for (const [start, end] of section.ranges) {
+    if (hunks.length === 0 && covering.length > 0) return false;
+    for (const hunk of hunks) {
+      const [start, end] = hunk.range;
       // Strict containment, no slack. Both captures share the head tree, so
       // a deletion the PR's own diff performs yields an identical junction
       // range and is covered at equality; slack for it bought nothing and
       // accepted a delta hunk one line past the covering hunk — a line
       // GitHub's PR diff does not display, where an anchored comment 422s
       // the entire all-or-nothing Create Review call.
-      if (!covering.ranges.some(([s, e]) => s <= start && end <= e)) {
-        return false;
+      //
+      // The enclosing hunks are collected rather than merely counted, because
+      // they are also what the deletions below are allowed to draw on. A hunk
+      // that does not enclose this one displays its lines somewhere else in
+      // the file, which is no help to a comment anchored HERE.
+      const enclosing = covering.filter(
+        (o) => o.range[0] <= start && end <= o.range[1],
+      );
+      if (enclosing.length === 0) return false;
+
+      // Deleted lines occupy NO new-side line, so the range check above is
+      // blind to them: what survives a deletion hunk on the new side is its
+      // context, which the covering hunk contains for free. A delta that
+      // deletes a line the PR's own diff never displays passed the range check
+      // outright.
+      //
+      // The discriminator is where the line came from. `-X` in the delta means
+      // X stood at the anchor and is gone at head. If X also stood at the merge
+      // base then the PR — which ends at that same head — must delete it too,
+      // so `-X` appears in the full capture as well. So the converse is the
+      // refusal: `-X` absent from the full capture means the PR introduced X
+      // after the base and then took it back out, and GitHub's PR diff shows
+      // that line on neither side. An inline comment anchored there 422s the
+      // entire all-or-nothing Create Review call.
+      //
+      // Content, not position: the two captures' old sides are different trees,
+      // so old-side line numbers are not comparable at all. But LOCALITY is
+      // comparable — the head tree is shared, which is the same fact the range
+      // check rests on — so the budget is drawn from the enclosing hunks only.
+      // Pooled per file, a `-X` the PR displays thirty lines away cleared a
+      // `-X` the delta performs here, in a hunk that displays no deletion at
+      // all.
+      //
+      // Counted, not set-membership. A set lets ONE `-X` clear ANY number of
+      // `-X` lines in the delta, so a round that deletes two identical lines —
+      // a duplicated guard clause, a repeated import, a blank line — where the
+      // PR deletes one is accepted, and the second deletion is a line GitHub's
+      // diff does not display. Each delta deletion must consume its own
+      // occurrence.
+      const budget = new Map<string, number>();
+      for (const o of enclosing) {
+        for (const d of o.deletions) budget.set(d, (budget.get(d) ?? 0) + 1);
       }
-    }
-    // Deleted lines occupy NO new-side line, so the range check above is
-    // blind to them: what survives a deletion hunk on the new side is its
-    // context, which the covering hunk contains for free. A delta that
-    // deletes a line the PR's own diff never displays passed the range check
-    // outright.
-    //
-    // The discriminator is where the line came from. `-X` in the delta means
-    // X stood at the anchor and is gone at head. If X also stood at the merge
-    // base then the PR — which ends at that same head — must delete it too,
-    // so `-X` appears in the full capture as well. So the converse is the
-    // refusal: `-X` absent from the full capture means the PR introduced X
-    // after the base and then took it back out, and GitHub's PR diff shows
-    // that line on neither side. An inline comment anchored there 422s the
-    // entire all-or-nothing Create Review call.
-    //
-    // Content, not position: the two captures' old sides are different trees,
-    // so old-side line numbers are not comparable at all.
-    //
-    // Counted, not set-membership. A set lets ONE `-X` in the PR's diff clear
-    // ANY number of `-X` lines in the delta, so a round that deletes two
-    // identical lines — a duplicated guard clause, a repeated import, a blank
-    // line — where the PR deletes one is accepted, and the second deletion is
-    // a line GitHub's diff does not display. Each delta deletion must consume
-    // its own occurrence.
-    const budget = new Map<string, number>();
-    for (const d of covering.deletions) {
-      budget.set(d, (budget.get(d) ?? 0) + 1);
-    }
-    for (const deleted of section.deletions) {
-      const left = budget.get(deleted) ?? 0;
-      if (left === 0) return false;
-      budget.set(deleted, left - 1);
+      for (const deleted of hunk.deletions) {
+        const left = budget.get(deleted) ?? 0;
+        if (left === 0) return false;
+        budget.set(deleted, left - 1);
+      }
     }
   }
   return true;

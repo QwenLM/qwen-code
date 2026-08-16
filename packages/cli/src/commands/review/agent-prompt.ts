@@ -1353,13 +1353,19 @@ export function buildRoleBrief(
     // sha costs a wider probe scope rather than the round. `host` has no such
     // second-best — a wrong hostname reroutes the evidence fetch — so it
     // refuses instead.
+    //
+    // BOTH sources, not just the anchor. `mergeBaseSha` reaches the same
+    // unquoted interpolation on every non-incremental round — the common case
+    // — and the plan is `JSON.parse`d with no field validation on this path,
+    // so shape-checking one source and not the other leaves the wider door
+    // open. A base that is not a sha emits no probe block at all, which is
+    // already what a report with no merge base does.
+    const shaOrNull = (v: unknown): string | null =>
+      typeof v === 'string' && SHA_RE.test(v) ? v : null;
     const base =
-      inc?.effective === true &&
-      inc.upToDate !== true &&
-      typeof inc.diffBase === 'string' &&
-      SHA_RE.test(inc.diffBase)
-        ? inc.diffBase
-        : report.mergeBaseSha;
+      inc?.effective === true && inc.upToDate !== true
+        ? (shaOrNull(inc.diffBase) ?? shaOrNull(report.mergeBaseSha))
+        : shaOrNull(report.mergeBaseSha);
     const pr = report.prNumber;
 
     // The tree build-test builds in. A PR review has a worktree; a **local** review

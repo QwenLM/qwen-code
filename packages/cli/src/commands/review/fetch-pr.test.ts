@@ -2204,9 +2204,11 @@ describe('containmentRuling — the containment oracle', () => {
     // no filesystem fixture can carry this shape.)
     const bytes = (...parts: Array<string | number[]>) =>
       Buffer.concat(
-        parts.map((x) =>
-          typeof x === 'string' ? Buffer.from(x) : Buffer.from(x),
-        ),
+        // No ternary: `Buffer.from` already accepts the whole
+        // `string | number[]` union, and a dead branch here invites a future
+        // edit to give one arm a different encoding — silently redefining the
+        // exact bytes these collision fixtures exist to carry.
+        parts.map((x) => Buffer.from(x)),
       );
     const nameA = bytes('data_', [0xe9], '.log').toString('utf8');
     const nameB = bytes('data_', [0xf1], '.log').toString('utf8');
@@ -2231,6 +2233,43 @@ describe('containmentRuling — the containment oracle', () => {
         secDeleting('a.ts', [1, 100], [sentB]),
       ),
     ).toEqual({ ok: false, unverified: true });
+
+    // ONE-SIDED, both directions. Every case above is lossy on both sides, so
+    // an `&&` in place of the `||` survives them all — and the difference
+    // matters: a lossy delta against a clean full capture would then be ruled
+    // `hunks-outside-pr-diff`, which asserts a PROVEN scope violation, rather
+    // than `containment-unverified`, which says the oracle could not read its
+    // input. The reachable shape is a file whose path carries an invalid byte,
+    // added after the anchor and deleted in the undo round: the delta capture
+    // carries it, the full capture nets it to nothing.
+    expect(
+      containmentRuling(
+        deletes(nameA, 6, ['X']),
+        secDeleting('a.ts', [1, 100], ['X']),
+      ),
+    ).toEqual({ ok: false, unverified: true });
+    expect(
+      containmentRuling(
+        deletes('a.ts', 6, ['X']),
+        secDeleting(nameA, [1, 100], ['X']),
+      ),
+    ).toEqual({ ok: false, unverified: true });
+  });
+
+  it('compares SHORT deleted lines by their whole content', () => {
+    // The collector strips exactly one marker character. Stripping two
+    // transforms both captures identically — so every equality this battery
+    // checks still holds — while collapsing distinct short deletions onto the
+    // empty string: `-a` and `-b` both become ``. The battery's own comment
+    // names "a blank line" as a shape it cares about, and no fixture supplied
+    // one.
+    expect(
+      contained(deletes('a.ts', 6, ['a']), secDeleting('a.ts', [1, 100], [''])),
+    ).toBe(false);
+    // A genuinely blank deleted line is matched by a blank one.
+    expect(
+      contained(deletes('a.ts', 6, ['']), secDeleting('a.ts', [1, 100], [''])),
+    ).toBe(true);
   });
 
   it('keys the deletion rule per FILE, not across the whole diff', () => {
@@ -2244,6 +2283,79 @@ describe('containmentRuling — the containment oracle', () => {
     expect(contained(deletes('a.ts', 6, ['X']), full)).toBe(false);
     // …and it is displayed where the PR actually deletes it.
     expect(contained(deletes('b.ts', 6, ['X']), full)).toBe(true);
+  });
+
+  it('draws the deletion budget from the ENCLOSING hunk, not the whole file', () => {
+    // Held per file, a `-X` the PR displays in one hunk cleared a `-X` the
+    // delta performs thirty lines away in another — a line displayed nowhere
+    // near where the delta deletes it, so a comment anchored there still 422s.
+    // Locality is available (the shared head tree is the same fact the range
+    // check rests on), so the budget comes from the hunks that enclose.
+    const far = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      // encloses the delta's range but deletes nothing
+      '@@ -2,14 +2,14 @@',
+      ...Array.from({ length: 3 }, (_, i) => ` c${i}`),
+      '-edited',
+      '+edited2',
+      ...Array.from({ length: 9 }, (_, i) => ` d${i}`),
+      // deletes X, but nowhere near
+      '@@ -40,11 +40,10 @@',
+      ' e0',
+      '-X',
+      ...Array.from({ length: 8 }, (_, i) => ` e${i + 1}`),
+      '',
+    ].join('\n');
+    expect(contained(deletes('a.ts', 6, ['X']), far)).toBe(false);
+    // …and it IS accepted when the enclosing hunk is the one that deletes it.
+    expect(
+      contained(
+        deletes('a.ts', 6, ['X']),
+        secDeleting('a.ts', [1, 100], ['X']),
+      ),
+    ).toBe(true);
+  });
+
+  it('reads a deletion that ends the hunk body, with no trailing context', () => {
+    // Under `--unified=3`, deleting within three lines of EOF emits a hunk
+    // whose body ENDS in the `-` line. Every other deletion fixture here wraps
+    // its deletions in trailing context, so the body scan's trailing bound was
+    // pinned by nothing while its leading bound was.
+    const endsInDeletion = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -8,3 +8,2 @@',
+      ' ctx',
+      ' ctx2',
+      '-X',
+      '',
+    ].join('\n');
+    // The PR displays no such deletion, so it must be refused — which only
+    // happens if the scan SAW the trailing `-X` at all.
+    expect(contained(endsInDeletion, sec('a.ts', [[1, 100]]))).toBe(false);
+    expect(
+      contained(endsInDeletion, secDeleting('a.ts', [1, 100], ['X'])),
+    ).toBe(true);
+  });
+
+  it('refuses a delta WITH hunks against a same-file section that has none', () => {
+    // The mirror of the vacuous-pass case. `refuses hunk-less sections`
+    // anchors its mode/binary deltas against a DIFFERENT file, so
+    // `covering === undefined` refuses before the range loop is reached and
+    // the empty-covering path goes unexercised. Real shape: round 1 edits
+    // `m.sh` and chmods it, round 2 reverts only the content, so `base..head`
+    // nets to a mode-only section while the delta still carries a hunk.
+    const modeOnly = [
+      'diff --git a/m.sh b/m.sh',
+      'old mode 100755',
+      'new mode 100644',
+      '',
+    ].join('\n');
+    expect(contained(sec('m.sh', [[10, 3]]), modeOnly)).toBe(false);
+    expect(contained(deletes('m.sh', 6, ['X']), modeOnly)).toBe(false);
   });
 
   it('refuses a deletion the PR diff does not itself perform', () => {

@@ -1305,6 +1305,12 @@ describe('renderLedgerSection', () => {
     // the CLI now owns — with no other test red.
     expect(anchored).toContain('pass it as `--since <sha>`');
     expect(anchored).toContain('never run git against an anchor yourself');
+    // The tail's other two load-bearing fragments, each deletable while this
+    // file stayed green: the antecedent that says WHAT to pass, and the
+    // statement that the CLI is what validates and scopes it. Without the
+    // first, `pass it as --since <sha>` refers to nothing.
+    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('validates it against the fetched history');
     // The CONDITION, not just the instruction. Dropping the clause leaves the
     // tail telling the orchestrator, unconditionally and in imperative tone,
     // to re-run with a sha that may already have been deterministically
