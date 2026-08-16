@@ -347,7 +347,10 @@ fi
 # every later round, so the agent never re-derives the clipped ids. The
 # warning names them for a maintainer to persist by hand (or raise the cap);
 # it must not imply a later round will re-defer them.
-TOTAL_NEW="$(printf '%s\n' "${NEW_LINES}" | wc -l)"
+# tr -d ' ': BSD/macOS wc pads its count with leading spaces, which would be
+# interpolated verbatim into the cap warning and the success message (the
+# sibling `wc -c` above already strips it).
+TOTAL_NEW="$(printf '%s\n' "${NEW_LINES}" | wc -l | tr -d ' ')"
 if (( TOTAL_NEW > 20 )); then
   DROPPED="$(printf '%s\n' "${NEW_LINES}" | tail -n +21)"
   NEW_LINES="$(printf '%s\n' "${NEW_LINES}" | head -n 20)"

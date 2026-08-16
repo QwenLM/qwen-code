@@ -5778,7 +5778,7 @@ jobs:
                 exec >&3
                 printf "%s\n" "__upsert_child_live__"
                 if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
-                  echo "::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                  echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
                   exit 0
                 fi
                 export GH_CONFIG_DIR
@@ -5795,8 +5795,16 @@ jobs:
             # The child's output is agent-reachable content, so a line-start
             # `::` is neutralized before it reaches this step's stdout.
             while IFS= read -r _upsert_line; do
-              [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
+              # Wrapper-authored lines carry a marker and are emitted
+              # VERBATIM so they still render as GitHub annotations; the
+              # script's own output is agent-reachable and stays neutralized.
+              if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
+                :
+              elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
+                printf '%s\n' "${_upsert_line#__upsert_trusted__}"
+              else
                 printf '%s\n' "${_upsert_line//::/;;}"
+              fi
             done <<< "${UPSERT_OUT}"
           }
 
@@ -6762,13 +6770,13 @@ jobs:
                   exec >&3
                   printf "%s\n" "__upsert_child_live__"
                   if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
-                    echo "::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                    echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
                     exit 0
                   fi
                   export GH_CONFIG_DIR
                   UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"
                   if [[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
-                    echo "::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got ${UPSERT_ACTOR:-none}); NOT persisted this round"
+                    echo "__upsert_trusted__::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got ${UPSERT_ACTOR:-none}); NOT persisted this round"
                     exit 0
                   fi
                   bash -c "${UPSERT_SRC}" ||
@@ -6779,8 +6787,13 @@ jobs:
                 echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
               fi
               while IFS= read -r _upsert_line; do
-                [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
+                if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
+                  :
+                elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
+                  printf '%s\n' "${_upsert_line#__upsert_trusted__}"
+                else
                   printf '%s\n' "${_upsert_line//::/;;}"
+                fi
               done <<< "${UPSERT_OUT}"
             fi
           fi

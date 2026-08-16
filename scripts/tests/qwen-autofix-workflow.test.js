@@ -10480,8 +10480,10 @@ exit 1
         argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
       ).map((m) => m.trim());
       const passed = assignments.map((m) => m.split('=')[0]);
-      expect(new Set(passed)).toEqual(
-        new Set([
+      // Sorted multiset, not a Set: a symmetric duplicate entry is exactly
+      // the mutation this check exists to catch, and a Set hides it.
+      expect([...passed].sort()).toEqual(
+        [
           // the LD_* command-prefix assignments lead the launch line
           'LD_PRELOAD',
           'LD_AUDIT',
@@ -10499,7 +10501,7 @@ exit 1
           'REPO',
           'AUTOFIX_BOT',
           'UPSERT_SRC',
-        ]),
+        ].sort(),
       );
       // Every entry pinned by its exact token, including UPSERT_SRC — the
       // script CONTENT, which is what makes the staged copy (and its digest
@@ -10567,7 +10569,7 @@ exit 1
       // R8-5: the captured output is re-emitted, so the child's warnings
       // actually reach the log (deleting both loops was invisible).
       expect(step).toMatch(
-        /while IFS= read -r _upsert_line; do\n\s*\[\[ "\$\{_upsert_line\}" == '__upsert_child_live__' \]\] \|\|\n\s*printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"\n\s*done <<< "\$\{UPSERT_OUT\}"/,
+        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
       );
       // Ordering: the script executes INSIDE the clean child, after the
       // launch — a relocation outside it must fail here.
@@ -10644,6 +10646,11 @@ exit 1
     expect(stageStep).toContain('cat .github/scripts/upsert-deferred-issue.sh');
     expect(stageStep).toMatch(
       /_upsert_delim="EOF_\$\(head -c 16 \/dev\/urandom/,
+    );
+    // …and the CLOSING delimiter: an unterminated heredoc would swallow the
+    // rest of GITHUB_OUTPUT into the value.
+    expect(stageStep).toMatch(
+      /echo "upsert_src<<\$\{_upsert_delim\}"\n(?:\s*#[^\n]*\n)*\s*cat [^\n]*\n\s*echo "\$\{_upsert_delim\}"/,
     );
     expect(workflow).not.toMatch(/upsert_sha256/);
     expect(workflow).not.toMatch(
@@ -10722,6 +10729,11 @@ exit 1
     expect(repairStep).toContain(
       '::warning::could not merge carried deferrals across the repair',
     );
+    // The merge-failure path QUARANTINES this round's set instead of deleting
+    // it, which is what makes the warning's artifact pointer true.
+    expect(repairStep).toContain(
+      'mv "${WORKDIR}/deferred-findings.json" \\\n                  "${WORKDIR}/deferred-findings.unmerged.json"',
+    );
     // R8-3: that branch discards THIS run's set, so it dumps it first —
     // `::` neutralized, like every other echo of agent-written content.
     expect(repairStep).toMatch(
@@ -10768,6 +10780,7 @@ exit 1
       writeFail = false,
       mktempFail = false,
       jqFail = false,
+      bsdWc = false,
       carry = '',
       listPages = null,
       listErr = '',
@@ -10801,6 +10814,15 @@ exit 1
           ].join('\n'),
         );
         chmodSync(join(bin, 'jq'), 0o755);
+      }
+      if (bsdWc) {
+        // BSD/macOS `wc` pads its count with leading spaces; GNU does not, so
+        // the padding bug is invisible on Linux CI without this stub.
+        writeFileSync(
+          join(bin, 'wc'),
+          '#!/usr/bin/env bash\nprintf "%8s\\n" "$(/usr/bin/wc "$@" | tr -d \' \')"\n',
+        );
+        chmodSync(join(bin, 'wc'), 0o755);
       }
       if (mktempFail) {
         // Shadow mktemp on PATH with a failing stub (simulates /tmp
@@ -11303,6 +11325,17 @@ exit 1
     });
     expect(freshWins.calls).toContain('fresh');
     expect(freshWins.calls).not.toContain('stale');
+    // BSD/macOS `wc -l` pads with leading spaces, and the count is
+    // interpolated into the cap warning and the success line — so the script
+    // strips it. Driven with a padding `wc` stub, since GNU wc never pads and
+    // the regression is invisible on Linux otherwise.
+    const padded = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      bsdWc: true,
+    });
+    expect(padded.out).toContain('(1 of 1 new)');
+    expect(padded.out).not.toMatch(/\(\s+1 of/);
+    expect(padded.out).not.toMatch(/of\s{2,}1 new/);
     // R10-4: the 200-char path cap and 500-char reason cap are behaviour, so
     // they get behavioural coverage rather than a static pin.
     const cappedFields = runUpsert({
