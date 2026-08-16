@@ -110,7 +110,7 @@ export function reviewBranch(prNumber: string | number): string {
  * separator and dot-segment to a single component so the file always sits
  * directly in the temp dir.
  */
-function safeTarget(target: string): string {
+export function safeTarget(target: string): string {
   const flat = target
     .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
     .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token

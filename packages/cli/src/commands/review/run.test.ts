@@ -204,12 +204,22 @@ describe('target-pinned artifact patterns', () => {
       number: '9014',
     });
     // A path that merely contains /pull/<n> is a FILE target to the parser,
-    // and the file identity is the basename (the skill's `{target}` token):
+    // and the file identity is the skill's `{target}` token: the
+    // repo-relative path put through the CLI's own `safeTarget`
+    // normalization, NOT the basename. The two diverge for every file in a
+    // subdirectory, and the basename pin made the parent poll a name the
+    // child never writes.
     expect(classifyRunTarget('docs/pull/42')).toEqual({
       kind: 'file',
-      base: '42',
+      base: 'docs_pull_42',
     });
     expect(classifyRunTarget('src/foo.ts')).toEqual({
+      kind: 'file',
+      base: 'src_foo.ts',
+    });
+    // Root-level targets are unchanged — which is why the drift went
+    // unnoticed: every fixture used one.
+    expect(classifyRunTarget('foo.ts')).toEqual({
       kind: 'file',
       base: 'foo.ts',
     });
