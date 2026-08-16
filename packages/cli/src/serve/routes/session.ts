@@ -94,6 +94,10 @@ import {
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  omitSkillDetailsForSdkSurface,
+  omitSkillDetailsFromReplayArrays,
+} from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
@@ -2101,7 +2105,9 @@ export function registerSessionRoutes(
             });
             return;
           }
-          res.status(200).json(session);
+          // Same replay-array shape as the load response; redact skill
+          // bodies for the browser surface (#9234).
+          res.status(200).json(omitSkillDetailsFromReplayArrays(session));
         } catch (err) {
           sendBridgeError(res, err, { route, sessionId });
         }
@@ -2414,7 +2420,9 @@ export function registerSessionRoutes(
             }
           }
         }
-        res.status(200).json(session);
+        // The load response embeds the replay snapshot inline; redact the
+        // skill bodies there just like the SSE egress does (#9234).
+        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
       } catch (err) {
         sendBridgeError(res, err, {
           route,
@@ -2597,7 +2605,16 @@ export function registerSessionRoutes(
           }
         }
         if (!res.writable) return;
-        res.status(201).json(result);
+        // Branch/side-task responses carry the same replay snapshot shape as
+        // load; apply the same redaction (#9234). The helper returns its
+        // input unchanged when no replay arrays are present (checkpoint
+        // branches), so apply it unconditionally rather than re-deriving the
+        // bridge's variant discrimination here.
+        res
+          .status(201)
+          .json(
+            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
+          );
       },
     ),
   );
@@ -2661,7 +2678,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(result);
+        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
       },
     ),
   );
@@ -2829,7 +2846,13 @@ export function registerSessionRoutes(
         },
       );
       if (result === undefined) return;
-      res.status(200).set('Cache-Control', 'no-store').json(result);
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .json({
+          ...result,
+          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
+        });
     } catch (err) {
       sendBridgeError(res, err, {
         route,
@@ -2949,11 +2972,13 @@ export function registerSessionRoutes(
             return {
               v: 1 as const,
               sessionId,
-              events: replay.updates.map((update) => ({
-                v: 1 as const,
-                type: 'session_update' as const,
-                data: update,
-              })),
+              events: replay.updates.map((update) =>
+                omitSkillDetailsForSdkSurface({
+                  v: 1 as const,
+                  type: 'session_update' as const,
+                  data: update,
+                }),
+              ),
               ...(replay.nextCursor && !cursorTooLarge
                 ? { nextCursor: replay.nextCursor }
                 : {}),
