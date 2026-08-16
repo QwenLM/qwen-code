@@ -1682,10 +1682,6 @@ function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.currentToolCallId = undefined;
   state.pendingUserShellCommand = undefined;
   state.lastFollowupSuggestion = undefined;
-  // Rewind erases the turns these diagnostics were routed from; keep the
-  // sidechannel aligned with the sibling per-turn state reset above.
-  state.unrecognizedDiagnostics = [];
-
   const liveToolCallIds = new Set<string>();
   for (const block of state.blocks) {
     if (block.kind === 'tool') {
