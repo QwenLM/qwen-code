@@ -20,6 +20,7 @@ import {
   mkdirSync,
   symlinkSync,
   lstatSync,
+  realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,7 +29,12 @@ import { cacheCommitCommand } from './cache-commit.js';
 let dir: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'cache-commit-'));
+  // `realpathSync`, like every sibling fixture here: the handler refuses to
+  // write through a symlinked parent (`assertUnredirectedParent`), and
+  // `tmpdir()` IS a symlink on macOS (`/var/folders/…` →
+  // `/private/var/folders/…`). Without the wrap every success-path test here
+  // fails on a developer's Mac while CI stays green on its real-path TMPDIR.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'cache-commit-')));
 });
 
 afterEach(() => {
