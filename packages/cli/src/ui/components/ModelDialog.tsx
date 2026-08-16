@@ -47,6 +47,20 @@ function formatModalities(modalities?: InputModalities): string {
   return `${t('text')} · ${parts.join(' · ')}`;
 }
 
+const AUTH_TYPE_LABELS: Record<AuthType, string> = {
+  [AuthType.QWEN_OAUTH]: 'Qwen OAuth',
+  [AuthType.USE_OPENAI]: 'OpenAI',
+  [AuthType.USE_OPENAI_RESPONSES]: 'OpenAI Responses',
+  [AuthType.USE_ANTHROPIC]: 'Anthropic',
+  [AuthType.USE_COPILOT]: 'GitHub Copilot',
+  [AuthType.USE_GEMINI]: 'Gemini',
+  [AuthType.USE_VERTEX_AI]: 'Vertex AI',
+};
+
+function authTypeLabel(authType: AuthType): string {
+  return AUTH_TYPE_LABELS[authType] ?? String(authType);
+}
+
 /**
  * Build a unique selection key for a model entry in the model dialog.
  * When baseUrl is present, it's appended after a \0 separator to ensure
@@ -351,6 +365,7 @@ export function ModelDialog({
       AuthType.USE_OPENAI,
       AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
+      AuthType.USE_COPILOT,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
     ];
@@ -399,7 +414,7 @@ export function ModelDialog({
   const MODEL_OPTIONS = useMemo(
     () =>
       availableModelEntries.map(
-        ({ authType: t2, model, isRuntime, snapshotId }) => {
+        ({ authType: t2, model, isRuntime, snapshotId }, index) => {
           const value =
             isRuntime && snapshotId
               ? snapshotId
@@ -407,8 +422,22 @@ export function ModelDialog({
 
           const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
 
+          // Show a section divider when the authType changes between
+          // consecutive entries. The first entry always shows a divider
+          // (no previous entry). Runtime models are grouped first, then
+          // registry models grouped by authType, so each group boundary
+          // gets a divider.
+          const previousAuthType =
+            index > 0 ? availableModelEntries[index - 1].authType : undefined;
+          const showSectionDivider = previousAuthType !== t2;
+
           const title = (
             <Text>
+              {showSectionDivider && (
+                <Text color="gray">
+                  ── {authTypeLabel(t2)} ──{'\n'}
+                </Text>
+              )}
               <Text
                 bold
                 color={
@@ -1160,18 +1189,19 @@ export function ModelDialog({
               highlightedEntry.model.contextWindowSize,
             )}
           />
-          {highlightedEntry.authType !== AuthType.QWEN_OAUTH && (
-            <>
-              <DetailRow
-                label="Base URL"
-                value={highlightedEntry.model.baseUrl ?? t('(default)')}
-              />
-              <DetailRow
-                label="API Key"
-                value={highlightedEntry.model.envKey ?? t('(not set)')}
-              />
-            </>
-          )}
+          {highlightedEntry.authType !== AuthType.QWEN_OAUTH &&
+            highlightedEntry.authType !== AuthType.USE_COPILOT && (
+              <>
+                <DetailRow
+                  label="Base URL"
+                  value={highlightedEntry.model.baseUrl ?? t('(default)')}
+                />
+                <DetailRow
+                  label="API Key"
+                  value={highlightedEntry.model.envKey ?? t('(not set)')}
+                />
+              </>
+            )}
         </Box>
       )}
 
