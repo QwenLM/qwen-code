@@ -19,9 +19,28 @@ reviewed and shipped independently from client behavior.
 `GET /workspaces/:workspace/sessions` is a persisted catalog query, not a live
 status probe. Depending on its query shape and workspace history, it can scan
 session JSONL files, read organization sidecars, paginate and filter persisted
-metadata, and merge bridge-owned live state. The server has a two-second cache
-and a conditional live-only fast path, but a workspace with persisted history
-still needs the catalog path.
+metadata, and merge bridge-owned live state.
+
+The current paths have different cost and cache behavior:
+
+- The default numeric-cursor path reads a fresh storage page for every request,
+  enriches its worktree sidecars, and does not use
+  `PersistedSessionListCache`. The server caps its requested page size at 100.
+- Metadata-filtered and organized paths gather the persisted workspace before
+  filtering and pagination. They use the process-global persisted-list cache,
+  but its TTL is two seconds.
+- A live-only fast path exists only when the request shape permits it and the
+  workspace has no active persisted sessions.
+
+The current daemon advertises session source metadata unconditionally, so Web
+Shell normally sends `sourceType=default`; organization-enabled views use the
+organized path.
+Those steady-state sidebar requests therefore use a cached full-workspace scan,
+not the uncached numeric path. The active sidebar cadence is also two seconds,
+so the next poll normally reaches or exceeds the cache TTL and can start the
+same persisted scan again. Older or differently shaped clients may instead hit
+the uncached numeric path. The protocol removes high-frequency status polling
+from all of these catalog paths.
 
 Polling that route to update `hasActivePrompt`, pending interaction state, or
 client counts couples a small volatile-state requirement to the most expensive
@@ -63,6 +82,19 @@ The protocol needs two independent signals:
 - Adding ETags, conditional requests, pagination, query filters, a feature
   gate, or a new readiness feature.
 - Changing current display-name persistence or live/persisted merge behavior.
+
+The existing full catalog remains capable of discovering sessions and metadata
+written directly by another daemon, a TUI, or an external process. This
+protocol does not make those writers observable to the in-memory clock. Once a
+client stops periodic full-catalog polling, their changes have no bounded
+discovery time: they become visible only after an explicit full reload, another
+observed catalog mutation, reconnect, or daemon/runtime replacement.
+
+Similarly, a turn in another controller can change persisted `updatedAt` and
+session ordering without advancing the revision. Local mutation and turn-
+completion signals may refresh immediately, but cross-controller ordering can
+remain stale until a later catalog reload. These are explicit compatibility
+boundaries, not guarantees supplied by the live-state protocol.
 
 ## Ownership and Trust
 
@@ -133,6 +165,9 @@ The response deliberately excludes workspace cwd, display name, timestamps,
 prompt content, pending interaction contents, turn errors, source metadata,
 organization, worktree metadata, branch metadata, tokens, and model state.
 Those fields belong to the full catalog or other dedicated status surfaces.
+`hasTurnError` and `pendingInteractionCount` also remain excluded because no
+current Web Shell catalog consumer reads them; either field can be added
+wire-additively when a concrete consumer requires it.
 
 The complete snapshot is intentional. A client needs absence to clear stale
 volatile state for a known catalog row. The default live-session cap is 32, so
@@ -157,6 +192,10 @@ markSessionCatalogChanged(): void;
 `generation` is a random UUID created with each bridge instance. It changes
 when the daemon restarts or a workspace runtime replaces its bridge.
 `revision` starts at zero and monotonically increases within that generation.
+`getSessionCatalogVersion()` returns a value snapshot: a previously returned
+object must never change when a later mark advances the internal revision. The
+route may therefore retain the returned value in its last-exposed `WeakMap`
+without aliasing mutable bridge state.
 
 The pair is not a gap-free event sequence. Conservative extra increments are
 allowed, and clients must not perform revision arithmetic or compare revisions
@@ -173,6 +212,13 @@ same value after daemon restart or workspace runtime replacement.
 
 The clock is intentionally daemon-local and non-durable. Writes made directly
 to the session store outside the current daemon are not observed.
+
+Live membership marks are structural rather than distributed across lifecycle
+call sites. The bridge's internal `emitSessionLifecycle` choke point advances
+the clock for `registered` and `removed` events after the corresponding map
+mutation and before invoking the failure-isolated optional host callback. Every
+bridge map insertion, deletion, and clear already flows through that choke
+point, so a host callback failure cannot suppress the revision change.
 
 ## What Advances the Revision
 
@@ -207,8 +253,11 @@ notifications without changing existing direct constructor calls.
 
 ## Persisted Mutation Integration
 
-Existing REST and ACP mutation helpers already invalidate portions of the
-persisted session-list cache. Their catalog mutation ordering becomes:
+Existing REST and ACP batch-mutation helpers already invalidate portions of the
+persisted session-list cache. Other catalog writers, including organization and
+group routes, need to adopt the same combined operation. Wherever success and
+no-op semantics match, mutation paths share an invalidate-and-mark helper whose
+ordering is:
 
 ```text
 perform mutation
@@ -220,6 +269,12 @@ Archive, unarchive, and delete can partially commit before returning an error,
 so their wrapper retains `finally` invalidation and also advances the revision
 there. A false-positive increment is safe; a missed partial mutation is not.
 
+The shared operation does not erase exact mutation semantics. A group delete
+that returns `deleted: false`, a no-op rename, and a mutation that fails before
+committing do not advance the revision. Paths with possible partial commits use
+their documented conservative `finally` behavior instead. Direct persisted
+cleanup paths mark only after deletion succeeds.
+
 Session organization and group mutations affect organized views for both
 active and archived sessions, so successful writes invalidate both scopes
 before advancing the revision. Direct persisted removals used by orphan,
@@ -230,9 +285,13 @@ the protocol explicitly permits this.
 ## Cache Consistency
 
 The persisted session-list cache is process-global and keyed by runtime base
-directory, workspace, and archive state. Invalidated in-flight loads may still
-resolve to their existing waiter, but their generation check prevents them
-from installing a stale cache value.
+directory, workspace, and archive state. Only organized and metadata-filtered
+catalog reads use it; the numeric-cursor path always performs a fresh storage
+read. Invalidated in-flight cached loads may still resolve to their existing
+waiter, but their generation check prevents them from installing a stale cache
+value. Cache invalidation therefore protects cached catalog shapes, while the
+version handshake below detects concurrent mutations for both cached and
+uncached shapes.
 
 The live-state route maintains a registration-local:
 
@@ -265,17 +324,33 @@ at their mutation sites.
 
 ## Client Consistency Handshake
 
-An initial load, runtime replacement, or observed catalog version change uses:
+An initial load, runtime replacement, or observed catalog version change
+reconciles a catalog bundle. The bundle always contains the client's canonical
+session-list response and, when the client consumes `session_organization`, also
+contains the workspace group catalog from
+`GET /workspaces/:workspace/session-groups`:
 
 ```text
 live-state A
 full /workspaces/:workspace/sessions load
+GET /workspaces/:workspace/session-groups when organization is enabled
 live-state B
 ```
 
-- If `A.catalogVersion` equals `B.catalogVersion`, the catalog load is accepted.
+- The session and group requests may run concurrently, but every required
+  resource must succeed before the bundle can be accepted.
+- Every accepted resource request must be initiated after A. A request or
+  deduplicated promise that began before A cannot satisfy this reconciliation;
+  the client may let it finish, but must schedule a fresh post-A load.
+- If `A.catalogVersion` equals `B.catalogVersion`, the whole catalog bundle is
+  accepted.
 - If they differ, the client marks the catalog stale and coalesces one more
   full reload. It must not enter a tight retry loop.
+- If A, B, or a required session/group request fails, the client retains the
+  previously accepted bundle when one exists, leaves the catalog stale, and
+  retries under the same background policy. It must not pair new session
+  organization data with stale group definitions and call the version
+  reconciled.
 - A mutation before A is covered by A's pre-response cache invalidation.
 - A mutation between A and B is detected by B, which invalidates before
   exposing the new version.
@@ -286,6 +361,23 @@ live-state B
 An absent live-state row only clears volatile fields such as active, waiting,
 and client count. It never deletes a persisted catalog row. An unknown live
 session id or a changed catalog version schedules a full catalog reload.
+
+Version-driven reloads are background work and must be bounded independently
+from the two-second live-state cadence:
+
+- At most one version-driven catalog-bundle reconciliation is in flight per
+  workspace.
+- Version changes observed while it is in flight coalesce into at most one
+  trailing reload carrying the newest desired version.
+- Background reload starts obey a non-zero minimum interval or backoff. A
+  change observed during the cooldown remains pending and is reconciled after
+  the cooldown rather than starting one full scan per live-state poll.
+- Explicit local user mutations may request an immediate refresh; they still
+  share the same single-flight operation and cannot create overlapping scans.
+
+The Web Shell implementation PR selects and tests the concrete cooldown. The
+server protocol requires bounded behavior but does not standardize a client
+timing constant.
 
 Clients that know they just created, archived, deleted, renamed, regrouped, or
 completed a turn may still update local state and explicitly refresh as needed.
@@ -370,6 +462,8 @@ The implementation is one atomic feature PR containing:
 - The trusted workspace-qualified route and cache exposure ordering.
 - Known REST and ACP catalog mutation marks.
 - Capability registration and TypeScript SDK surface.
+- Registration of the route in the daemon telemetry classifier with a stable,
+  low-cardinality route label.
 - Protocol, lifecycle, capability, and SDK documentation plus tests.
 
 Splitting these pieces would temporarily publish an endpoint with an
@@ -379,12 +473,13 @@ not redefine their semantics.
 
 The REST and SDK changes are wire-additive. Adding required clock methods to
 the exported `AcpSessionBridge` interface is a source-level contract change for
-custom structural bridge implementations and complete test fakes. Every
-production bridge in this repository is created by `createAcpSessionBridge`
-and receives the implementation automatically; direct implementers must add
-the two in-memory methods when upgrading. This migration must be called out in
-the implementation PR's risk section rather than described as having no source
-impact.
+custom structural bridge implementations. Every production bridge in this
+repository is created by `createAcpSessionBridge` and receives the
+implementation automatically. Existing in-repository tests that double-cast
+partial fakes do not fail structurally, while complete typed fakes and external
+direct implementers must add the two in-memory methods when upgrading. This
+migration must be called out in the implementation PR's risk section rather
+than described as having no source impact.
 
 ## Test Plan
 
@@ -392,8 +487,11 @@ impact.
 
 - Initial version is stable; separate bridge instances have different
   generations.
+- A version snapshot returned before a mark remains unchanged after the mark.
 - Registration, removal, actual rename, automatic title, worktree update, and
   public marks advance revision.
+- Registration and removal advance through the lifecycle choke point even when
+  the optional host lifecycle callback throws.
 - A no-op rename does not advance revision.
 - A persisted-only branch advances revision without a live registration.
 - A committed branch followed by restore failure still advances revision.
@@ -428,6 +526,8 @@ impact.
 
 - REST and ACP archive, unarchive, delete, organization, and group writes
   invalidate and advance with the declared success/partial-result semantics.
+- Shared invalidate-and-mark helpers preserve no-op and pre-commit failure
+  behavior, including `deleted: false` group deletion.
 - Successful orphan, scheduled-task, Live, and sub-session persisted cleanup
   advances revision.
 
@@ -439,6 +539,22 @@ impact.
 - Types are exported through the daemon and root public surfaces.
 - Capability registry, advertised features, and capability documentation stay
   synchronized.
+- The telemetry classifier maps the new route to one stable label without a
+  workspace selector in the label.
+
+### Web Shell follow-up tests
+
+- Organization-enabled reconciliation accepts a version only after both the
+  session page and group catalog succeed between live-state A and B.
+- A catalog request that began before A cannot satisfy the handshake; a fresh
+  post-A request is required.
+- A failed group load cannot publish a mixed-version bundle.
+- Repeated version changes during one catalog load produce at most one trailing
+  reload.
+- Sustained version churn obeys the background cooldown instead of issuing one
+  full catalog request per live-state poll.
+- An explicit local mutation can request immediate reconciliation without
+  overlapping an existing background load.
 
 ### E2E and fault injection
 
@@ -452,8 +568,8 @@ impact.
 4. Exercise active, waiting, and client-count changes; verify the response body
    changes while catalog version remains stable.
 5. Replace a workspace runtime and verify generation changes.
-6. Verify the client handshake recovers from a mutation during an in-flight
-   full catalog load.
+6. In the Web Shell follow-up, verify the dual-resource client handshake
+   recovers from a mutation during an in-flight session or group catalog load.
 
 ## Acceptance and Rollout
 
@@ -472,12 +588,20 @@ Acceptance requires:
 - A new version is never exposed before old active and archived catalog cache
   generations are invalidated.
 - Existing clients and all existing session-list shapes remain wire-compatible.
+- Version-driven clients cannot publish a session/group bundle assembled across
+  different exposed versions and cannot drive full scans at live-state poll
+  frequency during sustained catalog churn.
 
 No custom success log is added for the high-frequency route. Existing HTTP
 route count, latency, and failure telemetry is sufficient. Canary validation
 compares live-state latency and error rate with session-list scan count and
 confirms that client adoption reduces periodic full catalog requests without
 increasing ACP child or daemon restart activity.
+
+When rate limiting is enabled, the endpoint uses the existing read tier. A
+two-second poll is 30 requests per minute for one poller, below the default
+120/minute read limit, but the bucket is shared with other read routes and this
+comparison is capacity context rather than a reserved allowance.
 
 ## Rejected Alternatives
 
@@ -509,6 +633,14 @@ snapshot. The polling endpoint is deliberately stateless.
 `fs.watch` adds platform-specific event semantics, unknown-writer races,
 coalescing, and lifecycle management. The first version explicitly covers
 daemon-observed mutations only.
+
+### Require a periodic full-catalog safety refresh
+
+A mandatory low-frequency reload would bound staleness from external writers
+and unversioned ordering changes, but it would also retain an unconditional
+path back to the expensive scan. The server protocol therefore documents those
+staleness boundaries instead of requiring a timer. A client may adopt a slow
+safety refresh later when its product requirements justify the cost.
 
 ### Persist a global catalog revision
 
