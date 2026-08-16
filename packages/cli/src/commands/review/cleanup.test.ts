@@ -510,8 +510,11 @@ describe('runCleanup', () => {
         // skipIf(win32), so its contract ({reaped:false, failed:false},
         // and no scan) was asserted on no lane at all.
         const realGetuid = process.getuid;
-        // @ts-expect-error — modelling the win32 shape on a POSIX lane.
-        delete process.getuid;
+        // Modelling the win32 shape on a POSIX lane. `delete` on an
+        // optional property needs no suppression — an @ts-expect-error
+        // here is itself an error under `tsc --build`, which is what CI
+        // runs (and what `npm run typecheck` did not catch).
+        delete (process as { getuid?: unknown }).getuid;
         try {
           runCleanup('local');
         } finally {
