@@ -333,6 +333,7 @@ vi.mock('./lib/deadline.js', () => ({
   readBudgetStop: vi.fn(() => null),
   clearBudgetStop: vi.fn(),
   clearRoundStamps: vi.fn(),
+  hasReviewDeadline: vi.fn(() => false),
 }));
 vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/diff-plan.js')>();
