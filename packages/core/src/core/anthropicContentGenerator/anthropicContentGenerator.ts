@@ -348,6 +348,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
+      ...(contentGeneratorConfig.fetch
+        ? { fetch: contentGeneratorConfig.fetch }
+        : {}),
     });
 
     this.converter = new AnthropicContentConverter(

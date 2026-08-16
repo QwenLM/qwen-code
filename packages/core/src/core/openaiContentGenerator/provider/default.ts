@@ -97,6 +97,9 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      ...(this.contentGeneratorConfig.fetch
+        ? { fetch: this.contentGeneratorConfig.fetch }
+        : {}),
     });
   }
 

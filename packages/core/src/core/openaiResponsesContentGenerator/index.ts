@@ -82,6 +82,9 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
         ? { defaultHeaders: this.contentGeneratorConfig.customHeaders }
         : {}),
       ...(runtimeOptions || {}),
+      ...(this.contentGeneratorConfig.fetch
+        ? { fetch: this.contentGeneratorConfig.fetch }
+        : {}),
     });
     return this.openaiClient;
   }

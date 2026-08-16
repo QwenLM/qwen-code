@@ -468,7 +468,9 @@ export class ResponsesPipeline {
     // the bundled one, and handing it a foreign dispatcher throws `invalid
     // onError method`.
     const fetchFn =
-      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ?? fetch;
+      this.config.fetch ??
+      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ??
+      fetch;
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so
     // an endpoint that completes TCP/TLS but never sends headers would block
