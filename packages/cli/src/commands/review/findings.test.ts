@@ -1036,10 +1036,23 @@ describe('findings (command boundary)', () => {
       toAnchors: anchors,
       print: false,
     });
+    // A finding that projects nothing is disposed of as a finding — the
+    // ordinary unanchorable one: a Critical moves to the body, a Suggestion
+    // is discarded.
     expect(stderr).toContain(
-      'anchorless-c carries 1 location(s) without an anchor',
+      'anchorless-c carries 1 location(s) without an anchor — ' +
+        'absent from the resolver input; dispose as unanchorable',
     );
-    expect(stderr).toContain('agg carries 1 location(s) without an anchor');
+    // A mixed aggregate still projects its anchored locations, so the
+    // finding-level disposition must not fire for it: "dispose as
+    // unanchorable" there would move the Critical into the body (or count
+    // the Suggestion into S) while its anchored location also posts — the
+    // same finding counted twice into C or S.
+    expect(stderr).toContain(
+      'agg carries 1 location(s) without an anchor — absent from the ' +
+        'resolver input; the finding still projects 1 anchored location(s), ' +
+        'and the anchorless ones add no comment and no body copy',
+    );
     expect(stderr).not.toContain('anchored-c carries');
   });
 

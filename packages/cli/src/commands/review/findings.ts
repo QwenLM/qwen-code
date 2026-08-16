@@ -852,7 +852,10 @@ function isPostable(f: Finding): boolean {
  * Criticals and Suggestions; a standalone finding keeps its own id, and an
  * aggregate's locations carry `<id>-1`, `<id>-2`, …, the suffix scheme Step 7
  * joins each resolution back to its finding on. Locations without an anchor
- * are skipped: there is nothing to resolve, and their disposition is the
+ * are skipped: there is nothing to resolve, and the skip disclosure below
+ * names them. Their disposition follows Step 7's partial-resolution rule —
+ * while the finding still projects anchored locations, the anchorless ones
+ * add no comment and no body copy; a finding that projects nothing is the
  * ordinary unanchorable one (body Critical, discarded Suggestion).
  */
 export function anchorRequestsFor(
@@ -899,18 +902,26 @@ export function anchorRequestsFor(
 /**
  * The locations the projection skips: a postable finding carrying a location
  * with no anchor. Nothing downstream cross-checks the artifact's postable
- * findings against the resolver input, so the command discloses them — the
- * disposition is the ordinary unanchorable one (a Critical moves to the
- * body, a Suggestion is discarded).
+ * findings against the resolver input, so the command discloses them — and
+ * the disclosure splits on what the finding still projects: while anchored
+ * locations project, the anchorless ones add no comment and no body copy;
+ * only a finding that projects nothing is disposed of as unanchorable (a
+ * Critical moves to the body, a Suggestion is discarded).
  */
 function anchorlessLocationsFor(
   findings: readonly Finding[],
-): Array<{ id: string; count: number }> {
-  const skipped: Array<{ id: string; count: number }> = [];
+): Array<{ id: string; count: number; anchored: number }> {
+  const skipped: Array<{ id: string; count: number; anchored: number }> = [];
   for (const f of findings) {
     if (!isPostable(f)) continue;
     const count = f.locations.filter((l) => l.anchor === undefined).length;
-    if (count > 0) skipped.push({ id: f.id, count });
+    if (count > 0) {
+      skipped.push({
+        id: f.id,
+        count,
+        anchored: f.locations.length - count,
+      });
+    }
   }
   return skipped;
 }
@@ -1084,10 +1095,16 @@ export const findingsCommand: CommandModule = {
       writeStderrLine(
         `findings: wrote ${anchorRequests.length} anchor request(s) for Step 7 to ${anchorTarget}`,
       );
-      for (const { id, count } of anchorlessLocationsFor(report.findings)) {
+      for (const { id, count, anchored } of anchorlessLocationsFor(
+        report.findings,
+      )) {
         writeStderrLine(
           `findings: ${id} carries ${count} location(s) without an anchor — ` +
-            'absent from the resolver input; dispose as unanchorable',
+            'absent from the resolver input; ' +
+            (anchored > 0
+              ? `the finding still projects ${anchored} anchored location(s), ` +
+                'and the anchorless ones add no comment and no body copy'
+              : 'dispose as unanchorable'),
         );
       }
     }
