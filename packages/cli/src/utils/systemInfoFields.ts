@@ -104,10 +104,13 @@ function formatAuth(info: ExtendedSystemInfo): string {
 
   if (
     info.selectedAuthType.startsWith('oauth') ||
-    info.selectedAuthType === 'qwen-oauth' ||
-    info.selectedAuthType === 'copilot'
+    info.selectedAuthType === 'qwen-oauth'
   ) {
     return 'Qwen OAuth';
+  }
+
+  if (info.selectedAuthType === 'copilot') {
+    return 'GitHub Copilot';
   }
 
   return `API Key - ${info.selectedAuthType}`;
