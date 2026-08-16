@@ -299,6 +299,44 @@ describe('readManyFiles', () => {
       }
     });
 
+    it('reads validated text behind an image extension through the pinned handle', async () => {
+      const relativePath = 'validated-screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const jsonContent = '{"json": true}';
+      await fs.writeFile(absolutePath, jsonContent);
+      const approvedStats = await fs.stat(absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const readTextFileFromHandleSpy = vi.spyOn(
+        fileSystemService,
+        'readTextFileFromHandle',
+      );
+      const mkdtempSpy = vi.spyOn(fs, 'mkdtemp');
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+
+        expect(result.files).toHaveLength(1);
+        expect(result.files[0]!.content).toBe(jsonContent);
+        expect(result.files[0]!.error).toBeUndefined();
+        expect(readTextFileFromHandleSpy).toHaveBeenCalled();
+        expect(mkdtempSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen-validated-read-'),
+        );
+      } finally {
+        readTextFileFromHandleSpy.mockRestore();
+        mkdtempSpy.mockRestore();
+      }
+    });
+
     it('reads validated text through a handle when truncation is disabled', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
@@ -721,21 +759,31 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.content).toContain('Unsupported image file');
     });
 
-    it('reads text content behind an image extension as text', async () => {
-      const relativePath = 'screenshot.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      const jsonContent = '{"json": true}';
-      await fs.writeFile(absolutePath, Buffer.from(jsonContent));
-      const mockConfig = createMockConfig(tempRootDir);
+    it.each([
+      { extension: 'png' },
+      { extension: 'jpg' },
+      { extension: 'gif' },
+      { extension: 'webp' },
+    ])(
+      'reads text content behind a .$extension extension as text',
+      async ({ extension }) => {
+        const relativePath = `screenshot.${extension}`;
+        const absolutePath = path.join(tempRootDir, relativePath);
+        const jsonContent = '{"json": true}';
+        await fs.writeFile(absolutePath, Buffer.from(jsonContent));
+        const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+        });
 
-      expect(findInlineDataPart(result.contentParts)).toBeUndefined();
-      expect(contentToString(result.contentParts)).toContain('json');
-      expect(result.files).toHaveLength(1);
-      expect(result.files[0]!.content).toBe(jsonContent);
-      expect(result.files[0]!.error).toBeUndefined();
-    });
+        expect(findInlineDataPart(result.contentParts)).toBeUndefined();
+        expect(contentToString(result.contentParts)).toContain('json');
+        expect(result.files).toHaveLength(1);
+        expect(result.files[0]!.content).toBe(jsonContent);
+        expect(result.files[0]!.error).toBeUndefined();
+      },
+    );
 
     it('references large PDFs instead of inlining extracted text for @ attachments', async () => {
       const relativePath = 'paper.pdf';

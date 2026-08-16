@@ -247,7 +247,9 @@ export async function readManyFiles(
               displayPath,
               snapshot?.stats,
               validateAfterRead,
-              validatedFileType ? { fileType: validatedFileType } : undefined,
+              !snapshot && validatedFileType
+                ? { fileType: validatedFileType }
+                : undefined,
               fullPath,
             );
           } finally {

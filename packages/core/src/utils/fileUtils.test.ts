@@ -1428,39 +1428,61 @@ describe('fileUtils', () => {
       expect(result.error).toBeUndefined();
     });
 
-    it('reads text content behind a PNG extension as text', async () => {
-      const jsonBytes = Buffer.from(
-        '{"meta":{"format":"png"},"data":"not-a-real-image"}',
-      );
-      const screenshotPath = path.join(tempRootDir, 'screenshot.png');
-      await fsPromises.writeFile(screenshotPath, jsonBytes);
-      mockMimeGetType.mockReturnValue('image/png');
+    it.each([
+      { extension: 'png', mimeType: 'image/png' },
+      { extension: 'jpg', mimeType: 'image/jpeg' },
+      { extension: 'gif', mimeType: 'image/gif' },
+      { extension: 'webp', mimeType: 'image/webp' },
+    ])(
+      'reads text content behind a .$extension extension as text',
+      async ({ extension, mimeType }) => {
+        const jsonBytes = Buffer.from(
+          '{"meta":{"format":"png"},"data":"not-a-real-image"}',
+        );
+        const screenshotPath = path.join(
+          tempRootDir,
+          `screenshot.${extension}`,
+        );
+        await fsPromises.writeFile(screenshotPath, jsonBytes);
+        mockMimeGetType.mockReturnValue(mimeType);
 
-      const result = await processSingleFileContent(screenshotPath, mockConfig);
+        const result = await processSingleFileContent(
+          screenshotPath,
+          mockConfig,
+        );
 
-      expect(result.llmContent).toBe(jsonBytes.toString());
-      expect(result.returnDisplay).toBe('');
-      expect(result.error).toBeUndefined();
-    });
+        expect(result.llmContent).toBe(jsonBytes.toString());
+        expect(result.returnDisplay).toBe('');
+        expect(result.error).toBeUndefined();
+      },
+    );
 
-    it('reads BOM-prefixed UTF-16 text behind a PNG extension as text', async () => {
-      const text = 'text saved with the wrong extension';
-      const pngPath = path.join(tempRootDir, 'notes.png');
-      await fsPromises.writeFile(
-        pngPath,
-        Buffer.concat([
-          Buffer.from([0xff, 0xfe]),
-          Buffer.from(text, 'utf16le'),
-        ]),
-      );
-      mockMimeGetType.mockReturnValue('image/png');
+    it.each([
+      { extension: 'png', mimeType: 'image/png' },
+      { extension: 'jpg', mimeType: 'image/jpeg' },
+      { extension: 'gif', mimeType: 'image/gif' },
+      { extension: 'webp', mimeType: 'image/webp' },
+    ])(
+      'reads BOM-prefixed UTF-16 text behind a .$extension extension as text',
+      async ({ extension, mimeType }) => {
+        const text = 'text saved with the wrong extension';
+        const imagePath = path.join(tempRootDir, `notes.${extension}`);
+        await fsPromises.writeFile(
+          imagePath,
+          Buffer.concat([
+            Buffer.from([0xff, 0xfe]),
+            Buffer.from(text, 'utf16le'),
+          ]),
+        );
+        mockMimeGetType.mockReturnValue(mimeType);
 
-      const result = await processSingleFileContent(pngPath, mockConfig);
+        const result = await processSingleFileContent(imagePath, mockConfig);
 
-      expect(result.llmContent).toBe(text);
-      expect(result.returnDisplay).toBe('');
-      expect(result.error).toBeUndefined();
-    });
+        expect(result.llmContent).toBe(text);
+        expect(result.returnDisplay).toBe('');
+        expect(result.error).toBeUndefined();
+      },
+    );
 
     it('applies EXIF orientation before describing and rendering an overview', async () => {
       const orientedPath = path.join(tempRootDir, 'oriented.jpg');

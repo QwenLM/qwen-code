@@ -75,6 +75,8 @@ const CANONICAL_IMAGE_EXTENSIONS = new Set(
 // AND a MIME_EXTENSIONS entry (same file) mapping the mime to the exact
 // extension string the magic branch returns; missing either classifies every
 // valid image of that format as 'binary'.
+// Other image MIME types intentionally retain extension-only behavior until
+// their magic signatures and safe rendering paths are added here.
 const SNIFFABLE_IMAGE_MIME_TYPES = new Set([
   'image/gif',
   'image/jpeg',
