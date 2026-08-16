@@ -717,6 +717,14 @@ export function registerSessionRoutes(
           !path.isAbsolute(relative))
       );
     };
+    const canonicalizeIfPresent = (candidate: string): string => {
+      const resolved = path.resolve(candidate);
+      try {
+        return fs.realpathSync.native(resolved);
+      } catch {
+        return resolved;
+      }
+    };
     const rejectReservedConversationRoot = (): undefined => {
       res.status(400).json({
         error:
@@ -755,7 +763,10 @@ export function registerSessionRoutes(
         .filter((entry) => entry.internal)
         .map((entry) => entry.workspaceCwd),
       ...(deps.liveConversationRootPath
-        ? [path.resolve(deps.liveConversationRootPath)]
+        ? [
+            path.resolve(deps.liveConversationRootPath),
+            canonicalizeIfPresent(deps.liveConversationRootPath),
+          ]
         : []),
     ];
     if (
@@ -1514,6 +1525,34 @@ export function registerSessionRoutes(
       }
       throw new SessionNotFoundError(sessionId);
     };
+    let loadError: unknown;
+    const recordLoadError = (err: unknown): void => {
+      if (
+        loadError !== undefined &&
+        shouldPreserveTranscriptResolutionError(loadError) &&
+        shouldPreserveTranscriptResolutionError(err)
+      ) {
+        // Rare (a session id usually resolves to one workspace): two
+        // workspaces each raised a structured error. We keep the later one
+        // but log the superseded error so it is not lost silently.
+        logSessionRoutingFailure(
+          route,
+          'transcript_resolution_error_superseded',
+          {
+            sessionId,
+            supersededError:
+              loadError instanceof Error ? loadError.name : String(loadError),
+            newError: err instanceof Error ? err.name : String(err),
+          },
+        );
+      }
+      if (
+        loadError === undefined ||
+        shouldPreserveTranscriptResolutionError(err)
+      ) {
+        loadError = err;
+      }
+    };
 
     for (const entry of workspaceRegistry.listAllEntries()) {
       const generation = entry.current;
@@ -1522,7 +1561,16 @@ export function registerSessionRoutes(
         return undefined;
       }
       const runtime = generation.runtime;
-      const active = await activeInRuntime(runtime);
+      let active: boolean;
+      try {
+        active = await activeInRuntime(runtime);
+      } catch (err) {
+        if (!assertCurrentInternalGeneration(entry, generation, res)) {
+          return undefined;
+        }
+        recordLoadError(err);
+        continue;
+      }
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
       }
@@ -1549,7 +1597,16 @@ export function registerSessionRoutes(
       return runtime;
     }
 
-    if (legacyPrimaryFallback) return workspaceRegistry.primary;
+    if (legacyPrimaryFallback) {
+      const runtime = workspaceRegistry.primary;
+      if (loadError === undefined) return runtime;
+      try {
+        if (await activeInRuntime(runtime)) return runtime;
+      } catch (err) {
+        recordLoadError(err);
+      }
+      throw loadError;
+    }
 
     const liveOwner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
     if (liveOwner.kind === 'unavailable') {
@@ -1588,7 +1645,12 @@ export function registerSessionRoutes(
       ) {
         return undefined;
       }
-      const active = await activeInRuntime(liveOwner.runtime);
+      let active = false;
+      try {
+        active = await activeInRuntime(liveOwner.runtime);
+      } catch (err) {
+        recordLoadError(err);
+      }
       if (
         internalEntry &&
         internalGeneration &&
@@ -1600,52 +1662,32 @@ export function registerSessionRoutes(
         setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
         return liveOwner.runtime;
       }
+      if (loadError !== undefined) throw loadError;
       return throwMissingActiveTranscript();
     }
 
     if (workspaceRegistry.listEntries().length === 1) {
       const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
       if (!runtime) return undefined;
-      if (await activeInRuntime(runtime)) {
-        return runtime;
+      try {
+        if (await activeInRuntime(runtime)) {
+          return runtime;
+        }
+      } catch (err) {
+        recordLoadError(err);
       }
+      if (loadError !== undefined) throw loadError;
       return throwMissingActiveTranscript();
     }
 
     const activeRuntimes: WorkspaceRuntime[] = [];
-    let loadError: unknown;
     for (const runtime of workspaceRegistry.list()) {
       try {
         if (await activeInRuntime(runtime)) {
           activeRuntimes.push(runtime);
         }
       } catch (err) {
-        if (
-          loadError === undefined ||
-          shouldPreserveTranscriptResolutionError(err)
-        ) {
-          if (
-            loadError !== undefined &&
-            shouldPreserveTranscriptResolutionError(loadError)
-          ) {
-            // Rare (a session id usually resolves to one workspace): two
-            // workspaces each raised a structured error. We keep the later one
-            // but log the superseded error so it is not lost silently.
-            logSessionRoutingFailure(
-              route,
-              'transcript_resolution_error_superseded',
-              {
-                sessionId,
-                supersededError:
-                  loadError instanceof Error
-                    ? loadError.name
-                    : String(loadError),
-                newError: err instanceof Error ? err.name : String(err),
-              },
-            );
-          }
-          loadError = err;
-        }
+        recordLoadError(err);
       }
     }
     if (activeRuntimes.length === 1) {

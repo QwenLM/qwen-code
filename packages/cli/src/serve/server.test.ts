@@ -21260,6 +21260,92 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
+    it('prefers active ordinary sessions without losing internal archive errors', async () => {
+      const archivedSid = '55555555-bbbb-cccc-dddd-b0b0b0b0b0b0';
+      const conflictedSid = '55555555-bbbb-cccc-dddd-b1b1b1b1b1b1';
+      const internalOnlyArchivedSid = '55555555-bbbb-cccc-dddd-b2b2b2b2b2b2';
+      const internalOnlyConflictedSid = '55555555-bbbb-cccc-dddd-b3b3b3b3b3b3';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(archivedSid, 'active', wsDir);
+      await writeTranscriptSession(archivedSid, 'archived', internalWs);
+      await writeTranscriptSession(conflictedSid, 'active', wsDir);
+      await writeTranscriptSession(conflictedSid, 'active', internalWs);
+      await writeTranscriptSession(conflictedSid, 'archived', internalWs);
+      await writeTranscriptSession(
+        internalOnlyArchivedSid,
+        'archived',
+        internalWs,
+      );
+      await writeTranscriptSession(
+        internalOnlyConflictedSid,
+        'active',
+        internalWs,
+      );
+      await writeTranscriptSession(
+        internalOnlyConflictedSid,
+        'archived',
+        internalWs,
+      );
+      const primaryBridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const internalBridge = fakeBridge();
+      const internalRuntime: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'internal-conversations',
+          workspaceCwd: internalWs,
+          primary: false,
+          bridge: internalBridge,
+        }),
+        provenance: 'live-conversation',
+        removable: false,
+      };
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        internalRuntime,
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${archivedSid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const exported = await request(app)
+        .get(`/session/${conflictedSid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const internalOnlyTranscript = await request(app)
+        .get(`/session/${internalOnlyArchivedSid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const internalOnlyExport = await request(app)
+        .get(`/session/${internalOnlyConflictedSid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain(conflictedSid);
+      expect(internalOnlyTranscript.status).toBe(409);
+      expect(internalOnlyTranscript.body.code).toBe('session_archived');
+      expect(internalOnlyExport.status).toBe(409);
+      expect(internalOnlyExport.body.code).toBe('session_conflict');
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: archivedSid },
+      ]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
     it('prefers structured transcript errors found after generic scan failures', async () => {
       const sid = '55555555-bbbb-cccc-dddd-afafafafafaf';
       const secondaryDir = path.join(runtimeDir, 'archived-after-failure');
@@ -29566,7 +29652,15 @@ describe('Live conversation runtime lifecycle', () => {
     };
   }
 
-  function setupLiveRuntime(liveBridgeOptions: FakeBridgeOpts = {}) {
+  function setupLiveRuntime(
+    liveBridgeOptions: FakeBridgeOpts = {},
+    rootOverrides: Partial<{
+      configuredRoot: string;
+      canonicalRoot: string;
+      device: number;
+      inode: number;
+    }> = {},
+  ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
       makeWorkspaceRuntimeForTest({
@@ -29581,6 +29675,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: '/work/live-conversations',
       device: 1,
       inode: 2,
+      ...rootOverrides,
     };
     const conversationWorkspace = {
       rootPath: root.configuredRoot,
@@ -30349,6 +30444,77 @@ describe('Live conversation runtime lifecycle', () => {
       )();
     }
   });
+
+  it('rejects canonical aliases of the configured Live root before publication', async () => {
+    const tmp = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-live-reserved-root-'),
+    );
+    const realHome = path.join(tmp, 'real-home');
+    const linkedHome = path.join(tmp, 'linked-home');
+    const relativeRoot = path.join('Documents', 'Qwen Code', 'Conversations');
+    const realRoot = path.join(realHome, relativeRoot);
+    const realChild = path.join(realRoot, 'conversation-probe');
+    await fsp.mkdir(realChild, { recursive: true });
+    await fsp.symlink(
+      realHome,
+      linkedHome,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const setup = setupLiveRuntime(
+      {},
+      {
+        configuredRoot: path.join(linkedHome, relativeRoot),
+        canonicalRoot: realpathSync(realRoot),
+      },
+    );
+    try {
+      for (const cwd of [realpathSync(realRoot), realpathSync(realChild)]) {
+        const response = await request(setup.app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd });
+
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('live_session_creation_reserved');
+      }
+      expect(setup.primaryBridge.calls).toHaveLength(0);
+      expect(setup.liveBridge.calls).toHaveLength(0);
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps ordinary creation available when the Live root cannot be inspected',
+    async () => {
+      const tmp = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-live-unreadable-root-'),
+      );
+      const ordinaryCwd = path.join(tmp, 'ordinary-workspace');
+      const configuredRoot = path.join(tmp, 'looped-conversations');
+      await fsp.mkdir(ordinaryCwd, { recursive: true });
+      await fsp.symlink(configuredRoot, configuredRoot);
+      const canonicalOrdinaryCwd = realpathSync(ordinaryCwd);
+      const setup = setupLiveRuntime(
+        {},
+        { configuredRoot, canonicalRoot: configuredRoot },
+      );
+      try {
+        const response = await request(setup.app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: canonicalOrdinaryCwd });
+
+        expect(response.status).toBe(200);
+        expect(setup.primaryBridge.calls).toEqual([
+          expect.objectContaining({ workspaceCwd: canonicalOrdinaryCwd }),
+        ]);
+        expect(setup.liveBridge.calls).toHaveLength(0);
+      } finally {
+        await fsp.rm(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('retries a failed boot publication when the Host connects', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();
