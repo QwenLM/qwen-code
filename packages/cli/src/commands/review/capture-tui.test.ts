@@ -35,6 +35,7 @@ import {
   tmuxControl,
 } from './capture-tui.js';
 import {
+  captureServerName,
   tmuxSupportsCaptureN,
   tmuxPadsWithCaptureN,
 } from './lib/tui-capture.js';
@@ -150,6 +151,24 @@ function idOfPath(path: string): {
 // the system temp dir — so asserting that path is absent proves nothing.
 // This is the assertion that still has teeth: nothing of ours outlives the
 // run where the sentinel really is.
+/** Absolute path to capture-tui.ts, for the child drivers. Was copy-pasted
+ * at six sites, five of which failed SILENTLY when neither candidate
+ * existed: the driver then imported nothing and the test read as a passing
+ * run of a command it never invoked. One place, one loud failure. */
+function captureTuiSource(): string {
+  const candidates = [
+    join(process.cwd(), 'src/commands/review/capture-tui.ts'),
+    join(process.cwd(), 'packages/cli/src/commands/review/capture-tui.ts'),
+  ];
+  const found = candidates.find((p) => existsSync(p));
+  if (!found) {
+    throw new Error(
+      `capture-tui.ts not found for the child driver; tried:\n  ${candidates.join('\n  ')}`,
+    );
+  }
+  return found;
+}
+
 function leakedSentinels(pid: number = process.pid): string[] {
   return readdirSync(tmpdir()).filter((f) =>
     f.startsWith(`qwen-capture-ready-${pid}-`),
@@ -310,7 +329,17 @@ describe('capture-tui without tmux (probe seam)', () => {
       // CREATED, not just named: tmux only uses a base it can use, and an
       // unusable one falls back to /tmp — where the path is short and the
       // capture would have been fine.
-      const longBase = join(dir, 'x'.repeat(120));
+      // Sized AGAINST THE CONSTANT, not just "very long": the previous
+      // fixture overflowed by ~100 bytes, so any mutant bound in roughly
+      // [104, 197] refused it too and the gate's defining 103 was
+      // undiscriminated. This lands a few bytes over, built from the same
+      // pieces production measures.
+      const socketTail = `/tmux-${process.getuid?.() ?? 0}/${captureServerName(
+        process.pid,
+        'deadbeef',
+      )}`;
+      const pad = Math.max(1, 104 - Buffer.byteLength(dir) - socketTail.length);
+      const longBase = join(dir, 'x'.repeat(pad));
       mkdirSync(longBase, { recursive: true, mode: 0o700 });
       process.env['TMUX_TMPDIR'] = longBase;
       try {
@@ -1041,6 +1070,48 @@ describe('capture-tui without tmux (probe seam)', () => {
     });
   }
 
+  it('a GENUINE manifest does not authorize clearing a REPLACED artifact', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-replaced-'));
+    try {
+      // The signature authenticates the manifest, not the files beside it: a
+      // real previous run's manifest was enough to unlink whatever now holds
+      // the .ans name — the user's own file, put there after that run. The
+      // manifest records what it actually wrote, so a replaced artifact is
+      // simply not the one it describes.
+      // Swept the file for this class: this is the only test inside the
+      // real-tmux describe that never reaches tmux — it refuses in the clear
+      // phase, which runs before the probe. Sitting there, the identity rung
+      // was unpinned on every tmux-less lane.
+      writeFileSync(join(dir, 'cap.png'), 'old run');
+      writeFileSync(join(dir, 'cap.ans'), 'old run');
+      const genuine = staleManifest(join(dir, 'cap'));
+      // ...and NOW the .ans is replaced by something the manifest never saw.
+      writeFileSync(join(dir, 'cap.ans'), 'a user file that took the name');
+      writeFileSync(join(dir, 'cap.json'), genuine);
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('collides with a file this capture did not');
+      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
+        'a user file that took the name',
+      );
+      expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('clears stale artifacts for the SHAPE-BOUNDS gate family too', async () => {
     // Seven refusal gates have seeded-artifact ordering pins; the family
     // between the probe gates and the marker gate — geometry bounds, an
@@ -1118,16 +1189,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       // on the main thread, so an in-process timeout cannot interrupt it
       // (measured — a regression wedged the whole vitest run past its own
       // 10s test timeout), and only an external killer turns it red.
-      let captureTuiTs = join(
-        process.cwd(),
-        'src/commands/review/capture-tui.ts',
-      );
-      if (!existsSync(captureTuiTs)) {
-        captureTuiTs = join(
-          process.cwd(),
-          'packages/cli/src/commands/review/capture-tui.ts',
-        );
-      }
+      const captureTuiTs = captureTuiSource();
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-fifo-'));
       try {
         const mkfifo = spawnSync('mkfifo', [join(dir, 'cap.json')]);
@@ -1181,7 +1243,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     // (probe-reproduced: exit 0, success, wrong cwd). An empty --until is a
     // pattern matching everything, settling on the first frame.
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
-    for (const flag of ['cwd', 'until', 'ready'] as const) {
+    for (const flag of ['cwd', 'until', 'ready', 'out'] as const) {
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-emptyarg-'));
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
@@ -1197,14 +1259,25 @@ describe('capture-tui without tmux (probe seam)', () => {
             keys: undefined,
             out: join(dir, 'cap'),
             timeoutMs: 1000,
+            // --out's own empty form was pinned only by an exit-3
+            // assertion that holds with the gate deleted (resolve('') is
+            // the cwd, and the artifacts then collide there).
             [flag]: '   ',
           } as never),
         );
         expect(`${flag}:${process.exitCode}`).toBe(`${flag}:3`);
         expect(stderr).toContain(`--${flag} must not be empty`);
-        // ...and the clear ran first, like every sibling gate.
-        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
-        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+        if (flag === 'out') {
+          // The ONE gate that refuses without clearing, by design: an --out
+          // this run cannot name gives it nowhere to clear. So the pin is
+          // the opposite one — the seeded files are still there.
+          expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+          expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        } else {
+          // ...and the clear ran first, like every sibling gate.
+          expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+          expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -1494,16 +1567,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       // in the same run. A child contains the blast radius, and real
       // exhaustion is still what drives the EMFILE (vi.spyOn on node:fs
       // does not reach this module's named imports).
-      let captureTuiTs = join(
-        process.cwd(),
-        'src/commands/review/capture-tui.ts',
-      );
-      if (!existsSync(captureTuiTs)) {
-        captureTuiTs = join(
-          process.cwd(),
-          'packages/cli/src/commands/review/capture-tui.ts',
-        );
-      }
+      const captureTuiTs = captureTuiSource();
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-staleprobe-'));
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
@@ -1572,16 +1636,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       // withStdio mocks the streams, so no in-process test can raise a real
       // EPIPE; a child whose stdout pipe closes early can. Without the guard
       // the refusal crashed on the async 'error' event and exited 1.
-      let captureTuiTs = join(
-        process.cwd(),
-        'src/commands/review/capture-tui.ts',
-      );
-      if (!existsSync(captureTuiTs)) {
-        captureTuiTs = join(
-          process.cwd(),
-          'packages/cli/src/commands/review/capture-tui.ts',
-        );
-      }
+      const captureTuiTs = captureTuiSource();
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-epipe-'));
       try {
         const driver = join(dir, 'driver-epipe.mts');
@@ -1708,39 +1763,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } as never);
   }
 
-  it('a GENUINE manifest does not authorize clearing a REPLACED artifact', async () => {
-    // The signature authenticates the manifest, not the files beside it: a
-    // real previous run's manifest was enough to unlink whatever now holds
-    // the .ans name — the user's own file, put there after that run. The
-    // manifest records what it actually wrote, so a replaced artifact is
-    // simply not the one it describes.
-    writeFileSync(join(dir, 'cap.png'), 'old run');
-    writeFileSync(join(dir, 'cap.ans'), 'old run');
-    const genuine = staleManifest(join(dir, 'cap'));
-    // ...and NOW the .ans is replaced by something the manifest never saw.
-    writeFileSync(join(dir, 'cap.ans'), 'a user file that took the name');
-    writeFileSync(join(dir, 'cap.json'), genuine);
-    const { stderr } = await withStdio(() =>
-      runCaptureTui({
-        command: 'printf hi',
-        cwd: dir,
-        cols: 80,
-        rows: 24,
-        settleMs: 0,
-        until: undefined,
-        keys: undefined,
-        out: join(dir, 'cap'),
-        timeoutMs: 1000,
-      } as never),
-    );
-    expect(process.exitCode).toBe(3);
-    expect(stderr).toContain('collides with a file this capture did not');
-    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
-      'a user file that took the name',
-    );
-    expect(existsSync(join(dir, 'cap.json'))).toBe(true);
-  });
-
   it('refuses when the --out DIRECTORY is swapped mid-window', async () => {
     // The reported reproduction: every artifact path resolves by name, so
     // a captured command running as the same uid could move the directory
@@ -1774,6 +1796,42 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  it('creates a MISSING --out parent without calling it a swap', async () => {
+    // The directory-identity baseline was sampled before the mkdirSync
+    // that exists to create this directory, so a fresh parent baselined
+    // 'gone' and the first write refused with "the directory holding --out
+    // was replaced" — after paying the whole capture window, and factually
+    // false: this run created it. Every fixture in this suite used an
+    // existing mkdtemp dir, so it shipped green.
+    const fresh = join(dir, 'fresh-dir', 'nested');
+    await withStdio(() => run({ out: join(fresh, 'cap') }));
+    expect(process.exitCode).toBeUndefined();
+    expect(readFileSync(join(fresh, 'cap.ans'), 'utf8')).toContain('WORLD');
+    const manifest = JSON.parse(
+      readFileSync(join(fresh, 'cap.json'), 'utf8'),
+    ) as { ansPath: string };
+    expect(manifest.ansPath).toBe(join(fresh, 'cap.ans'));
+  });
+
+  it('does not delete a FOREIGN file that replaced <out>.ans mid-render', async () => {
+    // The refusal is right; the cleanup behind it was not. On a collision
+    // the loop asked `changed()` against the PRE-window stamps, which
+    // answer true for any occupant — so refusing to describe a replaced
+    // .ans then deleted the replacement. This run's own bytes are already
+    // gone from that path by then, so the unlink can only destroy someone
+    // else's file. The fake freeze does the replacing: it runs inside the
+    // render window, which is exactly where the reported racer sat.
+    await withFakeFreeze(
+      `#!/bin/sh\nprintf 'FOREIGN-CONTENT' > "${join(dir, 'cap.ans')}"\nexit 9\n`,
+      () => run(),
+    );
+    expect(process.exitCode).toBe(3);
+    // The refusal happened...
+    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    // ...and the foreign file is still there, byte for byte.
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('FOREIGN-CONTENT');
   });
 
   it('refuses a FIFO at <out>.json instead of hanging on it', async () => {
@@ -3080,16 +3138,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // has to be armed already. Arming it after the drain — as it was —
     // leaves the guard rethrowing at that moment, so this test measures the
     // arming POINT and not merely the guard's existence.
-    let captureTuiTs = join(
-      process.cwd(),
-      'src/commands/review/capture-tui.ts',
-    );
-    if (!existsSync(captureTuiTs)) {
-      captureTuiTs = join(
-        process.cwd(),
-        'packages/cli/src/commands/review/capture-tui.ts',
-      );
-    }
+    const captureTuiTs = captureTuiSource();
     const binDir = join(dir, 'fakebin-stdio');
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
@@ -3842,16 +3891,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // an operator's Ctrl+C left server, socket and holder alive.
       // vitest's transform does not guarantee a usable file: import.meta.url;
       // resolve from the working directory (package root or repo root).
-      let captureTuiTs = join(
-        process.cwd(),
-        'src/commands/review/capture-tui.ts',
-      );
-      if (!existsSync(captureTuiTs)) {
-        captureTuiTs = join(
-          process.cwd(),
-          'packages/cli/src/commands/review/capture-tui.ts',
-        );
-      }
+      const captureTuiTs = captureTuiSource();
       expect(existsSync(captureTuiTs)).toBe(true);
       const { spawn } = await import('node:child_process');
       // The FULL registration set, behaviorally: a registration mutant
@@ -3971,23 +4011,19 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // a queued signal must drain to the handler before the listeners go
     // away — without the drain the process exited 0 with the success JSON
     // as if the harness's kill never landed.
-    let captureTuiTs = join(
-      process.cwd(),
-      'src/commands/review/capture-tui.ts',
-    );
-    if (!existsSync(captureTuiTs)) {
-      captureTuiTs = join(
-        process.cwd(),
-        'packages/cli/src/commands/review/capture-tui.ts',
-      );
-    }
+    const captureTuiTs = captureTuiSource();
     const slowFreeze = join(dir, 'slow-freeze');
     // The sentinel line is what the wait below keys on — one write, so the
     // fixture a maintainer edits is the one the child runs.
     const renderStarted = join(dir, 'render-started');
     writeFileSync(
       slowFreeze,
-      `#!/bin/sh\n: > "${renderStarted}"\n/bin/sleep 4\nprintf x > "$5"\n`,
+      // `sleep` from PATH, and FAIL LOUD if it is not there: hardcoding
+      // /bin/sleep collapsed the 4s render window to ~0ms on hosts that do
+      // not have it (NixOS store paths, minimal rootfs) — sh has no set -e,
+      // so the shim went on to write the png and the test silently stopped
+      // testing the render window.
+      `#!/bin/sh\n: > "${renderStarted}"\nsleep 4 || exit 97\nprintf x > "$5"\n`,
       { mode: 0o755 },
     );
     const driver = join(dir, 'driver-render.mts');

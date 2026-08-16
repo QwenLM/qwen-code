@@ -327,6 +327,12 @@ export function idOf(st: {
  * behave differently: the occupant is not ours to remove. */
 class ArtifactCollision extends Error {}
 
+/** Thrown when the pane never signalled ready. Distinct from a tmux
+ * failure: the start succeeded and every tmux call returned — what did not
+ * happen is the holder writing its sentinel, and the refusal reason is
+ * machine-read, so it must not name a component that did its job. */
+class PaneInitFailed extends Error {}
+
 /** The contract writes (refusal/success JSON, stderr summary, the reap
  * WARNING) must never flip the exit disposition: a gone reader raises an
  * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
@@ -432,7 +438,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return 'gone';
     }
   };
-  const outDirId = dirIdOf();
+  let outDirId = dirIdOf();
   /** Throws the collision error when the directory holding the artifacts is
    * no longer the one this run measured. */
   const assertSameOutDir = (): void => {
@@ -788,6 +794,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     pngStamp = stampOf(pngPath);
     manifestStamp = stampOf(manifestPath);
     mkdirSync(dirname(outBase), { recursive: true });
+    // RE-BASELINE: the sample above ran before this mkdir, so an --out
+    // whose parent does not exist yet — the shape `recursive` is here for,
+    // and what the briefed --out template produces before the plan
+    // directory is made — baselined 'gone', and the first write then
+    // refused with "the directory holding --out was replaced" after paying
+    // the whole capture window. A directory this run just created is
+    // definitionally this run's, and the capture window opens only after
+    // this point, so nothing about the guard weakens.
+    outDirId = dirIdOf();
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
     // exists, so an unwritable --out would otherwise run the full capture —
@@ -946,6 +961,32 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     );
     return;
   }
+  // The reader caps a manifest at MAX_MANIFEST_BYTES, and the WRITER had
+  // no bound at all: --command, every --keys token, --ready and --until go
+  // in verbatim, and a few large tokens sum past 1 MiB while still fitting
+  // in ARG_MAX. Such a run wrote a manifest its own next run cannot verify
+  // — the artifacts stop being clearable and every re-run refuses on the
+  // collision instead. Measured from the arguments, before the window
+  // opens, with room left for the fields this run adds later.
+  const embedded = JSON.stringify({
+    command: args.command,
+    keys: args.keys,
+    ready: args.ready,
+    until: args.until,
+    cwd: args.cwd,
+    ansPath,
+    pngPath,
+  }).length;
+  if (embedded > MAX_MANIFEST_BYTES / 2) {
+    refuse(
+      `the arguments would not fit a readable manifest: they serialize to ` +
+        `${embedded} bytes, and a capture manifest this command can verify ` +
+        `on a later run is capped at ${MAX_MANIFEST_BYTES}. Shorten ` +
+        `--command/--keys, or point them at a script.`,
+    );
+    return;
+  }
+
   // A unix socket path is bounded by sockaddr_un — 104 bytes on macOS, 108
   // on Linux — and tmux builds this run's from the socket base, the uid
   // directory and the private server name. Over the limit, the start
@@ -970,7 +1011,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         // machine-read refusal naming the wrong problem.
         if (!statSync(envBase).isDirectory()) throw new Error('not a dir');
         accessSync(envBase, fsConstants.W_OK | fsConstants.X_OK);
-        socketBase = envBase;
+        // RESOLVED: a relative TMUX_TMPDIR measured verbatim under-counts
+        // the real socket path by the whole cwd — the same split-resolution
+        // hazard this file already met one gate earlier with TMPDIR, where
+        // the probe and the holder disagreed about what the path meant.
+        socketBase = resolve(envBase);
       } catch {
         // Unusable — tmux falls back to /tmp, and so does this measurement.
       }
@@ -1319,6 +1364,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // What the .ans write actually produced, by identity — see the manifest
   // block, which refuses to describe a file that is no longer that one.
   let ansWritten: ArtifactId | undefined;
+  let pngWritten: ArtifactId | undefined;
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
   let readyFailed = false;
   let keysSent: boolean | undefined;
@@ -1343,7 +1389,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       const holderDeadline = Date.now() + holderInit.timeoutMs;
       while (!existsSync(holderReadyPath)) {
         if (Date.now() >= holderDeadline) {
-          throw new Error(
+          throw new PaneInitFailed(
             'the pane never initialized — its holder wrote no ready marker',
           );
         }
@@ -1428,7 +1474,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
       (err.message ?? String(e)).split('\n')[0];
     captureFailed = true;
-    refuse(`tmux failed mid-capture: ${detail}`);
+    // WHO failed: the ready gate is a pure existsSync poll after a tmux
+    // start that SUCCEEDED, so routing it through this catch blamed tmux
+    // for something no tmux invocation did — in a reason a machine reads.
+    refuse(
+      e instanceof PaneInitFailed
+        ? `capture never started: ${detail}`
+        : `tmux failed mid-capture: ${detail}`,
+    );
     return;
   } finally {
     // Always, even when the capture threw mid-run: the private server holds
@@ -1481,7 +1534,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // ...and NEVER on a collision: the thing at the path is precisely
       // what this run refused to replace, so removing it would be the
       // data loss the refusal exists to prevent.
-      if (!(e instanceof ArtifactCollision) && changed(ansPath, ansStamp))
+      if (
+        e instanceof ArtifactCollision
+          ? sameFile(ansWritten, ansPath)
+          : changed(ansPath, ansStamp)
+      )
         rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
@@ -1658,6 +1715,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // otherwise manifest a png rung with no pixels, and a verifier would
       // publish it.
       png = pngPath;
+      // Its identity at credit time: the cleanup above asks whether the
+      // file still IS this one before removing anything.
+      pngWritten = idOf(stampOf(pngPath));
     } else {
       // The stderr tail rides along: a bare exit code is undiagnosable from
       // a manifest, and the whole point of recording degradation is that a
@@ -1785,11 +1845,31 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         [pngPath, pngStamp],
         [manifestPath, manifestStamp],
       ] as const) {
-        // A collision names the ONE path this run refused to replace: the
-        // occupant is someone else's, and removing it here would be the
-        // data loss the refusal exists to prevent. The other two are still
-        // this run's to clean up.
-        if (e instanceof ArtifactCollision && path === manifestPath) continue;
+        // On a collision, `changed()` is the WRONG question here: it
+        // compares against the pre-window stamps, which answer true for any
+        // mid-window occupant — so the cleanup deleted the very file the
+        // refusal was protecting. Skipping only manifestPath was not
+        // enough once this catch started receiving collisions that name
+        // the .ans (the identity re-check below) and the directory
+        // (assertSameOutDir): in those shapes this run's own bytes are
+        // already gone from the path, so an unlink can only destroy
+        // someone else's file (witnessed). Remove a path only while its
+        // CURRENT identity still proves it is this run's.
+        if (e instanceof ArtifactCollision) {
+          const mine =
+            path === ansPath
+              ? sameFile(ansWritten, ansPath)
+              : path === pngPath
+                ? sameFile(pngWritten, pngPath)
+                : false;
+          if (!mine) continue;
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            // The refusal reason below is the primary signal either way.
+          }
+          continue;
+        }
         try {
           if (changed(path, stamp)) rmSync(path, { force: true });
         } catch {

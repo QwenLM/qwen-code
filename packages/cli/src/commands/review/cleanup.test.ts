@@ -379,6 +379,23 @@ describe('runCleanup', () => {
         );
       });
 
+      /** The pid probe, stubbed: the literal pids below are assumed dead,
+       * and on a busy host one of them can be alive — the sweep would then
+       * skip the socket and the test would fail for a reason that has
+       * nothing to do with what it pins. ESRCH is "dead", which is the
+       * precondition these tests want. */
+      function withDeadPids(fn: () => void): void {
+        const realKill = process.kill;
+        process.kill = ((): never => {
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+        }) as typeof process.kill;
+        try {
+          fn();
+        } finally {
+          process.kill = realKill;
+        }
+      }
+
       it('unlinks EVERY reaped socket, not just the first', () => {
         // Positive rmSync assertions covered only the first matching
         // socket; the second orphan was pinned by its kill argv and its
@@ -390,7 +407,7 @@ describe('runCleanup', () => {
         mocks.readdirSync.mockImplementation((p: string) =>
           p === dir ? [o1, o2] : [],
         );
-        runCleanup('local');
+        withDeadPids(() => runCleanup('local'));
         for (const name of [o1, o2]) {
           expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
             `Reaped orphaned capture server: ${name}`,
@@ -420,7 +437,7 @@ describe('runCleanup', () => {
           mocks.execFileSync.mockImplementation(() => {
             throw Object.assign(new Error('kill failed'), { stderr: wording });
           });
-          runCleanup('local');
+          withDeadPids(() => runCleanup('local'));
           expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
             expect.stringContaining('Reaped orphaned capture server'),
           );
@@ -485,6 +502,28 @@ describe('runCleanup', () => {
           // the success path they present themselves as pinning.
           mocks.rmSync.mockReset();
         }
+      });
+
+      it('reports nothing swept where there are no uids — the win32 arm', () => {
+        // process.getuid is undefined on win32, which is the only platform
+        // that reaches this arm — and the describe holding these tests is
+        // skipIf(win32), so its contract ({reaped:false, failed:false},
+        // and no scan) was asserted on no lane at all.
+        const realGetuid = process.getuid;
+        // @ts-expect-error — modelling the win32 shape on a POSIX lane.
+        delete process.getuid;
+        try {
+          runCleanup('local');
+        } finally {
+          process.getuid = realGetuid;
+        }
+        expect(mocks.readdirSync).not.toHaveBeenCalled();
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Reaped orphaned capture server'),
+        );
       });
 
       it('leaves a socket alone when the pid probe answers EPERM', () => {

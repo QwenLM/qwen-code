@@ -27,9 +27,17 @@ describe('kill-server stderr classification', () => {
     // The bare wording, matched by its own regex branch: the entry above
     // satisfies the `error connecting` branch AND this one, so deleting
     // either shipped green.
-    'no such file or directory',
+    // Capital N, as strerror actually renders it: the all-lowercase
+    // fixture left the /i flag on this branch unpinned while the sibling
+    // `file name too long` branch had it covered by a capital F.
+    'No such file or directory',
+    // All FOUR alternates of the create-directory branch: only two were
+    // pinned, so narrowing the regex to those two shipped green while the
+    // other wordings printed a false orphan WARNING.
     "can't create directory /tmp/tmux-501: Permission denied",
     "couldn't create directory /tmp/tmux-501 (Permission denied)",
+    'cannot create directory /tmp/tmux-501: Permission denied',
+    'could not create directory /tmp/tmux-501 (Permission denied)',
     'error connecting to /very/long/... (File name too long)',
   ];
   for (const line of nothingToKill) {
