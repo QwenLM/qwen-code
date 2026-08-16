@@ -32,7 +32,15 @@
 //     coverage is the error.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  lstatSync,
+  realpathSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AnchorRequest } from './lib/anchors.js';
@@ -1013,13 +1021,31 @@ export const findingsCommand: CommandModule = {
     const { input, out, outcomes, print, testDelta, toAnchors } =
       argv as unknown as FindingsArgs;
 
-    // The resolver input must not share a path with any file this command
-    // reads or writes: a --to-anchors that resolves onto one of them destroys
-    // its counterpart while stderr reports every write as successful, and
-    // Step 7 joins the pair by id — a silently destroyed member poisons the
-    // join.
+    // The resolver input must not share a file with anything this command
+    // reads or writes: a --to-anchors that lands on one of them destroys its
+    // counterpart while stderr reports every write as successful, and Step 7
+    // joins the pair by id — a silently destroyed member poisons the join.
+    // resolve() is lexical, so a link alias of a sibling argument spells
+    // differently and passes any string compare: refuse links outright (a
+    // dangling one realpath cannot even see) and compare real paths where a
+    // file already exists.
     if (toAnchors !== undefined) {
       const anchorTarget = resolve(toAnchors);
+      let anchorStat: Stats | undefined;
+      try {
+        anchorStat = lstatSync(anchorTarget);
+      } catch {
+        // Not there yet — the run creates it; spelling is all it has.
+      }
+      if (anchorStat?.isSymbolicLink()) {
+        throw new Error(
+          `findings: --to-anchors must not be a symlink (${toAnchors}); ` +
+            'a link can alias a file this command also reads or writes, and no path compare would see the collision',
+        );
+      }
+      const anchorIdentity = anchorStat
+        ? realpathSync(anchorTarget)
+        : anchorTarget;
       const others: Array<[string, string | undefined]> = [
         ['--input', input],
         ['--out', out],
@@ -1027,7 +1053,14 @@ export const findingsCommand: CommandModule = {
         ['--test-delta', testDelta],
       ];
       for (const [flag, p] of others) {
-        if (p !== undefined && resolve(p) === anchorTarget) {
+        if (p === undefined) continue;
+        let identity = resolve(p);
+        try {
+          identity = realpathSync(identity);
+        } catch {
+          // Absent file — the lexical resolve() is its only identity.
+        }
+        if (identity === anchorIdentity) {
           throw new Error(
             `findings: --to-anchors points at the same file as ${flag} (${p}); the resolver input would overwrite it`,
           );

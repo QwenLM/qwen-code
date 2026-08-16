@@ -640,6 +640,10 @@ describe('resolveAnchor — the substring fallback (KB-long lines)', () => {
     const blind = resolveAnchor(hayR, phrase);
     expect(blind.status).toBe('unmatched');
     expect(blind.reason).toContain('more than one hunk line');
+    // The prefix above is shared with the whitespace-collapse refusal; Step 7
+    // string-matches the clause that distinguishes this shape to pick its
+    // recovery, so pin that clause too — a rewording must turn this red.
+    expect(blind.reason).toContain('nothing distinguishes them');
 
     const claimed = resolveAnchor(hayR, phrase, 3);
     expect(claimed).toMatchObject({

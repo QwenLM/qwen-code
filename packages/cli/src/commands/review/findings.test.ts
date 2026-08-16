@@ -7,7 +7,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Argv } from 'yargs';
 import yargs from 'yargs';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -1237,24 +1243,66 @@ describe('findings (command boundary)', () => {
   it('refuses a --to-anchors that is the same file as another path argument', () => {
     // The pair Step 7 joins by id must stay distinct files: a resolver input
     // that resolves onto any of them destroys its counterpart while stderr
-    // reports every write as successful. All four siblings are checked.
+    // reports every write as successful. All four siblings are checked, each
+    // spelled three ways: identical strings, and the same file named two
+    // different ways on each side in turn — the shape only resolve()
+    // normalisation catches, so a raw string compare must fail here.
     const input = join(dir, 'in.json');
     writeFileSync(input, JSON.stringify([base]));
+    const sameFile = join(dir, 'shared.json');
+    const spelled = join(dir, 'sub') + '/../shared.json';
     for (const flag of ['input', 'out', 'outcomes', 'testDelta']) {
-      const argv: Record<string, unknown> = {
-        input,
-        out: join(dir, 'findings.json'),
-        outcomes: undefined,
-        testDelta: undefined,
-        print: false,
-        toAnchors: undefined,
-      };
-      argv[flag] = join(dir, 'shared.json');
-      argv['toAnchors'] = join(dir, 'shared.json');
-      expect(() =>
-        (findingsCommand.handler as (a: unknown) => void)(argv),
-      ).toThrow(/--to-anchors points at the same file/);
+      for (const [flagPath, anchorPath] of [
+        [sameFile, sameFile],
+        [spelled, sameFile],
+        [sameFile, spelled],
+      ]) {
+        const argv: Record<string, unknown> = {
+          input,
+          out: join(dir, 'findings.json'),
+          outcomes: undefined,
+          testDelta: undefined,
+          print: false,
+          toAnchors: undefined,
+        };
+        argv[flag] = flagPath;
+        argv['toAnchors'] = anchorPath;
+        expect(() =>
+          (findingsCommand.handler as (a: unknown) => void)(argv),
+        ).toThrow(/--to-anchors points at the same file/);
+      }
     }
+  });
+
+  it('refuses a --to-anchors that is a symlink', () => {
+    // resolve() is lexical — it never consults the filesystem — so a link
+    // aliasing a sibling argument (say --out) passes any string compare, and
+    // the handler would write the anchor requests through the alias and then
+    // truncate the same file with the artifact, both writes reporting
+    // success. Identity is the check, and it starts by refusing links: a
+    // dangling one realpath cannot even see.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const makeArgv = (toAnchors: string) => ({
+      input,
+      out: join(dir, 'findings.json'),
+      outcomes: undefined,
+      testDelta: undefined,
+      print: false,
+      toAnchors,
+    });
+
+    const alias = join(dir, 'anchors.json');
+    symlinkSync(join(dir, 'findings.json'), alias);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(alias)),
+    ).toThrow(/--to-anchors must not be a symlink/);
+
+    const dangling = join(dir, 'dangling.json');
+    symlinkSync(join(dir, 'nowhere.json'), dangling);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(dangling)),
+    ).toThrow(/--to-anchors must not be a symlink/);
   });
 
   it('parses --to-anchors into the field the handler actually reads', () => {
@@ -1274,8 +1322,12 @@ describe('findings (command boundary)', () => {
       // witness is held to low confidence by the handler and never projects.
       JSON.stringify([{ ...base, source: 'probe', anchor: 'charge(amt);' }]),
     );
+    // .strict() matters: a lenient parser camel-cases unknown flags and
+    // passes them through, so dropping the --to-anchors registration from
+    // the builder would keep this test green while the real command (whose
+    // root parser IS strict) rejects the flag.
     const parsed = (findingsCommand.builder as (y: Argv) => Argv)(
-      yargs([]),
+      yargs([]).strict(),
     ).parseSync([
       '--input',
       input,
