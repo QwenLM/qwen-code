@@ -903,6 +903,16 @@ describe('fileUtils', () => {
       expect(await detectFileType(mislabeledPath)).toBe('image');
     });
 
+    it('should preserve image classification when image sniffing cannot open the file', async () => {
+      const imagePath = path.join(tempRootDir, 'unreadable.png');
+      mockMimeGetType.mockReturnValueOnce('image/png');
+      vi.spyOn(fsPromises, 'open').mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+
+      expect(await detectFileType(imagePath)).toBe('image');
+    });
+
     it('should detect svg type by extension', async () => {
       expect(await detectFileType('image.svg')).toBe('svg');
       expect(await detectFileType('image.icon.svg')).toBe('svg');
@@ -1401,6 +1411,20 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain(
         'Skipped binary file: garbage.png',
       );
+      expect(result.error).toBeUndefined();
+    });
+
+    it('rejects two-byte content behind an image extension as binary', async () => {
+      const tinyPath = path.join(tempRootDir, 'tiny.png');
+      await fsPromises.writeFile(tinyPath, Buffer.from('hi'));
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(tinyPath, mockConfig);
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain('Skipped binary file: tiny.png');
       expect(result.error).toBeUndefined();
     });
 
