@@ -972,6 +972,47 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
+    it('extracts the carried id when a colon follows the marker directly (#9212)', async () => {
+      // The strip tolerates a colon right after the severity marker — the
+      // shape the compose side's own fixtures use ('**[Critical]**: ...').
+      // The strip is now one shared statement (carriedClaimLine), and this
+      // pins its colon branch on the presubmit side, which no fixture here
+      // exercised before (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]**: R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('reads no carried id out of an unmarked body (#9212)', async () => {
+      // A re-post always leads with its severity marker — `submit` refuses
+      // to post an unmarked finding — so an unmarked body is not a re-post
+      // even when its first line opens with an id-shaped token: exempting
+      // it would vouch a comment that was never the finding's thread.
+      // buildLedger skips unmarked bodies when WRITING the ledger; the
+      // shared strip refuses them when READING it back, so the two ends can
+      // no longer disagree about what "marked" means (#9212 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'R3-2: discussed offline, keeping this thread _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
     it('does not exempt a lone comment that only cross-references the id mid-body (#9212)', async () => {
       // "see R3-2 for context" mentions the id without being its thread. The
       // strict prefix match must not fire on it, and the id-less fallback
@@ -1128,6 +1169,27 @@ describe('presubmitCommand', () => {
             ...CARRIED_COMMENT,
             user: undefined,
             body: '**[Critical]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('counts no comment as own while the login is unknown (#9212)', async () => {
+      // The ambiguity pre-count is wrapped in the same unknown-login guard
+      // as the gate: with no authenticated login, nothing may be vouched
+      // own-account. An author-less comment must not ride the degenerate
+      // `'' === ''` comparison into the count and fire the id-less fallback
+      // on a comment nobody proved belongs to this account (#9212 review).
+      currentUserMock.mockReturnValue('');
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            user: undefined,
+            body: '**[Critical]** author-less claim without an id _— model via Qwen Code /review_',
           },
         ],
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],

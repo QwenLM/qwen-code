@@ -74,6 +74,7 @@ import {
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
+  carriedClaimLine,
   countInlineFindings,
   severityOf,
   unmarkedComments,
@@ -2900,11 +2901,8 @@ export function buildLedger(
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
     if (!sev) continue;
-    const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-    const body = (typeof c.body === 'string' ? c.body : '').trimStart();
-    const { id: carried, title } = titleOf(
-      body.slice(marker.length).replace(/^:?\s*/, ''),
-    );
+    const line = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
+    const { id: carried, title } = titleOf(line ?? '');
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
       id: idFor(carried),

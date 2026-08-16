@@ -21,11 +21,7 @@ import {
   ensureAuthenticated,
   setGhHost,
 } from './lib/gh.js';
-import {
-  CRITICAL_PREFIX,
-  SUGGESTION_PREFIX,
-  severityOf,
-} from './lib/inline-counts.js';
+import { carriedClaimLine, severityOf } from './lib/inline-counts.js';
 import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
 
 interface FindingAnchor {
@@ -73,15 +69,7 @@ interface CommentSummary {
 const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 /** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
-  // Marker strip mirrors buildLedger's slice sequence (severityOf + the
-  // shared prefix constants): a hand-spelled marker regex is the drift the
-  // shared LEDGER_ID_READBACK removes for the id half (#9212 review).
-  const sev = severityOf({ body });
-  const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-  let rest = body.trimStart();
-  if (sev) rest = rest.slice(marker.length);
-  rest = rest.replace(/^:?\s*/, '');
-  const line = rest.split('\n')[0].trim();
+  const line = carriedClaimLine(body) ?? '';
   const carried = LEDGER_ID_READBACK.exec(line);
   return carried ? [carried[1]] : [];
 }
