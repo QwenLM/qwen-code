@@ -24,18 +24,15 @@ const RUNTIME_FIXTURE = 'packages/cli/src/runtime/boundary-fixture.ts';
 const lintCliFile = (filePath, code) =>
   eslint.lintText(code, { filePath: path.join(repoRoot, filePath) });
 
+/** Assert the boundary rule fired for `code`. Filters on the rule id,
+ *  not a 'serve' substring: every one of the rule's three messageIds
+ *  contains 'serve', and so do unrelated diagnostics — the substring
+ *  could not tell the rule firing from any other noise (#8084 review). */
 const expectServeBoundaryError = async (filePath, code) => {
   const [result] = await lintCliFile(filePath, code);
-  expect(result.messages.map((message) => message.message)).toEqual(
-    expect.arrayContaining([expect.stringContaining('serve')]),
+  expect(result.messages.some((message) => message.ruleId === RULE_ID)).toBe(
+    true,
   );
-};
-
-const expectBoundaryMessage = async (filePath, code, messageId) => {
-  const [result] = await lintCliFile(filePath, code);
-  expect(
-    result.messages.some((message) => message.messageId === messageId),
-  ).toBe(true);
 };
 
 /** Assert the boundary rule produced NO diagnostics for `code`. Filters on
@@ -243,21 +240,9 @@ describe('eslint cli serve boundary rules', () => {
       acp,
       "vitest.mock('../serve/live/live-task-service.js');",
     );
-    await expectServeBoundaryError(
-      acp,
-      "globalThis.vi.mock('../serve/live/live-task-service.js');",
-    );
-    await expectServeBoundaryError(
-      acp,
-      "vi[`mock`]('../serve/live/live-task-service.js');",
-    );
 
     // A non-serve vi.mock stays silent on the boundary.
-    const [result] = await lintCliFile(acp, "vi.mock('../utils/foo.js');");
-    const boundaryHits = result.messages.filter((message) =>
-      message.message.includes('serve'),
-    );
-    expect(boundaryHits).toEqual([]);
+    await expectNoBoundaryHits(acp, "vi.mock('../utils/foo.js');");
   });
 
   // Round-7 entrances (#8084): each spelling below resolves to serve/
@@ -416,21 +401,6 @@ describe('eslint cli serve boundary rules', () => {
     } finally {
       rmSync(link, { force: true });
     }
-
-    const bareLink = path.join(
-      repoRoot,
-      'packages/cli/src/acp-integration/serve-link.js',
-    );
-    rmSync(bareLink, { force: true });
-    try {
-      symlinkSync('../serve/index.ts', bareLink);
-      await expectServeBoundaryError(
-        ACP_FIXTURE,
-        "import 'src/acp-integration/serve-link.js';",
-      );
-    } finally {
-      rmSync(bareLink, { force: true });
-    }
   });
 
   // Codex self-review: vitest loaders reached through an alias evade the
@@ -462,14 +432,10 @@ describe('eslint cli serve boundary rules', () => {
   // executable resolved via PATH/cwd, not a module — it must NOT be
   // treated as an import source (would false-positive legitimate code).
   it('does not treat child_process.spawn arguments as import sources', async () => {
-    const [result] = await lintCliFile(
-      'packages/cli/src/acp-integration/boundary-fixture.ts',
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
       "import { spawn } from 'node:child_process';\nexport function run() { return spawn(process.execPath, ['--version']); }",
     );
-    const boundaryHits = result.messages.filter((message) =>
-      message.message.includes('serve'),
-    );
-    expect(boundaryHits).toEqual([]);
   });
 
   // R5-7: third-party packages whose name contains `serve` must not be
@@ -587,8 +553,6 @@ describe('eslint cli serve boundary rules', () => {
       'eval("import(\'../serve/index.js\')");',
       '(0, eval)("import(\'../serve/index.js\')");',
       'globalThis.eval("import(\'../serve/index.js\')");',
-      'Function("return import(\'../serve/index.js\')");',
-      'globalThis.Function("return import(\'../serve/index.js\')");',
       'const load = new Function("return import(\'../serve/index.js\')");',
     ]) {
       await expectServeBoundaryError(ACP_FIXTURE, code);
@@ -716,17 +680,6 @@ describe('eslint cli serve boundary rules', () => {
     );
     expect(hits).toHaveLength(1);
     expect(hits[0].messageId).toBe('serveBoundary');
-
-    await expectBoundaryMessage(
-      RUNTIME_FIXTURE,
-      "const w = new Worker(new URL('./worker.js', import.meta.env));",
-      'failClosed',
-    );
-    await expectBoundaryMessage(
-      RUNTIME_FIXTURE,
-      'new Worker("import(\'../serve/worker.js\')", { eval: true });',
-      'failClosed',
-    );
   });
 
   // The outside-serve (allow) verdict of the checkSource arms had zero
@@ -750,5 +703,182 @@ describe('eslint cli serve boundary rules', () => {
       ACP_FIXTURE,
       "import x = require('../serve/index.js');",
     );
+  });
+
+  // ── Round-12 review pins ─────────────────────────────────────────────
+
+  // Symlink canonicalization must be symmetric: the baseUrl arm realpath's
+  // the candidate AND the comparison side is canonicalized, so a
+  // committable symlink inside the baseUrl tree pointing into serve/ is
+  // caught (tsc/esbuild follow it), while a link pointing outside stays
+  // allowed.
+  it('catches baseUrl symlinks that point into serve', async () => {
+    const cliDir = path.join(repoRoot, 'packages/cli');
+    const intoServe = path.join(cliDir, 'serve-alias-fixture');
+    const outOfServe = path.join(cliDir, 'utils-alias-fixture');
+    let created = false;
+    try {
+      symlinkSync(path.join(cliDir, 'src/serve'), intoServe);
+      symlinkSync(path.join(cliDir, 'src/utils'), outOfServe);
+      created = true;
+    } catch {
+      // Platforms without unprivileged symlink support: nothing to pin.
+    }
+    if (!created) return;
+    try {
+      await expectServeBoundaryError(
+        ACP_FIXTURE,
+        "import 'serve-alias-fixture/index.ts';",
+      );
+      await expectNoBoundaryHits(
+        ACP_FIXTURE,
+        "import 'utils-alias-fixture/foo.ts';",
+      );
+    } finally {
+      rmSync(intoServe, { force: true });
+      rmSync(outOfServe, { force: true });
+    }
+  });
+
+  // Callee identity is shape-tolerant: nested member objects, computed
+  // template-literal properties, and renamed bindings must not evade the
+  // loader/fork/eval/getBuiltinModule arms.
+  it('catches shape-variant callee spellings', async () => {
+    for (const code of [
+      // nested member objects evade Identifier-only object checks
+      "globalThis.vi.mock('../serve/live/live-task-service.js');",
+      "x.cp.fork('../serve/index.js');",
+      // expression-free template-literal properties
+      "vi[`mock`]('../serve/live/live-task-service.js');",
+      "cp[`fork`]('../serve/index.js');",
+      'globalThis[`eval`]("import(\'../serve/index.js\')");',
+      "process[`getBuiltinModule`]('module');",
+      "Reflect[`apply`](process.getBuiltinModule, null, ['module']);",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+  });
+
+  it('catches renamed loader bindings and Reflect indirection', async () => {
+    for (const code of [
+      "import { Worker as W } from 'node:worker_threads';\nnew W('../serve/worker.js');",
+      "import { fork as f } from 'node:child_process';\nf('../serve/index.js');",
+      "Reflect.construct(Worker, ['../serve/worker.js']);",
+      "Reflect.apply(require, null, ['../serve/index.js']);",
+      "Reflect.apply(fork, null, ['../serve/index.js']);",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+  });
+
+  it('catches call/apply/bind indirection on guarded loaders', async () => {
+    for (const code of [
+      "(0, require)('../serve/index.js');",
+      "require.call(null, '../serve/index.js');",
+      "require.apply(null, ['../serve/index.js']);",
+      "fork.bind(null)('../serve/index.js');",
+      "process.getBuiltinModule.call(process, 'node:module');",
+      "process.getBuiltinModule.apply(process, ['node:module']);",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+  });
+
+  // The string-code execution class: call-without-new, member spellings,
+  // .constructor chains, the node:vm surface, and Worker's eval option —
+  // all compile/run arbitrary string code that can import() anything.
+  it('fails closed on the string-code execution class', async () => {
+    for (const code of [
+      'const f = Function("return import(\'../serve/index.js\')");',
+      'new globalThis.Function("return import(\'../serve/index.js\')")();',
+      "globalThis.Function('x')();",
+      "Function('x').bind(null)();",
+      'eval.call(null, "import(\'../serve/index.js\')");',
+      'eval.apply(null, ["import(\'../serve/index.js\')"]);',
+      '({}).constructor.constructor("return import(\'../serve/index.js\')")()();',
+      '(function(){}).constructor("return import(\'../serve/index.js\')");',
+      '[].constructor.constructor("return import(\'../serve/index.js\')")()();',
+      "import vm from 'node:vm';\nvm.runInThisContext('x');",
+      "import vm from 'node:vm';\nvm.runInNewContext('x');",
+      "import vm from 'node:vm';\nvm.compileFunction('x');",
+      "import { runInContext } from 'node:vm';\nrunInContext('x', {});",
+      "import vm from 'node:vm';\nnew vm.Script('x');",
+      "new Worker('x', { eval: true });",
+      "new Worker('x', options);",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+    // eval: false is statically verifiable — the specifier path applies.
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "new Worker('../serve/worker.js', { eval: false });",
+    );
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
+      "new Worker('../utils/worker.js', { eval: false });",
+    );
+    // messageId-specific: the eval:true form reports failClosed (arg0 is
+    // code, never a specifier), whatever the first argument looks like.
+    const [evalTrue] = await lintCliFile(
+      ACP_FIXTURE,
+      'new Worker("import(\'../serve/worker.js\')", { eval: true });',
+    );
+    expect(
+      evalTrue.messages.some(
+        (message) =>
+          message.ruleId === RULE_ID && message.messageId === 'failClosed',
+      ),
+    ).toBe(true);
+  });
+
+  // The URL arm resolves only the import.meta.url base; any other
+  // import.meta member is statically unresolvable — fail closed, never
+  // assume the module base.
+  it('fails closed on non-url import.meta bases', async () => {
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const u = new URL('../serve/index.js', import.meta.resolve);",
+    );
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "const w = new Worker(new URL('../serve/worker.js', import.meta.resolve));",
+    );
+    // messageId-specific: an unresolvable base reports failClosed, not
+    // serveBoundary — the specifier never resolves.
+    for (const code of [
+      "const u = new URL('../serve/index.js', import.meta.env);",
+      "const w = new Worker(new URL('./worker.js', import.meta.env));",
+    ]) {
+      const [result] = await lintCliFile(ACP_FIXTURE, code);
+      expect(
+        result.messages.some(
+          (message) =>
+            message.ruleId === RULE_ID && message.messageId === 'failClosed',
+        ),
+      ).toBe(true);
+    }
+  });
+
+  // stripUrlSuffixes must also protect the bare-directory and baseUrl
+  // spellings, not just full-file specifiers.
+  it('strips query/fragment suffixes from bare serve spellings', async () => {
+    await expectServeBoundaryError(RUNTIME_FIXTURE, "import '../serve?foo';");
+    await expectServeBoundaryError(
+      ACP_FIXTURE,
+      "import 'src/serve/index.js?v=1';",
+    );
+  });
+
+  // The outside-serve (allow) verdict needs pins for the export and
+  // import-equals arms too — otherwise mutating them to unconditional
+  // fail-closed stays green.
+  it('allows exports and import-equals that resolve outside serve', async () => {
+    for (const code of [
+      "export * from '../utils/foo.js';",
+      "export { x } from '../utils/foo.js';",
+      "import x = require('../utils/foo.js');",
+    ]) {
+      await expectNoBoundaryHits(ACP_FIXTURE, code);
+    }
   });
 });

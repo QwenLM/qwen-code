@@ -74,23 +74,6 @@ function staticTemplateValue(template) {
   return template.quasis.map((quasi) => quasi.value.cooked ?? '').join('');
 }
 
-function staticMemberPropertyName(memberExpr) {
-  if (!memberExpr.computed && memberExpr.property.type === 'Identifier') {
-    return memberExpr.property.name;
-  }
-  if (
-    memberExpr.computed &&
-    memberExpr.property.type === 'Literal' &&
-    typeof memberExpr.property.value === 'string'
-  ) {
-    return memberExpr.property.value;
-  }
-  if (memberExpr.computed && memberExpr.property.type === 'TemplateLiteral') {
-    return staticTemplateValue(memberExpr.property);
-  }
-  return undefined;
-}
-
 export default {
   meta: {
     type: 'problem',
@@ -124,6 +107,11 @@ export default {
 
   create(context) {
     const options = context.options[0] ?? {};
+    // Canonicalize BOTH comparison sides through realpath: candidates are
+    // realpath'd in the resolution arms, so a never-canonicalized
+    // serveDir/baseUrlDir mismatches them whenever the repo sits under a
+    // symlinked ancestor (macOS /tmp, symlink-mounted workspaces) and the
+    // guard fails open (#8084 review).
     const serveDir = options.serveDir
       ? resolvePath(options.serveDir)
       : undefined;
@@ -212,10 +200,13 @@ export default {
       // Bare specifiers: real packages resolve elsewhere, but a tsconfig
       // baseUrl (packages/cli) makes `src/serve/...` resolve into serve/
       // (round-8 entrance). A bare specifier carrying traversal cannot be
-      // attributed to any package — fail closed.
+      // attributed to any package — fail closed. The resolution goes
+      // through realpath like every other filesystem arm: a committable
+      // symlink inside the baseUrl tree pointing into serve/ must not
+      // classify 'outside' while tsc/esbuild follow it.
       if (cleaned.includes('../')) return 'unknown';
       if (baseUrlDir) {
-        const resolved = resolvePath(path.join(baseUrlDir, cleaned));
+        const resolved = resolvePath(path.resolve(baseUrlDir, cleaned));
         if (isInServeDir(resolved, serveDir)) return 'inside';
       }
       return 'outside';
@@ -251,63 +242,81 @@ export default {
       else if (verdict === 'unknown') reportUnknown(sourceNode);
     }
 
+    /** Static name of a member property node: Identifier for dot access,
+     *  string Literal or expression-free TemplateLiteral for computed
+     *  (`vi[`mock`]` is as resolvable as vi.mock). */
+    function staticPropertyName(propertyNode, computed) {
+      if (!computed) {
+        return propertyNode.type === 'Identifier'
+          ? propertyNode.name
+          : undefined;
+      }
+      if (
+        propertyNode.type === 'Literal' &&
+        typeof propertyNode.value === 'string'
+      ) {
+        return propertyNode.value;
+      }
+      if (propertyNode.type === 'TemplateLiteral') {
+        return staticTemplateValue(propertyNode) ?? undefined;
+      }
+      return undefined;
+    }
+
+    /** Rightmost member-segment name of an object expression:
+     *  `globalThis.vi` → 'vi', `x.cp` → 'cp', bare `vi` → 'vi'. Nested
+     *  member objects must not evade object-scoped arms. */
+    function rightmostObjectName(objectNode) {
+      if (objectNode.type === 'Identifier') return objectNode.name;
+      if (objectNode.type === 'MemberExpression') {
+        return staticPropertyName(objectNode.property, objectNode.computed);
+      }
+      return undefined;
+    }
+
     /** Member-call shape: obj.prop(...); pass objectNames null to match
-     *  ANY object identifier (alias-proof — the caller asserts safety). */
-    function memberCall(node, objectNames, propertyPattern) {
-      const callee = node.callee;
+     *  ANY object shape (alias-proof — the caller asserts safety). */
+    function memberCall(callee, objectNames, propertyPattern) {
       if (callee.type !== 'MemberExpression') return false;
-      const property = staticMemberPropertyName(callee);
-      return (
-        (objectNames === null ||
-          (callee.object.type === 'Identifier' &&
-            objectNames.includes(callee.object.name))) &&
-        property !== undefined &&
-        propertyPattern.test(property)
-      );
+      const property = staticPropertyName(callee.property, callee.computed);
+      if (property === undefined || !propertyPattern.test(property)) {
+        return false;
+      }
+      if (objectNames === null) return true;
+      const objectName = rightmostObjectName(callee.object);
+      return objectName !== undefined && objectNames.includes(objectName);
     }
 
     function isProcessObject(node) {
+      if (node.type === 'Identifier') return node.name === 'process';
+      if (node.type !== 'MemberExpression') return false;
+      const objectName = rightmostObjectName(node.object);
       return (
-        (node.type === 'Identifier' && node.name === 'process') ||
-        (node.type === 'MemberExpression' &&
-          node.object.type === 'Identifier' &&
-          (node.object.name === 'globalThis' ||
-            node.object.name === 'global') &&
-          staticMemberPropertyName(node) === 'process')
+        (objectName === 'globalThis' || objectName === 'global') &&
+        staticPropertyName(node.property, node.computed) === 'process'
       );
     }
 
-    /** getBuiltinModule as a property name — identifier or computed
-     *  string-literal spelling. */
+    /** getBuiltinModule as a property name — any statically resolvable
+     *  spelling. */
     function builtinModuleProperty(memberExpr) {
-      return staticMemberPropertyName(memberExpr) === 'getBuiltinModule';
-    }
-
-    function isImportMetaUrl(node) {
       return (
-        node?.type === 'MemberExpression' &&
-        node.object.type === 'MetaProperty' &&
-        staticMemberPropertyName(node) === 'url'
+        staticPropertyName(memberExpr.property, memberExpr.computed) ===
+        'getBuiltinModule'
       );
     }
 
-    function hasWorkerEvalOption(node) {
-      const options = node.arguments[1];
-      return (
-        options?.type === 'ObjectExpression' &&
-        options.properties.some(
-          (property) =>
-            property.type === 'Property' &&
-            ((property.key.type === 'Identifier' &&
-              property.key.name === 'eval') ||
-              (property.computed &&
-                property.key.type === 'Literal' &&
-                property.key.value === 'eval')) &&
-            property.value.type === 'Literal' &&
-            property.value.value === true,
-        )
-      );
-    }
+    // Renamed module-loading bindings resolved from the import
+    // declarations of this file: `import { fork as f }`,
+    // `import { Worker as W }`, vm surfaces. Anything unresolvable stays
+    // out of these sets (documented residue, not fail-closed bait).
+    const forkAliases = new Set();
+    const workerAliases = new Set();
+    const scriptAliases = new Set();
+    const vmObjectNames = new Set(['vm']);
+    const vmExecNames =
+      /^(?:runInThisContext|runInNewContext|runInContext|compileFunction)$/;
+    const vmBareExecAliases = new Set();
 
     return {
       ImportDeclaration(node) {
@@ -317,6 +326,30 @@ export default {
         if (typeof value === 'string' && /^(?:node:)?module$/.test(value)) {
           reportUnknown(node.source, 'moduleBuiltin');
           return;
+        }
+        if (typeof value === 'string') {
+          const bare = value.startsWith('node:') ? value.slice(5) : value;
+          for (const spec of node.specifiers) {
+            const imported =
+              spec.type === 'ImportSpecifier'
+                ? (spec.imported?.name ?? spec.imported?.value)
+                : undefined;
+            if (bare === 'child_process' && imported === 'fork') {
+              forkAliases.add(spec.local.name);
+            } else if (bare === 'worker_threads' && imported === 'Worker') {
+              workerAliases.add(spec.local.name);
+            } else if (bare === 'vm') {
+              if (spec.type === 'ImportSpecifier') {
+                if (imported === 'Script') scriptAliases.add(spec.local.name);
+                else if (vmExecNames.test(imported ?? '')) {
+                  vmBareExecAliases.add(spec.local.name);
+                }
+              } else {
+                // default or namespace import — usable as the vm object
+                vmObjectNames.add(spec.local.name);
+              }
+            }
+          }
         }
         checkSource(node.source);
       },
@@ -343,43 +376,125 @@ export default {
         }
       },
       CallExpression(node) {
-        const callee = node.callee;
+        // `(0, x)(...)` resolves to the last sequence element — unwrap
+        // once, uniformly, before every callee-shape check below.
+        const callee =
+          node.callee.type === 'SequenceExpression'
+            ? node.callee.expressions[node.callee.expressions.length - 1]
+            : node.callee;
 
-        // eval("import('...')") executes string code that can load any
-        // module — the source is visible but unresolvable, so fail closed
-        // like computed sources. Covers the `(0, eval)(...)` and
-        // `globalThis.eval(...)` spellings; no-eval is not enabled in the
-        // shared config and the guarded trees contain no eval calls.
-        const evalCallee =
-          callee.type === 'SequenceExpression'
-            ? callee.expressions[callee.expressions.length - 1]
-            : callee;
+        // Function.prototype.call/apply/bind indirection on guarded
+        // callees: `.call` unwraps like a direct call with the specifier
+        // shifted one argument right; `.apply`/`.bind` forward their
+        // arguments in shapes this rule does not resolve — fail closed
+        // (same treatment Reflect.apply already gets).
+        if (callee.type === 'MemberExpression') {
+          const indirect = staticPropertyName(callee.property, callee.computed);
+          if (
+            indirect === 'call' ||
+            indirect === 'apply' ||
+            indirect === 'bind'
+          ) {
+            const innerName = rightmostObjectName(callee.object);
+            if (innerName === 'eval') {
+              // The forwarded argument is code, not a specifier.
+              reportUnknown(node);
+              return;
+            }
+            if (innerName === 'getBuiltinModule') {
+              if (node.arguments.length > 0) {
+                reportUnknown(node, 'moduleBuiltin');
+              }
+              return;
+            }
+            if (
+              /^(?:require|fork|mock|doMock|importActual|importMock)$/.test(
+                innerName ?? '',
+              )
+            ) {
+              if (indirect === 'call') {
+                if (node.arguments.length > 1) {
+                  checkSource(node.arguments[1]);
+                }
+              } else {
+                reportUnknown(node);
+              }
+              return;
+            }
+          }
+        }
+
+        // String-code execution class: any call whose callee ends in the
+        // `eval` or `Function` identifier — direct, sequence-unwrapped,
+        // or member spellings (globalThis.eval, globalThis.Function) —
+        // plus `.constructor` property chains, which reach the Function
+        // constructor WITHOUT naming it (({}).constructor.constructor,
+        // (function(){}).constructor, AsyncFunction variants). All
+        // compile/execute arbitrary string code that can import()
+        // anything; the source is visible but unresolvable, so fail
+        // closed like computed sources. `.constructor` is only a code
+        // shape when called WITH a string argument; eval/Function fail
+        // closed on any argument.
+        const calleeName =
+          callee.type === 'Identifier'
+            ? callee.name
+            : callee.type === 'MemberExpression'
+              ? staticPropertyName(callee.property, callee.computed)
+              : undefined;
         if (
-          (evalCallee.type === 'Identifier' && evalCallee.name === 'eval') ||
-          (evalCallee.type === 'MemberExpression' &&
-            evalCallee.object.type === 'Identifier' &&
-            (evalCallee.object.name === 'globalThis' ||
-              evalCallee.object.name === 'global') &&
-            ((evalCallee.property.type === 'Identifier' &&
-              evalCallee.property.name === 'eval') ||
-              (evalCallee.computed &&
-                evalCallee.property.type === 'Literal' &&
-                evalCallee.property.value === 'eval')))
+          node.arguments.length > 0 &&
+          (calleeName === 'eval' ||
+            calleeName === 'Function' ||
+            calleeName === 'constructor')
         ) {
-          if (node.arguments.length > 0) reportUnknown(node);
+          if (calleeName === 'constructor') {
+            const first = node.arguments[0];
+            const stringCode =
+              (first.type === 'Literal' && typeof first.value === 'string') ||
+              (first.type === 'TemplateLiteral' &&
+                staticTemplateValue(first) !== undefined);
+            if (stringCode) reportUnknown(node);
+          } else {
+            reportUnknown(node);
+          }
           return;
+        }
+
+        // node:vm string-execution surface — runInThisContext /
+        // runInNewContext / runInContext / compileFunction compile or run
+        // arbitrary string code. Scoped to vm imports (default/namespace
+        // objects and renamed named imports) plus the bare `vm` name.
+        if (node.arguments.length > 0) {
+          const vmObjectName =
+            callee.type === 'MemberExpression'
+              ? rightmostObjectName(callee.object)
+              : undefined;
+          const vmProperty =
+            callee.type === 'MemberExpression'
+              ? staticPropertyName(callee.property, callee.computed)
+              : undefined;
+          if (
+            (vmProperty !== undefined &&
+              vmExecNames.test(vmProperty) &&
+              vmObjectName !== undefined &&
+              vmObjectNames.has(vmObjectName)) ||
+            (callee.type === 'Identifier' && vmBareExecAliases.has(callee.name))
+          ) {
+            reportUnknown(node);
+            return;
+          }
         }
 
         // vi.mock / vi.doMock / vi.importActual / vi.importMock — vitest
         // resolves (and, without a factory, loads) the real module. The
-        // object name is deliberately NOT matched: aliased spellings
-        // (`import { vi as v } from 'vitest'; v.mock(...)`, destructured
-        // `importActual(...)`) evade identifier checks (round-8 entrance),
+        // object is deliberately NOT matched (rightmost-segment matching
+        // covers `globalThis.vi`, `vitest.vi`, nested member objects):
+        // aliased spellings evade identifier checks (round-8 entrance),
         // and the guarded trees contain no non-vitest callers with these
         // method names. Only specifiers resolving INTO serve/ report, so
         // this cannot false-positive on other packages' modules.
         if (
-          memberCall(node, null, vitestLoaderNames) &&
+          memberCall(callee, null, vitestLoaderNames) &&
           node.arguments.length > 0
         ) {
           checkSource(node.arguments[0]);
@@ -413,37 +528,47 @@ export default {
         // process.getBuiltinModule(...) hands out module objects
         // (createRequire) without any import statement (round-8 entrance).
         // isProcessObject covers `process`, `globalThis.process` and
-        // `global.process` including the computed property spellings;
-        // builtinModuleProperty covers identifier and computed property
-        // names; the bare identifier is the destructured spelling;
-        // Reflect.apply(process.getBuiltinModule, ...) unwraps to the
-        // same member shape.
+        // `global.process` in every statically resolvable property
+        // spelling; builtinModuleProperty likewise; the bare identifier
+        // is the destructured spelling; Reflect indirection is unwrapped
+        // below.
         if (
           (callee.type === 'MemberExpression' &&
             isProcessObject(callee.object) &&
             builtinModuleProperty(callee)) ||
-          (callee.type === 'Identifier' &&
-            callee.name === 'getBuiltinModule') ||
-          (memberCall(node, ['Reflect'], /^apply$/) &&
-            node.arguments[0]?.type === 'MemberExpression' &&
-            isProcessObject(node.arguments[0].object) &&
-            builtinModuleProperty(node.arguments[0]))
+          (callee.type === 'Identifier' && callee.name === 'getBuiltinModule')
         ) {
           reportUnknown(node, 'moduleBuiltin');
           return;
         }
 
-        // Function(...) is new Function(...) without `new`.
-        if (
-          ((callee.type === 'Identifier' && callee.name === 'Function') ||
-            (callee.type === 'MemberExpression' &&
-              callee.object.type === 'Identifier' &&
-              (callee.object.name === 'globalThis' ||
-                callee.object.name === 'global') &&
-              staticMemberPropertyName(callee) === 'Function')) &&
-          node.arguments.length > 0
-        ) {
-          reportUnknown(node);
+        // Reflect.apply / Reflect.construct with a guarded target: the
+        // arguments travel inside an array this rule does not resolve —
+        // fail closed (the getBuiltinModule target keeps its messageId).
+        if (memberCall(callee, ['Reflect'], /^(?:apply|construct)$/)) {
+          const target = node.arguments[0];
+          const targetMember = target?.type === 'MemberExpression';
+          const targetName = targetMember
+            ? staticPropertyName(target.property, target.computed)
+            : target?.type === 'Identifier'
+              ? target.name
+              : undefined;
+          if (
+            targetMember &&
+            isProcessObject(target.object) &&
+            builtinModuleProperty(target)
+          ) {
+            reportUnknown(node, 'moduleBuiltin');
+          } else if (
+            targetMember
+              ? /^(?:fork|eval)$/.test(targetName ?? '')
+              : /^(?:require|eval|fork)$/.test(targetName ?? '') ||
+                targetName === 'Worker' ||
+                workerAliases.has(targetName ?? '') ||
+                forkAliases.has(targetName ?? '')
+          ) {
+            reportUnknown(node);
+          }
           return;
         }
 
@@ -455,12 +580,14 @@ export default {
         // legitimate code like spawn(process.execPath, [...]). The member
         // match is object-agnostic (same tradeoff as the vitest loaders:
         // `import cp from 'node:child_process'; cp.fork(...)` and the
-        // namespace form must not evade the guard), and the bare
-        // identifier covers destructured `fork`; only specifiers resolving
-        // INTO serve/ report, so a non-serve fork target is never flagged.
+        // namespace form must not evade the guard), the bare identifier
+        // covers destructured `fork`, and forkAliases covers renamed
+        // imports; only specifiers resolving INTO serve/ report, so a
+        // non-serve fork target is never flagged.
         if (
-          (memberCall(node, null, /^fork$/) ||
-            (callee.type === 'Identifier' && callee.name === 'fork')) &&
+          (memberCall(callee, null, /^fork$/) ||
+            (callee.type === 'Identifier' &&
+              (callee.name === 'fork' || forkAliases.has(callee.name)))) &&
           node.arguments.length > 0
         ) {
           checkSource(node.arguments[0]);
@@ -468,38 +595,71 @@ export default {
         }
       },
       NewExpression(node) {
-        // new Function(body) compiles arbitrary string code that can
-        // import() anything — the body is visible but unresolvable, so
-        // fail closed like computed sources (eval's sibling).
+        const callee =
+          node.callee.type === 'SequenceExpression'
+            ? node.callee.expressions[node.callee.expressions.length - 1]
+            : node.callee;
+
+        // new Function(body) / new globalThis.Function(body) compiles
+        // arbitrary string code that can import() anything — fail closed
+        // like computed sources (eval's sibling).
         if (
-          ((node.callee.type === 'Identifier' &&
-            node.callee.name === 'Function') ||
-            (node.callee.type === 'MemberExpression' &&
-              node.callee.object.type === 'Identifier' &&
-              (node.callee.object.name === 'globalThis' ||
-                node.callee.object.name === 'global') &&
-              staticMemberPropertyName(node.callee) === 'Function')) &&
-          node.arguments.length > 0
+          node.arguments.length > 0 &&
+          ((callee.type === 'Identifier' && callee.name === 'Function') ||
+            (callee.type === 'MemberExpression' &&
+              staticPropertyName(callee.property, callee.computed) ===
+                'Function'))
         ) {
           reportUnknown(node);
           return;
         }
 
-        // new Worker('../serve/...') / new wt.Worker('...') — string
-        // module paths resolve relative to the importing module
-        // (worker_threads does the same). Object-agnostic member match
-        // covers namespace/default-import spellings.
+        // new vm.Script(code) / new Script(code) — string-code
+        // compilation, same class as Function (vm import spellings).
         if (
-          (node.callee.type === 'Identifier'
-            ? node.callee.name === 'Worker'
-            : node.callee.type === 'MemberExpression' &&
-              (node.callee.property.type === 'Identifier'
-                ? node.callee.property.name === 'Worker'
-                : node.callee.computed &&
-                  node.callee.property.type === 'Literal' &&
-                  node.callee.property.value === 'Worker')) &&
-          node.arguments.length > 0
+          node.arguments.length > 0 &&
+          ((callee.type === 'MemberExpression' &&
+            staticPropertyName(callee.property, callee.computed) === 'Script' &&
+            vmObjectNames.has(rightmostObjectName(callee.object) ?? '')) ||
+            (callee.type === 'Identifier' && scriptAliases.has(callee.name)))
         ) {
+          reportUnknown(node);
+          return;
+        }
+
+        // new Worker('../serve/...') / new wt.Worker('...') / new W
+        // (renamed import) — string module paths resolve relative to the
+        // importing module (worker_threads does the same). Object-agnostic
+        // member match covers namespace/default-import spellings.
+        const workerCallee =
+          callee.type === 'Identifier'
+            ? callee.name === 'Worker' || workerAliases.has(callee.name)
+            : callee.type === 'MemberExpression' &&
+              staticPropertyName(callee.property, callee.computed) === 'Worker';
+        if (workerCallee && node.arguments.length > 0) {
+          // new Worker(codeString, { eval: true }) executes arg0 as CODE,
+          // not as a specifier. Fail closed unless the option is
+          // statically false (a dynamic option or a non-object second
+          // argument cannot be verified).
+          const opts = node.arguments[1];
+          if (opts) {
+            const evalProp =
+              opts.type === 'ObjectExpression' &&
+              opts.properties.find(
+                (property) =>
+                  property.type === 'Property' &&
+                  staticPropertyName(property.key, property.computed) ===
+                    'eval',
+              );
+            const staticallyFalse =
+              evalProp &&
+              evalProp.value.type === 'Literal' &&
+              evalProp.value.value === false;
+            if (!staticallyFalse) {
+              reportUnknown(node);
+              return;
+            }
+          }
           // new Worker(new URL(spec, import.meta.url)) is resolved by the
           // new-URL arm below; checking it here too would fail-close a
           // fully static, boundary-clean construct and double-report the
@@ -510,26 +670,39 @@ export default {
             arg.callee.type === 'Identifier' &&
             arg.callee.name === 'URL' &&
             arg.arguments.length >= 2 &&
-            isImportMetaUrl(arg.arguments[1]);
-          if (hasWorkerEvalOption(node)) reportUnknown(arg);
-          else if (!handledByUrlArm) checkSource(arg);
+            arg.arguments[1].type === 'MemberExpression' &&
+            arg.arguments[1].object.type === 'MetaProperty' &&
+            staticPropertyName(
+              arg.arguments[1].property,
+              arg.arguments[1].computed,
+            ) === 'url';
+          if (!handledByUrlArm) checkSource(arg);
           return;
         }
 
         // new URL('../serve/...', import.meta.url) — Worker/asset loads
         // (round-8 entrance). The base argument is a MemberExpression
         // wrapping the import.meta MetaProperty; resolve the first
-        // argument against this module.
+        // argument against this module. Only import.meta.URL is a
+        // statically known base — import.meta.<anything else> cannot be
+        // resolved, so fail closed instead of assuming the module base.
         if (
-          node.callee.type === 'Identifier' &&
-          node.callee.name === 'URL' &&
+          callee.type === 'Identifier' &&
+          callee.name === 'URL' &&
           node.arguments.length >= 2 &&
           node.arguments[1].type === 'MemberExpression' &&
           node.arguments[1].object.type === 'MetaProperty'
         ) {
-          if (isImportMetaUrl(node.arguments[1]))
+          if (
+            staticPropertyName(
+              node.arguments[1].property,
+              node.arguments[1].computed,
+            ) === 'url'
+          ) {
             checkSource(node.arguments[0]);
-          else reportUnknown(node.arguments[1]);
+          } else {
+            reportUnknown(node);
+          }
         }
       },
     };
