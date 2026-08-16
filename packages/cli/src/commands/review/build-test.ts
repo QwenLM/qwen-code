@@ -553,9 +553,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     ...(() => {
       try {
         const st = statSync(root);
-        // birthtimeMs is 0 on filesystems that do not record it; the inode
-        // still separates instances there. Rounded: a serialized float that
-        // re-parses a hair off must not fail an honest same-tree resume.
+        // birthtimeMs is 0 on filesystems that do not record it, and an
+        // immediate delete-and-recreate at the same path CAN reuse the inode
+        // (measured on ext4) — so on such filesystems this fingerprint may
+        // collide across instances. The plan mtime below is the discriminator
+        // that still separates ROUNDS there; the fingerprint adds instance
+        // separation where the filesystem supports it. Rounded: a serialized
+        // float that re-parses a hair off must not fail an honest same-tree
+        // resume.
         return { tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) } };
       } catch {
         // No tree to fingerprint is no tree to build in; the adapter's own
@@ -567,6 +572,16 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // A resumed call continues a report; without one there is nothing to
   // continue, and silently starting a fresh run would re-install and re-build
   // inside a budget the caller sized for suites alone. Fail loudly instead.
+  if (args.resume && args.buildOnly) {
+    // The continuation dispatch would win and silently ignore the flag: a
+    // resume runs suites and skips builds, a build-only probe runs builds and
+    // skips suites — together they name no work at all.
+    throw new Error(
+      'build-test: --resume and --build-only contradict each other — a ' +
+        'continuation reuses the build and runs the remaining suites. Drop ' +
+        'one of the two.',
+    );
+  }
   const previous = args.resume ? previousReport(args.out) : undefined;
   if (previous) {
     // The report must be THIS run's, not merely well-shaped: the out path is

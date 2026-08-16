@@ -21,6 +21,7 @@ import {
   budgetStopEntry,
   budgetStopEntryZh,
   roundCapStopEntry,
+  roundCapStopEntryZh,
   writeBudgetStop,
   writeRoundCapStop,
 } from './lib/deadline.js';
@@ -4535,7 +4536,7 @@ describe('the ledger marker reaches the POSTED body', () => {
         prNumber: 8255,
         fetchedSha: 'deadbeef00112233',
       });
-      writeRoundCapStop(planPath, 5);
+      writeRoundCapStop(planPath, 5, 5);
       return composeReview({
         planPath,
         env: ENV,
@@ -4548,12 +4549,18 @@ describe('the ledger marker reaches the POSTED body', () => {
         unreviewedDimensions: dims,
       });
     };
-    const relayed = composeWith([roundCapStopEntry(5)]);
-    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
-    expect(parseLedger(relayed.body)?.sha).toBe('deadbeef00112233');
     const dropped = composeWith([]);
     expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
+    // Byte identity across all three relay states, exactly as the budget
+    // branch pins it — the Chinese pair included, whose splice constant
+    // exists for precisely this path.
+    const relayed = composeWith([roundCapStopEntry(5)]);
+    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayed.body).toBe(dropped.body);
+    const relayedZh = composeWith([roundCapStopEntryZh(5)]);
+    expect(relayedZh.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayedZh.body).toBe(dropped.body);
   });
 
   it('gives stop-shaped PROSE no exemption when no marker backs it', () => {

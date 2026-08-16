@@ -3105,6 +3105,27 @@ describe('runBuildTest', () => {
       expect(rep.note).toContain('without --resume');
     });
 
+    it('refuses --resume with --build-only — the pair names no work', () => {
+      // The continuation dispatch precedes every buildOnly branch, so the
+      // flag was silently ignored: a resume reuses the build and runs suites,
+      // a build-only probe does the opposite — together they ask for nothing.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(outPath, JSON.stringify({ toolchain: 'npm' }));
+      expect(() =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          buildOnly: true,
+          exec: okResult,
+        }),
+      ).toThrow(/contradict each other/);
+    });
+
     it('refuses a resume with no report to continue, naming the fix', () => {
       threePackages();
       expect(() =>

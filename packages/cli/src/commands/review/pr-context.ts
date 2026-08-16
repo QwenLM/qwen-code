@@ -1094,8 +1094,9 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     // machine last wrote — and compose stamps `prevRound + 1` from it
     // unconditionally, so a machine that missed rounds K+1..K+m re-issues ids
     // the PR already carries. A null login is the cheap honest fallback: the
-    // work list still recovers, and it recovers as FOREIGN, so no anchor rides
-    // on an identity this run could not confirm.
+    // work list still recovers (bounded to the foreign-round headroom, since
+    // there is no own base to measure from), it recovers as FOREIGN, and no
+    // anchor rides on an identity this run could not confirm.
     let login: string | null = null;
     try {
       login = currentUser();
