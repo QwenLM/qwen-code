@@ -579,7 +579,21 @@ function CancelOnUnmount({
 }) {
   const cancelRef = useRef(onCancel);
   cancelRef.current = onCancel;
-  useEffect(() => () => cancelRef.current(), []);
+  const pendingCancelRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup at mount; defer the cancel
+    // so the replay's re-setup clears it and only a real unmount cancels.
+    if (pendingCancelRef.current !== undefined) {
+      window.clearTimeout(pendingCancelRef.current);
+      pendingCancelRef.current = undefined;
+    }
+    return () => {
+      pendingCancelRef.current = window.setTimeout(() => {
+        pendingCancelRef.current = undefined;
+        cancelRef.current();
+      }, 0);
+    };
+  }, []);
   return children;
 }
 
@@ -1366,11 +1380,6 @@ export function WebShellSidebar({
       return scope.kind === 'primary' || workspaceQualifiedRestCoreEnabled;
     },
     [workspaceQualifiedRestCoreEnabled],
-  );
-  const isActiveSessionReadOnly = useCallback(
-    (session: DaemonSessionSummary) =>
-      !isMutableSessionScope(resolveSessionWorkspaceScope(session)),
-    [isMutableSessionScope, resolveSessionWorkspaceScope],
   );
   const getSessionWorkspaceActions = useCallback(
     (session: DaemonSessionSummary) => {
@@ -2171,10 +2180,13 @@ export function WebShellSidebar({
       // focus from the composer on every hover-open, so reset it whenever
       // the collapsed surface is not showing (sidebar collapse, session
       // click, hover-out, or dismissal). Radix's outside-interaction
-      // dismissal unmounts a focused input without firing blur.
+      // dismissal unmounts a focused input without firing blur. A stale
+      // group picker would likewise block dismissal of the next
+      // hover-opened switcher.
       setSearchOpen(false);
       setSearchQuery('');
       cancelRename();
+      setGroupMenu(null);
     }
   }, [cancelRename, collapsed, collapsedSessionsOpen]);
 
@@ -3332,13 +3344,9 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
-        // Some controls still depend on the active runtime even though
-        // workspace-qualified actions can target trusted secondary rows.
-        readOnly?: boolean;
       } = {},
     ) => {
       const { isArchived = false } = options;
-      const readOnly = options.readOnly ?? isActiveSessionReadOnly(session);
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -3608,8 +3616,7 @@ export function WebShellSidebar({
                 ) : !attentionLabel && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
-                {(!readOnly ||
-                  showPin ||
+                {(showPin ||
                   showArchive ||
                   showRename ||
                   showExport ||
@@ -3862,7 +3869,6 @@ export function WebShellSidebar({
       saveRename,
       sessionActionItems,
       inlineActionItems,
-      isActiveSessionReadOnly,
       startRename,
       t,
     ],
@@ -4650,9 +4656,7 @@ export function WebShellSidebar({
                   {pinnedExpanded && (
                     <div className={styles.pinnedSessionList}>
                       {pinnedSessions.map((session) =>
-                        renderSessionRow(session, {
-                          readOnly: isActiveSessionReadOnly(session),
-                        }),
+                        renderSessionRow(session),
                       )}
                     </div>
                   )}
@@ -4705,15 +4709,7 @@ export function WebShellSidebar({
                     : undefined
                 }
                 renderSession={(session) =>
-                  renderSessionRow(
-                    { ...session, workspaceCwd: ws.cwd },
-                    {
-                      readOnly: isActiveSessionReadOnly({
-                        ...session,
-                        workspaceCwd: ws.cwd,
-                      }),
-                    },
-                  )
+                  renderSessionRow({ ...session, workspaceCwd: ws.cwd })
                 }
                 showSessionDetails={sessionActionItems.has('details')}
               />
@@ -4844,18 +4840,10 @@ export function WebShellSidebar({
                           }
                           renderSessions={!ws.primary}
                           renderSession={(session) =>
-                            renderSessionRow(
-                              {
-                                ...session,
-                                workspaceCwd: ws.cwd,
-                              },
-                              {
-                                readOnly: isActiveSessionReadOnly({
-                                  ...session,
-                                  workspaceCwd: ws.cwd,
-                                }),
-                              },
-                            )
+                            renderSessionRow({
+                              ...session,
+                              workspaceCwd: ws.cwd,
+                            })
                           }
                           showSessionDetails={sessionActionItems.has('details')}
                           headerActions={(visible) => {

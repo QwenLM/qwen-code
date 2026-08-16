@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as React from 'react';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
+import sidebarStyles from './WebShellSidebar.module.css';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
@@ -216,25 +218,33 @@ let container: HTMLDivElement;
 
 function renderSidebar(
   collapsed = false,
-  props: { onSelectCurrentSession?: () => void } = {},
+  props: {
+    onSelectCurrentSession?: () => void;
+    sessionActions?: WebShellSidebarSessionActionsOptions;
+    strict?: boolean;
+  } = {},
 ) {
+  const sidebar = (
+    <WebShellSidebar
+      collapsed={collapsed}
+      onCollapsedChange={() => {}}
+      onOpenSettings={() => {}}
+      onOpenDaemonStatus={() => {}}
+      onOpenScheduledTasks={() => {}}
+      onOpenGoals={() => {}}
+      onOpenSessions={() => {}}
+      onOpenSplitView={() => {}}
+      onNewSession={() => false}
+      onLoadSession={loadSession}
+      onSelectCurrentSession={props.onSelectCurrentSession}
+      onError={() => {}}
+      sessionActions={props.sessionActions}
+    />
+  );
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={collapsed}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={loadSession}
-          onSelectCurrentSession={props.onSelectCurrentSession}
-          onError={() => {}}
-        />
+        {props.strict ? <StrictMode>{sidebar}</StrictMode> : sidebar}
       </I18nProvider>,
     );
   });
@@ -1203,5 +1213,60 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     );
     expect(reopened).not.toBeNull();
     expect(reopened!.querySelector('input')).toBeNull();
+  });
+
+  it('does not render the actions overlay when a row has no available actions', async () => {
+    renderSidebar(false, { sessionActions: { items: ['details'] } });
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    expect(row!.querySelector(`.${sidebarStyles.sessionActions}`)).toBeNull();
+  });
+
+  it('opens the rename editor on double-click', async () => {
+    connection.sessionId = 'session-a';
+    renderSidebar(false);
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    act(() => {
+      row!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Rename: API review"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('keeps the rename editor mounted under the StrictMode effect replay', async () => {
+    connection.sessionId = 'session-a';
+    renderSidebar(false, { strict: true });
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    act(() => {
+      row!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Rename: API review"]',
+      ),
+    ).not.toBeNull();
   });
 });
