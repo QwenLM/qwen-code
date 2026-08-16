@@ -2623,10 +2623,17 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.output).not.toContain('should_run=true');
     // The check must query the labels endpoint, not trust the event payload:
     // the label is applied AFTER the triggering event fires. It must also
-    // read the live head SHA and the marker comments (#9193).
-    expect(r.ghCalls).toContain('issues/4242/labels');
+    // read the live head SHA and the marker comments (#9193). Both list
+    // reads carry `--paginate`: without it a pin sitting beyond page 1
+    // (a re-triage after 100+ comments accumulated) is invisible to the
+    // gate, which then misreports "not pinned" and burns a full review on
+    // every event — silent, fail-open, and green in CI (R6-7, #9193
+    // review; pinned the same way as the sibling triage/autofix reads).
+    expect(r.ghCalls).toContain('issues/4242/labels?per_page=100 --paginate');
     expect(r.ghCalls).toContain('pulls/4242');
-    expect(r.ghCalls).toContain('issues/4242/comments');
+    expect(r.ghCalls).toContain(
+      'issues/4242/comments?per_page=100 --paginate',
+    );
     // Pin the filter EXPRESSION, not just its substring: the stub does its
     // own author filtering, so a mutated jq that merely contains
     // '.user.login' (e.g. select(.user.login != "")) would otherwise pass
