@@ -198,6 +198,7 @@ export async function readManyFiles(
           shouldUseTextHandle = standardFileSystem && fileType === 'text';
           shouldSnapshot =
             !shouldUseTextHandle &&
+            fileType !== 'binary' &&
             (standardFileSystem || fileType !== 'text') &&
             stats.size <= SNAPSHOT_MAX_SIZE_BYTES;
         }
