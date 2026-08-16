@@ -453,4 +453,58 @@ describe('sweepStaleWorktreeProjects', () => {
       fs.existsSync(path.join(base, 'projects', sanitizeCwd(alsoMissing))),
     ).toBe(true);
   });
+
+  it('matches the temp-dir containment gate on realpath-resolved paths', async () => {
+    // macOS hands out os.tmpdir() as /var/folders/... while a realpath'd
+    // launch cwd reads /private/var/folders/...: the lexical gate can never
+    // match there and the ephemeral-launch arm stays inert. Build the fixture
+    // from the realpath'd root so both sides compare in real form.
+    const realTmp = fs.realpathSync(os.tmpdir());
+    const launchCwd = path.join(realTmp, `gone-launch-${Date.now()}`);
+    const entry = sanitizeCwd(launchCwd);
+    const gone = makeProjectSnapshot(base, entry, {
+      worktreePath: path.join(launchCwd, '.qwen', 'worktrees', 'slug'),
+      originalCwd: launchCwd,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([entry]);
+    expect(fs.existsSync(gone)).toBe(false);
+  });
+
+  it('keeps the bucket the current process just attached to', async () => {
+    // The constructor-scheduled sweep must not delete the resumed session's
+    // own bucket mid-startup.
+    const missingWorktree = path.join(base, 'missing-worktree');
+    const entry = sanitizeCwd(missingWorktree);
+    const kept = makeProjectSnapshot(base, entry, {
+      worktreePath: missingWorktree,
+      originalCwd: base,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base, entry);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
+  it('keeps the bucket when the owning repo cannot be positively stat-ed', async () => {
+    // A symlink loop stats ELOOP: "cannot prove the repo is there" must keep
+    // the bucket, not read as proof the repo exists.
+    const loopDir = path.join(base, 'loopdir');
+    fs.mkdirSync(loopDir, { recursive: true });
+    fs.symlinkSync('loop', path.join(loopDir, 'loop'));
+    const eloopPath = path.join(loopDir, 'loop', 'repo');
+    const worktree = path.join(base, 'gone-worktree');
+    const kept = makeProjectSnapshot(base, sanitizeCwd(worktree), {
+      worktreePath: worktree,
+      originalCwd: eloopPath,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
 });

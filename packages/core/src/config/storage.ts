@@ -45,6 +45,37 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
   );
 }
 
+// realpathSync only resolves existing paths, but sweep candidates are usually
+// gone by definition: walk up to the nearest existing ancestor and re-append
+// the missing tail, so a deleted worktree still resolves to its real location
+// (on macOS /var/folders vs /private/var/folders otherwise never matches).
+function resolveThroughExistingAncestor(candidate: string): string {
+  let current = candidate;
+  const tail: string[] = [];
+  while (true) {
+    try {
+      const real = fs.realpathSync(current);
+      return path.join(real, ...tail.reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return candidate;
+      tail.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+// The repo-existence conjunct needs positive proof: only a clean stat counts
+// as "the repo is still there". Any stat error (ESTALE/EIO on a downed mount,
+// EACCES, ELOOP) keeps the bucket.
+function isPositivelyExistingDirectorySync(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Worktree sessions snapshot a project dir under
  * `<runtimeBaseDir>/projects/<sanitizeCwd(worktreePath)>` whose transcripts
@@ -63,6 +94,7 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
  */
 export async function sweepStaleWorktreeProjects(
   runtimeBaseDir: string,
+  keepBucket?: string,
 ): Promise<string[]> {
   const projectsDir = path.join(runtimeBaseDir, PROJECT_DIR_NAME);
   let entries: string[];
@@ -72,8 +104,19 @@ export async function sweepStaleWorktreeProjects(
     return [];
   }
 
+  let realTmpdir: string;
+  try {
+    realTmpdir = fs.realpathSync(os.tmpdir());
+  } catch {
+    realTmpdir = os.tmpdir();
+  }
+
   const removed: string[] = [];
   for (const entry of entries.sort()) {
+    // The bucket this process just attached to is in use by definition; never
+    // sweep it out from under the live session. Its staleness is re-evaluated
+    // at the next start.
+    if (keepBucket !== undefined && entry === keepBucket) continue;
     const chatsDir = path.join(projectsDir, entry, 'chats');
     const sidecars = await readWorktreeSidecarRecords(chatsDir);
     // An archived sidecar means archiveSessions moved that session, transcript
@@ -103,7 +146,7 @@ export async function sweepStaleWorktreeProjects(
         sidecars.every(
           (sidecar) =>
             sidecar.originalCwd !== undefined &&
-            isDirectorySync(sidecar.originalCwd),
+            isPositivelyExistingDirectorySync(sidecar.originalCwd),
         );
     } else {
       // Bucket keyed by a gone ephemeral launch cwd, #7906's main class:
@@ -117,11 +160,17 @@ export async function sweepStaleWorktreeProjects(
       // repo dir can mean an unplugged drive, not garbage.
       stale =
         allWorktreesGone &&
+        // A tmpdir root that will not stat cleanly is a downed volume, not an
+        // ephemeral scratch space: keep every bucket until it comes back.
+        isPositivelyExistingDirectorySync(realTmpdir) &&
         sidecars.every(
           (sidecar) =>
             sidecar.originalCwd !== undefined &&
             entry === sanitizeCwd(sidecar.originalCwd) &&
-            isResolvedPathWithinDirectory(sidecar.originalCwd, os.tmpdir()) &&
+            isResolvedPathWithinDirectory(
+              resolveThroughExistingAncestor(sidecar.originalCwd),
+              realTmpdir,
+            ) &&
             !isDirectorySync(sidecar.originalCwd),
         );
     }
@@ -296,10 +345,13 @@ async function hasLiveRuntime(chatsDir: string): Promise<boolean> {
 
 const staleWorktreeSweepStarted = new Set<string>();
 
-function scheduleStaleWorktreeSweep(runtimeBaseDir: string): void {
+function scheduleStaleWorktreeSweep(
+  runtimeBaseDir: string,
+  keepBucket?: string,
+): void {
   if (staleWorktreeSweepStarted.has(runtimeBaseDir)) return;
   staleWorktreeSweepStarted.add(runtimeBaseDir);
-  void sweepStaleWorktreeProjects(runtimeBaseDir).catch(
+  void sweepStaleWorktreeProjects(runtimeBaseDir, keepBucket).catch(
     async (error: unknown) => {
       (await storageLogger()).warn(
         `stale worktree project sweep failed: ${error}`,
@@ -328,7 +380,10 @@ export class Storage {
   ) {
     this.targetDir = targetDir;
     this.runtimeBaseDir = path.resolve(runtimeBaseDir);
-    scheduleStaleWorktreeSweep(this.runtimeBaseDir);
+    scheduleStaleWorktreeSweep(
+      this.runtimeBaseDir,
+      sanitizeCwd(this.targetDir),
+    );
   }
 
   /**
