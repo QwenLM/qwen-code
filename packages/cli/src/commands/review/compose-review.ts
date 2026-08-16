@@ -873,6 +873,7 @@ function ledgerMarkerFor(
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       prNumber?: unknown;
       fetchedSha?: unknown;
+      reviewModelId?: unknown;
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -897,7 +898,7 @@ function ledgerMarkerFor(
     // certify a range.
     const failClosed =
       (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
-    const sha =
+    const shaCandidate =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
         : undefined;
@@ -919,7 +920,25 @@ function ledgerMarkerFor(
     const declared =
       typeof input.modelId === 'string' ? input.modelId.trim() : '';
     const certifying = runtime !== '' ? runtime : declared;
-    const model = attribution && certifying !== '' ? certifying : undefined;
+    // WHO reviewed, not who is posting. The runtime id above tracks the
+    // session's CURRENT model, and the documented deferred-post flow —
+    // review under A, `/model` to B, "post comments" — sampled B and
+    // certified A's range to it, so the next round under B scoped past code
+    // B never reviewed. `fetch-pr` stamps the identity the round STARTED
+    // under into the plan; when the two disagree, this round cannot say who
+    // reviewed the range and certifies nobody: the anchor pair is withheld
+    // and the next round re-reviews in full. An absent stamp (a plan written
+    // before the field) reads as unknown, not as agreement — but it also
+    // cannot prove disagreement, so it keeps today's behaviour rather than
+    // withholding every anchor on an older plan.
+    const roundStart =
+      typeof plan.reviewModelId === 'string' ? plan.reviewModelId.trim() : '';
+    const identityDrifted =
+      roundStart !== '' && runtime !== '' && roundStart !== runtime;
+    const model =
+      attribution && certifying !== '' && !identityDrifted
+        ? certifying
+        : undefined;
     return serializeLedger({
       ...buildLedger(
         prevRound + 1,
@@ -935,7 +954,9 @@ function ledgerMarkerFor(
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
         ],
       ),
-      ...(sha ? { sha } : {}),
+      // The pair falls together: a sha with no model reads to the next
+      // round as a pre-field marker rather than as "nobody certified this".
+      ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
       ...(model ? { model } : {}),
     });
   } catch {
@@ -2976,7 +2997,8 @@ export const composeReviewCommand: CommandModule = {
       // launching command can still override the env (and a hijacked
       // orchestrator can forge the marker outright via the API) — the same
       // forgeable posture DESIGN.md records for the cache path.
-      process.env['QWEN_CODE_MODEL'],
+      // See submit.ts: the provider-qualified identity when published.
+      process.env['QWEN_CODE_MODEL_IDENTITY'] ?? process.env['QWEN_CODE_MODEL'],
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

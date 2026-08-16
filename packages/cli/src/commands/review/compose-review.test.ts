@@ -139,6 +139,7 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
+    reviewModelId?: string;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -147,6 +148,9 @@ function plan(
     JSON.stringify({
       diffPathAbsolute: DIFF,
       ...(opts.fetchedSha === undefined ? {} : { fetchedSha: opts.fetchedSha }),
+      ...(opts.reviewModelId === undefined
+        ? {}
+        : { reviewModelId: opts.reviewModelId }),
       // What fetch-pr records when the PR description contains Han
       // characters — the deterministic bilingual-body switch.
       ...(opts.han ? { prDescriptionHasHan: true } : {}),
@@ -430,6 +434,7 @@ function coveredPlan(
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
+    reviewModelId?: string;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -4768,6 +4773,89 @@ describe('the ledger marker reaches the POSTED body', () => {
     });
     expect(r.cappedBy).toEqual([]);
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('withholds the anchor when the posting model is not the reviewing model', () => {
+    // The deferred-post flow: review under A, `/model` to B, "post comments".
+    // The runtime id is sampled at POST time, so it says B while the plan's
+    // round-start stamp says A — this round cannot say who reviewed the
+    // range, so it certifies nobody and the pair is withheld. The findings
+    // still ride; the next round simply re-reviews in full.
+    const drifted = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'model-a',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'model-b',
+    );
+    expect(drifted.cappedBy).toEqual([]);
+    const withheld = parseLedger(drifted.body)!;
+    expect(withheld.sha).toBeUndefined();
+    expect(withheld.model).toBeUndefined();
+    expect(withheld.findings.length).toBeGreaterThan(0);
+
+    // Same stamp, same poster: the anchor rides, certified by that identity.
+    const agreed = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'model-a',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'model-a',
+    );
+    expect(parseLedger(agreed.body)?.sha).toBe('deadbeef00112233');
+    expect(parseLedger(agreed.body)?.model).toBe('model-a');
+  });
+
+  it('a provider-qualified identity is what gets certified, verbatim', () => {
+    // A bare model id is unique only inside one provider configuration; the
+    // runtime publishes `<model>@<8-hex of authType+baseUrl>` so two
+    // configurations exposing one name cannot pass each other's gate.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+          reviewModelId: 'qwen3.7-max@1a2b3c4d',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'qwen3.7-max@1a2b3c4d',
+    );
+    expect(parseLedger(r.body)?.model).toBe('qwen3.7-max@1a2b3c4d');
+    // …and the SAME model id under a different provider does not match it.
+    expect(parseLedger(r.body)?.model).not.toBe('qwen3.7-max@9f8e7d6c');
   });
 
   it('the anchor carries its model — the same-model contract survives recovery', () => {

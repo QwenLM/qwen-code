@@ -168,6 +168,21 @@ type FetchPrResult = PlanReport & {
    */
   prDescriptionHasHan: boolean;
   /**
+   * The model this ROUND started under — the runtime identity at capture
+   * time, stamped here because nothing else in the flow remembers it.
+   *
+   * `compose-review` certifies the posted anchor with the model that did the
+   * review, and its only other source is `QWEN_CODE_MODEL` read at compose
+   * or submit time. That env tracks the session's CURRENT model: the
+   * documented deferred-post flow — review under A, `/model` to B, "post
+   * comments" — then certified A's range as B, and the next round under B
+   * scoped `sha..HEAD` past code B never reviewed. A stamp taken when the
+   * diff was captured is the one value that cannot drift out from under the
+   * work it describes. Absent on a report written before this field, which
+   * compose reads as "unknown" rather than as agreement.
+   */
+  reviewModelId?: string;
+  /**
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
@@ -584,7 +599,28 @@ function cleanStale(prNumber: string): void {
   }
 }
 
+/**
+ * The identity this round runs under, read from the runtime's published slots.
+ *
+ * Prefers the PROVIDER-QUALIFIED id (`<model>@<8-hex of authType+baseUrl>`):
+ * a bare model id is unique only inside one provider configuration, so two of
+ * them exposing the same name would otherwise pass each other's same-model
+ * gate and skip code neither reviewed. Falls back to the bare id for a runtime
+ * that publishes no identity, and to `''` — meaning "unknown", which the
+ * composer reads as a mismatch rather than as agreement — for one that
+ * publishes neither.
+ */
+export function roundModelIdFrom(env: NodeJS.ProcessEnv): string {
+  return (
+    env['QWEN_CODE_MODEL_IDENTITY'] ??
+    env['QWEN_CODE_MODEL'] ??
+    ''
+  ).trim();
+}
+
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
+  // Sampled HERE, at the start of the round: see `reviewModelId`.
+  const roundModelId = roundModelIdFrom(process.env);
   const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
 
   if (ownerRepo.indexOf('/') < 0) {
@@ -1187,6 +1223,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute,
     diffSha256,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+    ...(roundModelId ? { reviewModelId: roundModelId } : {}),
     ...(anchor ? { incremental: anchor.incremental } : {}),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
       operatorRoundCap: operatorReviewSettings().reverseAuditRounds,

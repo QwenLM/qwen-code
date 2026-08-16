@@ -13,6 +13,7 @@ import {
   isEmptyDiff,
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
+  roundModelIdFrom,
   containmentRuling,
   type AnchorProbe,
 } from './fetch-pr.js';
@@ -3089,5 +3090,40 @@ describe('fetch-pr run-session ledger wiring', () => {
     const writeOrder =
       producerMocks.writeFileSync.mock.invocationCallOrder[writeIndex];
     expect(appendOrder).toBeGreaterThan(writeOrder);
+  });
+});
+
+describe('roundModelIdFrom', () => {
+  it('prefers the provider-qualified identity over the bare model id', () => {
+    // Two provider configurations can expose one model NAME; only the
+    // qualified form separates them, and the same-model gate that decides
+    // whether to skip already-reviewed hunks is what reads this.
+    expect(
+      roundModelIdFrom({
+        QWEN_CODE_MODEL: 'qwen3-coder-plus',
+        QWEN_CODE_MODEL_IDENTITY: 'qwen3-coder-plus@1a2b3c4d',
+      }),
+    ).toBe('qwen3-coder-plus@1a2b3c4d');
+  });
+
+  it('falls back to the bare id when the runtime publishes no identity', () => {
+    expect(roundModelIdFrom({ QWEN_CODE_MODEL: 'qwen3-coder-plus' })).toBe(
+      'qwen3-coder-plus',
+    );
+  });
+
+  it('is empty when neither slot is published, and when one is blank', () => {
+    // Empty means "unknown", which the composer reads as a MISMATCH rather
+    // than as agreement — the anchor is withheld and the next round reviews
+    // in full. A whitespace-only slot must reach that same state, not stamp a
+    // blank identity that compares equal to another blank one.
+    expect(roundModelIdFrom({})).toBe('');
+    expect(roundModelIdFrom({ QWEN_CODE_MODEL: '   ' })).toBe('');
+    expect(
+      roundModelIdFrom({
+        QWEN_CODE_MODEL: 'qwen3-coder-plus',
+        QWEN_CODE_MODEL_IDENTITY: '  ',
+      }),
+    ).toBe('');
   });
 });
