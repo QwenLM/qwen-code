@@ -194,6 +194,13 @@ export type ContentGeneratorConfig = {
   // text-only tool results as strings while leaving the default spec-compliant
   // content-part shape unchanged.
   toolResultContentFormat?: 'parts' | 'string';
+  // Custom fetch override. When set, provider generators MUST use this fetch
+  // instead of the runtime-built undici fetch, so an auth wrapper (e.g.
+  // Copilot's `wrapFetchWithCopilotAuth`) can rewrite the host and inject
+  // bearer headers per-request. Read sites: the Anthropic/OpenAI Responses/
+  // OpenAI Chat generators pass it through to their SDK clients as the
+  // `fetch` runtime option. Optional — absent for all non-Copilot auth types.
+  fetch?: typeof fetch;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
