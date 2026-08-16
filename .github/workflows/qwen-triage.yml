@@ -2751,6 +2751,15 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
+          # Runner file-command backing files under $RUNNER_TEMP are
+          # uid-1000-owned: a step's PR code can poison the job
+          # environment (PATH above all) that LATER steps inherit, and
+          # root-side blocks resolve bare binaries through it. Pin a
+          # root-only-writable PATH. Production runs this block as root;
+          # the test harness does not and keeps its stub PATH.
+          if [ "${EUID:-1}" -eq 0 ]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
           # Root-only home for every gate working file. $RUNNER_TEMP itself
           # is uid 1000 mode 755 on this pool, and `node` in the job's
           # container is uid 1000 — so PR-controlled code (lifecycle
@@ -2971,6 +2980,15 @@ jobs:
           # gate exists to classify (round-1 sandboxed verify, cells C/D).
           set -uo pipefail
           set +e
+          # Same poisoned-env premise as the record step: the file
+          # commands a PR step wrote to the uid-1000-owned backing files
+          # are applied at step end, so this block's inherited PATH may
+          # be attacker-chosen. Pin a root-only-writable one before any
+          # bare binary is resolved (production runs as root; the test
+          # harness does not and keeps its stub PATH).
+          if [ "${EUID:-1}" -eq 0 ]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
           # Abnormal-exit net: `set -u` (or any unforeseen fatal) still
           # aborts non-zero. Convert that ending to the fixed `error` verdict
           # and a zero exit, so even a gate implementation bug is
@@ -3008,6 +3026,17 @@ jobs:
             GATE_DONE=1
             exit 0
           fi
+          # The validated entry lives in the uid-1000-writable
+          # $RUNNER_TEMP top level, and rename(2) needs write on the
+          # PARENT, not the entry: the 0700 home cannot stop its own
+          # entry being swapped after this validation, and every later
+          # path-based access re-resolves the path. Record the home's
+          # identity now; every such access re-verifies it before use.
+          GATE_HOME_ID="$(stat -c '%d:%i' "$GATE_DIR")"
+          gate_home_intact() {
+            gate_dir_ok &&
+              [ "$(stat -c '%d:%i' "$GATE_DIR" 2>/dev/null)" = "$GATE_HOME_ID" ]
+          }
           LOG="$GATE_DIR/log"
           LIST="$GATE_DIR/files"
           # Per-invocation detail (round lines, failure tails) goes to a
@@ -3028,8 +3057,14 @@ jobs:
             # the matrix/verdict must never be truncated away behind
             # failure tails (full copy stays in the artifact).
             if [ -s "$DETAIL" ]; then
-              printf -- '\n--- per-invocation detail (full copy in the artifact) ---\n' >> "$LOG"
-              cat "$DETAIL" >> "$LOG"
+              if [ -n "${GATE_HOME_ID:-}" ] && ! gate_home_intact; then
+                # A home swapped after the samples ran would feed
+                # attacker-chosen bytes into the published log.
+                printf -- '\n(per-invocation detail dropped: the gate working directory changed mid-run)\n' >> "$LOG"
+              else
+                printf -- '\n--- per-invocation detail (full copy in the artifact) ---\n' >> "$LOG"
+                cat "$DETAIL" >> "$LOG"
+              fi
             fi
             echo "Flakiness gate: $1 — $2" >> "$GITHUB_STEP_SUMMARY"
             GATE_DONE=1
@@ -3045,6 +3080,8 @@ jobs:
           # but the check is the cheap half of a defence in depth — a
           # future relocation out of the root-only home must not silently
           # reintroduce "follow whatever symlink is there".
+          gate_home_intact ||
+            finish error 'the gate working directory changed since validation — refusing to read files a PR could have planted'
           { [ -f "$LIST" ] && [ ! -L "$LIST" ]; } ||
             finish error 'the recorded changed-test list is missing or not a regular file'
 
@@ -3187,50 +3224,80 @@ jobs:
           # timeout budget above accounts for. Divergence needs no uniform
           # round count: a P and an F for the same group is non-determinism
           # no matter how many rounds fit the budget.
-          # Round-state reset — run AS THE BUILD USER, not root: a root
-          # checkout restores node-mutated tracked files as new root-owned
-          # inodes that later node rounds cannot write (EACCES),
-          # manufacturing the very divergence the reset exists to prevent.
-          # `git clean -ffd` (no -x: gitignored node_modules/dist must
-          # survive) drops the untracked residue `checkout` never touches
-          # — lock files, output dirs a test creates — INCLUDING dirs
-          # holding a nested .git, which plain -fd by documented git
-          # behavior refuses to remove. `checkout HEAD -- .` restores from
-          # the root-pinned commit, not the index: PR lifecycle code can
-          # stage mutations, and restoring from the index would preserve
-          # them. Both git calls carry the lane's runner-injection strip
-          # (git filters run from PR-owned .git metadata as node) and a
-          # timeout wrapper (a planted filter can hang them, and the reset
-          # runs outside the invocation loop's deadline check). A failed
-          # reset means samples would not start from equivalent state, so
-          # the gate fails open to the fixed error verdict instead of
-          # sampling a dirty tree.
-          reset_round_state() {
-            # Kill FIRST, then restore — a live daemon can re-dirty the tree
-            # after the checkout. One-shot SIGTERM races slow-draining
-            # daemons, so SIGKILL with a bounded wait, zombies disregarded
-            # (same reasoning as the agent step's process guard).
+          kill_node_processes() {
+            # One-shot SIGTERM races slow-draining daemons, so SIGKILL
+            # with a bounded wait, zombies disregarded (same reasoning
+            # as the agent step's process guard).
             pkill -KILL -u node 2>/dev/null || true
             for _ in 1 2 3; do
               [ -n "$(ps -o pid=,stat= -u node 2>/dev/null | awk '$2 !~ /^Z/')" ] || break
               sleep 1
               pkill -KILL -u node 2>/dev/null || true
             done
+          }
+          # Round-state reset — the git calls run AS THE BUILD USER, not
+          # root: a root checkout restores node-mutated tracked files as
+          # new root-owned inodes that later node rounds cannot write
+          # (EACCES), manufacturing the very divergence the reset exists
+          # to prevent. `git clean -ffd` (no -x: gitignored
+          # node_modules/dist must survive) drops the untracked residue
+          # `checkout` never touches — lock files, output dirs a test
+          # creates — INCLUDING dirs holding a nested .git, which plain
+          # -fd by documented git behavior refuses to remove. The restore
+          # is `git reset --hard` to the OID pinned before the round
+          # loop: a test can `git commit` mid-invocation and move HEAD,
+          # after which restoring from HEAD would make the committed
+          # mutation the baseline, and a pathspec checkout would keep
+          # files the moved HEAD added. All calls carry the lane's
+          # runner-injection strip and a timeout wrapper (a planted
+          # filter can hang them, and the reset runs outside the
+          # invocation loop's deadline check). The calls also execute
+          # PR-planted git filters/hooks as node, so the kill runs AGAIN
+          # after them: nothing node-owned may be alive when root touches
+          # paths in the uid-1000-writable $RUNNER_TEMP afterwards. A
+          # failed reset fails open to the fixed error verdict while no
+          # sample exists; once samples are collected it stops the
+          # sampling instead — collected results are honest, and a later
+          # cleanup failure must not discard them.
+          reset_round_state() {
+            # Kill FIRST, then restore — a live daemon can re-dirty the
+            # tree after the checkout (the post-git kill covers the
+            # processes the restore itself re-spawns).
+            kill_node_processes
             local reset_rc=0
+            # The restore below runs THROUGH the checkout's metadata: a
+            # smudge filter or fsmonitor hook planted in .git during a
+            # round survives checkout/clean (they never touch .git) and
+            # executes inside the next reset's own git calls, rewriting
+            # restored content per round — manufactured divergence. Drop
+            # .git's execution vectors as round state BEFORE restoring,
+            # as the build user (root's git trips the dubious-ownership
+            # guard); none of these calls runs filters or hooks itself.
+            timeout -k 10 30 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              bash -c 'rm -f .git/info/attributes; git config --local --list --name-only 2>/dev/null | grep -o "^filter\.[^.]*" | sort -u | while IFS= read -r s; do git config --local --remove-section "$s" 2>/dev/null || true; done; git config --local --unset core.fsmonitor 2>/dev/null || true; git config --local --unset core.hooksPath 2>/dev/null || true; git config --local --unset core.attributesFile 2>/dev/null || true' || reset_rc=$?
             timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-              git checkout HEAD -- . 2>/dev/null || reset_rc=$?
+              git reset --hard "$PINNED_OID" 2>/dev/null || reset_rc=$?
             timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
               git clean -ffd 2>/dev/null || reset_rc=$?
-            if [ "$reset_rc" -ne 0 ]; then
-              finish error "workspace reset failed (exit ${reset_rc}) — samples would not start from equivalent state"
-            fi
+            kill_node_processes
+            return "$reset_rc"
           }
+
+          # Pin the restore target ONCE, before any sample (see
+          # reset_round_state). Read as the build user, stripped —
+          # root's git would trip the dubious-ownership guard.
+          PINNED_OID="$(timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY git rev-parse HEAD 2>/dev/null)"
+          case "$PINNED_OID" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) finish error 'could not pin the baseline commit for workspace resets' ;;
+          esac
 
           declare -a results=()
           deadline=$(( $(date +%s) + 900 ))
           rounds_done=0
           timed_out=false
           infra_exits=0
+          samples=0
           round=1
           while [ "$round" -le "$ROUNDS" ]; do
             for i in "${!group_labels[@]}"; do
@@ -3246,14 +3313,38 @@ jobs:
               # lifecycle scripts, npm ci/build run as node, may have
               # mutated the tree since the list was recorded).
               reset_round_state
+              reset_rc=$?
+              if [ "$reset_rc" -ne 0 ]; then
+                if [ "$samples" -eq 0 ]; then
+                  finish error "workspace reset failed (exit ${reset_rc}) — samples would not start from equivalent state"
+                fi
+                # Samples already collected are honest — a reset failure
+                # must not discard them (including a computed flaky).
+                # Stop sampling; classification decides from what
+                # completed.
+                printf 'reset failed (exit %s) before round %s · %s: sampling stopped, classifying the collected results\n' "$reset_rc" "$round" "${group_labels[$i]}" >> "$LOG"
+                break 2
+              fi
+              # Re-verify the home identity before opening the output
+              # through it: a swapped home would redirect the sample's
+              # bytes and every read that follows (see GATE_HOME_ID).
+              gate_home_intact ||
+                finish error 'the gate working directory changed mid-run — refusing to continue'
               # Fresh per-invocation HOME and temp/cache dirs: samples must
               # not share dotfile/XDG/cache state or caches any more than
               # they share the tree or processes.
               inv_tmp="$RUNNER_TEMP/flake-inv-tmp"
               rm -rf "$inv_tmp"
               mkdir -p "$inv_tmp"
-              chown node:node "$inv_tmp"
-              out="$GATE_DIR/round-out"
+              # -h: never dereference — a planted symlink at this fixed
+              # path in the uid-1000-writable $RUNNER_TEMP must not turn
+              # the chown into an ownership takeover of its target.
+              chown -h node:node "$inv_tmp"
+              # Unique per invocation: if the redirect below fails to
+              # OPEN (ENOSPC), bash never runs the subshell and reports
+              # 1 — a reused path would leave the PREVIOUS invocation's
+              # bytes for the classifier to misread as this one's.
+              out="$GATE_DIR/round-out-$round-$i"
               (
                 cd "${group_dirs[$i]}" &&
                 timeout -k 30 600 runuser -u node -- \
@@ -3276,7 +3367,13 @@ jobs:
               # can only SUPPRESS a demotion the PR could already dodge by
               # deleting its tests — one-way authority holds.
               mark='P'
-              if [ "$status" -ge 124 ]; then
+              if [ ! -e "$out" ]; then
+                # The redirect never opened: the invocation did not run.
+                # The unique path rules out stale bytes; a never-created
+                # output is infrastructure, never a test outcome.
+                mark='I'
+                infra_exits=$((infra_exits + 1))
+              elif [ "$status" -ge 124 ]; then
                 mark='I'
                 infra_exits=$((infra_exits + 1))
               elif [ "$status" -ne 0 ] && grep -q 'No test files found' "$out"; then
@@ -3285,14 +3382,18 @@ jobs:
                 mark='F'
               fi
               results[$i]="${results[$i]:-}${mark}"
+              samples=$((samples + 1))
               printf 'round %s · %s: %s (exit %s)\n' "$round" "${group_labels[$i]}" "$mark" "$status" >> "$DETAIL"
-              if [ "$status" -ne 0 ]; then
+              if [ "$status" -ne 0 ] && [ -e "$out" ]; then
                 {
                   printf -- '--- output tail · round %s · %s ---\n' "$round" "${group_labels[$i]}"
                   tail -c 8000 "$out"
                   printf '\n'
                 } >> "$DETAIL"
               fi
+              # Reclaim the sample's bytes: ENOSPC is the named hazard of
+              # this job, and the classifier already consumed the mark.
+              rm -f "$out"
             done
             [ "$timed_out" = true ] && break
             rounds_done="$round"
@@ -3300,8 +3401,9 @@ jobs:
           done
           # And leave the agent the same clean tree it would have seen
           # before the gate ran: the last invocation's residue must not be
-          # handed to the verifier.
-          reset_round_state
+          # handed to the verifier. Best-effort: the samples are complete,
+          # so a cleanup failure must not discard their verdict.
+          reset_round_state || echo "::warning::post-gate workspace reset failed (exit $?); continuing with the sampled verdict"
 
           flaky=0
           failing=0
@@ -3948,6 +4050,14 @@ jobs:
         continue-on-error: true
         run: |-
           set -euo pipefail
+          # Pin a root-only-writable PATH: the job env this step
+          # inherits may be poisoned through the uid-1000-owned
+          # file-command backing files (see the record step). Production
+          # runs as root; the test harness does not and keeps its stub
+          # PATH.
+          if [ "${EUID:-1}" -eq 0 ]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
           # BUILD a trusted upload tree; never harden an attacker's.
           # $RUNNER_TEMP is uid-1000 mode-755 on this pool and `node` is
           # uid 1000, so verify-results — chowned to the build user for the
@@ -3979,14 +4089,24 @@ jobs:
             # selection time, and `cp -f --no-dereference` never opens a
             # link target even if one wins a race between find and cp.
             if [ -d "$RUNNER_TEMP/verify-results" ] && [ ! -L "$RUNNER_TEMP/verify-results" ]; then
+              # The guard above and the cd below re-resolve the path: a
+              # kill-loop survivor owning the uid-1000 parent can swap
+              # the entry between the two. The opened directory must
+              # still be the validated one, or the copy is skipped.
+              vr_id="$(stat -c '%d:%i' "$RUNNER_TEMP/verify-results" 2>/dev/null)"
               (
                 cd "$RUNNER_TEMP/verify-results" &&
+                [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$vr_id" ] &&
                 find . -type f -exec cp -f --no-dereference --parents {} "$UPLOAD_DIR/" \;
               ) 2>/dev/null || true
             fi
             # The gate's own log is authoritative and root-owned inside the
             # home — it is copied LAST so nothing in the untrusted tree can
-            # shadow the name the publisher pins.
+            # shadow the name the publisher pins. Reserve the name first:
+            # when the log is absent (an ENOSPC'd gate) a planted file
+            # would otherwise survive the copy, and a planted DIRECTORY
+            # would swallow the authoritative file even when it exists.
+            rm -rf -- "$UPLOAD_DIR/flake-gate.log"
             if [ -f "$GATE_DIR/log" ] && [ ! -L "$GATE_DIR/log" ]; then
               cp -f --no-dereference "$GATE_DIR/log" "$UPLOAD_DIR/flake-gate.log"
             fi
