@@ -2528,6 +2528,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     action = 'opened',
     labels = [],
     ghFails = false,
+    markersFail = false,
     triggerBody = '',
     headSha = 'abc123def456',
     onHoldMarkers = [],
@@ -2572,6 +2573,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             'case "$*" in',
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
             '  */comments*)',
+            '    if [ "${CONTEXT_MARKERS_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi',
             '    node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author)) console.log(row.body);\'',
             '    if [ "${CONTEXT_MARKER_PAD:-0}" != "0" ]; then head -c "$CONTEXT_MARKER_PAD" /dev/zero | tr "\\\\0" "x"; echo; fi ;;',
             '  *pulls/*) printf \'%s\\n\' "$CONTEXT_HEAD_SHA" ;;',
@@ -2596,6 +2598,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
         TRIGGER_BODY: triggerBody,
         CONTEXT_LABELS: labels.join(' '),
         CONTEXT_MARKERS: JSON.stringify(markerRows),
+        CONTEXT_MARKERS_FAIL: markersFail ? '1' : '0',
         CONTEXT_MARKER_PAD: String(markerPadBytes),
         CONTEXT_HEAD_SHA: headSha,
         CONTEXT_GH_CALLS: callsFile,
@@ -2707,6 +2710,10 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
     });
     expect(r.output).toContain('should_run=true');
+    // An unreadable head is reported as such — never as a stale pin, which
+    // would assert a mismatch that was never observed (R5-4, #9193 review).
+    expect(r.summary).toContain('live head SHA was unreadable');
+    expect(r.summary).not.toContain('not pinned to the live head');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2745,6 +2752,27 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       ghFails: true,
     });
     expect(r.output).toContain('should_run=true');
+    // The fail-open must be DIAGNOSABLE: a skip disabled by an API failure
+    // writes its own summary line instead of vanishing silently — the only
+    // symptom used to be the continued capacity burn this PR eliminates
+    // (R5-4, #9193 review).
+    expect(r.summary).toContain('label read failed');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('fails open: unreadable marker comments never skip and never masquerade as a stale pin (#9193)', () => {
+    // Labels read fine but the comments read fails: before R5-4 this
+    // reported "not pinned to the live head" — a mismatch never observed.
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'abc123def456',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      markersFail: true,
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('marker comments were unreadable');
+    expect(r.summary).not.toContain('not pinned to the live head');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2758,6 +2786,35 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       (s) => s.name === 'Resolve PR context',
     );
     expect(step.env?.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
+  });
+
+  it('ties the marker writer side to the skip-gate reader (#9193)', () => {
+    // R4-4: the marker grammar lives in two artifacts — the skill doc's
+    // upsert call (writer) and the skip gate's substring match (reader).
+    // A one-sided rename of the shared prefix makes the gate silently
+    // never fire (the label stays applied, every push burns a full
+    // review), so pin both sides to the same literal (#9193 review).
+    const skillDoc = readFileSync(
+      join('.qwen', 'skills', 'triage', 'references', 'pr-workflow.md'),
+      'utf8',
+    );
+    const writerMatch = skillDoc.match(
+      /upsert-bot-comment\.sh "\$REPO" "\$PR_NUMBER" '([^']+)'/,
+    );
+    expect(writerMatch).not.toBeNull();
+    const writerPrefix = writerMatch[1];
+    // The marker template in the same doc leads with the same prefix.
+    expect(skillDoc).toContain(
+      '<!-- ' + writerPrefix + '<HEAD_SHA> -->',
+    );
+    // The gate matches that exact prefix, keyed to the live head.
+    const doc = parse(workflow);
+    const step = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Resolve PR context',
+    );
+    expect(step.run).toContain(
+      '*"' + writerPrefix + '${HEAD_SHA}"*',
+    );
   });
 
   it('never skips an explicit /review ask, whatever the labels say', () => {

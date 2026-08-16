@@ -304,9 +304,14 @@ gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
 
    Fail closed, in this order: post the marker FIRST. If the upsert fails
    (retries exhausted), stop — do not apply the label and do not post the
-   triage-only outcome. A label without the pin would skip review for every
-   future push, and the outcome comment's promise would post over a skip
-   that is no longer bounded to the triaged head.
+   triage-only outcome. The review-lane gate requires the label AND a pin
+   matching the live head (a label without the pin runs the review lane),
+   so the harm of a partial state is not a silent skip — it is the inverse:
+   the outcome comment promises that no review verdict will post
+   automatically while the unpinned label leaves the automatic lane
+   running on every push, and the label alone reads as "parked" with no
+   pin to explain why. All three — pin, label, outcome — post together or
+   not at all.
 
    `<HEAD_SHA>` is the head commit you triaged — the same SHA quoted in the
    Stage 1 "Reviewed at" footer. Post the marker through the author-scoped
