@@ -2425,11 +2425,13 @@ describe('qwen-autofix workflow', () => {
     // variants, mirroring the ack job — a loud add next to a mute stop
     // would re-create the lost-event ambiguity on the release side), and
     // the scan-side first-pickup engage ack (fork label events carry no
-    // secrets, so the scan anchors the window itself).
+    // secrets, so the scan anchors the window itself), and the
+    // command-path release-failed ack (a failed release must say so — a
+    // 'released' marker would record a release that never happened).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(19);
+    expect(ackBodies).toHaveLength(20);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -2466,6 +2468,12 @@ describe('qwen-autofix workflow', () => {
     // after a newer /takeover stop read the unlabeled state.
     expect(workflow).toContain(
       "group: 'qwen-autofix-takeover-cmd-${{ needs.route.outputs.cmd_pr }}'",
+    );
+    // R11-2: ack runs serialize per PR the same way, so a delayed engaged
+    // ack queues behind the newer cycle's ack and its staleness read sees
+    // that ack's marker.
+    expect(workflow).toContain(
+      "group: 'qwen-autofix-takeover-ack-${{ needs.route.outputs.ack_pr }}'",
     );
     // Fork PRs can never produce a red ack run or a stuck label: the
     // unlabeled branch log-and-drops forks (fork pull_request events carry
@@ -2879,7 +2887,7 @@ describe('qwen-autofix workflow', () => {
       ).length - 1,
     ).toBe(2);
     expect(reviewScanJob).toContain(
-      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
+      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository,author',
     );
     // Command-style comments are instructions, not feedback — excluded at
     // ALL FIVE feedback sites (scan count via $cf; NEWEST, LIVE_NEW,
@@ -2916,10 +2924,11 @@ describe('qwen-autofix workflow', () => {
     // Pin the total --paginate code-site count so ANY new paginated site
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
-    // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(15);
+    // the count below too) — bumping this pin alone leaves toBe(10) green.
+    expect(workflow.split('--paginate').length - 1).toBe(18);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
-    // report COMMENTS_JSON fallback = nine normalized fetch sites. The
+    // report COMMENTS_JSON fallback + the cap-branch release-evidence events
+    // fetch (R4-1) = ten normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
@@ -2927,7 +2936,11 @@ describe('qwen-autofix workflow', () => {
     // array and break the tail-1 consumer. The #8888 deferred-review ack
     // dedup is the same class: `--jq '.[].body'` feeds a grep, never a
     // WORKDIR file, so it bumps the total pin but not the normalizer count.
-    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
+    // The R11-2 engaged-stale guard's comments/events reads in
+    // takeover-ack are the same class too: captured into shell variables
+    // and consumed by slurp-style `jq -rs 'add // [] | …'` (idempotent
+    // over a single flat array), never a WORKDIR file.
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
     // the PRIOR_HEADS consumer below iterates the result with .[], which
@@ -3353,6 +3366,27 @@ describe('qwen-autofix workflow', () => {
     expect(gate('autofix/managed autofix/takeover', 'true')).toContain(
       'PROCEED',
     );
+    // B12: the consent re-read FAILS CLOSED for standard bot PRs too — an
+    // unreadable `gh pr view` must skip the write entirely (a collapse to
+    // '' would ignore a concurrently added skip). The block sits BEFORE the
+    // consent gate.
+    expect(reviewScanJob).toContain(
+      'cap notice skipped: label state unreadable (fail closed)',
+    );
+    const unreadableIdx = reviewScanJob.indexOf(
+      'if [[ -z "${LIVE_LABELS_JSON}" ]]; then',
+    );
+    expect(unreadableIdx).toBeGreaterThan(-1);
+    expect(unreadableIdx).toBeLessThan(
+      reviewScanJob.indexOf('if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "*'),
+    );
+    // R8-17: the fail-closed gate actually SKIPS the writes — the
+    // `continue` is load-bearing (without it an unreadable state falls
+    // through the consent gate, whose empty-string disjuncts are both
+    // false, and POSTs over a concurrently added skip).
+    expect(reviewScanJob).toMatch(
+      /if \[\[ -z "\$\{LIVE_LABELS_JSON\}" \]\]; then\n\s+echo "🧭 cap notice skipped: label state unreadable \(fail closed\) on #\$\{PR\}"\n\s+continue/,
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
@@ -3371,6 +3405,205 @@ describe('qwen-autofix workflow', () => {
     expect(loopHead).toContain("'busy'");
     expect(loopHead).toContain("'idle-backoff'");
     expect(loopHead).not.toContain('INSPECTED=');
+  });
+
+  it('applies the needs-human escalation label at the cap and removes it on resume/release', () => {
+    // The label contract: one env definition, one idempotent create with a
+    // fixed color (a REST add of a missing label would mint a random one).
+    // The create's `|| true` and the POST's `if !` guard are load-bearing
+    // under the runner's `bash -e`: a create that fails once the label
+    // exists, or a POST that aborts the scan on a transient 502, must not
+    // ship green (R2-25).
+    expect(workflow).toContain("NEEDS_HUMAN_LABEL: 'autofix/needs-human'");
+    expect(reviewScanJob).toContain(
+      'gh label create "${NEEDS_HUMAN_LABEL}" --repo "${REPO}" --color',
+    );
+    expect(reviewScanJob).toMatch(
+      /gh label create "\$\{NEEDS_HUMAN_LABEL\}"[\s\S]{0,250}?2> \/dev\/null \|\| true/,
+    );
+    expect(reviewScanJob).toContain(
+      'if ! gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${NEEDS_HUMAN_LABEL}"',
+    );
+    expect(reviewScanJob).toContain(
+      '${NEEDS_HUMAN_LABEL} add failed for #${PR}; will retry next scan',
+    );
+    // The label write sits OUTSIDE the once-per-window comment dedup —
+    // that is the bootstrap property: already-noticed PRs (paused before
+    // this shipped) get labeled on the first scan after deploy. Assert on
+    // ordering inside the cap branch: the label POST precedes the
+    // CAP_NOTICED gate that guards only the comment.
+    const labelPost = reviewScanJob.indexOf(
+      '-f "labels[]=${NEEDS_HUMAN_LABEL}"',
+    );
+    const commentGate = reviewScanJob.indexOf('"${CAP_NOTICED}" == "0"');
+    expect(labelPost).toBeGreaterThan(-1);
+    expect(commentGate).toBeGreaterThan(-1);
+    expect(labelPost).toBeLessThan(commentGate);
+    // …but never BEFORE the live-consent recheck: a takeover label pulled
+    // moments ago gets neither the notice nor the escalation label.
+    const consentRecheck = reviewScanJob.indexOf(
+      'cap notice skipped: consent changed since the snapshot',
+    );
+    expect(consentRecheck).toBeGreaterThan(-1);
+    expect(consentRecheck).toBeLessThan(labelPost);
+    // R3-1/R4-1: a takeover `unlabeled` EVENT newer than the window
+    // suppresses the every-scan label POST — a released PR stays in the
+    // scan candidate set with ROUND >= cap, so an unconditional POST would
+    // re-add the escalation label the release just removed and ping-pong
+    // with the shepherd's cleanup. R4-5: the gate only fires for
+    // HUMAN-authored PRs (a bot PR released from takeover is still managed,
+    // so it keeps the label at the strict cap). The gate sits BEFORE the
+    // label POST.
+    expect(reviewScanJob).toContain('RELEASE_ACKED=');
+    expect(reviewScanJob).toContain('IS_BOT_AUTHOR=');
+    expect(reviewScanJob).toContain(
+      'cap label/notice skipped: PR was released after its last re-arm',
+    );
+    const releaseGate = reviewScanJob.indexOf(
+      'elif [[ "${RELEASE_ACKED}" != "0" && "${IS_BOT_AUTHOR}" != "true" ]]; then',
+    );
+    expect(releaseGate).toBeGreaterThan(-1);
+    expect(releaseGate).toBeLessThan(labelPost);
+    // R4-5 residual: IS_BOT_AUTHOR must actually resolve from PR_META — the
+    // fetch's field list must carry `author` and the jq must read
+    // .author.login. Replay both so a field-list drift fails (a dead
+    // IS_BOT_AUTHOR=false would suppress the label for bot PRs forever).
+    const botAuthorJq = reviewScanJob.match(
+      /IS_BOT_AUTHOR="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([^']+)' <<< "\$\{PR_META\}"\)"/,
+    )?.[1];
+    expect(botAuthorJq).toBeTruthy();
+    const runBotAuthor = (login) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'qwen-code-dev-bot', botAuthorJq],
+        {
+          encoding: 'utf8',
+          input: JSON.stringify({ author: { login } }),
+        },
+      ).trim();
+    expect(runBotAuthor('qwen-code-dev-bot')).toBe('true');
+    expect(runBotAuthor('wenshao')).toBe('false');
+    expect(runBotAuthor('')).toBe('false');
+    // R4-15: the RELEASE_ACKED jq body (event marker + time direction) is
+    // replayed — a `> $rt` → `< $rt` flip must fail, not ship green.
+    const relAckJq = reviewScanJob.match(
+      /RELEASE_ACKED="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" --arg rt "\$\{NOTICE_RT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ev\.json"\)"/,
+    )?.[1];
+    expect(relAckJq).toBeTruthy();
+    const runRelAck = (events, rt) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'tl', 'autofix/takeover', '--arg', 'rt', rt, relAckJq],
+        { encoding: 'utf8', input: JSON.stringify(events) },
+      ).trim();
+    expect(
+      runRelAck(
+        [
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-08-06T00:00:00Z',
+          },
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('1');
+    // ack older than the window → 0; no ack → 0.
+    expect(
+      runRelAck(
+        [
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-08-04T00:00:00Z',
+          },
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('0');
+    expect(runRelAck([{ event: 'labeled' }], '2026-08-05T00:00:00Z')).toBe('0');
+    // R6-6: same-second boundary — a release at EXACTLY the window key
+    // counts (>= tie-toward-released: a completed release must never be
+    // re-escalated, R5-9).
+    expect(
+      runRelAck(
+        [
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-08-05T00:00:00Z',
+          },
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('1');
+    // R4-24: the gate's control-flow nesting is replayed — the label POST
+    // must fire ONLY in the outer else arm (RELEASE_ACKED=0 or bot author),
+    // never in the released arm. R7-3: elseIdx anchors on the OUTER else
+    // (16-space indent — the inner else at 18 spaces introduces the
+    // released echo, not the POST arm). R8-18: releasedIdx anchors on the
+    // FULL released echo — the shared prefix alone resolves to the earlier
+    // 'release history unreadable' echo, silently migrating the anchor.
+    const gateBlock = reviewScanJob.match(
+      /if \[\[ "\$\{SCAN_BOT_ACTOR\}" != "\$\{AUTOFIX_BOT\}" \]\]; then[\s\S]*?cap label\/notice skipped[\s\S]*?\n {16}fi/,
+    )?.[0];
+    expect(gateBlock).toBeTruthy();
+    const releasedIdx = gateBlock.indexOf(
+      'cap label/notice skipped: PR was released after its last re-arm',
+    );
+    const elseIdx = gateBlock.indexOf(
+      '\n' + ' '.repeat(16) + 'else',
+      releasedIdx,
+    );
+    const postIdx = gateBlock.indexOf(
+      'gh api -X POST "repos/${REPO}/issues/${PR}/labels"',
+    );
+    expect(releasedIdx).toBeGreaterThan(-1);
+    expect(elseIdx).toBeGreaterThan(releasedIdx);
+    expect(postIdx).toBeGreaterThan(elseIdx);
+    // The dry-run line covers both writes.
+    expect(reviewScanJob).toContain(
+      'DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL}',
+    );
+    // Removal at every resume/release point — the URI-encoded REST DELETE
+    // with 404 tolerance, same shape as the TAKEOVER_LABEL removal. Six
+    // sites: takeover-command re-arm, fresh engage, and stop; the ack
+    // job's engage/release; the /retry marker; the scan's first-pickup ack.
+    const removals =
+      workflow.match(
+        /gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}"/g,
+      ) ?? [];
+    expect(removals).toHaveLength(6);
+    // R9-16: the escalation POST rides the cap detection exactly ONCE — a
+    // duplicate outside the gate would re-add the label on every cap
+    // detection of a released human PR (the R3-1/R4-1 ping-pong with the
+    // shepherd's cleanup that this test cites).
+    expect(
+      workflow.match(
+        /gh api -X POST "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels" -f "labels\[\]=\$\{NEEDS_HUMAN_LABEL\}"/g,
+      ) ?? [],
+    ).toHaveLength(1);
+    // R4-17: the scan-side first-pickup DELETE must live in the engage-ack
+    // SUCCESS branch — moved to the ack-failure path it would clear
+    // needs-human when no engagement happened.
+    const firstPickup = reviewScanJob.match(
+      /if gh pr comment "\$\{PR\}" --repo "\$\{REPO\}" --body "\$\(printf '🤝 Takeover engaged[\s\S]*?; then([\s\S]*?)\n {16}else/,
+    )?.[1];
+    expect(firstPickup).toBeTruthy();
+    expect(firstPickup).toContain(
+      'gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}"',
+    );
+    // Every removal tolerates the common 404 (never-paused PR).
+    expect(
+      workflow.match(/\$\{NEEDS_HUMAN_LABEL\} removal failed/g)?.length,
+    ).toBe(6);
+    // The ack job removes on a real engage or any release — but NOT on
+    // base-refused (nothing changed), NOT on skip-blocked (management never
+    // resumed), and NOT on a release onto a skip-frozen PR (nothing manages
+    // or restores it — R4-3): both arms now require HAS_SKIP != 'true'.
+    expect(workflow).toContain(
+      '( "${ACK}" == \'released\' || "${ACK}" == \'engaged\' ) && "${HAS_SKIP}" != \'true\'',
+    );
   });
 
   it('backs off idle candidates without spending inspection budget', () => {
@@ -3557,7 +3790,7 @@ describe('qwen-autofix workflow', () => {
             // the block's two failure policies instead of the stub
             // universally exiting 0.
             `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
-            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[{"name":"Tracks HTTP 5xx flakes"}]'; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3585,6 +3818,7 @@ describe('qwen-autofix workflow', () => {
               REPO: 'QwenLM/qwen-code',
               TAKEOVER_LABEL: 'autofix/takeover',
               SKIP_LABEL: 'autofix/skip',
+              NEEDS_HUMAN_LABEL: 'autofix/needs-human',
               TAKEOVER_COMMAND: '@qwen-code /takeover',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
@@ -3627,12 +3861,31 @@ describe('qwen-autofix workflow', () => {
     );
     expect(addAbsent.writes).toContain('labels[]=autofix/takeover');
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
+    // …and the engage arm clears any stale escalation label (R2-27: the
+    // removal must live in THIS branch, not just anywhere in the file).
+    expect(addAbsent.writes).toContain('labels/autofix%2Fneeds-human');
+    // R4-18: the loud takeover POST precedes the tolerant needs-human
+    // DELETE — a transient POST failure then aborts the step before the
+    // DELETE, keeping the paused PR visible (reversed order would drop the
+    // escalation label even though the engagement never landed).
+    expect(addAbsent.writes.indexOf('API api -X POST')).toBeLessThan(
+      addAbsent.writes.indexOf('labels/autofix%2Fneeds-human'),
+    );
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
-    // add + present → re-arm ack, label untouched.
+    // add + present → re-arm ack, takeover label untouched — the only API
+    // write is the stale needs-human cleanup (404-tolerant; this PR was
+    // never paused). Pin the full DELETE line (method + encoded label) and
+    // that it is the ONLY API write — a fragment match would let a refactor
+    // swap the DELETE for a probe GET or add a stray label POST (R3-9).
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
-    expect(rearm.writes).not.toContain('API');
+    expect(rearm.writes).not.toContain('labels[]=autofix/takeover');
+    expect(rearm.writes).not.toContain('labels/autofix%2Ftakeover');
+    expect(rearm.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Fneeds-human',
+    );
+    expect(rearm.writes.match(/^API /gm) ?? []).toHaveLength(1);
     expect(rearm.log).toContain('re-armed');
     // remove + present → label removed, through the URI-encoded path segment
     // (real jq runs in the substitution, so the %2F is the executed truth).
@@ -3643,6 +3896,9 @@ describe('qwen-autofix workflow', () => {
     expect(removePresent.writes).toContain(
       'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
     );
+    // …and the stop arm clears the escalation label in the same breath
+    // (R2-27): a stop on a paused PR must not leave needs-human behind.
+    expect(removePresent.writes).toContain('labels/autofix%2Fneeds-human');
     // Release acks directly too — the exact mirror of the engage side: a
     // loud add next to a mute stop re-creates the lost-event ambiguity on
     // the release side (and fork/non-main releases have no other ack path
@@ -3665,6 +3921,10 @@ describe('qwen-autofix workflow', () => {
     expect(botSkipRelease.writes).toContain(
       'opts it out of standard bot management entirely',
     );
+    // R7-6: the skip veto keeps needs-human on a skip-frozen release —
+    // /takeover stop must NOT strip the only filterable escalation state
+    // from a PR nothing manages.
+    expect(botSkipRelease.writes).not.toContain('labels/autofix%2Fneeds-human');
     // remove + absent → explicit no-op, no writes at all.
     const removeAbsent = runToggle({ cmd: 'remove' });
     expect(removeAbsent.writes.trim()).toBe('');
@@ -3680,6 +3940,7 @@ describe('qwen-autofix workflow', () => {
     expect(forkRefused.writes).not.toContain('API');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
     expect(forkManaged.writes).toContain('labels[]=autofix/takeover');
+    expect(forkManaged.writes).toContain('labels/autofix%2Fneeds-human');
     // Fork label events carry no secrets, so no other job could ever ack a
     // fork engage — the command's own ack is the ONLY one, and it sets the
     // expectation that the first round comes from the next scheduled scan.
@@ -3766,19 +4027,75 @@ describe('qwen-autofix workflow', () => {
     );
     expect(releaseRace.writes).toContain('takeover-ack released');
     expect(releaseRace.log).not.toContain('::warning::');
-    // Any other DELETE failure must not drop the release ack either — a
-    // later `/takeover stop` retries the removal — but it MUST warn:
-    // masked, the ack reads "released" while the loop keeps managing the
-    // PR.
+    // R9-3: pin BOTH echo arms — a swap ships a lying log in either
+    // direction while the separate ::warning:: line keeps the old pins
+    // green.
+    expect(releaseRace.log).toContain('removed autofix/takeover');
+    expect(releaseRace.log).not.toContain('removal did not land');
+    // R5-1: a 404 counts as landed, so the needs-human cleanup still runs…
+    expect(releaseRace.writes).toContain('labels/autofix%2Fneeds-human');
+    // Any other DELETE failure keeps the label ON — the ack must say the
+    // release did NOT land (a 'released' marker would record a release
+    // that never happened: no unlabeled event fires, nothing retries, no
+    // human re-issues the command) and the loud warning keeps the failure
+    // diagnosable in the log.
     const releaseFailed = runToggle({
       cmd: 'remove',
       labels: ['autofix/takeover'],
       deleteFails: 'HTTP 500',
     });
-    expect(releaseFailed.writes).toContain('takeover-ack released');
+    expect(releaseFailed.writes).toContain('takeover-ack release-failed');
+    expect(releaseFailed.writes).toContain('release did not land');
+    expect(releaseFailed.writes).not.toContain('takeover-ack released');
     expect(releaseFailed.log).toContain('::warning::');
     expect(releaseFailed.log).toContain('removal failed');
     expect(releaseFailed.log).toContain('HTTP 500');
+    expect(releaseFailed.log).toContain('removal did not land');
+    expect(releaseFailed.log).not.toContain('removed autofix/takeover from');
+    // R5-1: …but a failed takeover release keeps needs-human — landed vs
+    // not-landed is keyed on the DELETE's EXIT STATUS (404 counts as
+    // landed; any other non-zero does not — R6-1's transport failures and
+    // R6-19's "HTTP "-bearing success bodies both mislead a text sniff),
+    // and the stub's success body carries a label name containing "HTTP "
+    // to model the real remaining-labels API contract.
+    expect(releaseFailed.writes).not.toContain('labels/autofix%2Fneeds-human');
+    expect(releaseFailed.log).toContain('release did not land');
+    // R6-9: a transport-level failure carries no "HTTP " token anywhere —
+    // the exit-status derivation still classifies it as not-landed (the
+    // class the old text sniff missed, R6-1).
+    const releaseTransportFailed = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'gh: dial tcp 140.82.121.4:443: connect: connection refused',
+    });
+    expect(releaseTransportFailed.writes).toContain(
+      'takeover-ack release-failed',
+    );
+    expect(releaseTransportFailed.writes).not.toContain(
+      'takeover-ack released',
+    );
+    expect(releaseTransportFailed.writes).not.toContain(
+      'labels/autofix%2Fneeds-human',
+    );
+    expect(releaseTransportFailed.log).toContain('release did not land');
+    // R10-1: the tolerance matches the EXACT "HTTP 404" token, never a bare
+    // 404 substring — a transport failure embeds the request URL, so a
+    // 404-bearing PR number in the path (modeled here on #4041) must
+    // classify as not-landed, not as the already-off case.
+    const releaseUrlFourOhFour = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails:
+        'gh: Delete "https://api.github.com/repos/QwenLM/qwen-code/issues/4041/labels/autofix%2Ftakeover": dial tcp 140.82.121.4:443: connect: connection refused',
+    });
+    expect(releaseUrlFourOhFour.writes).toContain(
+      'takeover-ack release-failed',
+    );
+    expect(releaseUrlFourOhFour.writes).not.toContain('takeover-ack released');
+    expect(releaseUrlFourOhFour.writes).not.toContain(
+      'labels/autofix%2Fneeds-human',
+    );
+    expect(releaseUrlFourOhFour.log).toContain('release did not land');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -5211,7 +5528,16 @@ exit 1
       .join('\n');
     expect(ackBlock).toBeTruthy();
 
-    const runAck = ({ ack, base = '', prViewOk = true }) => {
+    const runAck = ({
+      ack,
+      base = '',
+      prViewOk = true,
+      labels = [],
+      deleteFails = '',
+      comments = [],
+      events = [],
+      historyFails = false,
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ack-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -5219,10 +5545,27 @@ exit 1
         join(bin, 'gh'),
         [
           '#!/usr/bin/env bash',
-          `if [[ "$1" == 'api' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          `if [[ "$1" == 'api' && "$2" == 'user' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          // R11-2: the engaged-stale dedup reads — served per knob
+          // (empty by default, so a legacy vector sees no history).
+          `if [[ "$1" == 'api' && "$2" == *'/comments' ]]; then ${historyFails ? 'exit 1' : `printf '%s' '${JSON.stringify(comments)}'`}; fi`,
+          `if [[ "$1" == 'api' && "$2" == *'/events' ]]; then ${historyFails ? 'exit 1' : `printf '%s' '${JSON.stringify(events)}'`}; fi`,
+          // Other api calls (the needs-human DELETE) succeed silently but
+          // are recorded above — the ack-job conditional removal is
+          // observable. R6-33: with a failure knob — a non-404 must
+          // warn-and-continue onto the ack comment, and the harness's
+          // bash -e discriminates an aborting guard-strip mutant.
+          `if [[ "$1" == 'api' ]]; then if [[ -n "${deleteFails}" ]]; then echo "${deleteFails}" >&2; exit 1; fi; exit 0; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then : > ${JSON.stringify(join(dir, 'pr-view-called'))}; ${
             prViewOk
-              ? `printf '%s' '{"labels":[],"author":{"login":"wenshao"}}'; exit 0`
+              ? // R6-22: serve the payload only for the EXACT field list
+                // the ack job requests (--json labels,author) — a drifted
+                // field selection gets an empty object, like production.
+                // R9-14: anchored at the END of the token (the field list
+                // is the final argument at the production call site), so a
+                // superset drift is served the empty object too.
+                `if [[ "$*" == *' --json labels,author' ]]; then printf '%s' '${JSON.stringify({ labels, author: { login: 'wenshao' } })}'; else printf '%s' '{}'; fi; exit 0`
               : 'exit 1'
           }; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'comment.md'))}; exit 0; fi`,
@@ -5240,6 +5583,7 @@ exit 1
           SKIP_LABEL: 'autofix/skip',
           TAKEOVER_LABEL: 'autofix/takeover',
           TAKEOVER_COMMAND: '@qwen-code /takeover',
+          NEEDS_HUMAN_LABEL: 'autofix/needs-human',
           ACK: ack,
           PR: '7368',
           ACK_BASE: base,
@@ -5247,9 +5591,12 @@ exit 1
         encoding: 'utf8',
       });
       const commentPath = join(dir, 'comment.md');
+      const callsPath = join(dir, 'calls.log');
       const result = {
         status: proc.status,
+        stdout: proc.stdout ?? '',
         body: existsSync(commentPath) ? readFileSync(commentPath, 'utf8') : '',
+        calls: existsSync(callsPath) ? readFileSync(callsPath, 'utf8') : '',
         readPr: existsSync(join(dir, 'pr-view-called')),
       };
       rmSync(dir, { recursive: true, force: true });
@@ -5282,12 +5629,184 @@ exit 1
 
     // Unchanged for every other ack: the live read happens and still fails
     // CLOSED, so a transient API error cannot turn into a wrong ack.
-    const engaged = runAck({ ack: 'engaged' });
+    // R11-2: an engaged ack posts only while the takeover label is LIVE —
+    // the engagement it acknowledges must still exist at ack time.
+    const engaged = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }],
+    });
     expect(engaged.readPr).toBe(true);
     expect(engaged.body).toContain('<!-- takeover-ack engaged -->');
     const broken = runAck({ ack: 'engaged', prViewOk: false });
     expect(broken.status).not.toBe(0);
     expect(broken.body).toBe('');
+    // R4-16: the conditional needs-human removal is observable per branch —
+    // engaged (no skip) and released perform exactly one DELETE of the
+    // encoded label; base-refused / engaged-with-skip perform none.
+    const nhDelete =
+      'api -X DELETE repos/QwenLM/qwen-code/issues/7368/labels/autofix%2Fneeds-human';
+    expect(
+      runAck({
+        ack: 'engaged',
+        labels: [{ name: 'autofix/takeover' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(1);
+    expect(
+      runAck({ ack: 'engaged', labels: [{ name: 'autofix/takeover' }] }).calls,
+    ).toContain(nhDelete);
+    expect(
+      runAck({ ack: 'released' }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(1);
+    expect(runAck({ ack: 'released' }).calls).toContain(nhDelete);
+    // R6-11: …and the cleanup runs BEFORE the unguarded final ack comment —
+    // a transient comment failure aborting under bash -e must not strand
+    // the stale label.
+    const releasedOrder = runAck({ ack: 'released' });
+    expect(releasedOrder.calls.indexOf('api -X DELETE')).toBeLessThan(
+      releasedOrder.calls.indexOf('pr comment'),
+    );
+    expect(
+      runAck({
+        ack: 'engaged',
+        labels: [{ name: 'autofix/skip' }, { name: 'autofix/takeover' }],
+      }).calls,
+    ).not.toContain(nhDelete);
+    // R6-5: assert the TOTAL DELETE count for engaged-with-skip too —
+    // `not.toContain` alone lets a mutant add an unrelated second DELETE.
+    expect(
+      runAck({
+        ack: 'engaged',
+        labels: [{ name: 'autofix/skip' }, { name: 'autofix/takeover' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
+    expect(
+      runAck({ ack: 'base-refused', base: 'release' }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({ ack: 'base-refused', base: 'release' }).calls.match(
+        /api -X DELETE/gm,
+      ) ?? [],
+    ).toHaveLength(0);
+    // R7-6: the ack-job matrix's released-with-skip cell — a released PR
+    // frozen by skip must keep needs-human (narrowing the live-read gate to
+    // engaged-only would leave HAS_SKIP='' on released acks and strip it).
+    expect(
+      runAck({ ack: 'released', labels: [{ name: 'autofix/skip' }] }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({
+        ack: 'released',
+        labels: [{ name: 'autofix/skip' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
+    // R2-4: a DELAYED release ack that lands after takeover was re-applied
+    // is stale — it must not touch the new cycle's needs-human and posts
+    // nothing (the new cycle's own events produce their own acks).
+    const staleRelease = runAck({
+      ack: 'released',
+      labels: [{ name: 'autofix/takeover' }, { name: 'autofix/needs-human' }],
+    });
+    expect(staleRelease.status).toBe(0);
+    expect(staleRelease.calls).not.toContain('api -X DELETE');
+    expect(staleRelease.body).toBe('');
+    expect(staleRelease.stdout).toContain('stale ack');
+    // R11-2: the R2-4 mirror for the engaged direction — a delayed engaged
+    // ack is stale in two shapes. Label removed since the label event: the
+    // engagement ended, so post nothing and touch nothing…
+    const staleEngagedRemoved = runAck({ ack: 'engaged' });
+    expect(staleEngagedRemoved.status).toBe(0);
+    expect(staleEngagedRemoved.calls).not.toContain('api -X DELETE');
+    expect(staleEngagedRemoved.body).toBe('');
+    expect(staleEngagedRemoved.stdout).toContain('stale ack');
+    // …and label LIVE but the current cycle already acked: a bot engage
+    // marker at/after the newest takeover labeled event means this run's
+    // event is superseded — it must not DELETE the fresh cycle's
+    // needs-human nor post a marker that would reset the round window.
+    const engagedMarker = (created_at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at,
+      body: '🤝 … <!-- takeover-ack engaged -->',
+    });
+    const takeoverLabeled = (created_at) => ({
+      event: 'labeled',
+      label: { name: 'autofix/takeover' },
+      created_at,
+    });
+    const staleEngagedAcked = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }, { name: 'autofix/needs-human' }],
+      comments: [engagedMarker('2026-08-06T02:00:00Z')],
+      events: [takeoverLabeled('2026-08-06T01:00:00Z')],
+    });
+    expect(staleEngagedAcked.status).toBe(0);
+    expect(staleEngagedAcked.calls).not.toContain('api -X DELETE');
+    expect(staleEngagedAcked.body).toBe('');
+    expect(staleEngagedAcked.stdout).toContain('stale ack');
+    // Comparator: a label event NEWER than the last engage marker is a
+    // live unacked engagement (a re-label after release) — it posts and
+    // cleans the stale escalation label.
+    const freshEngagement = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }],
+      comments: [engagedMarker('2026-08-06T00:00:00Z')],
+      events: [takeoverLabeled('2026-08-06T01:00:00Z')],
+    });
+    expect(freshEngagement.status).toBe(0);
+    expect(freshEngagement.body).toContain('<!-- takeover-ack engaged -->');
+    expect(freshEngagement.calls).toContain(nhDelete);
+    // Unreadable history fails CLOSED: a stale marker is irreparable, a
+    // missed ack is healed by the scan's NEED_ENGAGE_ACK dedup.
+    const blindEngaged = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }],
+      historyFails: true,
+    });
+    expect(blindEngaged.status).toBe(0);
+    expect(blindEngaged.body).toBe('');
+    expect(blindEngaged.calls).not.toContain('api -X DELETE');
+    expect(blindEngaged.stdout).toContain('fail closed');
+    // R6-33: a non-404 needs-human DELETE failure warns and STILL posts the
+    // ack (bash -e must not abort before the comment)…
+    const relDeleteFailed = runAck({
+      ack: 'released',
+      deleteFails: 'HTTP 502: Bad Gateway',
+    });
+    expect(relDeleteFailed.status).toBe(0);
+    expect(relDeleteFailed.stdout).toContain('removal failed');
+    expect(relDeleteFailed.body).toContain('<!-- takeover-ack released -->');
+    // …while a 404 (the never-paused common case) is silently tolerated.
+    const relDelete404 = runAck({
+      ack: 'released',
+      deleteFails: 'HTTP 404: Not Found',
+    });
+    expect(relDelete404.status).toBe(0);
+    expect(relDelete404.stdout).not.toContain('removal failed');
+    expect(relDelete404.body).toContain('<!-- takeover-ack released -->');
+    // R10-3: …but the tolerated token is exactly "HTTP 404" — an error that
+    // carries 404 only as a substring must still warn (the loose *404*
+    // match swallowed it; transport errors embed 404-bearing request URLs).
+    const relDeleteSubstring = runAck({
+      ack: 'released',
+      deleteFails: 'HTTP 502: Bad Gateway (upstream retry of request 404)',
+    });
+    expect(relDeleteSubstring.status).toBe(0);
+    expect(relDeleteSubstring.stdout).toContain('removal failed');
+    expect(relDeleteSubstring.body).toContain('<!-- takeover-ack released -->');
+    // R4-16: fork-refused and skip-blocked acks — management never resumed,
+    // zero DELETEs (with total-count assertions, not just toContain).
+    expect(runAck({ ack: 'fork-refused' }).calls).not.toContain(nhDelete);
+    expect(
+      runAck({ ack: 'fork-refused' }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
+    expect(
+      runAck({ ack: 'skip-blocked', labels: [{ name: 'autofix/skip' }] }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({
+        ack: 'skip-blocked',
+        labels: [{ name: 'autofix/skip' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
   });
 
   it('narrows the agent prompt after a timeout since the last successful round', () => {
@@ -6236,12 +6755,14 @@ exit 1
     expect(divBlock).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'autofix-diverge-'));
     // Markers carry round= (informational) and run= (GITHUB_RUN_ID) — deduped
-    // and ordered on run=, the per-workflow-run id: a retry re-posts one run's
-    // marker (same run → collapses) while distinct address runs have distinct,
-    // increasing run ids. round=/eval-watermark are NOT a safe identity — a
-    // state-triggered lane freezes both — so two distinct runs can share
-    // round= yet must still count twice. Each row also carries an author +
-    // created_at (the read filters to the bot and to post-base-update markers).
+    // on run= and ordered on measured= (the prepare-time instant; created_at
+    // fallback for legacy markers), the per-workflow-run id: a retry or a
+    // failed job's re-run re-posts one run's marker (same run → collapses to
+    // its latest measurement) while distinct address runs have distinct run
+    // ids. round=/eval-watermark are NOT a safe identity — a state-triggered
+    // lane freezes both — so two distinct runs can share round= yet must still
+    // count twice. Each row also carries an author + created_at (the read
+    // filters to the bot and to markers measured after the cutoff).
     const marker = (
       src,
       test,
@@ -6250,15 +6771,21 @@ exit 1
       key = 'W1',
       {
         login = 'qwen-code-dev-bot',
-        at = '2026-01-01T00:00:00Z',
-        // Default run advances with the round so sort_by(.run) is
-        // deterministic; distinct runs that share round= override it.
+        // measured= (the prepare-time measurement instant) is the dedup/order
+        // key; default advances with the round so sort_by/max_by are
+        // deterministic. A re-run's distinct attempts override it explicitly.
+        measured = `2026-01-01T00:${String(round).padStart(2, '0')}:00Z`,
+        // Default run advances with the round; distinct runs that share round=
+        // override it.
         run = 1000 + round,
       } = {},
     ) => ({
       user: { login },
-      created_at: at,
-      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} key=${key} -->`,
+      // Deliberately DIFFERENT from measured=: the report posts the comment
+      // long after prepare measured, and the read must key on measured=. A
+      // fixture that tied them together could not tell the two apart.
+      created_at: '2026-06-01T00:00:00Z',
+      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} measured=${measured} key=${key} -->`,
     });
     const diverge = ({
       src,
@@ -6266,7 +6793,9 @@ exit 1
       criticalOnlyGrowth = 'true',
       history,
       div = 2,
-      baseUpdAt = '',
+      // The comparability cutoff (base update OR external head move); markers
+      // measured at/before it are dropped as incomparable.
+      cutoff = '',
       // Distinct from every default fixture run id (1000+round), so existing
       // cases see no self-exclusion; a case can set a fixture marker's run to
       // this to prove the current run's own attempt is excluded.
@@ -6281,7 +6810,7 @@ exit 1
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nLIVE_REARM_KEY=W1\nWORKDIR=${dir}\n` +
             `NET_MEASURED=true\nCRITICAL_ONLY_GROWTH=${criticalOnlyGrowth}\n` +
-            `BASE_UPD_AT='${baseUpdAt}'\nGITHUB_RUN_ID=${currentRun}\n` +
+            `GROWTH_NOW_CUTOFF='${cutoff}'\nGITHUB_RUN_ID=${currentRun}\n` +
             `GROWTH_SRC=${src}\nGROWTH_TEST=${test}\nGROWTH_DIVERGENCE_ROUNDS=${div}\n` +
             `${divBlock}\nprintf '\\n%s %s' "$GROWTH_DIVERGED" "$OVER_ROUNDS_PRIOR"`,
         ],
@@ -6356,7 +6885,7 @@ exit 1
       }),
     ).toBe('false 1');
     // When a run was re-run and posted two markers with DIFFERENT sums, the
-    // LATEST attempt (by created_at) wins, not jq's stale first: run 1002's
+    // LATEST attempt (by measured=) wins, not jq's stale first: run 1002's
     // fresh attempt (sum 300 @ T2) is PREV_SUM, so current 400 >= 300 →
     // diverged. Keeping the stale first (sum 900) would read 400 >= 900 → not.
     expect(
@@ -6367,11 +6896,32 @@ exit 1
           marker(300, 200, 'true', 1, 'W1', { run: 1001 }),
           marker(600, 300, 'true', 2, 'W1', {
             run: 1002,
-            at: '2026-01-01T00:01:00Z',
+            measured: '2026-01-01T00:01:00Z',
           }),
           marker(150, 150, 'true', 2, 'W1', {
             run: 1002,
-            at: '2026-01-01T00:02:00Z',
+            measured: '2026-01-01T00:02:00Z',
+          }),
+        ],
+      }),
+    ).toBe('true 2');
+    // measured= order inverts run order across DISTINCT runs — a failed
+    // job's re-run keeps its OLD run id but stamps a NEWER measured=:
+    // PREV_SUM must follow measured=, so the current 150 >= 100 runaway
+    // escalates. Reverting to run-id ordering would read run 1002's stale
+    // 900 as PREV_SUM and suppress it (#9192 R2-4).
+    expect(
+      diverge({
+        src: 100,
+        test: 50,
+        history: [
+          marker(60, 40, 'true', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+          marker(500, 400, 'true', 2, 'W1', {
+            run: 1002,
+            measured: '2026-01-01T00:02:00Z',
           }),
         ],
       }),
@@ -6434,17 +6984,181 @@ exit 1
         history: climbing.map((m) => ({ ...m, user: { login: 'attacker' } })),
       }),
     ).toBe('false 0');
-    // Markers BEFORE a mid-window base update are excluded (re-anchoring makes
-    // pre-update sums incomparable) — only the post-update round remains.
+    // Markers measured at/before the comparability cutoff (a base update OR an
+    // external head move) are excluded — re-anchoring makes pre-cutoff sums
+    // incomparable; only the post-cutoff round remains.
     expect(
       diverge({
         src: 999,
         test: 999,
-        baseUpdAt: '2026-01-01T12:00:00Z',
+        cutoff: '2026-01-01T12:00:00Z',
         history: [
-          marker(500, 300, 'true', 1, 'W1', { at: '2026-01-01T06:00:00Z' }),
-          marker(600, 400, 'true', 2, 'W1', { at: '2026-01-01T06:30:00Z' }),
-          marker(200, 100, 'true', 3, 'W1', { at: '2026-01-01T18:00:00Z' }),
+          marker(500, 300, 'true', 1, 'W1', {
+            measured: '2026-01-01T06:00:00Z',
+          }),
+          marker(600, 400, 'true', 2, 'W1', {
+            measured: '2026-01-01T06:30:00Z',
+          }),
+          marker(200, 100, 'true', 3, 'W1', {
+            measured: '2026-01-01T18:00:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 1');
+    // …and the boundary is STRICT: a marker measured exactly AT the cutoff
+    // is dropped as incomparable (at second granularity a same-second stamp
+    // and base-update comment can collide) — a `>` → `>=` flip ships green
+    // without this pin (#9192 R4-7).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          marker(500, 300, 'true', 1, 'W1', {
+            measured: '2026-01-01T12:00:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 0');
+    // A re-run whose FRESH attempt came back under budget must not be
+    // represented by its own stale over=true attempt: the per-run collapse
+    // happens BEFORE the over-filter, so the run drops out entirely.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(300, 150, 'true', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:01:00Z',
+          }),
+          marker(80, 40, 'false', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+        ],
+      }),
+    ).toBe('false 0');
+    // Mirror of that case for the FAILURE path's inert marker: a re-run
+    // attempt that crashed BEFORE prepare posts over=false with NO measured=
+    // (MEASURED_AT empty), so its fallback is the comment's created_at —
+    // post-run, hence newer than the same run's prepare-time measured= from
+    // its earlier attempt. The collapse must prefer an explicit measured=
+    // over that fallback, or the inert marker erases the run's real
+    // over-budget count (#9192 R3-1).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 measured=2026-01-01T00:01:00Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
+    // Same defect at the handoff threshold: two real over-budget priors, the
+    // second erased by the inert marker — without the explicit-measured
+    // preference the count drops to 1 and the divergence handoff (div=2) is
+    // suppressed while the diff keeps climbing.
+    expect(
+      diverge({
+        src: 500,
+        test: 300,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T01:30:00Z',
+            body: '<!-- autofix-growth-now src=300 test=200 over=true round=1 run=1001 measured=2026-01-01T00:00:30Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=400 test=250 over=true round=2 run=1002 measured=2026-01-01T00:01:00Z key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=2 run=1002 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('true 2');
+    // …and two LEGACY markers for the same run (neither carries measured=)
+    // still collapse on the created_at fallback: the explicit-measured
+    // preference must not disturb fallback-vs-fallback ordering.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=300 test=150 over=true round=1 run=1001 key=W1 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T03:00:00Z',
+            body: '<!-- autofix-growth-now src=80 test=40 over=false round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 0');
+    // Backward compatibility: a marker posted BEFORE measured= existed still
+    // counts, falling back to its comment's created_at — deploying the
+    // measured= switch must not blank the census of an in-flight window.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:01:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
+    // …and a legacy marker is still subject to the cutoff, via that fallback.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:01:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 0');
+    // …and the created_at fallback ITSELF is pinned: a legacy marker whose
+    // created_at sits AFTER the cutoff still counts. Dropping the fallback
+    // (measured= absent → "") would exclude every post-update legacy marker
+    // and under-count the census (#9192 R2-3).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T18:00:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
         ],
       }),
     ).toBe('false 1');
@@ -6480,7 +7194,7 @@ exit 1
     // of silently inerting the feature. Every writer path is covered, not just
     // the push path (a drift in only the no-op or failure suffix would
     // otherwise survive green).
-    const roundTrip = (roundVar) => {
+    const roundTrip = (roundVar, { omitMeasuredAt = false } = {}) => {
       const line = workflow.match(
         new RegExp(
           `echo "<!-- autofix-growth-now src=\\$\\{GROWTH_SRC:-0\\}[^\\n]*round=\\$\\{${roundVar}\\}[^\\n]*-->"`,
@@ -6492,7 +7206,9 @@ exit 1
         [
           '-c',
           `GROWTH_SRC=500\nGROWTH_TEST=300\nCRITICAL_ONLY_GROWTH=true\n` +
-            `${roundVar}=2\nGITHUB_RUN_ID=1002\nGROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
+            `${roundVar}=2\nGITHUB_RUN_ID=1002\n` +
+            (omitMeasuredAt ? '' : 'MEASURED_AT=2026-01-01T00:05:00Z\n') +
+            `GROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
         ],
         { encoding: 'utf8' },
       ).trim();
@@ -6513,6 +7229,13 @@ exit 1
     expect(roundTrip('NEXT_ROUND')).toBe('false 1'); // push path
     expect(roundTrip('ROUND')).toBe('false 1'); // no-op path
     expect(roundTrip('MARK_ROUND')).toBe('false 1'); // failure/handoff path
+    // …and it still round-trips when MEASURED_AT is empty — prepare never
+    // ran (#9192 R2-1) or the round could not measure (#9192 R4-3): measured=
+    // omits itself rather than emit an empty value no scan can match, so the
+    // marker survives on the created_at fallback instead of silently dropping.
+    expect(roundTrip('NEXT_ROUND', { omitMeasuredAt: true })).toBe('false 1');
+    expect(roundTrip('ROUND', { omitMeasuredAt: true })).toBe('false 1');
+    expect(roundTrip('MARK_ROUND', { omitMeasuredAt: true })).toBe('false 1');
     rmSync(dir, { recursive: true, force: true });
 
     // The report writes the per-round growth-now marker on ALL THREE report
@@ -6524,7 +7247,7 @@ exit 1
       workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
     ).toHaveLength(3);
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // The failure/handoff report step binds the three growth outputs so its
     // marker is not inert-by-omission.
@@ -6554,10 +7277,58 @@ exit 1
       expect(pushAndReportStep).toContain(bind);
     }
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
+    );
+    // Both report STEPS bind MEASURED_AT (push+no-op share one env block, the
+    // failure/handoff report has its own), so all three marker writers can
+    // stamp the prepare-time instant (not the post-agent comment created_at).
+    expect(
+      workflow.match(
+        /MEASURED_AT: '\$\{\{ steps\.prepare\.outputs\.measured_at \}\}'/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(workflow).toContain('echo "measured_at=${MEASURED_AT}"');
+    // The measurement instant is taken in PREPARE, next to the net it stamps —
+    // not at report time, which is what the whole switch is about.
+    const prepMeasured = prepareBranchAndFeedbackStep.indexOf(
+      'MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+    );
+    expect(prepMeasured).toBeGreaterThan(-1);
+    expect(prepMeasured).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf('echo "measured_at=${MEASURED_AT}"'),
+    );
+    // …and the stamp is emitted ONLY when the round actually measured: an
+    // unmeasured re-run attempt must not gain an explicit measured= that the
+    // per-run collapse would prefer over the same run's real measurement
+    // (#9192 R4-3). Behavioral: execute the gated stamp both ways.
+    const stampGate = prepareBranchAndFeedbackStep.match(
+      /\[\[ "\$\{NET_MEASURED\}" == 'true' \]\] && echo "measured_at=\$\{MEASURED_AT\}" >> "\$\{GITHUB_OUTPUT\}"/,
+    )?.[0];
+    expect(stampGate).toBeTruthy();
+    const stampedFor = (netMeasured) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\nout="$(mktemp)"\nNET_MEASURED=${netMeasured}\n` +
+            `MEASURED_AT=2026-01-01T00:05:00Z\nGITHUB_OUTPUT="$out"\n` +
+            `${stampGate} || true\ncat "$out"\nrm -f "$out"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    expect(stampedFor('true')).toBe('measured_at=2026-01-01T00:05:00Z\n');
+    expect(stampedFor('false')).toBe('');
+    // The head-move re-anchor is deliberately NOT in this change (see #9114):
+    // the redcheck head is the pre-push judged head, so comparing against it
+    // would re-anchor on the bot's own pushes and zero the census.
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'GROWTH_NOW_CUTOFF="${MEASURED_AT}"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"',
     );
     // growth_diverged is NOT emitted as a step output — the handoff is
     // enforced by the feedback.md text, so a dangling dead output would only
@@ -12355,19 +13126,45 @@ exit 1
     expect(rearmStep).toBeTruthy();
     const block = rearmStep.replace(/\n {10}/g, '\n');
 
-    const runRearm = ({ actor = BOT, apiFail = false } = {}) => {
+    const runRearm = ({
+      actor = BOT,
+      apiFail = false,
+      labels = '[]',
+      prAuthor = BOT,
+      viewFail = false,
+      deleteFail = '',
+    } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
       try {
         writeFileSync(
           join(dir, 'gh'),
           [
             '#!/bin/bash',
-            `echo "$1 $2" >> '${join(dir, 'calls.log')}'`,
+            // One line per call even when an argument (the re-arm body)
+            // carries newlines — the R6-34 allowlist walks call lines.
+            `printf '%s\\n' "\${*//$'\\n'/ }" >> '${join(dir, 'calls.log')}'`,
             'if [[ "$1" == "api" && "$2" == "user" ]]; then',
             `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
             `  printf '%s' "${actor}"`,
+            'elif [[ "$1" == "api" && "$2" == "-X" ]]; then',
+            // R4-20: the DELETE can fail — non-404 surfaces the error text,
+            // 404 is the already-gone case.
+            `  if [[ -n "${deleteFail}" ]]; then echo "${deleteFail}" >&2; exit 1; fi`,
             'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
             `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
+            'elif [[ "$1" == "pr" && "$2" == "view" ]]; then',
+            `  if [[ "${viewFail}" == "true" ]]; then echo "GraphQL: Something went wrong" >&2; exit 1; fi`,
+            // R4-22: only serve the labels payload when the caller actually
+            // asked for it — a field-selection drift must fail the guard.
+            // R6-12/R2-7: the gate matches the EXACT production field list;
+            // a drifted `--json labels` (no author) must not be served the
+            // author metadata production would omit.
+            // R9-15: end-anchored like its runAck twin (R9-14).
+            '  if [[ "$*" == *" --json labels,author" ]]; then',
+            `    printf '%s' '{"labels":${labels},"author":{"login":"${prAuthor}"}}'`,
+            '  else',
+            `    printf '%s' '{"number":7354}'`,
+            '  fi',
             'fi',
           ].join('\n'),
         );
@@ -12381,6 +13178,9 @@ exit 1
             PR: '7354',
             REPO: 'QwenLM/qwen-code',
             AUTOFIX_BOT: BOT,
+            NEEDS_HUMAN_LABEL: 'autofix/needs-human',
+            SKIP_LABEL: 'autofix/skip',
+            TAKEOVER_LABEL: 'autofix/takeover',
           },
           encoding: 'utf8',
         });
@@ -12408,9 +13208,94 @@ exit 1
     expect(ok.body).toContain('<!-- autofix-rearm -->');
     expect(ok.body).toContain('<details>');
     expect(ok.body).toContain('中文说明');
+    // R3-11: the /retry path's needs-human DELETE must actually target the
+    // encoded label (broken @uri / renamed variable / swallowed failure all
+    // fail here), and it is the only label write the re-arm performs.
+    expect(ok.calls).toContain(
+      'api -X DELETE repos/QwenLM/qwen-code/issues/7354/labels/autofix%2Fneeds-human',
+    );
+    expect(ok.calls.match(/^api -X DELETE/gm) ?? []).toHaveLength(1);
+    // R4-23: …and it is the only label WRITE of any verb — the full api-call
+    // census is `api user` + the one DELETE (a stray label POST would make
+    // this 3). R6-34: …and the census is not verb-blind: EVERY recorded
+    // call must match the allowlist, so a stray `pr edit --remove-label` or
+    // `label create` write fails too.
+    expect(ok.calls.match(/^api /gm) ?? []).toHaveLength(2);
+    for (const call of ok.calls.trim().split('\n')) {
+      expect(call).toMatch(/^(api user|api -X DELETE|pr view|pr comment)/);
+    }
+    // R4-19: the marker comment posts BEFORE the cleanup DELETE — under
+    // `bash -eo pipefail` a comment failure then aborts before the DELETE,
+    // keeping the escalation label (the reverse order would drop the label
+    // without posting the re-arm marker).
+    expect(ok.calls.indexOf('pr comment')).toBeLessThan(
+      ok.calls.indexOf('api -X DELETE'),
+    );
     // No line may be indented 4+ spaces, or the marker renders as a code block
     // and the scanners' marker match silently fails.
     expect(ok.body).not.toMatch(/^ {4,}/m);
+
+    // R4-20: a non-404 DELETE failure surfaces `removal failed` but does not
+    // fail the step (the marker was already posted); a 404 stays silent.
+    const delFail = runRearm({
+      actor: BOT,
+      deleteFail: 'HTTP 502: Bad Gateway',
+    });
+    expect(delFail.status).toBe(0);
+    expect(delFail.calls).toContain('api -X DELETE');
+    expect(delFail.stdout).toContain('removal failed');
+    const del404 = runRearm({
+      actor: BOT,
+      deleteFail: 'HTTP 404: Not Found',
+    });
+    expect(del404.status).toBe(0);
+    expect(del404.stdout).not.toContain('removal failed');
+
+    // R3-7: skip wins over re-arm — with autofix/skip present the stale-label
+    // DELETE is skipped, so a frozen PR keeps its only filterable escalation
+    // state (no scan manages it and the fresh window won't re-apply it).
+    // R4-25: the fixture uses the production multi-label shape (takeover +
+    // needs-human + skip) — a single-label payload would miss order-
+    // dependent guard mutants.
+    const skipped = runRearm({
+      actor: BOT,
+      labels:
+        '[{"name":"autofix/takeover"},{"name":"autofix/needs-human"},{"name":"autofix/skip"}]',
+    });
+    expect(skipped.status).toBe(0);
+    expect(skipped.calls).toContain('pr comment');
+    expect(skipped.calls).not.toContain('api -X DELETE');
+    expect(skipped.stdout).toContain('removal skipped');
+
+    // R4-2: the skip check FAILS CLOSED — a transient `gh pr view` failure
+    // keeps the label rather than dropping it (the marker still posts; only
+    // the cleanup is withheld).
+    const readFailed = runRearm({ actor: BOT, viewFail: true });
+    expect(readFailed.status).toBe(0);
+    expect(readFailed.calls).toContain('pr comment');
+    expect(readFailed.calls).not.toContain('api -X DELETE');
+    expect(readFailed.stdout).toContain('label state unreadable');
+
+    // R5-2: an auto-released HUMAN-authored PR (no takeover label, not
+    // bot-authored) is in no scan candidate set — /retry must keep the
+    // escalation label, since nothing will re-apply it.
+    const orphan = runRearm({ actor: BOT, prAuthor: 'wenshao' });
+    expect(orphan.status).toBe(0);
+    expect(orphan.calls).toContain('pr comment');
+    expect(orphan.calls).not.toContain('api -X DELETE');
+    expect(orphan.stdout).toContain('nothing manages it until re-engaged');
+    // R6-7: a HUMAN-authored takeover PR — the managed-PR guard's takeover
+    // disjunct deletes the stale label (a mutant killing that disjunct
+    // keeps every other fixture green).
+    const humanTakeover = runRearm({
+      actor: BOT,
+      prAuthor: 'wenshao',
+      labels: '[{"name":"autofix/takeover"},{"name":"autofix/needs-human"}]',
+    });
+    expect(humanTakeover.status).toBe(0);
+    expect(humanTakeover.calls).toContain(
+      'api -X DELETE repos/QwenLM/qwen-code/issues/7354/labels/autofix%2Fneeds-human',
+    );
 
     // Actor mismatch: the PAT authenticates as someone else -> the guard exits
     // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
@@ -12419,6 +13304,9 @@ exit 1
     expect(mismatch.status).toBe(1);
     expect(mismatch.calls).toContain('api user');
     expect(mismatch.calls).not.toContain('pr comment');
+    // R4-21: the identity failure must also withhold the needs-human DELETE —
+    // a mis-scoped PAT must not strip the escalation label either.
+    expect(mismatch.calls).not.toContain('api -X DELETE');
     expect(mismatch.body).toBe('');
     expect(mismatch.stdout).toContain(`expected ${BOT}`);
 
@@ -12427,6 +13315,7 @@ exit 1
     const failed = runRearm({ apiFail: true });
     expect(failed.status).toBe(1);
     expect(failed.calls).not.toContain('pr comment');
+    expect(failed.calls).not.toContain('api -X DELETE');
     expect(failed.body).toBe('');
     expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
     expect(failed.stdout).toContain('Bad credentials');

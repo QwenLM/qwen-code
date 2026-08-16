@@ -28,6 +28,15 @@ import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
+/**
+ * The posting floor for findings on a PR review: `critical` posts only
+ * Critical findings (otherwise-postable high-confidence Suggestions are
+ * recorded and deferred; low-confidence and Nice-to-have stay terminal-only
+ * as ever), `suggestion` posts Criticals and Suggestions — today's behaviour. The floor governs what
+ * the review PUBLISHES, never what it finds or verifies.
+ */
+export type ReviewSeverityFloor = 'critical' | 'suggestion';
+
 export type ReviewTarget =
   | { type: 'pr-number'; number: number }
   | {
@@ -79,6 +88,17 @@ export interface ParsedReviewArgs {
     /** `--fix` applies (the target has a durable working tree). */
     effective: boolean;
   };
+  /**
+   * The posting floor, or `'auto'` — the round-adaptive default, resolved at
+   * Step 6 where the round is known (`suggestion` through round 5, `critical`
+   * from round 6). The parser cannot resolve `auto` itself: the round comes
+   * from the previous posted round's ledger, which is not fetched yet. An
+   * explicit `--severity-floor` on a non-PR target is ignored with a warning,
+   * exactly as `--comment` is — the floor is a posting rule, and rounds exist
+   * only for PRs.
+   */
+  severityFloor: ReviewSeverityFloor | 'auto';
+  severityFloorSource: 'explicit' | 'configured' | 'default';
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -90,6 +110,16 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
   'low',
   'medium',
   'high',
+]);
+
+export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
+  'critical',
+  'suggestion',
+  // `auto` is a legal EXPLICIT value too — it is the schema-enumerated
+  // default's name, so an operator typing `--severity-floor auto` means
+  // "the round-adaptive rule" (overriding a configured floor), not a typo
+  // to reject and then promote into a bogus file target.
+  'auto',
 ]);
 
 // The verdict's owner/repo/number are interpolated into `gh` commands by the
@@ -112,6 +142,13 @@ function asEffort(value: string): ReviewEffort | null {
   return EFFORT_LEVELS.has(lower) ? (lower as ReviewEffort) : null;
 }
 
+function asSeverityFloor(value: string): ReviewSeverityFloor | 'auto' | null {
+  const lower = value.toLowerCase();
+  return SEVERITY_FLOORS.has(lower)
+    ? (lower as ReviewSeverityFloor | 'auto')
+    : null;
+}
+
 /**
  * Single-dash tokens count as flags too: `-c` is never a plausible review
  * target, and classifying it as a file path demoted the real target the
@@ -123,6 +160,16 @@ function isFlag(token: string): boolean {
 
 function isPureInteger(token: string): boolean {
   return /^\d+$/.test(token);
+}
+
+/** A token that classifies as a PR target (number or PR URL). */
+function isPrShapedToken(token: string): boolean {
+  const shape = classifyToken(token);
+  return (
+    shape !== null &&
+    shape !== 'invalid-url' &&
+    (shape.type === 'pr-number' || shape.type === 'pr-url')
+  );
 }
 
 /**
@@ -206,6 +253,12 @@ export function parseReviewArgs(
      * authorises only the PR the arguments name.
      */
     comment?: boolean;
+    /**
+     * The standing `review.severityFloor` setting, raw (`auto` already mapped
+     * to undefined by the caller). Validated exactly like the flag — a typo
+     * warns and falls back to the round-adaptive default.
+     */
+    severityFloor?: string;
   } = {},
 ): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
@@ -215,6 +268,7 @@ export function parseReviewArgs(
   let commentRequestedByFlag = false;
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
+  let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
 
   // The configured default gets the same validation as an explicit flag:
   // settings loading performs no enum validation, so a hand-edited typo
@@ -231,6 +285,20 @@ export function parseReviewArgs(
       invalidConfiguredEffort = defaults.effort;
     }
   }
+  let configuredFloor: ReviewSeverityFloor | undefined;
+  let invalidConfiguredFloor: string | undefined;
+  if (defaults.severityFloor !== undefined) {
+    const normalized = asSeverityFloor(defaults.severityFloor);
+    if (normalized === 'auto') {
+      // The default's own name: the same round-adaptive rule as an unset
+      // setting. The settings caller pre-maps it, but a direct caller must
+      // get identical semantics.
+    } else if (normalized !== null) {
+      configuredFloor = normalized;
+    } else {
+      invalidConfiguredFloor = defaults.severityFloor;
+    }
+  }
 
   // Warnings about a rejected `--effort` occurrence must state what effort
   // is ACTUALLY in effect — which is not known until every occurrence is
@@ -244,15 +312,19 @@ export function parseReviewArgs(
     | { kind: 'discarded'; value: string }
     | { kind: 'kept-as-target'; value: string };
   const effortIssues: EffortIssue[] = [];
+  // `--severity-floor` shares the value-token grammar and therefore the same
+  // deferred-warning problem; its issues are a separate list because its
+  // resolution sentence is its own.
+  const floorIssues: EffortIssue[] = [];
 
-  // First pass: pull out flags (and each `--effort`'s value token, when the
-  // spaced form legitimately consumes one). Non-flag tokens are kept in
-  // order; invalid spaced `--effort` values are kept as *candidates* whose
-  // disposal is decided after we know whether any other token is the target.
+  // First pass: pull out flags (and each value-taking flag's value token,
+  // when the spaced form legitimately consumes one). Non-flag tokens are kept
+  // in order; invalid spaced values are kept as *candidates* whose disposal
+  // is decided after we know whether any other token is the target.
   interface Kept {
     token: string;
-    /** True when this token arrived as an invalid `--effort` value. */
-    fromInvalidEffortValue: boolean;
+    /** Set when this token arrived as an invalid value of the named flag. */
+    invalidValueOf?: '--effort' | '--severity-floor';
   }
   const kept: Kept[] = [];
 
@@ -276,6 +348,12 @@ export function parseReviewArgs(
         const effortValue = asEffort(value);
         if (effortValue !== null) {
           explicitEffort = effortValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          // A PR-shaped value in either flag syntax is the same typo of the
+          // same intent — it joins the disposal pool exactly as the spaced
+          // form does, so which codebase gets reviewed cannot depend on
+          // which syntax happened to be typed (round-8 review finding).
+          kept.push({ token: value, invalidValueOf: '--effort' });
         } else {
           effortIssues.push({ kind: 'invalid-eq', value });
         }
@@ -288,6 +366,14 @@ export function parseReviewArgs(
         i++;
         continue;
       }
+      // A quoted-empty value ('' survives tokenization) is a missing value,
+      // not a candidate — and it is CONSUMED, or the leftover '' token would
+      // classify as an empty-string file target.
+      if (next === '') {
+        effortIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
       if (next === undefined || isFlag(next)) {
         // Flag-final, or followed by another flag: the value is simply
         // missing. Never consume a flag as a value.
@@ -297,7 +383,41 @@ export function parseReviewArgs(
       // Spaced form with an invalid non-flag value. Whether `next` is a
       // discarded typo or the review target is decided below, once we know
       // whether any other token can be the target.
-      kept.push({ token: next, fromInvalidEffortValue: true });
+      kept.push({ token: next, invalidValueOf: '--effort' });
+      i++;
+      continue;
+    }
+
+    if (token === '--severity-floor' || token.startsWith('--severity-floor=')) {
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        const floorValue = asSeverityFloor(value);
+        if (floorValue !== null) {
+          explicitFloor = floorValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--severity-floor' });
+        } else {
+          floorIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      const nextFloor = next !== undefined ? asSeverityFloor(next) : null;
+      if (nextFloor !== null) {
+        explicitFloor = nextFloor;
+        i++;
+        continue;
+      }
+      if (next === '') {
+        floorIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (next === undefined || isFlag(next)) {
+        floorIssues.push({ kind: 'missing' });
+        continue;
+      }
+      kept.push({ token: next, invalidValueOf: '--severity-floor' });
       i++;
       continue;
     }
@@ -308,21 +428,88 @@ export function parseReviewArgs(
       continue;
     }
 
-    kept.push({ token, fromInvalidEffortValue: false });
+    kept.push({ token });
   }
 
-  // Disposal rule for invalid `--effort` values: a typo is discarded when
-  // any *other* token is the target; it survives only when it is itself the
-  // sole target candidate (`/review --effort 6711`).
-  const hasOtherCandidate = kept.some((k) => !k.fromInvalidEffortValue);
+  // Disposal rule for invalid flag values, by what the token could BE:
+  // - PR-shaped (a pure number, a PR URL) survives as a target candidate —
+  //   `/review --effort 6711` is a user reviewing PR 6711 past a flag
+  //   mistake, and an unrelated second typo (`--severity-floor blocker
+  //   --effort 6711`) must not change WHICH codebase is reviewed.
+  // - File-shaped survives only as the SOLE kept token (`/review
+  //   --severity-floor criticl`): beside anything else, `blocker` is an
+  //   enum typo, not a path — promoting it would send the caller off to
+  //   stat nonsense, and two such typos are two typos, not a target and a
+  //   tiebreak.
+  // A token the user typed OUTSIDE any flag always outranks a flag value:
+  // when one exists, every invalid value is a typo beside the real target.
+  // And a PR-shaped rescue must be UNIQUE: two PR-shaped values arriving as
+  // invalid flag values (`--severity-floor 6711 --effort 6712`) are an
+  // ambiguous invocation — silently reviewing the first would review the
+  // wrong PR half the time, so both are refused, loudly, and the review
+  // falls back to the local diff nothing contradicted.
+  const soleCandidate = kept.length === 1;
+  const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
+  const isPrShaped = isPrShapedToken;
+  // The pool counts BOTH spellings: an `=`-form invalid value never enters
+  // `kept` (it was recorded as `invalid-eq` and consumed in place), but it
+  // is the same typed PR number — `--severity-floor=6711 --effort 6712`
+  // must be exactly as ambiguous as the all-spaced spelling, or the guard
+  // is defeated by which syntax happened to be typed.
+  // Distinct TARGETS, not distinct strings: `--severity-floor 6711 --effort
+  // https://github.com/o/r/pull/6711` are two spellings of one PR and are
+  // unambiguous (round-9 finding: a raw-token Set read them as two and
+  // silently fell back to the local tree — the very harm the guard exists
+  // to prevent). The identity is the classified target's number plus, for
+  // a URL, its host/owner/repo. Both flag syntaxes already landed in `kept`
+  // above, so the pool sees every spelling.
+  const targetKey = (token: string): string => {
+    const shape = classifyToken(token);
+    if (shape === null || shape === 'invalid-url') return `raw:${token}`;
+    if (shape.type === 'pr-number') return `pr:${shape.number}`;
+    if (shape.type === 'pr-url')
+      return `pr:${shape.number}@${shape.host}/${shape.owner}/${shape.repo}`;
+    return `raw:${token}`;
+  };
+  const prShapedKeys = [
+    ...new Set(
+      kept
+        .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
+        .map((k) => targetKey(k.token)),
+    ),
+  ];
+  // A bare number and a same-number URL name one PR when no other repo is
+  // in play: collapse `pr:N` into `pr:N@…` for the count.
+  const distinctPr = new Set(prShapedKeys.map((k) => k.replace(/@.*$/, '')));
+  if (!hasValidCandidate && distinctPr.size > 1) {
+    const shown = kept
+      .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
+      .map((k) => JSON.stringify(k.token));
+    warnings.push(
+      `Ambiguous target: ${shown.join(' and ')} arrived as invalid flag values and name different PRs; refusing to choose between them.`,
+    );
+  }
   const targetTokens: string[] = [];
+  // Of several spellings of the SAME rescued PR, exactly one becomes the
+  // target; the rest are the same intent restated, not extra arguments —
+  // pushing them all left the operator told "Ignoring extra argument(s)"
+  // on the very invocation the dedupe blesses (round-9 finding).
+  let rescuedPr = false;
   for (const k of kept) {
-    if (k.fromInvalidEffortValue && hasOtherCandidate) {
-      effortIssues.push({ kind: 'discarded', value: k.token });
-      continue;
-    }
-    if (k.fromInvalidEffortValue) {
-      effortIssues.push({ kind: 'kept-as-target', value: k.token });
+    const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
+    if (k.invalidValueOf !== undefined) {
+      const survives = isPrShaped(k.token)
+        ? !hasValidCandidate && distinctPr.size === 1
+        : soleCandidate;
+      if (!survives) {
+        issues.push({ kind: 'discarded', value: k.token });
+        continue;
+      }
+      if (isPrShaped(k.token)) {
+        if (rescuedPr) continue; // same PR, restated — not an extra token
+        rescuedPr = true;
+      }
+      issues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);
   }
@@ -464,12 +651,70 @@ export function parseReviewArgs(
     );
   }
 
+  // The floor resolves like the effort — explicit flag over configured
+  // setting over the built-in default — except the default is `auto`: the
+  // round-adaptive rule, which only Step 6 can resolve (the round comes from
+  // the previous posted round's ledger, not fetched yet). Non-PR gating
+  // mirrors `--comment`: the floor is a posting rule and rounds exist only
+  // for PRs, so an explicit flag on a local/file target warns and is
+  // ignored, and a configured setting is silently inert there.
+  let severityFloor: ReviewSeverityFloor | 'auto' = 'auto';
+  let severityFloorSource: ParsedReviewArgs['severityFloorSource'] = 'default';
+  if (explicitFloor !== null && !isPr) {
+    warnings.push(
+      'Warning: `--severity-floor` flag is ignored because the review target is not a PR.',
+    );
+  } else if (explicitFloor !== null) {
+    severityFloor = explicitFloor;
+    severityFloorSource = 'explicit';
+  } else if (configuredFloor !== undefined && isPr) {
+    severityFloor = configuredFloor;
+    severityFloorSource = 'configured';
+  }
+  const floorResolution =
+    severityFloorSource === 'explicit'
+      ? `--severity-floor ${severityFloor} (the last valid occurrence) is in effect`
+      : severityFloorSource === 'configured'
+        ? 'using the configured review.severityFloor'
+        : 'using the round-adaptive default';
+  for (const issue of floorIssues) {
+    switch (issue.kind) {
+      case 'invalid-eq':
+        warnings.push(
+          `Invalid --severity-floor value ${JSON.stringify(issue.value)}; ${floorResolution}.`,
+        );
+        break;
+      case 'missing':
+        warnings.push(`--severity-floor requires a value; ${floorResolution}.`);
+        break;
+      case 'discarded':
+        warnings.push(
+          `Invalid --severity-floor value ${JSON.stringify(issue.value)} discarded; ${floorResolution}.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `Invalid --severity-floor value ${JSON.stringify(issue.value)}; treating it as the review target — ${floorResolution}.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
+  if (invalidConfiguredFloor !== undefined && isPr) {
+    warnings.push(
+      `Invalid review.severityFloor value ${JSON.stringify(invalidConfiguredFloor)} in settings; ${floorResolution}.`,
+    );
+  }
+
   return {
     target,
     effort,
     effortSource,
     comment: { requested: commentRequestedByFlag, effective: commentEffective },
     fix: { requested: fixRequested, effective: fixEffective },
+    severityFloor,
+    severityFloorSource,
     extraTokens,
     unknownFlags,
     warnings,
@@ -494,6 +739,7 @@ interface ParseArgsCliArgs {
 function reviewDefaultsFromSettings(): {
   effort?: string;
   comment?: boolean;
+  severityFloor?: string;
 } {
   const review = operatorReviewSettings();
   return {
@@ -502,13 +748,18 @@ function reviewDefaultsFromSettings(): {
         ? undefined
         : review.effort,
     comment: review.comment,
+    severityFloor:
+      review.severityFloor === undefined ||
+      review.severityFloor.toLowerCase() === 'auto'
+        ? undefined
+        : review.severityFloor,
   };
 }
 
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --fix, --effort, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {
