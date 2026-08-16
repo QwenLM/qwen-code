@@ -23,8 +23,10 @@ export interface ToolchainRunArgs {
   budget?: number;
   /**
    * The report a `--resume` call continues: its install and build are reused
-   * as-is, and only the suites it could not reach are run. Undefined is a
-   * fresh run, which is every call that is not a continuation.
+   * as-is, and the continuation runs the suites it killed on a
+   * budget-shortened deadline FIRST (their provisional results are replaced),
+   * then the suites it could not reach at all. Undefined is a fresh run,
+   * which is every call that is not a continuation.
    */
   previous?: BuildTestReport;
   exec: (command: string, cwd: string, timeoutMs: number) => CommandResult;

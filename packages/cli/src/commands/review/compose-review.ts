@@ -547,12 +547,15 @@ export interface ComposeReviewResult {
    */
   scopeUnproven?: boolean;
   /**
-   * True when every `unreviewedDimensions` entry names the one dimension that
-   * reads no diff (build-and-test), so none of them is a claim about which
-   * lines were reviewed. Vacuously true when there are no entries.
+   * True when every `unreviewedDimensions` entry is a DEPTH claim: it names
+   * the one dimension that reads no diff (build-and-test), or it is the
+   * machine's own relayed budget/round-cap stop entry — exact minted text,
+   * and only while the stop marker exists (`isRelayedStopEntry`). Vacuously
+   * true when there are no entries.
    *
-   * The anchor reads this beside `scopeUnproven`: a dimension nobody could run
-   * says nothing about lines, but a whiffed lens says exactly that, and only
+   * The anchor reads this beside `scopeUnproven`: a dimension nobody could
+   * run and a truncated audit over receipt-proven lines say nothing about
+   * WHICH lines were read, but a whiffed lens says exactly that, and only
    * the orchestrator's prose ever reports it.
    */
   dimensionGapsAreDepthOnly?: boolean;

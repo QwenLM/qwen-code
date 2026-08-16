@@ -486,6 +486,33 @@ function previousReport(out: string | undefined): BuildTestReport {
   // but a PRESENT one is walked for both of its lists, so a truthy non-object
   // (or a scope whose lists are not lists) has to be refused here rather than
   // becoming a `.filter of undefined` inside the merge.
+  // The identity the resume gate walks — validated HERE, like every other
+  // field the continuation reads: `tree: null` slipped past a gate that
+  // checked only presence shapes and crashed on `null.ino` inside the very
+  // check that exists to refuse with a named fix.
+  const runShape = (parsed as { run?: unknown }).run;
+  const runOk =
+    runShape === undefined ||
+    (typeof runShape === 'object' &&
+      runShape !== null &&
+      !Array.isArray(runShape) &&
+      typeof (runShape as { root?: unknown }).root === 'string' &&
+      (runShape as { root: string }).root.length > 0 &&
+      ((runShape as { sha?: unknown }).sha === undefined ||
+        typeof (runShape as { sha?: unknown }).sha === 'string') &&
+      ((runShape as { plan?: unknown }).plan === undefined ||
+        typeof (runShape as { plan?: unknown }).plan === 'number') &&
+      ((): boolean => {
+        const tree = (runShape as { tree?: unknown }).tree;
+        return (
+          tree === undefined ||
+          (typeof tree === 'object' &&
+            tree !== null &&
+            !Array.isArray(tree) &&
+            typeof (tree as { ino?: unknown }).ino === 'number' &&
+            typeof (tree as { birth?: unknown }).birth === 'number')
+        );
+      })());
   const scope = shape.testScope;
   // Element shapes too, not only the lists: `notRun` entries become shell
   // commands (`npm test --workspace=<dir>`), so a `[null]` that cleared an
@@ -506,7 +533,8 @@ function previousReport(out: string | undefined): BuildTestReport {
     !commandsOk(shape.test) ||
     !commandsOk(shape.build) ||
     !strings(shape.timedOut) ||
-    !scopeOk
+    !scopeOk ||
+    !runOk
   ) {
     throw new Error(
       `build-test: --resume expected a build-test report at ${out}, and that ` +

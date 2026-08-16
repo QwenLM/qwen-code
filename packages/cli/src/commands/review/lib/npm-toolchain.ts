@@ -292,11 +292,11 @@ function resumeNpmToolchain(
     const liveSegments = liveCaveat === '' ? [] : [liveCaveat];
     const outstanding = [...stillPending, ...unattemptedRetries];
     if (outstanding.length > 0) {
-      // ONE segment, so no '; ' inside it: retirement re-parses the stored
-      // caveat by that separator, and a clause that emits it internally is
-      // cut in half on the NEXT resume — the head (matching the resume
-      // grammar) retired, the tail ("N still to run: …") surviving into a
-      // report whose note says everything ran.
+      // The machine clause this call appends. It is REPLACED whole on the
+      // next resume — everything outside `liveCaveat` is machine text and is
+      // rebuilt, never content-matched — so its internal punctuation carries
+      // no structural meaning anymore; it stays one plain clause for the
+      // reader, not for any parser.
       liveSegments.push(
         `a --resume call ran ${ranDirs.length + replaced.size} more ` +
           `command(s), ${outstanding.length} still to run: ` +

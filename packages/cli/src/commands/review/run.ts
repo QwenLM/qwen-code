@@ -376,9 +376,11 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * bundle). The child runs argv[1], so compare the resolved package roots
  * (dirname of realpathSync): cli-entry.js stamps itself but spawns cli.js,
  * so an exact-file comparison would blank a valid same-install stamp. On a
- * root mismatch — or an inherited path that does not resolve at all — write
- * '': empty counts as unset in stampCliEntryEnv, and the child re-stamps
- * from its own modules.
+ * root mismatch, an inherited path that does not resolve, or an UNSET slot,
+ * stamp this build's own `argv[1]` — the entry this command is about to
+ * re-enter — when a shell could exec it; write '' only when that entry fails
+ * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
+ * stamp that dies on exit 126.
  */
 function childEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };

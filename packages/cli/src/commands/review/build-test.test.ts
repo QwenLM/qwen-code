@@ -3543,11 +3543,12 @@ describe('runBuildTest', () => {
     });
 
     it('retires its own clause whole across a SECOND resume', () => {
-      // The clause is one segment on purpose: retirement re-parses the stored
-      // caveat by '; ', and a clause that emitted the separator internally
-      // was cut in half on the next resume — the head retired, the tail
-      // ("N still to run: …") surviving into a report whose note says
-      // everything ran. Two continuations are routine on this repo.
+      // Retirement is the structural liveCaveat carry-through: the machine
+      // clause is whatever sits outside `liveCaveat`, replaced whole on the
+      // next resume. This chain pins that a SECOND continuation ends with the
+      // caveat absent — the failure it guards was the parse-era cut-in-half
+      // clause whose tail survived into a completed report. Two continuations
+      // are routine on this repo.
       threePackages();
       const outPath = join(root, 'report.json');
       writeFileSync(
@@ -3609,11 +3610,11 @@ describe('runBuildTest', () => {
     });
 
     it('cannot be talked out of a LIVE limitation by a PR-authored name', () => {
-      // Caveat segments interpolate paths from the reviewed diff, and the
-      // retirement regex used to substring-match its phrases anywhere in the
-      // segment — so a file named `whole-call budget.mjs` retired the live
-      // disclosure quoting it. Anchored to the producers' own grammar at the
-      // segment start, the interpolated name is just text.
+      // Caveat text interpolates paths from the reviewed diff, and two
+      // parse-era retirements were each talked out of a live disclosure by a
+      // PR-authored name shaped like the machine grammar. Retirement is now
+      // the structural liveCaveat carry-through — nothing content-matches —
+      // so the interpolated name is just text; this pins exactly that.
       threePackages();
       const outPath = join(root, 'report.json');
       const live =
@@ -3960,6 +3961,30 @@ describe('runBuildTest', () => {
           test: [{ command: '' }],
           build: [],
           timedOut: [],
+        }),
+        // The identity's own shapes: `tree: null` slipped past a
+        // presence-only check and crashed on `null.ino` INSIDE the gate that
+        // exists to refuse with a named fix.
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          run: { root: '/x', tree: null },
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          run: { root: '/x', tree: { ino: 'not a number', birth: 1 } },
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          run: { root: '' },
         }),
       ]) {
         writeFileSync(outPath, corrupt);

@@ -97,8 +97,13 @@ export interface DeltaEntry {
    */
   unparsed: boolean;
   /**
-   * True when the PR-side output this read was already trimmed by `build-test`.
-   * The failing-file list may be short, which can only understate `shared`.
+   * True when the PR side had to be re-parsed out of the TRIMMED stored
+   * output — the report carried no capture-time `failingFiles` (or a
+   * malformed one) AND the trim marker is present. A report whose set was
+   * measured before the trim never sets this. When it is set, the loss cuts
+   * BOTH ways: a missing file understates `shared` when base fails it too,
+   * and understates `netNew` — the direction that loses a failure the PR
+   * caused — when only the PR side does.
    */
   prTruncated: boolean;
 }

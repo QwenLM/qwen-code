@@ -17,6 +17,7 @@ const {
   ensureAuthenticatedMock,
   setGhHostMock,
   writeFileSyncMock,
+  rmSyncMock,
   mkdirSyncMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
@@ -25,6 +26,7 @@ const {
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
 }));
 
@@ -46,6 +48,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    rmSync: rmSyncMock,
   };
   return { ...mock, default: mock };
 });
@@ -1694,6 +1697,62 @@ describe('buildMarkdown host baking', () => {
     expect(md).toContain(
       'comment-body 31 --kind issue --repo o/r --host ghe.example.com',
     );
+  });
+});
+
+describe('runPrContext identity failure (handler level)', () => {
+  const metaJson = JSON.stringify({
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  // A marker-less review by SOMEONE: with the identity unknowable, the walk
+  // cannot say whose it is — and must not read that as proof of absence.
+  const strangerReview = {
+    id: 9,
+    user: { login: 'someone' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'no marker here',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    ghMock.mockReturnValue(metaJson);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([]) // inline
+      .mockReturnValueOnce([]) // issue comments
+      .mockReturnValueOnce([strangerReview]); // reviews
+    process.exitCode = undefined;
+  });
+
+  it('never deletes the side file over a failed identity lookup', async () => {
+    // The pre-isolation code got this right by accident: the throw reached
+    // the outer catch and took the strip path. The isolated lookup turned a
+    // rate-limit blip into login=null, the walk recorded "no own review"
+    // about an identity it never knew, and the deletion arm reset the round
+    // counter — the id-space collision the recovery redesign exists to
+    // prevent. An unknown identity licenses nothing.
+    currentUserMock.mockImplementation(() => {
+      throw new Error('rate limited');
+    });
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+    expect(rmSyncMock).not.toHaveBeenCalled();
   });
 });
 

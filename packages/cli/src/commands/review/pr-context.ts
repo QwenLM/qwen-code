@@ -1302,6 +1302,16 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   let prevRecovered: ReturnType<typeof recoverLedger>['recovered'] = null;
   let recoveryThrew = false;
   let sawOwnReview = false;
+  /**
+   * Proof-of-absence needs a proven identity. When the lookup fails,
+   * `sawOwnReview` stays false because the walk had no name to look for — an
+   * unknown identity recorded as "no own review exists" licensed deleting the
+   * side file and resetting the round counter over a rate-limit blip, the
+   * exact id-space collision the recovery redesign exists to prevent. The
+   * pre-isolation code got this right by accident: the throw reached the
+   * outer catch and took the strip path.
+   */
+  let identityKnown = false;
   try {
     // With no reviews on the PR there is nothing to recover from, so neither
     // network round-trip is made.
@@ -1318,6 +1328,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       let login: string | null = null;
       try {
         login = currentUser();
+        identityKnown = true;
       } catch {
         login = null;
       }
@@ -1343,17 +1354,15 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,
-    // Deletion is licensed ONLY by proof of true absence: a non-empty list
-    // this run walked in which NO submitted review by this account exists —
-    // and nothing was recovered from any other account either (a recovered
-    // foreign ledger is a live counter, not leftovers). An empty `reviews`
-    // may be an error envelope ghApiAll flattened to []; an own review whose
-    // marker fails to parse is a persistent state, not absence — both take
-    // the conservative strip path.
-    reviews.length > 0 &&
-      !recoveryThrew &&
-      !sawOwnReview &&
-      prevRecovered === null,
+    // Deletion is licensed ONLY by proof of true absence: a CONFIRMED
+    // identity, and a non-empty list this run walked in which no submitted
+    // review by that identity exists. An empty `reviews` may be an error
+    // envelope ghApiAll flattened to []; an own review whose marker fails to
+    // parse is a persistent state, not absence; and a failed identity lookup
+    // proves nothing about anyone — all take the conservative strip path.
+    // (A recovered foreign ledger also protects the file, but through the
+    // helper's own recovered-first branch, not through this flag.)
+    reviews.length > 0 && identityKnown && !recoveryThrew && !sawOwnReview,
   );
 
   // The effective host (explicit --host, else an operator-exported
