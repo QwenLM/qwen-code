@@ -44,7 +44,10 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { readTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
-import { LAYER_RECEIPT_LINE_RE } from './audit-layers.js';
+import {
+  INLINE_LAYER_WALKED_RE,
+  LAYER_RECEIPT_LINE_RE,
+} from './audit-layers.js';
 import {
   deliveredVerbatimLines,
   findingsPointerOf,
@@ -238,21 +241,31 @@ const DRY_RECEIPT_PHRASE_CORE = '(?:' + DRY_RECEIPT_EN + DRY_RECEIPT_ZH + ')';
 const DRY_RECEIPT_PHRASE =
   '(?:' + DRY_RECEIPT_EN + '[ \\w()]{0,32}' + DRY_RECEIPT_ZH + ')';
 
-/** Closing emphasis/quotation that may sit between the phrase and the stop. */
-const DRY_RECEIPT_TAIL = '\\s*[*_)\\]"”’]*\\s*';
+/**
+ * Closing emphasis/quotation that may sit between the phrase and the stop.
+ * Every whitespace element here is LINE-BOUND (`[ \t]`, never `\s`): a
+ * `\s*` matches `\n`, so the matcher itself spanned lines and pulled the
+ * clause in from a LATER line — `No issues found —\nre-walked …` matched
+ * with the next line as its clause, and the receipt-is-its-line form
+ * refused nothing (#9213).
+ */
+const DRY_RECEIPT_TAIL = '[ \\t]*[*_)\\]"”’]*[ \\t]*';
 
 /**
  * The ONE receipt matcher: anchored — prose before the phrase is a form
  * violation, not a receipt lead — with every separator in one class and
  * the clause captured to the END OF THE LINE: the receipt is its line,
  * and prose on any later line is the form's to refuse, not the clause's
- * to judge (#9213).
+ * to judge (#9213). The separator's own whitespace is line-bound for the
+ * same reason as the tail's: the ASCII hyphen's "stands alone" rule asks
+ * for a space, not any `\s`, and a separator left dangling at a line end
+ * opens no clause on the next one.
  */
 const DRY_RECEIPT_RE = new RegExp(
   '^[ \\t]*[*_~]*' +
     DRY_RECEIPT_PHRASE +
     DRY_RECEIPT_TAIL +
-    '(?:[—–]+|[:：.,;。，；]|--+|-+\\s)\\s*' +
+    '(?:[—–]+|[:：.,;。，；]|--+|-+[ \\t])[ \\t]*' +
     '([^\\n]*)',
   'i',
 );
@@ -524,11 +537,20 @@ function classifyReturn(
   // run: a one-line return (`No new issues found — …; Budget gap: X`)
   // slips past the line-based strip, and the clause capture would
   // otherwise absorb the gap text and get its substantiveness from it —
-  // the admission doubling as the receipt again, one line lower.
+  // the admission doubling as the receipt again, one line lower. The
+  // `Layer walked:` label fused onto the receipt's line is the same
+  // absorption one marker over: the label's own "walked" passes the walk
+  // test and its length the substance floor, certifying a receipt the
+  // identical two-line form refuses (#9213) — cut at whichever marker
+  // comes first.
   const clause = receipt?.[1] ?? '';
   const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
-  const judgedClause =
-    inlineGap === null ? clause : clause.slice(0, inlineGap.index);
+  const inlineLayer = INLINE_LAYER_WALKED_RE.exec(clause);
+  const cutAt = Math.min(
+    inlineGap?.index ?? clause.length,
+    inlineLayer?.index ?? clause.length,
+  );
+  const judgedClause = clause.slice(0, cutAt);
   const unknown = (failure: CertificationFailure): Classification => ({
     outcome: 'unknown',
     failure,

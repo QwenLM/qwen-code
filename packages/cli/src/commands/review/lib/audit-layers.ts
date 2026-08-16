@@ -196,6 +196,17 @@ export const LAYER_RECEIPT_LINE_RE =
   /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z0-9-]*)/i;
 
 /**
+ * The receipt marker ANYWHERE in a line — the `INLINE_BUDGET_GAP_RE`
+ * analogue: a layer label fused onto the no-issues receipt's own line
+ * (`No issues found — Layer walked: lexing`) slips past the line-anchored
+ * parser above, and the clause capture would otherwise absorb the label
+ * and take its walk verb AND its length from it (#9213). Only for cutting
+ * a clause, never for minting receipts — the line form above stays the
+ * receipt authority.
+ */
+export const INLINE_LAYER_WALKED_RE = /layer\s+walked[*_~`]{0,3}[ \t]*[:：]/i;
+
+/**
  * Tests the text immediately AFTER a captured id: an optional run of trailing
  * punctuation/symbols followed by either a non-space, non-punctuation code point
  * OR a CONNECTOR (`\p{Pc}`) means the id is STITCHED to more of a visible word

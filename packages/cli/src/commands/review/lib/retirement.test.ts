@@ -953,6 +953,80 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(true);
   });
 
+  it('a layer label fused onto the receipt line certifies nothing (#9213)', () => {
+    // The line-anchored strip only sees OWN-line labels, so a fused one
+    // rode the clause: the label's own "walked" passed the walk test and
+    // its length the substance floor, certifying a receipt the identical
+    // two-line form (above) refuses. The clause is cut at the inline
+    // marker, exactly as at an inline `Budget gap:`.
+    const fused = 'No issues found — Layer walked: lexing';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), fused);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), fused);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause not substantive; ' +
+        'round 2: receipt clause not substantive',
+    ]);
+  });
+
+  it('a receipt split across two lines is not dry — the matcher is line-bound (#9213)', () => {
+    // Every whitespace element in the matcher used to be `\s`, which
+    // matches `\n`: the matcher itself spanned lines and pulled the
+    // clause in from a LATER line, so the receipt-is-its-line form
+    // refused nothing. Each shape below reads `unknown` — the dangling
+    // separator leaves prose after the receipt's (empty) line, and a
+    // break before the separator is no receipt at all.
+    const shapes: Array<[string, string]> = [
+      // Dangling em dash at the end of line 1.
+      [
+        'No issues found —\nre-walked the parser and the retry cap call sites',
+        'receipt not alone',
+      ],
+      // Break before the separator.
+      [
+        'No issues found\n— re-walked the parser and the retry cap call sites',
+        'receipt not matched',
+      ],
+      // Blank line after the dangling separator.
+      [
+        'No issues found —\n\nre-walked the parser and the retry cap call sites',
+        'receipt not alone',
+      ],
+      // ASCII hyphen dangling — "stands alone" asks for a space, not `\n`.
+      [
+        'No issues found -\nre-walked the parser and the retry cap call sites',
+        'receipt not matched',
+      ],
+    ];
+    shapes.forEach(([ret], i) => {
+      const chunk = 13 + i;
+      transcript(
+        record(1, chunk, `chunk ${chunk} round 1 territory walk`),
+        ret,
+      );
+      transcript(
+        record(2, chunk, `chunk ${chunk} round 2 territory walk`),
+        ret,
+      );
+    });
+
+    const r3 = schedule(
+      3,
+      shapes.map((_, i) => 13 + i),
+    );
+    expect(r3.due).toEqual([13, 14, 15, 16]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.diagnostics).toEqual(
+      shapes.map(
+        ([, failure], i) =>
+          `chunk ${13 + i} — round 1: ${failure}; round 2: ${failure}`,
+      ),
+    );
+  });
+
   it('an innocuous "but" does not block retirement — only a hedge does (#9213)', () => {
     // The clause-contrast refusal used to reject ANY occurrence of a
     // contrast word, so the commonest honest connective — "already in the
