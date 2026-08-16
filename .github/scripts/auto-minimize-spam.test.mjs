@@ -85,10 +85,10 @@ describe('auto-minimize-spam: event fast path', () => {
 
   it('processes the triggering comment without dropping bursts', () => {
     const jobGuard = String(minimizeJob.if);
-    assert.match(jobGuard, /comment\.user\.type != 'Bot'/);
-    assert.match(jobGuard, /OWNER/);
-    assert.match(jobGuard, /MEMBER/);
-    assert.match(jobGuard, /COLLABORATOR/);
+    assert.match(
+      jobGuard,
+      /comment\.user\.type != 'Bot'[\s\S]*!contains\([\s\S]*OWNER[\s\S]*MEMBER[\s\S]*COLLABORATOR[\s\S]*github\.event\.comment\.author_association/,
+    );
     assert.match(jobGuard, /head\.repo\.full_name == github\.repository/);
     assert.match(String(doc.concurrency.group), /comment\.node_id/);
     assert.equal(
@@ -106,7 +106,11 @@ describe('auto-minimize-spam: event fast path', () => {
     assert.match(minimizeStep.run, /\[ -n "\$EVENT_COMMENT_NODE_ID" \]/);
     assert.match(
       minimizeStep.run,
-      /ALL_CANDIDATES=.*EVENT_COMMENT_LOGIN.*EVENT_COMMENT_NODE_ID/,
+      /ALL_CANDIDATES="\$\{EVENT_COMMENT_LOGIN\}"\$'\\t'"\$\{EVENT_COMMENT_NODE_ID\}"/,
+    );
+    assert.match(
+      minimizeStep.run,
+      /--jq '\.data\.node\.isMinimized \/\/ "missing"'[\s\S]*\|\| printf 'missing'/,
     );
   });
 });

@@ -190,8 +190,10 @@ jobs:
                       ... on Minimizable { isMinimized }
                     }
                   }
-                " --jq '.data.node.isMinimized'
+                " --jq '.data.node.isMinimized // "missing"' 2>/dev/null \
+                  || printf 'missing'
               )"
+              [ "$is_minimized" = "missing" ] && continue
               [ "$is_minimized" = "true" ] && continue
               MATCHED_IDS="${MATCHED_IDS}${node_id}"$'\n'
               MATCHED_COUNT=$((MATCHED_COUNT + 1))
