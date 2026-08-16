@@ -186,8 +186,8 @@ export default {
       context.report({ node, messageId: 'serveBoundary' });
     }
 
-    function reportUnknown(node) {
-      context.report({ node, messageId: 'failClosed' });
+    function reportUnknown(node, messageId = 'failClosed') {
+      context.report({ node, messageId });
     }
 
     /** Check a Literal/TemplateLiteral/computed source node. */
@@ -210,17 +210,6 @@ export default {
       const verdict = classifySpecifier(raw);
       if (verdict === 'inside') reportInside(sourceNode);
       else if (verdict === 'unknown') reportUnknown(sourceNode);
-    }
-
-    /** new URL(spec, import.meta.url) — resolves against this module. */
-    function isNewUrlWithImportMeta(node) {
-      return (
-        node.type === 'NewExpression' &&
-        node.callee.type === 'Identifier' &&
-        node.callee.name === 'URL' &&
-        node.arguments.length >= 2 &&
-        node.arguments[1].type === 'MetaProperty'
-      );
     }
 
     /** Member-call shape: obj.prop(...); pass objectNames null to match
@@ -264,7 +253,7 @@ export default {
         // The `module` builtin hands out createRequire, which aliases
         // require() past every import-shaped guard (round-7 entrance).
         if (typeof value === 'string' && /^(?:node:)?module$/.test(value)) {
-          reportUnknown(node.source);
+          reportUnknown(node.source, 'moduleBuiltin');
           return;
         }
         checkSource(node.source);
@@ -345,7 +334,7 @@ export default {
             node.arguments[0].property.type === 'Identifier' &&
             node.arguments[0].property.name === 'getBuiltinModule')
         ) {
-          reportUnknown(node);
+          reportUnknown(node, 'moduleBuiltin');
           return;
         }
 
@@ -354,19 +343,18 @@ export default {
         // trees have no such calls today). spawn is deliberately NOT
         // checked: its first argument is an executable resolved via
         // PATH/cwd, not a module — flagging it would false-positive on
-        // legitimate code like spawn(process.execPath, [...]).
+        // legitimate code like spawn(process.execPath, [...]). The bare
+        // identifier covers the destructured spelling
+        // (`import { fork } from 'node:child_process'`); only specifiers
+        // resolving INTO serve/ report, so a non-serve fork target is
+        // never flagged.
         if (
-          memberCall(node, ['child_process'], /^fork$/) &&
+          (memberCall(node, ['child_process'], /^fork$/) ||
+            (callee.type === 'Identifier' && callee.name === 'fork')) &&
           node.arguments.length > 0
         ) {
           checkSource(node.arguments[0]);
           return;
-        }
-
-        // new URL('../serve/...', import.meta.url) — Worker/asset loads
-        // (round-8 entrance).
-        if (isNewUrlWithImportMeta(node) && node.arguments.length > 0) {
-          checkSource(node.arguments[0]);
         }
       },
       NewExpression(node) {
@@ -376,6 +364,21 @@ export default {
           node.callee.type === 'Identifier' &&
           node.callee.name === 'Worker' &&
           node.arguments.length > 0
+        ) {
+          checkSource(node.arguments[0]);
+          return;
+        }
+
+        // new URL('../serve/...', import.meta.url) — Worker/asset loads
+        // (round-8 entrance). The base argument is a MemberExpression
+        // wrapping the import.meta MetaProperty; resolve the first
+        // argument against this module.
+        if (
+          node.callee.type === 'Identifier' &&
+          node.callee.name === 'URL' &&
+          node.arguments.length >= 2 &&
+          node.arguments[1].type === 'MemberExpression' &&
+          node.arguments[1].object.type === 'MetaProperty'
         ) {
           checkSource(node.arguments[0]);
         }

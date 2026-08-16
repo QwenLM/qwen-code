@@ -400,6 +400,16 @@ describe('eslint cli serve boundary rules', () => {
       acp,
       "import { importActual } from 'vitest';\nexport async function load() { return importActual('../serve/live/live-task-service.js'); }",
     );
+    // R8-2: doMock/importMock were matched by the guard but had zero
+    // fixture coverage — narrowing the alternation stayed green.
+    await expectServeBoundaryError(
+      acp,
+      "import { vi } from 'vitest';\nvi.doMock('../serve/live/live-task-service.js');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "import { vi } from 'vitest';\nvi.importMock('../serve/live/live-task-service.js');",
+    );
   });
 
   // Codex self-review: child_process.spawn's first argument is an
@@ -429,9 +439,80 @@ describe('eslint cli serve boundary rules', () => {
       'packages/cli/src/acp-integration/boundary-fixture.ts',
       code,
     );
-    const boundaryHits = result.messages.filter((message) =>
-      message.message.includes('serve/ internals'),
+    // R10-3: filter on the rule itself, not the serveBoundary text — a
+    // regression routing serve-named bare specifiers to failClosed must
+    // also turn this pin red ('serve/ internals' is absent from the
+    // failClosed message).
+    const boundaryHits = result.messages.filter(
+      (message) =>
+        message.ruleId === 'qwen-boundary/no-serve-boundary-cross',
     );
     expect(boundaryHits).toEqual([]);
+  });
+
+  // R9-5: the re-export / Worker / fork / require visitors had no fixture
+  // pins — deleting any of them left the suite green. The bare `fork`
+  // spelling also covers R9-4 (the destructured child_process import
+  // evaded the member-only guard).
+  it('pins re-export, Worker, fork and require entrances', async () => {
+    const runtime = 'packages/cli/src/runtime/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      runtime,
+      "export * from '../serve/index.js';",
+    );
+    await expectServeBoundaryError(
+      runtime,
+      "export { x } from '../serve/index.js';",
+    );
+    await expectServeBoundaryError(runtime, "new Worker('../serve/worker.js');");
+    await expectServeBoundaryError(runtime, "require('../serve/index.js');");
+    await expectServeBoundaryError(
+      runtime,
+      "import { fork } from 'node:child_process';\nfork('../serve/index.js');",
+    );
+  });
+
+  // R9-2: the new-URL-with-import.meta check sat in the CallExpression
+  // visitor (NewExpression nodes never dispatch there), so a standalone
+  // `new URL('../serve/...', import.meta.url)` reported nothing.
+  it('rejects standalone new URL(spec, import.meta.url) into serve', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/runtime/boundary-fixture.ts',
+      "const u = new URL('../serve/worker.js', import.meta.url);",
+    );
+  });
+
+  // R9-7: no pin exercised the false branch of static-template
+  // concatenation — a pure template literal resolving OUTSIDE serve must
+  // stay allowed (breaking the concatenation fail-closes legitimate code).
+  it('allows pure template-literal imports that resolve outside serve', async () => {
+    const [result] = await lintCliFile(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      'export async function load() { await import(`../utils/boundary-fixture.ts`); }',
+    );
+    const boundaryHits = result.messages.filter(
+      (message) =>
+        message.ruleId === 'qwen-boundary/no-serve-boundary-cross',
+    );
+    expect(boundaryHits).toEqual([]);
+  });
+
+  // R13-2: resolution-based detections must report via the serveBoundary
+  // messageId — if inside-detection degrades into blanket fail-closed
+  // rejection the substring-based positive helper stays green, so pin the
+  // messageId directly.
+  it('reports resolution detections via the serveBoundary messageId', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    for (const code of [
+      "import '../serve/index.js';",
+      "export async function load() { return import('src/serve/index.js'); }",
+    ]) {
+      const [result] = await lintCliFile(acp, code);
+      expect(
+        result.messages.some(
+          (message) => message.messageId === 'serveBoundary',
+        ),
+      ).toBe(true);
+    }
   });
 });
