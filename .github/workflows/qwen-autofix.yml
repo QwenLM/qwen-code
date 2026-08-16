@@ -5343,7 +5343,15 @@ jobs:
                 > "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then
                 mv "${WORKDIR}/deferred-findings.carry.next" \
                   "${WORKDIR}/deferred-findings.carry.json"
+                # Merged: this round's copy lives on inside the sidecar.
+                rm -f "${WORKDIR}/deferred-findings.json"
               else
+                # Which side is corrupt is NOT known here — jq -s fails if
+                # EITHER input is unparseable, and today's topology cannot
+                # even produce a pre-existing carry (WORKDIR is wiped at run
+                # start and there is exactly one repair step), so this branch
+                # is defensive. Say what is certain: the merge failed, the
+                # earlier set is kept, this round's is preserved unmerged.
                 # The only loss path in this feature without a raw dump: the
                 # newer set is discarded here and the eval watermark means
                 # nothing re-derives it, so print it before deleting. `::` is
@@ -5351,15 +5359,20 @@ jobs:
                 # `::` at line start would be parsed as a workflow command.
                 _dfsize="$(wc -c < "${WORKDIR}/deferred-findings.json" 2> /dev/null | tr -d ' ')"
                 if [[ -n "${_dfsize}" ]] && (( _dfsize > 4000 )); then
-                  echo "::warning::could not merge carried deferrals across the repair; keeping the earlier set. This run's deferrals are LOST — raw content follows, TRUNCATED at 4000 of ${_dfsize} bytes (the full file is in this run's artifact dump):"
+                  echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows, TRUNCATED at 4000 of ${_dfsize} bytes — the full file rides this run's artifact dump:"
                 else
-                  echo "::warning::could not merge carried deferrals across the repair; keeping the earlier set. This run's deferrals are LOST — raw content follows for manual recovery:"
+                  echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows:"
                 fi
                 head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
                 echo
                 rm -f "${WORKDIR}/deferred-findings.carry.next"
+                # Keep the discarded set ON DISK so the warning's pointer at
+                # the artifact dump is true past the 4000-byte clip. Renamed,
+                # not left in place: the upsert would otherwise union it back
+                # in as if it had merged.
+                mv "${WORKDIR}/deferred-findings.json" \
+                  "${WORKDIR}/deferred-findings.unmerged.json"
               fi
-              rm -f "${WORKDIR}/deferred-findings.json"
             else
               mv "${WORKDIR}/deferred-findings.json" \
                 "${WORKDIR}/deferred-findings.carry.json"
@@ -5458,7 +5471,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent-written content: a line-start `::` would be parsed as a
@@ -5804,7 +5817,8 @@ jobs:
               UPSERT_OUT="$(<"${UPSERT_LOG}")"
             fi
             rm -rf "${UPSERT_LOG}" 2> /dev/null || true
-            # Inspect with bash BUILTINS only ([[ ]], read, printf — no exec):
+            # INSPECTION uses bash builtins only ([[ ]], read, printf — no
+            # exec; the surrounding setup does run rm/mktemp, which is fine):
             # under loader trace mode every external binary, grep included,
             # would itself print-and-exit-0, so a grep-based check would be
             # neutered by the very condition it is meant to detect.

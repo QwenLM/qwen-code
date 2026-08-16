@@ -91,7 +91,7 @@ if [[ -s "${CARRY}" ]]; then
     if jq -s 'add' "${FINDINGS}" "${CARRY}" > "${MERGED}" 2> /dev/null; then
       FINDINGS="${MERGED}"
     else
-      echo "::warning::could not merge the carried deferrals; persisting only this round's. The carried set is LOST — raw content follows:"
+      echo "::warning::could not merge this round's deferrals with the carried sidecar (one of the two is unparseable); persisting only this round's. The carried set is LOST — raw content follows:"
       dump_file "${CARRY}"
     fi
   else
@@ -144,6 +144,7 @@ if ! shape_ok "${FINDINGS}"; then
 fi
 
 MARKER="<!-- autofix-deferred pr=${PR} -->"
+TITLE="Deferred review findings from PR #${PR}"
 
 # Locate the tracking issue with structured filtering: never a pull
 # request, marker matched against the real body (no line-joining), first
@@ -165,9 +166,16 @@ while (( lookup_page <= LOOKUP_MAX_PAGES )); do
     lost "the tracking-issue lookup failed on page ${lookup_page} ($(gh_reason))"
     exit 0
   fi
-  HIT="$(jq -r --arg m "${MARKER}" '
-    map(select((.pull_request | not)
-      and ((.body // "") | contains($m)))) | (.[0].number // "") | tostring' \
+  # Two identity anchors: the body marker first, the derived title as a
+  # fallback. The marker lives on the one surface maintainers are invited to
+  # edit, so an edit that drops it would orphan the issue and the next round
+  # would open a duplicate; the title is derived, never authored.
+  HIT="$(jq -r --arg m "${MARKER}" --arg t "${TITLE}" '
+    (map(select((.pull_request | not)
+      and ((.body // "") | contains($m)))) | .[0].number)
+    // (map(select((.pull_request | not)
+      and ((.title // "") == $t))) | .[0].number)
+    // "" | tostring' \
     <<< "${PAGE_JSON}" 2> /dev/null)" || HIT=''
   if [[ -n "${HIT}" && "${HIT}" != 'null' ]]; then
     ISSUE_NUM="${HIT}"
@@ -235,6 +243,16 @@ RESOLVED_RAW=''
 # real renderer; `\@` and bare entity-escaping are NOT. Paths are already
 # reduced to a safe charset (no `@` survives).
 if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RAW}" '
+  # Identity for the multi-finding sources. LOSSLESS on content: only case
+  # and PUNCTUATION are normalized, so the tolerance for rewording survives
+  # while every letter of every script does too. The earlier form stripped
+  # all non-[a-z0-9] bytes and capped at 160 chars, which silently merged
+  # CJK siblings (this repo is bilingual) and, on a long path, cut the
+  # reason out of the identity altogether — silent loss, the one outcome
+  # this feature exists to prevent.
+  def normkey:
+    ascii_downcase | gsub("[[:punct:]]+"; " ") | gsub("\\s+"; " ")
+    | sub("^ "; "") | sub(" $"; "");
   ($resolved | split("\n")
     | map(sub("^rc:"; "") | sub("\r$"; "")
       | select(test("^[0-9]+$")) | tonumber)) as $done
@@ -266,8 +284,7 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLV
     # of path+reason — case-folded, punctuation-collapsed, capped — which
     # absorbs whitespace and phrasing churn while keeping genuinely distinct
     # findings apart. Erring toward a visible duplicate over a silent loss.
-    | . + {key: ((.line | ascii_downcase | gsub("[^a-z0-9]+"; " ")
-        | gsub("^ +| +$"; "") | .[0:160]))})
+    | . + {key: (.line | normkey)})
   # An inline comment is one finding, so its id IS the identity (and the
   # anchor keeps working across rounds). A review body or an issue-level
   # comment can raise SEVERAL findings under one id, so there the identity —
@@ -279,10 +296,7 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLV
         then ($klines | any(test($r.anchor))) | not
         # Corpus check on the same normalized key, so a reworded sibling of an
         # already-tracked finding is recognised as tracked.
-        else ($klines
-          | map(ascii_downcase | gsub("[^a-z0-9]+"; " ")
-            | gsub("^ +| +$"; "") | .[0:160])
-          | index($r.key)) == null end)
+        else ($klines | map(normkey) | index($r.key)) == null end)
     | $r.line)
   | .[]' "${FINDINGS}" 2> /dev/null)"; then
   # The only remaining silent-exit path: a jq/sed failure here would leave
@@ -311,7 +325,7 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   BODY="${MARKER}"$'\n\n'"Verified review findings from PR #${PR} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up. A maintainer can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
   gh_err_reset
   if NUM="$(gh api "repos/${REPO}/issues" \
-    -f title="Deferred review findings from PR #${PR}" \
+    -f title="${TITLE}" \
     -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")"; then
     echo "🗂 deferred findings tracked in new issue #${NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
