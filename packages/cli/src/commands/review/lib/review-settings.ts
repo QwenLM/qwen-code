@@ -15,6 +15,8 @@ export interface OperatorReviewSettings {
    * at all. Callers normalize.
    */
   effort?: string;
+  /** The raw `review.severityFloor` value when set — same caveats as effort. */
+  severityFloor?: string;
 }
 
 /**
@@ -38,5 +40,9 @@ export function operatorReviewSettings(): OperatorReviewSettings {
       typeof review?.attribution === 'boolean' ? review.attribution : true,
     comment: review?.comment === true,
     effort: typeof review?.effort === 'string' ? review.effort : undefined,
+    severityFloor:
+      typeof review?.severityFloor === 'string'
+        ? review.severityFloor
+        : undefined,
   };
 }

@@ -154,7 +154,11 @@ export function serializeLedger(ledger: Ledger): string {
     title: f.title.slice(0, LEDGER_MAX_TITLE),
     file: f.file.slice(0, LEDGER_MAX_FILE),
   }));
-  const render = (findings: LedgerFinding[], dropped: number): string => {
+  const render = (
+    findings: LedgerFinding[],
+    dropped: number,
+    anchor: boolean,
+  ): string => {
     const payload: Ledger = { v: 1, round: ledger.round, findings };
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
@@ -163,7 +167,7 @@ export function serializeLedger(ledger: Ledger): string {
     // are IN the work list, so they would retire silently. A partial ledger
     // keeps its findings and loses its anchor, exactly as a fail-closed round
     // does.
-    else if (ledger.sha && SHA_RE.test(ledger.sha)) {
+    else if (anchor && ledger.sha && SHA_RE.test(ledger.sha)) {
       // The same-model qualifier travels only beside the anchor it qualifies
       // — and only WHOLE: a truncated id is a prefix, and a prefix can equal
       // a DIFFERENT model's full id, which the gate would then accept past
@@ -189,10 +193,19 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept);
+  let marker = render(capped, total - kept, true);
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // Shed the anchor PAIR before any finding: `dropped` withholds the pair
+    // the moment a finding goes anyway, so the old order paid a ruling from
+    // the work list for bytes the pair alone could have paid. The pair shed
+    // first keeps the whole work list — recovery degrades to the full diff,
+    // which the findings survive — and findings start going only when the
+    // anchorless form still exceeds the cap.
+    marker = render(capped, total - kept, false);
+  }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept);
+    marker = render(capped.slice(0, kept), total - kept, false);
   }
   return marker;
 }

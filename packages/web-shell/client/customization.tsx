@@ -168,6 +168,7 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  files?: readonly { name: string; mimeType: string }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
 }
 
@@ -481,6 +482,12 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  /**
+   * Built-in / host @ mention providers. Split-view panes share this context
+   * so they match the main composer without ChatPane prop drilling.
+   */
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  atProviders?: readonly WebShellAtProvider[];
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
