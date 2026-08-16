@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
+import MarkdownIt from 'markdown-it';
 import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
@@ -5189,6 +5190,23 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   const countOf = (haystack: string, needle: string): number =>
     haystack.split(needle).length - 1;
+  // The oracle for every closer the cut appends is the RENDERED page, not
+  // a balance count over the raw text: GFM extends an unclosed fence or
+  // HTML block to the end of the document, so a body whose counts agree
+  // with themselves can still render the truncation notice inside a code
+  // block — the exact shape the parity closers shipped. Where a real
+  // renderer puts the notice is the fact under test.
+  const page = new MarkdownIt({ html: true });
+  const noticeOutsideCode = (body: string): boolean => {
+    const html = page.render(body);
+    const at = html.indexOf('was TRUNCATED to fit');
+    if (at === -1) return false;
+    const before = html.slice(0, at);
+    return (
+      countOf(before, '<pre>') === countOf(before, '</pre>') &&
+      countOf(before, '<!--') === countOf(before, '-->')
+    );
+  };
   const nit = (i: number): DeferredEntry => ({
     file: `f${i}.ts`,
     line: 1,
@@ -5265,6 +5283,10 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain('Not reviewed: security');
     expect(r.body).toContain('(1 section(s))');
     expect(r.body).toContain('the deferred-findings list did not fit');
+    // The rank-drop exit's one sentence naming the loss non-blocking: the
+    // cut path asserts its ABSENCE, and with no positive arm the clause
+    // could be deleted from `trimNote` with the whole suite green.
+    expect(r.body).toContain('Nothing blocking was trimmed.');
     expect(r.bodyTrim).toEqual({
       sections: 1,
       deferralList: true,
@@ -5697,23 +5719,94 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // blocker. GFM extends an unclosed fence to the end of the document, so
     // an unbalanced cut renders the truncation notice and the footer as
     // code at the bottom of a multi-thousand-line block — the author reads
-    // a truncated body as a complete review.
+    // a truncated body as a complete review. This fixture is also the
+    // mid-line trap: the entry renders as `**[Critical]** \`\`\`ts`, so the
+    // opening fence is NOT a fence at all under CommonMark (fences open at
+    // line start) — the parity closers counted it anyway, and the stray
+    // "closer" they appended opened a real fence that swallowed the tail.
     const fenced = '```ts\n' + 'const x = 1;\n'.repeat(6_000);
     const r = composeReview(base({ bodyCriticals: [fenced] }));
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.truncated).toBe(true);
-    // Balanced: an odd count would leave the tail inside the block.
-    expect(countOf(r.body, '```') % 2).toBe(0);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('counts only fences GFM opens — a closed fence and a mid-line mention append nothing', () => {
+    // One REAL fenced block (opened and closed before the cut) plus one
+    // mid-line \`\`\` mention — parity saw three markers, appended a stray
+    // fourth, and that stray OPENED the fence which swallowed the notice.
+    const fencedThenMention =
+      'log:\n```ts\nconst x = 1;\n```\nsee the ``` marker\n' +
+      'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [fencedThenMention] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a four-backtick fence with four backticks — a shorter closer is content', () => {
+    // The closing fence must be at least as long as the opener: parity
+    // always appended three backticks, which GFM reads as a line of code
+    // inside a four-backtick block — the block kept extending over the
+    // notice.
+    const fourTick = 'quote:\n````ts\n' + 'const x = 1;\n'.repeat(6_000);
+    const r = composeReview(base({ bodyCriticals: [fourTick] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('\n````\n');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a tilde fence the cut left open', () => {
+    // CommonMark's alternate fence form: a blocker quoting a shell session
+    // in \`~~~\`. Deleting the branch or shrinking the closer reserve below
+    // the worst case must not ship green.
+    const tilded = 'quote:\n~~~sh\n' + 'echo hi\n'.repeat(9_000);
+    const r = composeReview(base({ bodyCriticals: [tilded] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(countOf(r.body, '~~~') % 2).toBe(0);
     expect(r.body).toContain('was TRUNCATED to fit');
   });
 
   it('closes an HTML comment the cut left open', () => {
     // Worse than a fence: an unclosed `<!--` hides the notice, the footer
-    // and the ledger marker from the rendered page outright.
-    const commented = '<!-- reviewer note\n' + 'x'.repeat(70_000);
+    // and the ledger marker from the rendered page outright. The comment
+    // opens at LINE START inside the entry — the mid-line form the first
+    // fixture used is no comment at all under CommonMark.
+    const commented = 'note:\n<!-- reviewer note\n' + 'x'.repeat(70_000);
     const r = composeReview(base({ bodyCriticals: [commented] }));
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(countOf(r.body, '<!--')).toBe(countOf(r.body, '-->'));
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('a backtick mention inside an unclosed comment is comment content, not a fence', () => {
+    // Parity counted the \`\`\` inside the comment, appended a fence
+    // "closer" AFTER the \`-->\` that closed it — and that stray fence
+    // opened a block which swallowed the notice.
+    const commented = 'note:\n<!-- review ```a``` b ```\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [commented] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a raw HTML block the cut left open — the longest closer still fits the reserve', () => {
+    // `<textarea` opens a raw block until its closing tag, exactly like
+    // `<script`/`<pre`/`<style`, and its closer is the longest one the
+    // reserve pays for.
+    const rawBlock = 'form:\n<textarea>\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [rawBlock] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(r.body).toContain('</textarea>');
     expect(r.body).toContain('was TRUNCATED to fit');
   });
 

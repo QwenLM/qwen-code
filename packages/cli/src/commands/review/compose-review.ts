@@ -604,6 +604,75 @@ function withMarker(line: string): string {
   return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
 
+/**
+ * The block left OPEN at the end of `text`, decided by CommonMark's
+ * block grammar rather than substring parity: a fence opens only at line
+ * start (at most three leading spaces, and a backtick fence's info string
+ * may carry no backtick) and closes only on a line of the SAME character
+ * at least as long as the opener; `<!--` at line start opens an HTML
+ * comment; `<script`/`<pre`/`<style`/`<textarea` open a raw block until
+ * their closing tag. Inside any open block everything is content — no
+ * nested openers. Parity over the whole cut models none of this: it
+ * counted mid-line mentions no renderer opens, missed four-backtick
+ * fences, and read comment content as fences — appending "closers" that
+ * OPENED the block which swallowed the tail they were meant to protect.
+ */
+type OpenBlockAtEnd =
+  | { kind: 'fence'; char: '`' | '~'; len: number; lineStart: number }
+  | { kind: 'comment'; lineStart: number }
+  | { kind: 'html1'; tag: string; lineStart: number };
+
+function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
+  let open: OpenBlockAtEnd | null = null;
+  let i = 0;
+  for (;;) {
+    const nl = text.indexOf('\n', i);
+    const lineEnd = nl === -1 ? text.length : nl;
+    let line = text.slice(i, lineEnd);
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    const indent = /^ */.exec(line)![0].length;
+    const content = line.slice(indent);
+    if (open === null) {
+      if (indent <= 3) {
+        const fence = /^(`{3,}|~{3,})(.*)$/.exec(content);
+        if (fence && !(fence[1].startsWith('`') && fence[2].includes('`'))) {
+          open = {
+            kind: 'fence',
+            char: fence[1].charAt(0) as '`' | '~',
+            len: fence[1].length,
+            lineStart: i,
+          };
+        } else if (content.startsWith('<!--')) {
+          open = { kind: 'comment', lineStart: i };
+        } else {
+          const html1 = /^<(script|pre|style|textarea)(?=[\s>]|$)/i.exec(
+            content,
+          );
+          if (html1) {
+            open = {
+              kind: 'html1',
+              tag: html1[1].toLowerCase(),
+              lineStart: i,
+            };
+          }
+        }
+      }
+    } else if (open.kind === 'fence') {
+      if (indent <= 3) {
+        let n = 0;
+        while (n < content.length && content.charAt(n) === open.char) n++;
+        if (n >= open.len && /^[\t ]*$/.test(content.slice(n))) open = null;
+      }
+    } else if (open.kind === 'comment') {
+      if (content.includes('-->')) open = null;
+    } else if (/<\/(script|pre|style|textarea)\s*>/i.test(content)) {
+      open = null;
+    }
+    if (nl === -1) return open;
+    i = nl + 1;
+  }
+}
+
 /** The plan's PR identity, when it names one — the base for comment anchors. */
 interface PrIdentity {
   ownerRepo: string;
@@ -1940,8 +2009,10 @@ function composeReviewBody(
       `trimmed does not fit the room this body has. Read the complete text in ` +
       `the terminal report and this run's findings artifact.`;
     const tail = `${hardNote}${footerTail}`;
-    // Headroom for the closers below, so balancing the markup can never
-    // push the body back over the budget it was just cut to fit.
+    // Headroom for the closer below, so balancing the markup can never
+    // push the body back over the budget it was just cut to fit. At most
+    // one closer is appended, and the longest is `\n</textarea>` —
+    // exactly this reserve.
     const CLOSER_RESERVE = 12;
     let cut = head.slice(
       0,
@@ -1960,23 +2031,32 @@ function composeReviewBody(
     ) {
       cut = cut.slice(0, -1);
     }
-    // Close what the cut left open. A blocker quoting code in a fenced
-    // block is the ordinary shape of a blocker, and GFM extends an
-    // unclosed fence to the end of the document: the truncation notice and
-    // the footer then render INSIDE a multi-thousand-line code block, and
-    // the author reads a truncated body as a complete review. An unclosed
-    // `<!--` hides them outright. The machine channels read raw text and
-    // never cared; this is for the human reading the PR page.
-    // Counted anywhere, not only at line starts: a body Critical is
-    // rendered as `**[Critical]** <the model's text>`, so the fence opening
-    // its first line is mid-line by the time it reaches here.
-    const odd = (marker: string): boolean => cut.split(marker).length % 2 === 0;
-    const closers =
-      ((cut.match(/<!--/g) ?? []).length > (cut.match(/-->/g) ?? []).length
-        ? '\n-->'
-        : '') +
-      (odd('```') ? '\n```' : '') +
-      (odd('~~~') ? '\n~~~' : '');
+    // Close what the cut left open, decided by the block grammar in
+    // `openBlockAtEnd`. A blocker quoting code in a fenced block is the
+    // ordinary shape of a blocker, and GFM extends an unclosed fence or
+    // HTML block to the end of the document: the truncation notice and the
+    // footer then render INSIDE a multi-thousand-line code block, and the
+    // author reads a truncated body as a complete review. The machine
+    // channels read raw text and never cared; this is for the human reading
+    // the PR page. One block can be open at the end of the cut — never two
+    // — and a fence whose closer would not fit the reserve loses its whole
+    // block: the cut moves back before the opener and scans again.
+    let closer = '';
+    for (;;) {
+      const open = openBlockAtEnd(cut);
+      if (open === null) break;
+      const c =
+        open.kind === 'fence'
+          ? `\n${open.char.repeat(open.len)}`
+          : open.kind === 'comment'
+            ? '\n-->'
+            : `\n</${open.tag}>`;
+      if (c.length <= CLOSER_RESERVE) {
+        closer = c;
+        break;
+      }
+      cut = cut.slice(0, open.lineStart);
+    }
     bodyTrim.truncated = true;
     noteTrimmedRanks(droppedRanks);
     remediation.push(
@@ -1985,7 +2065,7 @@ function composeReviewBody(
         `left by GitHub's ${BODY_MAX_CHARS}-character review limit, so the ` +
         `posted body is truncated`,
     );
-    return `${cut}${closers}${tail}`;
+    return `${cut}${closer}${tail}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body

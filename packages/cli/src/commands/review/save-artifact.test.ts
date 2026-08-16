@@ -321,7 +321,11 @@ describe('saveReviewArtifact', () => {
     ],
     [
       'a non-boolean truncated',
-      { sections: 1, deferralList: false, truncated: 1 },
+      // `fold` present and valid: the validator checks sections,
+      // deferralList, fold, truncated in that order, and without it this
+      // case threw on the fold clause — leaving the truncated clause it
+      // exists to pin with zero deciding coverage.
+      { sections: 1, deferralList: false, fold: false, truncated: 1 },
     ],
     [
       'a non-boolean fold',
