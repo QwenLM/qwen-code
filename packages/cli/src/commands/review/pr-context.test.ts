@@ -65,6 +65,7 @@ import {
   type RawComment,
   type RawReview,
   latestLedger,
+  recoverLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -1120,6 +1121,122 @@ describe('latestLedger — the split trust surface', () => {
       'bot',
     );
     expect(own?.ledger).toEqual(anchored);
+  });
+
+  it("recovers the winning review's own commit_id as the age reference", () => {
+    // The reference must come from the SAME review the ledger came from — a
+    // recovery that took the newest ledger but another review's commit_id
+    // would date old code against the wrong head. The fixture must be able
+    // to refute that mutant: the account's NEWEST review is marker-less with
+    // a different commit_id (the bot's follow-up comment posted against a
+    // later head), so "take commitId from the latest review regardless of
+    // ledger" fails here instead of passing by coincidence. An invalid or
+    // missing commit_id yields null, never a truncated or garbage reference.
+    // 64 hex chars: COMMIT_SHA_RE's deliberate {40,64} breadth exists for
+    // SHA-256 heads — narrowing to {40} would silently drop the age
+    // reference on such repos.
+    const head = 'a'.repeat(64);
+    const { recovered } = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'b'.repeat(40),
+        },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
+          id: 77,
+          commit_id: head,
+        },
+        {
+          ...review('bot', '2026-01-03T00:00:00Z', 'marker-less follow-up'),
+          commit_id: 'c'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.commitId).toBe(head);
+    // The winning review's own id rides along: Step 6's not-reviewed check
+    // must know WHICH body's disclosures bind the age rule.
+    expect(recovered?.reviewId).toBe(77);
+    const invalid = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'abc123',
+        },
+      ],
+      'bot',
+    ).recovered;
+    expect(invalid?.ledger.round).toBe(1);
+    expect(invalid?.commitId).toBeNull();
+  });
+
+  it('distinguishes "no own review" from "own review without a parseable ledger"', () => {
+    // The deletion arm must read "recovery returned null although reviews
+    // were read" as proof of nothing: an own review whose marker fails to
+    // parse (edited or damaged bot body, marker-less follow-up) also yields
+    // null — a persistent state, not absence. Deleting the side file there
+    // stamped the next round "round 1" mid-PR and reset the posture clock.
+    const damaged = recoverLedger(
+      [review('bot', '2026-01-01T00:00:00Z', 'edited body, marker gone')],
+      'bot',
+    );
+    expect(damaged.recovered).toBeNull();
+    expect(damaged.sawOwnReview).toBe(true);
+    // A stranger's marker with no own review: under the split trust surface
+    // the WORK LIST still recovers (as foreign, anchor gone at the seam) —
+    // and precisely because it does, the deletion arm requires BOTH "no own
+    // review" AND "nothing recovered from anyone": a live foreign counter is
+    // not leftovers.
+    const foreignOnly = recoverLedger(
+      [review('stranger', '2026-01-01T00:00:00Z', marker(3))],
+      'bot',
+    );
+    expect(foreignOnly.sawOwnReview).toBe(false);
+    expect(foreignOnly.recovered?.foreign).toBe(true);
+    expect(foreignOnly.recovered?.ledger.round).toBe(3);
+    // Logins compare case-insensitively (GitHub's rule): a case mismatch
+    // would read an own marker as FOREIGN — stripping an anchor this account
+    // itself posted — and "own review exists" as "proven absence".
+    const cased = recoverLedger(
+      [review('Bot', '2026-01-01T00:00:00Z', marker(2))],
+      'bot',
+    );
+    expect(cased.sawOwnReview).toBe(true);
+    expect(cased.recovered?.foreign).toBe(false);
+    expect(cased.recovered?.ledger.round).toBe(2);
+    // A PENDING draft is not "seen" either — it is not a submitted review.
+    const draftOnly = recoverLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          state: 'PENDING',
+        },
+      ],
+      'bot',
+    );
+    expect(draftOnly.sawOwnReview).toBe(false);
+    expect(draftOnly.recovered).toBeNull();
+  });
+
+  it('never selects a PENDING draft — an unsubmitted review is not a previous round', () => {
+    // The API serves the caller's own drafts in the reviews list; a run that
+    // crashed between creating and submitting one must not hand the next
+    // round a round number, an age reference and a reviewId from state the
+    // PR never showed anyone.
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(9)),
+          state: 'PENDING',
+          commit_id: 'd'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(1);
   });
 
   it('treats an unknown login as foreign — an anchor needs a proven owner', () => {
