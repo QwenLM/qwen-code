@@ -1397,6 +1397,26 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
   });
 
+  it('resubmits a legacy admission after a transport failure', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockRejectedValue(
+      new Error('connection lost'),
+    );
+    mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('do not lose me'));
+    await act(async () => {});
+
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'do not lose me',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'do not lose me', serverState: 'submitting' },
+    ]);
+  });
+
   it('deletes an accepted message from the daemon queue', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({

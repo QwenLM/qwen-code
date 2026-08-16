@@ -1381,7 +1381,11 @@ export function useQueuedPrompts({
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
+          if (latestSessionIdRef.current !== targetSessionId) return;
+          fallbackToPendingPrompt(prompt.id);
+        });
       return true;
     },
     [

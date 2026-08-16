@@ -602,10 +602,17 @@ export function ChatPane({
     ) => {
       const busyOwner = sessionOwnerGuard.capture();
       const busySessionId = connectionRef.current.sessionId;
+      const expectedGoalId = connectionRef.current.goalState?.goal?.goalId;
       setGoalControlBusy(true);
       try {
         const snapshot = (await actions.getGoal()).snapshot;
         const goal = snapshot.goal;
+        if (
+          (action === 'replace' || action === 'edit') &&
+          goal?.goalId !== expectedGoalId
+        ) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
         let request: GoalControlRequest;
         if (action === 'replace') {
           if (!objective) throw new Error(t('goals.error.emptyCondition'));

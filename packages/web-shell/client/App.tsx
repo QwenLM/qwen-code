@@ -8428,10 +8428,17 @@ export function App({
     ) => {
       const busyOwner = sessionOwnerGuard.capture();
       const busySessionId = connectionRef.current.sessionId;
+      const expectedGoalId = goalSnapshotRef.current?.goal?.goalId;
       setGoalControlBusy(true);
       try {
         const snapshot = await refreshGoal();
         const goal = snapshot.goal;
+        if (
+          (action === 'replace' || action === 'edit') &&
+          goal?.goalId !== expectedGoalId
+        ) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
         let request: GoalControlRequest;
         if (action === 'create' || action === 'replace') {
           if (!objective) throw new Error(t('goals.error.emptyCondition'));

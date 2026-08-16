@@ -794,7 +794,7 @@ describe('ScheduledTasksDialog run now', () => {
     expect(actions.runScheduledTask).not.toHaveBeenCalled();
   });
 
-  it('admits a bound ONE-SHOT before consuming it (enqueue → record)', async () => {
+  it('consumes a bound ONE-SHOT before enqueuing (record → enqueue)', async () => {
     const order: string[] = [];
     const onRunPrompt = vi.fn(() => {
       order.push('enqueue');
@@ -809,10 +809,10 @@ describe('ScheduledTasksDialog run now', () => {
     });
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(order).toEqual(['enqueue', 'record']);
+    expect(order).toEqual(['record', 'enqueue']);
   });
 
-  it('preserves a ONE-SHOT when delivery fails before admission', async () => {
+  it('surfaces a consumed-but-failed error when a ONE-SHOT delivery fails', async () => {
     const onRunPrompt = vi.fn().mockRejectedValue(new Error('switch timeout'));
     const onError = vi.fn();
     await mount(
@@ -828,11 +828,11 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
-      expect.stringContaining('run'),
+      expect.stringContaining('never ran'),
     );
   });
 

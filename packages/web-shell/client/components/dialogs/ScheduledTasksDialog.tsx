@@ -1054,11 +1054,16 @@ export function ScheduledTasksDialog({
             onError(err, t('scheduledTasks.error.runFailed'));
           }
         } else {
-          // Preserve the one-shot until its prompt is admitted. A failed
-          // preflight or session switch must not delete work that never ran.
-          await onRunPrompt(fresh.prompt, fresh.sessionId);
+          // One-shot: /run IS its single fire — consume it before awaiting
+          // admission so the scheduler cannot fire the same prompt meanwhile.
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
+          try {
+            await onRunPrompt(fresh.prompt, fresh.sessionId);
+          } catch (err) {
+            onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
+            return;
+          }
         }
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));

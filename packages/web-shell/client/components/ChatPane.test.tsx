@@ -731,6 +731,57 @@ describe('ChatPane', () => {
     },
   );
 
+  it('rejects a Goal edit when the same session replaces the goal', async () => {
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'goal A',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const goalB = {
+      ...goalA,
+      goal: { ...goalA.goal, goalId: 'goal-b', objective: 'goal B' },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof goalB }>();
+    const onError = vi.fn();
+    connectionState.goalState = goalA;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )
+        ?.click();
+    });
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      connectionState = { ...connectionState, goalState: goalB };
+      rerender({ onError });
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: goalB }));
+
+    expect(controlGoal).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to edit the goal',
+    );
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],

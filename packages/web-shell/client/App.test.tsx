@@ -19951,6 +19951,40 @@ describe('App /goal command', () => {
     },
   );
 
+  it('rejects a Goal edit when the same session replaces the goal', async () => {
+    const goalA = activeGoalSnapshot('goal A', 5);
+    const goalB = {
+      ...activeGoalSnapshot('goal B', 1),
+      goal: {
+        ...activeGoalSnapshot('goal B', 1).goal!,
+        goalId: 'goal-b',
+      },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof goalB }>();
+    mockConnection.goalState = goalA;
+    mockSessionActions.getGoal.mockReturnValueOnce(pendingGoal.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    const edit = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+    );
+    if (!edit) throw new Error('edit control was not rendered');
+    act(() => edit.click());
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      mockConnection.goalState = goalB;
+      rerender({});
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: goalB }));
+
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+  });
+
   it('keeps the Goals page open when canonical creation is rejected', async () => {
     const { container } = renderApp();
     await flush();
