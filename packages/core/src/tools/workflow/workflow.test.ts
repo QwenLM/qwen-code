@@ -17,6 +17,8 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   MAX_WORKFLOW_AGENTS_ENV,
   MAX_WORKFLOW_CONCURRENCY_ENV,
+  WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+  WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
 
@@ -65,7 +67,7 @@ describe('WorkflowTool', () => {
   // would notice — so anchor the load-bearing claims.
   it('description carries both the runtime facts and the orchestration policy', () => {
     const { description } = new WorkflowTool(fakeConfig());
-    // Every env knob the description names is anchored. The two that the
+    // Every env knob the description names is anchored. The four that the
     // orchestrator exports are anchored *through the exported constant*, so
     // a rename on the runtime side fails here too — a hardcoded literal
     // would only have caught a description-side typo, and the model would
@@ -76,6 +78,8 @@ describe('WorkflowTool', () => {
       'min(16, cpus-2)',
       MAX_WORKFLOW_AGENTS_ENV,
       MAX_WORKFLOW_CONCURRENCY_ENV,
+      WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+      WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
       'QWEN_CODE_MAX_WORKFLOW_SECONDS',
       'resumeFromRunId',
       '/workflows',
