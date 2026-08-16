@@ -307,26 +307,26 @@ const EXAMPLE_RECEIPT_CLAUSE_LC = EXAMPLE_RECEIPT_CLAUSE.toLowerCase();
  * shallow walk (`skimmed`), zh bare-不 (`打不开`) and 跳过 — with 不过
  * exempted as the pinned innocuous connective.
  *
- * The bare tokens also carry ABSENCE-OF-PROBLEMS exceptions (#9259), each
- * narrowed to the witnessed honest shape after the first form licensed
- * real admissions (#9272 — the impossibility claim the earlier comment
- * made was falsified by execution): `no` + a problem noun is excepted
- * only in the ACTIVE voice — `no regressions were verified` is the
- * passive admission and stays marked; 没/未 + 问题名词 are excepted, 未来
- * is excepted but the incapacity compound 未来得及 is not; `fail-`
- * hyphen jargon is bounded to the witnessed `fail-open|safe|fast`; and a
- * limiter before a walk verb (只走查/仅检查 — "only walked X") is itself
- * a marker: a partial walk is the admission, not the walk. What is NOT
- * excepted fails toward audit, the module's own direction: bare `n't`
- * (`it wasn't flaky`) still reads `unknown`.
- * The list has no last word, and the residue is stated rather than
+ * The marker list is BARE on purpose (#9272): an absence-of-problems
+ * exception class (`no regressions`, 没有回归, `fail-open` jargon) was
+ * tried and removed after two review rounds of executed entrances —
+ * passive voice (`no regressions have been verified`), lexicalized
+ * compounds (回归测试), limiter compounds (只不过) — because an
+ * exception list over natural language has no last corner, the same
+ * lesson the polarity guard itself learned in #9213 (the form closes
+ * what enumeration cannot). The stated residue is the honest mirror:
+ * absence-of-problem phrasing that IS honest (`verified no
+ * regressions`, `确认没有回归`) reads `unknown` and the chunk stays
+ * under audit — the never-retire cost this module already declares as
+ * its failure direction, preferable to certifying one admission. The
+ * list has no last word, and the residue is stated rather than
  * papered over: a marker it misses still fails toward RETIREMENT when the
  * clause ALSO names a walk; what closes that class is the form itself —
  * the brief tells an auditor that did not walk its scope to return
  * prose, not the receipt, and prose is not the form.
  */
 const NEGATION_MARKER_RE =
-  /\bnot\b|n['’]t\b|\bnever\b|\bno\b(?![\s-]*(?:regressions?|issues?|findings?|gaps?|problems?|defects?|bugs?)\b(?!\s+(?:were|was|are|is)\b))|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b(?!-(?:open|safe|fast)\b)|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened|examined)\b|没(?!有?(?:回归|问题|缺陷|异常|bug))|未(?!来(?!得及)|有?(?:回归|问题|缺陷|异常|bug))|[只仅](?=\s*(?:走查|核对|复核|核查|复查|重走|检查|walk|verif|trace|examin))|无法|跳过|不(?!过)/i;
+  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened|examined)\b|未|没|无法|跳过|不(?!过)/i;
 
 /**
  * The brief's own all-clear vocabulary — the exact shapes

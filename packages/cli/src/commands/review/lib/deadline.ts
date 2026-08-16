@@ -40,7 +40,13 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
@@ -151,51 +157,46 @@ interface RoundStamp {
 
 const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
-const DEGRADE_NOTES_FILE = 'retirement-degrade-notes.json';
 
 /**
  * Claim the retirement-degradation NOTE's slot for `round`, this run:
- * `true` exactly once per round per run, across PROCESSES — Step 3B
- * builds each chunk in its own CLI process, so an in-memory Set dedupes
- * nothing in production and a dead-schedule round printed one identical
- * NOTE per chunk build (#9272). The sidecar rides the stamps file's
- * pattern: run-epoch fenced (a previous run's claim must not silence this
- * run's channel), read-modify-write, and every failure fails toward
- * PRINTING — a lost or corrupt claim re-prints next time; the note is the
- * diagnostic, and silence is the only wrong answer here (#9206).
+ * `true` at most once per round per run, across PROCESSES — Step 3B
+ * builds each chunk in its own CLI process, and the claim file's atomic
+ * `wx` create is the inter-process exclusion a read-modify-write sidecar
+ * does not have (#9272: 24 concurrent builds all claimed one slot, and
+ * the JSON tore). One claim file per round, fenced to the run by its
+ * mtime against the plan's epoch — a previous run's claim must not
+ * silence this run's channel; the stale-claim remove-then-create window
+ * can double-print, which is the verbose side and accepted. Every other
+ * failure fails toward PRINTING: the note is the diagnostic, and silence
+ * is the only wrong answer here (#9206).
  */
 export function claimRetirementDegradeNote(
   planPath: string,
   round: number | undefined,
 ): boolean {
   const dir = promptRecordDir(planPath);
-  const file = join(dir, DEGRADE_NOTES_FILE);
-  let entries: RoundStamp[] = [];
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    if (Array.isArray(parsed)) {
-      const epoch = runEpochMs(planPath);
-      entries = parsed.filter(
-        (e): e is RoundStamp =>
-          typeof e === 'object' &&
-          e !== null &&
-          typeof (e as RoundStamp).atMs === 'number' &&
-          (e as RoundStamp).atMs >= epoch,
-      );
-    }
-  } catch {
-    // Missing or unreadable bookkeeping: nothing has claimed the slot.
-  }
-  const key = round ?? null;
-  if (entries.some((e) => e.round === key)) return false;
-  entries.push({ round: key, atMs: Date.now() });
+  const file = join(dir, `retirement-degrade-note-round-${round ?? 'x'}.json`);
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(file, JSON.stringify(entries));
-  } catch {
-    // A lost write re-prints on the next build — the verbose side.
+    try {
+      if (statSync(file).mtimeMs < runEpochMs(planPath)) {
+        rmSync(file, { force: true });
+      }
+    } catch {
+      // No prior claim — the create below is the claimant.
+    }
+    writeFileSync(
+      file,
+      JSON.stringify({ round: round ?? null, atMs: Date.now() }),
+      { flag: 'wx' },
+    );
+    return true;
+  } catch (err) {
+    // EEXIST: claimed already this run — stay silent. Anything else (an
+    // unwritable record dir, a faulting stat) must not silence the note.
+    return (err as NodeJS.ErrnoException).code !== 'EEXIST';
   }
-  return true;
 }
 
 // The run-epoch fence is shared with every other per-run artifact (the
