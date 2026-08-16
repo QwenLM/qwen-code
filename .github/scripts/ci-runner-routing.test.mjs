@@ -188,10 +188,12 @@ describe('serve-ab.yml runner routing', () => {
     assert.match(runsOn, /ubuntu-latest/);
   });
 
-  it('wipes only the reused A/B checkout dirs before checking out PR code', () => {
+  it('wipes the reused workspace except the shared root .git before checking out PR code', () => {
     const steps = serveAbDoc.jobs.ab.steps;
     const wipeIndex = steps.findIndex(
-      (s) => s.name === 'Wipe stale A/B checkout dirs before checkout',
+      (s) =>
+        s.name ===
+        'Wipe stale workspace except the shared .git before checkout',
     );
     assert.ok(
       wipeIndex !== -1,
@@ -199,11 +201,28 @@ describe('serve-ab.yml runner routing', () => {
     );
     const wipe = steps[wipeIndex];
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
-    assert.notEqual(
-      wipe['continue-on-error'],
-      true,
+    // The script text alone does not decide whether the wipe runs: the
+    // shell wrapper, continue-on-error, and BASH_ENV — at step, job, and
+    // workflow level — all control whether the pinned command executes and
+    // whether its failure fails the job.
+    const shell =
+      wipe.shell ??
+      serveAbDoc.jobs.ab.defaults?.run?.shell ??
+      serveAbDoc.defaults?.run?.shell;
+    assert.ok(
+      shell === undefined || shell === 'bash',
+      'the wipe must run under the default bash wrapper',
+    );
+    assert.ok(
+      !('continue-on-error' in wipe),
       'a failed wipe must fail the job, not bleed into the next PR',
     );
+    for (const envMap of [wipe.env, serveAbDoc.jobs.ab.env, serveAbDoc.env]) {
+      assert.ok(
+        !envMap || envMap.BASH_ENV === undefined,
+        'BASH_ENV can shadow the pinned wipe command',
+      );
+    }
     // The sudo-less wipe only works because ownership-restore ran first,
     // and it must precede the checkouts or it deletes the freshly
     // checked-out code instead of stale leftovers.
@@ -217,8 +236,6 @@ describe('serve-ab.yml runner routing', () => {
       ownershipIndex < wipeIndex,
       'the wipe depends on ownership-restore running first',
     );
-    // Derive the wipe targets from the checkout steps so this pin cannot
-    // drift from the paths the checkouts actually use.
     const checkouts = steps.filter((s) =>
       String(s.uses || '').startsWith('actions/checkout'),
     );
@@ -227,63 +244,22 @@ describe('serve-ab.yml runner routing', () => {
         steps.indexOf(checkout) > wipeIndex,
         'the wipe must run before every checkout it protects',
       );
-      assert.ok(
-        checkout.with && checkout.with.path,
-        'every checkout must declare a with.path the wipe can target',
-      );
     }
-    const checkoutPaths = checkouts.map((s) => s.with.path);
-    assert.ok(
-      checkoutPaths.length >= 2,
-      'expected at least two checkout paths',
-    );
-    // A whole-workspace wipe destroys the shared root .git, forcing the
-    // next job on this runner to re-fetch the full history from
-    // github.com — on the ECS pool's slow link that is the "hung runner"
-    // pathology. Pin the wipe step's entire executed script: no extra
-    // removal may be added, and nothing may follow the rm. The runner
-    // already invokes this step with -eo pipefail, but pin the executed
-    // script anyway so any change forces a deliberate test update.
+    assert.ok(checkouts.length >= 2, 'expected at least two checkouts');
+    // Wiping the shared root .git forces the next job on this runner to
+    // re-fetch the full history from github.com — on the ECS pool's slow
+    // link that is the "hung runner" pathology. Pin the wipe step's entire
+    // executed script so any change forces a deliberate test update.
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
-    assert.equal(executed.length, 2, 'expected `set -uo pipefail` + one rm');
+    assert.equal(executed.length, 2, 'expected `set -uo pipefail` + one find');
     assert.equal(executed[0], 'set -uo pipefail');
-    assert.ok(
-      executed[1].startsWith('rm -rf '),
-      'the wipe must be a single rm line',
+    assert.equal(
+      executed[1],
+      'find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name \'.git\' -exec rm -rf {} +',
+      'the wipe must remove every top-level workspace entry except the shared root .git',
     );
-    const expectedTargets = checkoutPaths
-      .map((p) => '"${GITHUB_WORKSPACE:?}/' + p + '"')
-      .sort();
-    assert.deepEqual(
-      executed[1].slice('rm -rf '.length).split(' ').sort(),
-      expectedTargets,
-      'the rm must target exactly the checkout dirs',
-    );
-    // The wipe covers only the checkout dirs, so any later step that
-    // materializes fresh workspace content must land inside them — a
-    // `git clone` into any other dir would survive into the next run on
-    // the persistent pool, the exact bleed this pin exists to prevent.
-    for (const step of steps.slice(wipeIndex + 1)) {
-      const run = String(step.run || '');
-      if (!run.includes('git clone')) continue;
-      const base = step['working-directory'] ?? '.';
-      for (const line of run.split('\n')) {
-        if (!line.includes('git clone')) continue;
-        const target = line
-          .trim()
-          .split(/\s+/)
-          .at(-1)
-          .replace(/^["']|["']$/g, '')
-          .replace(/^(\$\{GITHUB_WORKSPACE[^}]*\}|\$GITHUB_WORKSPACE)\//, '');
-        const dest = join(base, target);
-        assert.ok(
-          checkoutPaths.some((p) => dest === p || dest.startsWith(p + '/')),
-          `post-wipe git clone target ${dest} is not covered by the wipe`,
-        );
-      }
-    }
   });
 });
