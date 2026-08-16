@@ -1016,6 +1016,29 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-gate"$/m,
       'a plant left by an earlier run on the persistent pool must be removed first',
     );
+    // Run-freshness marker: a stale-but-genuine home from an earlier
+    // run on the persistent pool passes every ownership/mode/shape
+    // check — only this marker lets the always() staging step tell
+    // runs apart when the record step itself was skipped.
+    assert.match(
+      recordStep.run,
+      /^\s*printf '%s-%s' "\$\{GITHUB_RUN_ID:\?\}" "\$\{GITHUB_RUN_ATTEMPT:\?\}" > "\$RUNNER_TEMP\/flake-gate\/run-id"$/m,
+      'the record step must stamp the run identity into the home it creates',
+    );
+    // Startup-channel scrub: BASH_FUNC_* imports are dropped by a
+    // one-shot env -i re-exec whose child marker is POSITIONAL — an
+    // env-borne sentinel would be forgeable through the very
+    // file-command channel the scrub defends against.
+    assert.match(
+      recordStep.run,
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
+      'the record step must re-exec through env -i with a positional child marker',
+    );
+    assert.doesNotMatch(
+      recordStep.run,
+      /_FLAKE_CLEAN_REEXEC/,
+      'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
+    );
     assert.match(
       recordStep.run,
       pathPinRe,
@@ -1106,11 +1129,36 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       'runner-injection files must be invisible to PR test code',
     );
     // Whole-env pin: any future secret added to this step env reaches
-    // process.env of PR test code, so it must be an explicit test decision.
+    // process.env of PR test code, so it must be an explicit test
+    // decision. BASH_ENV/LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH are the
+    // defensive startup-channel blanks (consumed at shell/loader startup,
+    // before any in-script defence) — blanks, never secrets.
     assert.deepEqual(
       Object.keys(flakeStep.env).sort(),
-      ['FLAKE_ROUNDS', 'GH_TOKEN', 'GITHUB_TOKEN'],
+      [
+        'BASH_ENV',
+        'FLAKE_ROUNDS',
+        'GH_TOKEN',
+        'GITHUB_TOKEN',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+        'LD_PRELOAD',
+      ],
       'the gate env must stay tokens-blanked and secret-free',
+    );
+    // Startup-channel scrub: BASH_FUNC_* imports are dropped by a
+    // one-shot env -i re-exec whose child marker is POSITIONAL — an
+    // env-borne sentinel would be forgeable through the very
+    // file-command channel the scrub defends against.
+    assert.match(
+      flakeStep.run,
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
+      'the gate must re-exec through env -i with a positional child marker',
+    );
+    assert.doesNotMatch(
+      flakeStep.run,
+      /_FLAKE_CLEAN_REEXEC/,
+      'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
     );
     // Actions merges workflow- and job-level env into every step: the
     // step-key pin above is only exhaustive while those levels stay empty.
@@ -1199,11 +1247,11 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // node-owned may be alive when root touches $RUNNER_TEMP paths
     // afterwards).
     const resetRestoreRe =
-      /^\s*timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*git reset --hard "\$PINNED_OID" 2>\/dev\/null \|\| reset_rc=\$\?$/m;
+      /^\s*timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*-u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \\\n\s*git reset --hard "\$PINNED_OID" 2>\/dev\/null \|\| reset_rc=\$\?$/m;
     const resetCleanRe =
-      /^\s*timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*git clean -ffd 2>\/dev\/null \|\| reset_rc=\$\?$/m;
+      /^\s*timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*-u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \\\n\s*git clean -ffd 2>\/dev\/null \|\| reset_rc=\$\?$/m;
     const sanitizeRe =
-      /^\s*timeout -k 10 30 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*bash -c 'rm -f \.git\/info\/attributes; git config --local --list --name-only 2>\/dev\/null \| grep -o "\^filter\\\.\[\^\.\]\*" \| sort -u \| while IFS= read -r s; do git config --local --remove-section "\$s" 2>\/dev\/null \|\| true; done; git config --local --unset core\.fsmonitor 2>\/dev\/null \|\| true; git config --local --unset core\.hooksPath 2>\/dev\/null \|\| true; git config --local --unset core\.attributesFile 2>\/dev\/null \|\| true' \|\| reset_rc=\$\?$/m;
+      /^\s*timeout -k 10 30 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*-u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \\\n\s*bash -c 'rm -f \.git\/info\/attributes; git config --local --list --name-only 2>\/dev\/null \| grep -o "\^filter\\\.\[\^\.\]\*" \| sort -u \| while IFS= read -r s; do git config --local --remove-section "\$s" 2>\/dev\/null \|\| true; done; git config --local --unset core\.fsmonitor 2>\/dev\/null \|\| true; git config --local --unset core\.hooksPath 2>\/dev\/null \|\| true; git config --local --unset core\.attributesFile 2>\/dev\/null \|\| true' \|\| reset_rc=\$\?$/m;
     assert.match(
       flakeStep.run,
       resetRestoreRe,
@@ -1296,7 +1344,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // the pristine baseline. reset --hard also drops files the moved
     // HEAD added, which a pathspec checkout would keep.
     const pinnedOidRe =
-      /^\s*PINNED_OID="\$\(timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY git rev-parse HEAD 2>\/dev\/null\)"$/m;
+      /^\s*PINNED_OID="\$\(timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \\\n\s*-u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \\\n\s*git rev-parse HEAD 2>\/dev\/null\)"$/m;
     const pinnedOid = flakeStep.run.search(pinnedOidRe);
     assert.ok(
       pinnedOid !== -1,
@@ -1369,13 +1417,22 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       'the recorded list must only be read through an intact home',
     );
     const intactInLoop = flakeStep.run.search(
-      /^\s*gate_home_intact \|\|\n\s*finish error 'the gate working directory changed mid-run/m,
+      /^\s*if ! gate_home_intact; then\n\s*if \[ "\$samples" -eq 0 \]; then\n\s*finish error 'the gate working directory changed mid-run — refusing to continue'\n\s*fi/m,
     );
     assert.ok(
       intactInLoop !== -1 &&
         loopStart < intactInLoop &&
         intactInLoop < uniqueOut,
       'every invocation output must open through a re-verified home',
+    );
+    // A swap AFTER samples exist must stop and classify them, not
+    // discard them: publishing `error` there would let a PR dodge a
+    // computed demotion by renaming the home after its first divergent
+    // sample.
+    assert.match(
+      flakeStep.run,
+      /^\s*printf 'gate home changed mid-run: sampling stopped, classifying the collected results\\n' >> "\$DETAIL"\n\s*break 2$/m,
+      'a swapped home after samples must keep the collected results',
     );
     assert.match(
       flakeStep.run,
@@ -1495,6 +1552,12 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     const iHomeCheck = sr.search(
       /^\s*if \[ ! -L "\$GATE_DIR" \] && \[ -d "\$GATE_DIR" \] && \[ -O "\$GATE_DIR" \] &&$/m,
     );
+    // The RUN-identity conjunct: ownership/mode/shape all pass on a
+    // stale-but-genuine home an earlier run left on the persistent
+    // pool; only the marker the record step stamped separates runs.
+    const iRunId = sr.search(
+      /^\s*\[ "\$\(cat "\$GATE_DIR\/run-id" 2>\/dev\/null\)" = "\$\{GITHUB_RUN_ID:\?\}-\$\{GITHUB_RUN_ATTEMPT:\?\}" \]; then$/m,
+    );
     const iFresh = sr.search(
       /^\s*install -d -m 0700 -o root -g root "\$UPLOAD_DIR"$/m,
     );
@@ -1510,8 +1573,11 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // a kill-loop survivor owning the uid-1000 parent can swap the
     // entry between the two — the opened directory must still BE the
     // validated one, or the copy is skipped.
+    // || true (round 14): a survivor renaming verify-results between
+    // the guard and this stat must degrade to a skipped copy, never a
+    // set -e abort that discards the authoritative gate-log copy.
     const iVrId = sr.search(
-      /^\s*vr_id="\$\(stat -c '%d:%i' "\$RUNNER_TEMP\/verify-results" 2>\/dev\/null\)"$/m,
+      /^\s*vr_id="\$\(stat -c '%d:%i' "\$RUNNER_TEMP\/verify-results" 2>\/dev\/null \|\| true\)"$/m,
     );
     const iVrIntact = sr.search(
       /^\s*\[ "\$\(stat -c '%d:%i' \. 2>\/dev\/null\)" = "\$vr_id" \] &&$/m,
@@ -1551,6 +1617,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       ['pkill', iPkill],
       ['bounded survivor wait', iWait],
       ['root-only home integrity check', iHomeCheck],
+      ['run-identity check', iRunId],
       ['fresh 0700 upload dir', iFresh],
       ['verify-results identity pin', iVrId],
       ['opened-directory identity re-check', iVrIntact],
@@ -1565,7 +1632,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     assert.ok(
       iPkill < iWait &&
         iWait < iHomeCheck &&
-        iHomeCheck < iFresh &&
+        iHomeCheck < iRunId &&
+        iRunId < iFresh &&
         iFresh < iVrId &&
         iVrId < iVrIntact &&
         iVrIntact < iCopyRegular &&
@@ -1579,6 +1647,18 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       sr,
       pathPinRe,
       'staging must pin a root-only-writable PATH — its inherited one may be poisoned through the file-command backing files',
+    );
+    // Startup-channel scrub: same one-shot env -i re-exec as the record
+    // and gate blocks, positional child marker (env markers forgeable).
+    assert.match(
+      sr,
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
+      'staging must re-exec through env -i with a positional child marker',
+    );
+    assert.doesNotMatch(
+      sr,
+      /_FLAKE_CLEAN_REEXEC/,
+      'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
     );
     assert.doesNotMatch(
       agentStep.run,
@@ -1671,11 +1751,14 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
   });
 
   it('the verify job timeout still covers agent + prepare + gate', () => {
-    // agent 120m + install/build 15m + gate ~25m + misc ~5m — the job limit
-    // must stay comfortably above the sum or the container is killed mid-run
-    // and the ship-what-ran path is bypassed (see the budget comment).
+    // agent 120m + install/build 15m + gate ~40m (the 15m round budget is
+    // checked BEFORE each reset, so the last invocation drags its reset
+    // plus its -k 30 600 cap; add the OID pin and the post-gate reset)
+    // + misc ~5m ≈ 180m — the job limit must stay comfortably above the
+    // sum or the container is killed mid-run and the ship-what-ran path
+    // is bypassed (see the budget comment).
     assert.ok(
-      verifyJob['timeout-minutes'] >= 170,
+      verifyJob['timeout-minutes'] >= 190,
       `timeout-minutes must cover the gate budget (got ${verifyJob['timeout-minutes']})`,
     );
   });
@@ -1765,7 +1848,14 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   const STUB_PS = ['#!/bin/bash', 'exit 0', ''].join('\n');
 
   const scenarioRoot = mkdtempSync(join(tmpdir(), 'flake-behavioral-'));
-  after(() => rmSync(scenarioRoot, { recursive: true, force: true }));
+  after(() => {
+    // STUB_POISON leaves a mode-500 directory rmSync cannot delete
+    // (force suppresses ENOENT only, not EACCES), which marks the whole
+    // suite hookFailed and leaks the tree; restore owner permissions
+    // first.
+    spawnSync('chmod', ['-R', 'u+rwx', scenarioRoot]);
+    rmSync(scenarioRoot, { recursive: true, force: true });
+  });
 
   const runGate = ({
     layout = {},
@@ -2815,14 +2905,48 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.match(log, /sampling stopped/);
   });
 
+  it('a reset failure before two full rounds carries no flakiness signal either way', () => {
+    // Round 14 (R11-3/R13-3): the deadline path has always degraded
+    // sub-2-round sampling to the informational timeout verdict; the
+    // reset-failure early stop must do the same. Round 1 passes and
+    // plants residue that defeats `git clean -ffd`, failing the next
+    // reset — classifying one agreeing round as `pass` would certify
+    // a ~50% flake that happened to pass its single sample.
+    const STUB_POISON_PASS = [
+      '#!/bin/bash',
+      'n_file="$FLAKE_SEQ_DIR/.count-poisonpass"',
+      'n=$(cat "$n_file" 2>/dev/null || echo 0)',
+      'echo $((n+1)) > "$n_file"',
+      'if [ "$n" -eq 0 ]; then',
+      '  mkdir -p poison',
+      '  touch poison/f',
+      '  chmod 500 poison',
+      'fi',
+      'exit 0',
+      '',
+    ].join('\n');
+    const { res, outputs, log } = runGate({
+      layout: { 'scripts/tests/poisonpass.test.js': '' },
+      list: 'scripts/tests/poisonpass.test.js\n',
+      stubs: { npx: STUB_POISON_PASS },
+      git: true,
+    });
+    assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'timeout');
+    assert.match(outputs.flake_summary, /no flakiness signal either way/);
+    assert.match(log, /sampling stopped/);
+  });
+
   it('a home swapped mid-run fails closed instead of sampling through the plant', () => {
-    // Round 11 (R8-1): rename(2) needs write on the PARENT directory —
-    // the uid-1000 $RUNNER_TEMP top level grants it, so the 0700 home
-    // cannot stop its own entry being swapped after the one-time
-    // validation. The stub swaps the home during round 1; the identity
-    // re-check before the next output open must fail the gate closed
-    // (-O passes on the harness user, so only the recorded identity
-    // catches the plant).
+    // Round 11 (R8-1) + round 14 (R12-1): rename(2) needs write on the
+    // PARENT directory — the uid-1000 $RUNNER_TEMP top level grants it,
+    // so the 0700 home cannot stop its own entry being swapped after
+    // the one-time validation. The stub swaps the home during round 1;
+    // the identity re-check before the next output open must stop the
+    // sampling (-O passes on the harness user, so only the recorded
+    // identity catches the plant). With only agreeing samples collected
+    // the stop lands the sub-2-round timeout verdict — never the old
+    // `error`, which discarded honest samples.
     const STUB_SWAPPER = [
       '#!/bin/bash',
       'f="${@: -1}"',
@@ -2848,7 +2972,56 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       stubs: { npx: STUB_SWAPPER },
     });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(outputs.flake_verdict, 'error');
-    assert.match(outputs.flake_summary, /working directory changed/);
+    assert.equal(outputs.flake_verdict, 'timeout');
+    assert.match(outputs.flake_summary, /no flakiness signal either way/);
+  });
+
+  it('a home swapped after a computed divergence still demotes', () => {
+    // Round 14 (R12-1): samples already collected are honest — the
+    // swap must stop the sampling and classify them, because
+    // publishing `error` instead lets a PR dodge its demotion by
+    // renaming the home after the first divergent sample. a.test.js
+    // diverges F-then-P in rounds 1-2; the home is swapped during
+    // round 2, after the divergence is already collected.
+    const STUB_SWAPPER = [
+      '#!/bin/bash',
+      'f="${@: -1}"',
+      'case "$f" in',
+      '  ./scripts/tests/a.test.js)',
+      '    n_file="$FLAKE_SEQ_DIR/.count-a"',
+      '    n=$(cat "$n_file" 2>/dev/null || echo 0)',
+      '    echo $((n+1)) > "$n_file"',
+      '    seq="$(cat "$FLAKE_SEQ_DIR/a.test.js" 2>/dev/null || echo P)"',
+      '    [ "${seq:$((n % ${#seq})):1}" = F ] && exit 1',
+      '    exit 0',
+      '    ;;',
+      '  ./scripts/tests/swapper.test.js)',
+      '    n_file="$FLAKE_SEQ_DIR/.count-swapper"',
+      '    n=$(cat "$n_file" 2>/dev/null || echo 0)',
+      '    echo $((n+1)) > "$n_file"',
+      '    if [ "$n" -eq 1 ] && [ ! -e "$RUNNER_TEMP/flake-gate.real" ]; then',
+      '      mv "$RUNNER_TEMP/flake-gate" "$RUNNER_TEMP/flake-gate.real"',
+      '      mkdir "$RUNNER_TEMP/flake-gate"',
+      '      chmod 700 "$RUNNER_TEMP/flake-gate"',
+      '    fi',
+      '    exit 0',
+      '    ;;',
+      'esac',
+      'exit 1',
+      '',
+    ].join('\n');
+    const { res, outputs, log } = runGate({
+      layout: {
+        'scripts/tests/a.test.js': '',
+        'scripts/tests/swapper.test.js': '',
+      },
+      list: 'scripts/tests/a.test.js\nscripts/tests/swapper.test.js\n',
+      sequences: { 'a.test.js': 'FP' },
+      stubs: { npx: STUB_SWAPPER },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'flaky');
+    assert.match(outputs.flake_summary, /returned different results/);
+    assert.match(log, /a\.test\.js: FP/);
   });
 });

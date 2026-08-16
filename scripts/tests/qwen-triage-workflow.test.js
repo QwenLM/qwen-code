@@ -2143,18 +2143,21 @@ describe('qwen-triage verify hardening', () => {
   it('strips GitHub command files from every node-run verify command', () => {
     // Bound to the commands that run as node before the agent: npm ci and
     // npm run build in the prepare step, the evidence browser download,
-    // and the flake gate's two reset git invocations (git filters run
-    // from PR-owned .git metadata). The slice stops at the agent step,
-    // whose own `runuser` launches qwen under `env -i` and needs no
-    // per-variable stripping. Covering all five by construction (not
-    // enumeration) is what catches a future node-run command added
-    // without the strip.
+    // and the flake gate's four pre-sample git invocations — the .git
+    // sanitize, git reset --hard, git clean -ffd, and the PINNED_OID
+    // rev-parse (git filters run from PR-owned .git metadata). The slice
+    // stops at the agent step, whose own `runuser` launches qwen under
+    // `env -i` and needs no per-variable stripping; the gate's
+    // per-sample invocation is a line-continuation shape this
+    // single-line match does not fold. Covering all seven by
+    // construction (not enumeration) is what catches a future node-run
+    // command added without the strip.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(5);
+    expect(commands.length).toBe(7);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );

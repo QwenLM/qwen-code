@@ -2151,17 +2151,22 @@ jobs:
     #   install + build              ~6m measured (run 30284341325: npm ci
     #                                3m00 + build 2m40), budget 15m for a
     #                                cold cache or a heavier dependency tree
-    #   flakiness gate               ~25m worst case (15m round budget,
-    #                                checked before each invocation, plus one
-    #                                in-flight invocation capped at 10m)
+    #   flakiness gate               ~40m worst case: the 15m round budget
+    #                                is checked BEFORE each reset, so the
+    #                                last invocation drags its reset (≤~345s:
+    #                                sanitize -k 10 30, reset/clean -k 30 120
+    #                                each, bounded kill waits) plus its own
+    #                                -k 30 600 cap; add the OID pin (≤150s)
+    #                                and the unconditional post-gate reset
+    #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
     #   ------------------------------------
-    #   worst case                   ~165m  ⇒ 175 leaves 10m of headroom.
+    #   worst case                   ~180m  ⇒ 190 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
     # verify run now occupies one ECS slot for up to ~3h instead of 1h.
-    timeout-minutes: 175
+    timeout-minutes: 190
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2763,8 +2768,46 @@ jobs:
       # execution.
       - name: 'Record changed test files for the flakiness gate'
         if: "steps.pr.outputs.decision == 'run'"
+        # Startup-channel scrub (see the gate step): BASH_ENV and the
+        # LD_* loader channels are consumed at shell/loader startup,
+        # before any in-script defence — blank them where the step env
+        # is assembled. BASH_FUNC_* imports are handled by the re-exec
+        # below.
+        env:
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         run: |-
           set -euo pipefail
+          # Startup-channel scrub, part two: BASH_FUNC_<name>%% env
+          # entries are imported as shell functions BEFORE this body
+          # runs, are invisible to ${!BASH_FUNC_@}/`set`, and shadow
+          # every later resolution — including the PATH pin below,
+          # because function lookup precedes PATH. No in-script purge is
+          # safe (an import can shadow the purge builtin itself), so
+          # re-exec ONCE through an absolute-path env -i child: a
+          # slash-bearing word never goes through function lookup, and
+          # -i drops every import. The child marker is a POSITIONAL
+          # argument, never an env entry — the poisoned file-command
+          # channel this block defends against can plant any env
+          # variable, so an env-borne "already re-executed" sentinel
+          # would be forgeable; argv is set by exec, and the runner
+          # wrapper passes no arguments after the script path. Mirrors
+          # the autofix lane's env -i bootstrap; only builtins and
+          # expansions resolve before this guard.
+          if [ "${EUID:-1}" -eq 0 ] && { [ -n "${BASH_ENV:-}" ] || [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_AUDIT:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; }; then
+            echo "::error::flake-gate record: step-env scrub lost — refusing to run in a poisoned environment"
+            exit 1
+          fi
+          if [ "${1:-}" != '--flake-clean-child' ]; then
+            [ -x /usr/bin/env ] || { echo "::error::flake-gate record: clean re-exec unavailable"; exit 1; }
+            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+              PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+              GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+              bash --noprofile --norc -e -o pipefail "${BASH_SOURCE[0]}" --flake-clean-child
+          fi
           # Runner file-command backing files under $RUNNER_TEMP are
           # uid-1000-owned: a step's PR code can poison the job
           # environment (PATH above all) that LATER steps inherit, and
@@ -2791,6 +2834,14 @@ jobs:
           # earlier run on this persistent pool.
           rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
           install -d -m 0700 -o root -g root "$RUNNER_TEMP/flake-gate"
+          # Run-freshness marker: staging re-validates it before trusting
+          # the home. A stale-but-genuine home left by an earlier run on
+          # the persistent pool passes every ownership/mode/shape check —
+          # only this marker separates runs, so the always() staging step
+          # can never restage a previous run's evidence under this run's
+          # artifact name when the record step itself was skipped (a
+          # cancel between steps.pr and record still runs staging).
+          printf '%s-%s' "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" > "$RUNNER_TEMP/flake-gate/run-id"
           # Two statements, not a pipeline: `git diff | grep || true` would
           # swallow a git failure as "no changed test files", silently
           # narrowing the gate to n/a. A git failure here is pre-build
@@ -2981,6 +3032,16 @@ jobs:
           GITHUB_TOKEN: ''
           GH_TOKEN: ''
           FLAKE_ROUNDS: '${{ vars.QWEN_VERIFY_FLAKE_ROUNDS }}'
+          # Startup-channel scrub (see the re-exec below): BASH_ENV and
+          # the LD_* loader channels are consumed at shell/loader
+          # startup, before any in-script defence — blank them where the
+          # step env is assembled. Step env outranks the poisoned job
+          # env a PR step wrote to the uid-1000 file-command backing
+          # files; all four are defensive blanks, never secrets.
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         run: |-
           # Fail OPEN by contract: the gate is advisory-and-demoting only, so
           # a bug in it must degrade to the fixed `error` verdict — never
@@ -2994,6 +3055,48 @@ jobs:
           # gate exists to classify (round-1 sandboxed verify, cells C/D).
           set -uo pipefail
           set +e
+          # Startup-channel scrub, part one: if the step-env blanks
+          # above lost to the poisoned job env, BASH_ENV's payload
+          # already ran at startup and the LD_* channels are live — a
+          # compromised root shell must not keep producing verdicts.
+          # EUID-gated so the test harness (which cannot apply this
+          # step's env block and runs non-root) stays out of it.
+          if [ "${EUID:-1}" -eq 0 ] && { [ -n "${BASH_ENV:-}" ] || [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_AUDIT:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; }; then
+            echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+            echo "flake_summary=the gate refused to sample in a poisoned environment — see the step log" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Startup-channel scrub, part two: BASH_FUNC_<name>%% env
+          # entries are imported as shell functions BEFORE this body
+          # runs, are invisible to ${!BASH_FUNC_@}/`set`, and shadow
+          # every later resolution — including the PATH pin below,
+          # because function lookup precedes PATH. No in-script purge is
+          # safe (an import can shadow the purge builtin itself), so
+          # re-exec ONCE through an absolute-path env -i child: a
+          # slash-bearing word never goes through function lookup, and
+          # -i drops every import. The child marker is a POSITIONAL
+          # argument, never an env entry — the poisoned file-command
+          # channel this block defends against can plant any env
+          # variable, so an env-borne "already re-executed" sentinel
+          # would be forgeable; argv is set by exec, and the runner
+          # wrapper passes no arguments after the script path. Mirrors
+          # the autofix lane's env -i bootstrap; only builtins and
+          # expansions resolve before this guard. The gate fails OPEN
+          # if the re-exec is unavailable, never into a compromised
+          # shell.
+          if [ "${1:-}" != '--flake-clean-child' ]; then
+            if [ ! -x /usr/bin/env ]; then
+              echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+              echo "flake_summary=the gate could not start a clean shell — refusing to sample" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+              PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+              GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+              FLAKE_ROUNDS="${FLAKE_ROUNDS:-}" FLAKE_SEQ_DIR="${FLAKE_SEQ_DIR:-}" \
+              bash --noprofile --norc -e -o pipefail "${BASH_SOURCE[0]}" --flake-clean-child
+          fi
           # Same poisoned-env premise as the record step: the file
           # commands a PR step wrote to the uid-1000-owned backing files
           # are applied at step end, so this block's inherited PATH may
@@ -3233,9 +3336,11 @@ jobs:
             printf '\n'
           } >> "$LOG"
 
-          # 15-minute wall budget, checked before every invocation, plus a
-          # 10-minute cap per invocation — worst case ~25m, which the job
-          # timeout budget above accounts for. Divergence needs no uniform
+          # 15-minute wall budget, checked before every invocation; each
+          # invocation drags its reset (≤~345s) and a -k 30 600 cap, and
+          # the OID pin plus the unconditional post-gate reset add ≤150s
+          # and ≤~345s — worst case ~40m, which the job timeout budget
+          # above accounts for. Divergence needs no uniform
           # round count: a P and an F for the same group is non-determinism
           # no matter how many rounds fit the budget.
           kill_node_processes() {
@@ -3288,10 +3393,13 @@ jobs:
             # as the build user (root's git trips the dubious-ownership
             # guard); none of these calls runs filters or hooks itself.
             timeout -k 10 30 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
               bash -c 'rm -f .git/info/attributes; git config --local --list --name-only 2>/dev/null | grep -o "^filter\.[^.]*" | sort -u | while IFS= read -r s; do git config --local --remove-section "$s" 2>/dev/null || true; done; git config --local --unset core.fsmonitor 2>/dev/null || true; git config --local --unset core.hooksPath 2>/dev/null || true; git config --local --unset core.attributesFile 2>/dev/null || true' || reset_rc=$?
             timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
               git reset --hard "$PINNED_OID" 2>/dev/null || reset_rc=$?
             timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
               git clean -ffd 2>/dev/null || reset_rc=$?
             kill_node_processes
             return "$reset_rc"
@@ -3300,7 +3408,9 @@ jobs:
           # Pin the restore target ONCE, before any sample (see
           # reset_round_state). Read as the build user, stripped —
           # root's git would trip the dubious-ownership guard.
-          PINNED_OID="$(timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY git rev-parse HEAD 2>/dev/null)"
+          PINNED_OID="$(timeout -k 30 120 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+            -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+            git rev-parse HEAD 2>/dev/null)"
           case "$PINNED_OID" in
             [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
             *) finish error 'could not pin the baseline commit for workspace resets' ;;
@@ -3342,8 +3452,18 @@ jobs:
               # Re-verify the home identity before opening the output
               # through it: a swapped home would redirect the sample's
               # bytes and every read that follows (see GATE_HOME_ID).
-              gate_home_intact ||
-                finish error 'the gate working directory changed mid-run — refusing to continue'
+              # Samples already collected are honest (same rule as a
+              # reset failure): stop and classify them. Publishing
+              # `error` here instead would let a PR dodge a computed
+              # demotion by renaming the home after its first divergent
+              # sample.
+              if ! gate_home_intact; then
+                if [ "$samples" -eq 0 ]; then
+                  finish error 'the gate working directory changed mid-run — refusing to continue'
+                fi
+                printf 'gate home changed mid-run: sampling stopped, classifying the collected results\n' >> "$DETAIL"
+                break 2
+              fi
               # Fresh per-invocation HOME and temp/cache dirs: samples must
               # not share dotfile/XDG/cache state or caches any more than
               # they share the tree or processes.
@@ -3363,6 +3483,7 @@ jobs:
                 cd "${group_dirs[$i]}" &&
                 timeout -k 30 600 runuser -u node -- \
                   env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                  -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_SHALLOW_FILE -u GIT_EXEC_PATH -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_ALLOW_PROTOCOL -u GIT_PROXY_COMMAND -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
                   NODE_OPTIONS='--max-old-space-size=3072' CI=true HOME="$inv_tmp" TMPDIR="$inv_tmp" \
                   bash -c "${group_cmds[$i]}"
               ) > "$out" 2>&1
@@ -3444,8 +3565,16 @@ jobs:
           if [ "$flaky" -gt 0 ]; then
             finish flaky "${flaky} of ${total} changed test file(s) returned different results across identical re-runs (${rounds_done} full round(s))"
           fi
-          if [ "$timed_out" = true ] && [ "$rounds_done" -lt 2 ]; then
-            finish timeout "the 15-minute budget elapsed before two full rounds completed (${rounds_done} done) — no flakiness signal either way"
+          if [ "$rounds_done" -lt 2 ]; then
+            # Classification needs two completed rounds: one round (or
+            # zero) cannot separate a flake from a deterministic
+            # outcome. BOTH early stops land here — the deadline, and a
+            # reset failure with samples already collected (classified
+            # above first: an observed divergence still demotes).
+            if [ "$timed_out" = true ]; then
+              finish timeout "the 15-minute budget elapsed before two full rounds completed (${rounds_done} done) — no flakiness signal either way"
+            fi
+            finish timeout "sampling stopped after ${rounds_done} full round(s) — no flakiness signal either way"
           fi
           if [ "$infra_exits" -gt 0 ]; then
             finish timeout "${infra_exits} invocation(s) ended in a timeout/signal exit — infrastructure, not test nondeterminism, so these rounds carry no flakiness signal"
@@ -4062,8 +4191,38 @@ jobs:
         # verdict and report "infrastructure failure" instead. Same rule
         # the Upload step below documents.
         continue-on-error: true
+        # Startup-channel scrub (see the gate step): BASH_ENV and the
+        # LD_* loader channels are consumed at shell/loader startup,
+        # before any in-script defence — blank them where the step env
+        # is assembled. BASH_FUNC_* imports are handled by the re-exec
+        # below.
+        env:
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         run: |-
           set -euo pipefail
+          # Startup-channel scrub (same shape and rationale as the gate
+          # step's): fail closed if the step-env blanks lost, then
+          # re-exec once through an absolute-path env -i child to drop
+          # any BASH_FUNC_* imports before a bare binary resolves.
+          if [ "${EUID:-1}" -eq 0 ] && { [ -n "${BASH_ENV:-}" ] || [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_AUDIT:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; }; then
+            echo "::error::flake-gate staging: step-env scrub lost — refusing to stage evidence in a poisoned environment"
+            exit 1
+          fi
+          # The child marker is positional, not an env entry: the
+          # poisoned file-command channel can plant any env variable, so
+          # an env-borne sentinel would be forgeable (see the record
+          # step for the full rationale).
+          if [ "${1:-}" != '--flake-clean-child' ]; then
+            [ -x /usr/bin/env ] || { echo "::error::flake-gate staging: clean re-exec unavailable"; exit 1; }
+            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+              PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+              GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+              bash --noprofile --norc -e -o pipefail "${BASH_SOURCE[0]}" --flake-clean-child
+          fi
           # Pin a root-only-writable PATH: the job env this step
           # inherits may be poisoned through the uid-1000-owned
           # file-command backing files (see the record step). Production
@@ -4094,8 +4253,15 @@ jobs:
           done
           GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
           UPLOAD_DIR="$GATE_DIR/upload"
+          # The run-id conjunct is the RUN-identity check: ownership,
+          # mode and shape all pass on a stale-but-genuine home an
+          # earlier run left on the persistent pool, and the always()
+          # staging step runs on exactly the paths where this run's
+          # record step (the only creator) was skipped — without it a
+          # previous run's evidence would ship under this run's name.
           if [ ! -L "$GATE_DIR" ] && [ -d "$GATE_DIR" ] && [ -O "$GATE_DIR" ] &&
-             [ "$(stat -c '%a' "$GATE_DIR" 2>/dev/null)" = '700' ]; then
+             [ "$(stat -c '%a' "$GATE_DIR" 2>/dev/null)" = '700' ] &&
+             [ "$(cat "$GATE_DIR/run-id" 2>/dev/null)" = "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]; then
             rm -rf -- "$UPLOAD_DIR"
             install -d -m 0700 -o root -g root "$UPLOAD_DIR"
             # Copy only REGULAR files out of the untrusted tree, resolving
@@ -4107,7 +4273,11 @@ jobs:
               # kill-loop survivor owning the uid-1000 parent can swap
               # the entry between the two. The opened directory must
               # still be the validated one, or the copy is skipped.
-              vr_id="$(stat -c '%d:%i' "$RUNNER_TEMP/verify-results" 2>/dev/null)"
+              # || true: a survivor renaming verify-results between the
+              # guard above and this stat must degrade to a skipped copy
+              # (empty vr_id matches no opened directory), never a set -e
+              # abort that discards the authoritative gate-log copy below.
+              vr_id="$(stat -c '%d:%i' "$RUNNER_TEMP/verify-results" 2>/dev/null || true)"
               (
                 cd "$RUNNER_TEMP/verify-results" &&
                 [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$vr_id" ] &&
