@@ -101,11 +101,13 @@ export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
- * The deferred-suggestions list's rendered bounds. Module-scoped because two
- * surfaces read the line cap: the body renderer that applies it, and
- * `verdictLine`, whose "(listed in the body)" claim must turn cap-aware the
- * moment the list overflows — a verdict that counts 21 over a body that
- * lists 20 is a false record persisted into the archived report.
+ * The deferred-suggestions list's rendered bounds, shared by the
+ * duplicate-drop account; the cannot-tell account shares the char cap.
+ * Module-scoped because two surfaces read the line cap: the body renderer
+ * that applies it, and `verdictLine`, whose "(listed in the body)" claim
+ * must turn cap-aware the moment the list overflows — a verdict that counts
+ * 21 over a body that lists 20 is a false record persisted into the
+ * archived report.
  */
 const MAX_DEFERRED_SUGGESTION_LINES = 20;
 const MAX_DEFERRED_SUGGESTION_CHARS = 240;
@@ -172,20 +174,35 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
 }
 
 /**
- * The per-entry bound every deferral-channel exit applies — deferred AND
- * relocated: collapse newlines, cap at MAX_DEFERRED_SUGGESTION_CHARS
+ * One model-written entry flattened to a single line — every CommonMark
+ * line ending (`\n`, `\r\n`, or a bare `\r`) becomes a space. Split/join,
+ * not a whitespace-normalising regex replace: that backtracks quadratically
+ * on a long whitespace run with no line ending in it, and these entries are
+ * model-written with no length cap — one such entry stalled a measured
+ * probe for seconds at 80k characters.
+ */
+function collapseToLine(text: string): string {
+  return text
+    .split(/\r\n?|\n/)
+    .map((seg) => seg.trim())
+    .filter((seg) => seg !== '')
+    .join(' ');
+}
+
+/**
+ * The per-entry bound the deferred, relocated, duplicate-dropped, AND
+ * cannot-tell exits apply: collapse line endings, cap at
+ * MAX_DEFERRED_SUGGESTION_CHARS
  * without splitting a surrogate pair, mark a trim with an ellipsis. The
  * relocation exit once bypassed all of it (round-9 finding): twenty-five
  * relocated 4,000-char titles spliced ~100 KB of unbounded model text into
  * the body — the whole review lost at GitHub's 65,536 limit, precisely what
- * the cap on the deferred exit was added to prevent.
+ * the cap on the deferred exit was added to prevent. The free-form
+ * bodyCriticals exit is the exception: its entries are the review's only
+ * copy of their Criticals, quoted as-is and left unbounded.
  */
 function boundDeferredLine(rendered: string): string {
-  const collapsed = rendered
-    .split('\n')
-    .map((seg) => seg.trim())
-    .filter((seg) => seg !== '')
-    .join(' ');
+  const collapsed = collapseToLine(rendered);
   let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
   // The cap slices UTF-16 code units; a cut landing inside a surrogate pair
   // leaves a lone high surrogate that serializes as U+FFFD into the posted
@@ -195,8 +212,14 @@ function boundDeferredLine(rendered: string): string {
     oneLine = oneLine.slice(0, -1);
   }
   // A trimmed entry must say so — a claim cut mid-sentence otherwise renders
-  // as a complete finding line on the PR record.
-  if (oneLine.length < collapsed.length) oneLine += '…';
+  // as a complete finding line on the PR record. A cut inside a trailing
+  // `comment <id>` ref drops the fragment first: the kept digit prefix
+  // still satisfies the linkifier's digit floor and would anchor a comment
+  // that does not exist.
+  if (oneLine.length < collapsed.length) {
+    oneLine =
+      oneLine.replace(/\s*\(?(?:issue-level )?comment(?: \d*)?$/i, '') + '…';
+  }
   return oneLine;
 }
 
@@ -334,6 +357,17 @@ export interface ComposeReviewInput {
   bodyCriticals?: string[];
   /** Suggestions discarded as unanchorable (offline validation or 422). */
   suggestionsDiscarded?: number;
+  /**
+   * Suggestions this review confirmed but did not re-post because they are
+   * already reported on the PR (a prior round, or a concurrent reviewer) —
+   * one entry each, naming the finding and where it already lives, e.g.
+   * `R1-1 precheck-pr pin — already reported (comment 3788857375)`. Distinct
+   * from `suggestionsDiscarded`: these anchored fine, and rendering them
+   * under the anchor-failure sentence posts a claim the resolver's output
+   * contradicts. They still count toward `S` — a run must not read as
+   * zero-finding because its findings were duplicates.
+   */
+  suggestionsDroppedAsDuplicates?: string[];
   /**
    * The findings the convergence posture deferred — Step 6's round-aware
    * posting discipline (from round 6, or under an explicit `--severity-floor
@@ -599,6 +633,16 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
 }
 
 /**
+ * A model-written entry flattened to one renderable list line, its `comment
+ * <id>` refs linked to the PR's anchors. Entries render as one-line list
+ * items: an unindented newline ends a list item (CommonMark), so an entry
+ * spanning lines would leak its continuation out of the list.
+ */
+function asListLine(text: string, pr: PrIdentity | null): string {
+  return linkifyCommentRefs(collapseToLine(text), pr);
+}
+
+/**
  * The unresolved-existing-Critical block, as a Markdown list instead of a
  * space-joined paragraph: #8388's posted body ran 31 of these together in
  * one unreadable wall. Entries sharing the exact reason after their first
@@ -612,34 +656,21 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  */
 function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
   const parsed = cannotTell.map((raw) => {
-    // Entries render as one-line list items: an unindented newline ends a
-    // list item (CommonMark), so a model-written entry spanning lines would
-    // leak its continuation out of the list. Collapsed by split/join, not
-    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
-    // a long whitespace run with no newline in it, and these entries are
-    // model-written with no length cap — one such entry stalled a measured
-    // probe for seconds at 80k characters.
     const unmarked = raw.startsWith(CRITICAL_PREFIX)
       ? raw.slice(CRITICAL_PREFIX.length).trim()
       : raw;
-    const line = linkifyCommentRefs(
-      unmarked.includes('\n')
-        ? unmarked
-            .split('\n')
-            .map((seg) => seg.trim())
-            .filter((seg) => seg !== '')
-            .join(' ')
-        : unmarked,
-      pr,
-    );
-    const idx = line.indexOf(' — ');
-    // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
-    // empty-string reason would become a group key and render `2 entries — :`.
+    const line = asListLine(boundDeferredLine(unmarked), pr);
+    // A dangling ` — ` with nothing after it is reasonless — an empty-string
+    // reason would become a group key and render `2 entries — :`. The bound
+    // strands the separator the same way when a cut lands right after it.
+    const subject = line.replace(/ —\s*…$/, '…').replace(/ —$/, '');
+    const idx = subject.indexOf(' — ');
+    // `|| null`: reasonless entries never spawn the empty group key.
     return idx === -1
-      ? { head: line, reason: null }
+      ? { head: subject, reason: null }
       : {
-          head: line.slice(0, idx),
-          reason: line.slice(idx + 3).trim() || null,
+          head: subject.slice(0, idx),
+          reason: subject.slice(idx + 3).trim() || null,
         };
   });
   // Grouped on the exact reason text, in first-appearance order. A reasonless
@@ -705,6 +736,27 @@ function toStringList(value: unknown, field: string): string[] {
   // entries are appended to these lists — a programmatic caller that reused one
   // across two calls would find the first call's caps in the second.
   return [...(value as string[])];
+}
+
+/**
+ * One model-written list field, normalized for render. Entries render in the
+ * posted body above the canonical footer, so each is stripped of a relocated
+ * footer — per entry, not on the assembled body: the `$`-anchored strip regex
+ * only sees an entry's end, before the footer is appended, and a forged footer
+ * inside one would otherwise post directly above the canonical footer. Entries
+ * that normalize to nothing drop, so the field's count never overclaims its
+ * rendered list.
+ */
+function strippedList(
+  input: ComposeReviewInput,
+  key:
+    | 'bodyCriticals'
+    | 'suggestionsDroppedAsDuplicates'
+    | 'cannotTellCriticals',
+): string[] {
+  return toStringList(input[key], key)
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
@@ -824,9 +876,7 @@ function ledgerMarkerFor(
           body?: unknown;
         }>,
         [
-          ...toStringList(input.bodyCriticals, 'bodyCriticals')
-            .map(stripReviewFooter)
-            .filter((entry) => entry.trim() !== ''),
+          ...strippedList(input, 'bodyCriticals'),
           // The same split the body performed: a relocated Critical is a
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
@@ -851,17 +901,14 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  // Stripped per entry, not on the assembled body: these model-written
-  // strings render verbatim as the LAST body part, and a forged footer
-  // relocated into one would post directly above the canonical footer —
-  // the `$`-anchored regex only sees an entry's end, before the footer is
-  // appended.
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
+  const bodyCriticals = strippedList(input, 'bodyCriticals');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
+  );
+  const suggestionsDroppedAsDuplicates = strippedList(
+    input,
+    'suggestionsDroppedAsDuplicates',
   );
   // A Critical marker in the deferral channel is RELOCATED, never fatal and
   // never deferred: it counts toward `C`, the event blocks, and the round
@@ -911,12 +958,7 @@ function composeReviewBody(
   const severityFloor: 'critical' | 'suggestion' | 'auto' = floorKnown
     ? (floorRaw as 'critical' | 'suggestion' | 'auto')
     : 'auto';
-  const cannotTell = toStringList(
-    input.cannotTellCriticals,
-    'cannotTellCriticals',
-  )
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
+  const cannotTell = strippedList(input, 'cannotTellCriticals');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
@@ -1450,12 +1492,16 @@ function composeReviewBody(
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
-  // `S` counts every *confirmed* Suggestion — anchored or discarded: the
-  // verdict reflects the findings the review confirmed, not the ones that
-  // anchored, so dropping every Suggestion's anchor must never upgrade the
-  // event to APPROVE.
+  // `S` counts every *confirmed* Suggestion — anchored, discarded, or dropped
+  // as an already-reported duplicate: the verdict reflects the findings the
+  // review confirmed, not the ones that anchored or were worth re-posting, so
+  // neither dropping every anchor nor every duplicate may upgrade the event
+  // to APPROVE.
   const c = criticalsInline + bodyCriticals.length;
-  const s = suggestionsInline + suggestionsDiscarded;
+  const s =
+    suggestionsInline +
+    suggestionsDiscarded +
+    suggestionsDroppedAsDuplicates.length;
 
   const baseEvent: ReviewEvent =
     c >= 1 ? 'REQUEST_CHANGES' : s >= 1 ? 'COMMENT' : 'APPROVE';
@@ -1842,15 +1888,52 @@ function composeReviewBody(
   // Clause 5 — blockers the review could neither confirm nor clear. They
   // survive every event shape: erasing one is how a review approves the
   // very thing it is asking about.
+  const pr = prIdentityFromPlan(input.planPath);
   const cannotTellBlock: Bi[] =
-    cannotTell.length === 0
-      ? []
-      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
+    cannotTell.length === 0 ? [] : [formatCannotTell(cannotTell, pr)];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) => withMarker(l))
     .map((l) => ({ en: l, zh: l }));
+
+  // Confirmed-but-duplicate Suggestions — dropped from the payload by the
+  // overlap rules (already on the PR), NOT by anchor failure. The verdict
+  // counted them in `s`, so the body owes the author a truthful account of
+  // where they went: reusing the discarded sentence's "could not be anchored"
+  // claim posts a fact the resolver's output contradicts (#9204 —
+  // resolve-anchors returned exact matches, the drop reason was duplication,
+  // the posted body said anchoring failed). Its own paragraph: entries are a
+  // list, not verdict prose. Rendered on every event — `s` counts them even
+  // when `c` forces REQUEST_CHANGES.
+  // Bounded like the deferral channel — same 65,536-char body limit, same
+  // all-or-nothing post: entries are model-written with no upstream cap, so
+  // one oversized entry here would lose the round's Criticals over this
+  // disclosure paragraph. The count sentence keeps naming the total; an
+  // overflow item names what the cap cut.
+  const duplicatesShown = suggestionsDroppedAsDuplicates
+    .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
+    .map((entry) => asListLine(boundDeferredLine(entry), pr));
+  const duplicatesMore =
+    suggestionsDroppedAsDuplicates.length - duplicatesShown.length;
+  const duplicatesBlock: Bi[] =
+    suggestionsDroppedAsDuplicates.length === 0
+      ? []
+      : [
+          {
+            en:
+              `${suggestionsDroppedAsDuplicates.length} Suggestion-level ` +
+              `finding(s) this review confirmed are already reported on this PR ` +
+              `and are not repeated:\n\n` +
+              duplicatesShown.map((line) => `- ${line}`).join('\n') +
+              (duplicatesMore > 0
+                ? `\n- …and ${duplicatesMore} more (see the run report)`
+                : ''),
+            zh:
+              `本轮确认的 ${suggestionsDroppedAsDuplicates.length} 条建议级发现已在 PR ` +
+              `上报告过，不再重复发布（列表见上方英文部分）。`,
+          },
+        ];
 
   const contextUnavailableClause: Bi = {
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
@@ -1991,6 +2074,7 @@ function composeReviewBody(
     const parts = [
       ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
+      ...duplicatesBlock,
       ...cannotTellBlock,
       ...notReviewedParts,
       ...unverifiedTagsBlock,
@@ -2167,6 +2251,10 @@ function composeReviewBody(
   // of it with spaces, 31 unresolved entries and seven disclosures in a
   // single unreadable wall.
   const openerCount = clauses.length;
+
+  // 4a. Duplicate-dropped Suggestions — built above with the other body
+  //     blocks; it renders on every event, RC included.
+  clauses.push(...duplicatesBlock);
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
