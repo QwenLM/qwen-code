@@ -23,6 +23,8 @@ interface Deferred<T> {
   reject: (reason?: unknown) => void;
 }
 
+type LoadResult = { artifacts: DaemonSessionArtifact[] };
+
 const sdkMock = vi.hoisted(() => ({
   ownerVersion: 0,
   ownerGuard: { capture: vi.fn() },
@@ -130,8 +132,8 @@ afterEach(async () => {
 
 describe('useSessionArtifacts', () => {
   it('clears stale artifacts while loading a different session', async () => {
-    const sessionA = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const sessionB = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const sessionA = deferred<LoadResult>();
+    const sessionB = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(sessionA.promise)
       .mockReturnValueOnce(sessionB.promise);
@@ -166,8 +168,8 @@ describe('useSessionArtifacts', () => {
   });
 
   it('keeps current artifacts visible while refreshing the same session', async () => {
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const refreshLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const initialLoad = deferred<LoadResult>();
+    const refreshLoad = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(initialLoad.promise)
       .mockReturnValueOnce(refreshLoad.promise);
@@ -196,7 +198,7 @@ describe('useSessionArtifacts', () => {
   });
 
   it('loads a same-id replacement without waiting for the old owner', async () => {
-    const oldLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const oldLoad = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(oldLoad.promise)
       .mockResolvedValueOnce({ artifacts: [artifact('replacement')] });
@@ -232,11 +234,11 @@ describe('useSessionArtifacts', () => {
     // continuation off the commit under full-suite parallel load, making
     // the last-good assertions intermittently see `artifacts === []`
     // (#7427 review).
-    const load1 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load2 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load3 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load4 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load5 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const load1 = deferred<LoadResult>();
+    const load2 = deferred<LoadResult>();
+    const load3 = deferred<LoadResult>();
+    const load4 = deferred<LoadResult>();
+    const load5 = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(load1.promise)
       .mockReturnValueOnce(load2.promise)
@@ -318,9 +320,9 @@ describe('useSessionArtifacts', () => {
   });
 
   it('ignores loading cleanup from superseded artifact refresh failures', async () => {
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const staleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const finalLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const initialLoad = deferred<LoadResult>();
+    const staleLoad = deferred<LoadResult>();
+    const finalLoad = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(initialLoad.promise)
       .mockReturnValueOnce(staleLoad.promise)
@@ -361,9 +363,9 @@ describe('useSessionArtifacts', () => {
   });
 
   it('ignores stale success from superseded artifact refreshes', async () => {
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const staleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const finalLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const initialLoad = deferred<LoadResult>();
+    const staleLoad = deferred<LoadResult>();
+    const finalLoad = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(initialLoad.promise)
       .mockReturnValueOnce(staleLoad.promise)
@@ -405,9 +407,9 @@ describe('useSessionArtifacts', () => {
     // previously-seen value is still a transition. A mutant that forgets to
     // record the seen version keeps comparing against the mount value and
     // silently skips the returning refresh (stale panel, suite green).
-    const load1 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load2 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const load3 = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const load1 = deferred<LoadResult>();
+    const load2 = deferred<LoadResult>();
+    const load3 = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(load1.promise)
       .mockReturnValueOnce(load2.promise)
@@ -447,8 +449,8 @@ describe('useSessionArtifacts', () => {
     // BEFORE any re-render — so an in-flight load resolving in that window
     // passes the requestId check and only the owner check stops it from
     // painting the previous session's artifacts.
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const inFlightLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const initialLoad = deferred<LoadResult>();
+    const inFlightLoad = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(initialLoad.promise)
       .mockReturnValueOnce(inFlightLoad.promise);
@@ -482,8 +484,8 @@ describe('useSessionArtifacts', () => {
     // `'waiting'` is a real prompt status (queued prompt / observer text
     // deltas before any generation signal); the settling trigger must not
     // be specialized to `'streaming'` (#7427 review).
-    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
-    const settleLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    const initialLoad = deferred<LoadResult>();
+    const settleLoad = deferred<LoadResult>();
     sdkMock.actions.loadArtifacts
       .mockReturnValueOnce(initialLoad.promise)
       .mockReturnValueOnce(settleLoad.promise);
