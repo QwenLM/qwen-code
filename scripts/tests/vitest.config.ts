@@ -19,10 +19,10 @@ export default defineConfig({
         ? [
             ...configDefaults.exclude,
             'scripts/tests/pr-self-report-label.test.js',
-            // Every *-workflow.test.js drives a workflow's real `run:`
-            // blocks under bash; none is named `qwen-*` uniformly (e.g.
-            // serve-ab-workflow.test.js), so exclude by the shared suffix.
-            'scripts/tests/*-workflow.test.js',
+            // Bash-driven workflow suites cannot run on Windows; pure
+            // YAML-parse workflow suites still do.
+            'scripts/tests/qwen-*-workflow.test.js',
+            'scripts/tests/serve-ab-workflow.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],

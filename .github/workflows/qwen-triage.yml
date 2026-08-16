@@ -2584,14 +2584,17 @@ jobs:
           # /usr), so a raw string match lets them slip past the case arms.
           # `-m` is GNU-only — a BSD realpath exits 1 on it and the fallback
           # silently keeps the raw spelling. Safe here (this pool is
-          # Linux-only), and off-GNU the strip loop and the allowlist below
-          # are what still hold; the suite gates its GNU-only assertion on a
-          # host probe rather than assuming this line ran.
+          # Linux-only), and off-GNU the strip loop, `..` refusal, and
+          # allowlist below are what still hold; the suite gates its GNU-only
+          # assertion on a host probe rather than assuming this line ran.
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           # Trailing slashes slip past the exact-match case arms below
           # (`/home/` would pass the guard and reach the rm); realpath strips
           # them too, but this keeps the guard whole when realpath is absent.
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
           case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
           esac
@@ -2608,9 +2611,12 @@ jobs:
           # workspace; "/" stripped empty would match every path instead.
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
           case "$WS" in
             "$RWS"/*) ;;
-            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           # Contents, not the directory itself: the runner owns the mount
           # point. Dotfiles included — a planted .npmrc or .git is exactly
@@ -3547,15 +3553,21 @@ jobs:
           WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
+          esac
+          case "$WS" in
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
           esac
           RWS="${RUNNER_WORKSPACE:?}"
           RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
           case "$WS" in
             "$RWS"/*) ;;
-            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"
