@@ -37,7 +37,13 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -72,9 +78,10 @@ export interface ScratchTreeReport {
   /**
    * The `node_modules` farm: how many packages were symlinked in from the
    * review worktree, how many could not be, and whether a farm was already
-   * standing. `null` when no farm could be built at all — the review worktree
-   * has no `node_modules`, or the linking failed — and the note says WHICH,
-   * because the two want opposite things done about them.
+   * standing. `null` means only one thing: the review worktree has no
+   * `node_modules` to link from. A linking FAILURE arrives as
+   * `{linked: 0, failed: N}` instead, because `exposeDependencies` guards every
+   * fs call it makes and counts what went wrong rather than throwing.
    */
   dependencies: DependencyFarm | null;
   /**
@@ -170,15 +177,31 @@ function resetScratchTree(tree: string, headSha: string): boolean {
   // caller's discard-and-rebuild path handles the bare directory correctly;
   // this one must never touch it.
   if (!existsSync(join(tree, '.git'))) return false;
+  // And the tree must BE the tree: a symlink at the scratch path, or a `.git`
+  // naming another repository, would aim everything below at whatever it
+  // resolves to. Discard-and-rebuild is the correct answer to all of it —
+  // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
+  try {
+    if (!lstatSync(tree).isDirectory()) return false;
+    if (
+      realpathSync(gitOut(tree, 'rev-parse', '--show-toplevel')) !==
+      realpathSync(tree)
+    ) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
   try {
     git(tree, 'checkout', '--force', '--detach', headSha);
-    // `-ff`, not `-f`: a single `-f` refuses to delete a nested git repository,
-    // so a probe that cloned or `git init`-ed a fixture inside the scratch tree
-    // survives the reset while the report says the tree is pristine. `-x` is
-    // deliberately NOT passed — ignored paths are where the dependency farm
-    // lives, and rebuilding it every call is the cost this reuse path exists to
-    // avoid.
-    git(tree, 'clean', '-ffd');
+    // `-ff` because a single `-f` refuses to delete a nested git repository, so
+    // a probe that cloned or `git init`-ed a fixture would survive a reset the
+    // report calls pristine — and `-x` because IGNORED paths are where the rest
+    // of a probe's state lives: its own `node_modules` at any depth, a
+    // `.tsbuildinfo`, a `dist/` it built and then mutated. Sparing them to keep
+    // the dependency farm cheap bought a second and sold the guarantee; the
+    // farm is re-linked by the caller instead.
+    git(tree, 'clean', '-ffdx');
     // `checkout --force` silently skips a file carrying the skip-worktree bit,
     // and `clean` never touches tracked files — so a probe that set the bit
     // (directly, or via `git sparse-checkout`) and then edited the file leaves
@@ -189,6 +212,17 @@ function resetScratchTree(tree: string, headSha: string): boolean {
       .split('\n')
       .some((line) => /^[a-zS]/.test(line));
     if (hidden) return false;
+    // Nor does any of it reach INSIDE an initialized submodule: `checkout
+    // --force` without `--recurse-submodules` leaves its working tree alone,
+    // `clean` never touches a tracked gitlink, and `rev-parse HEAD` is the
+    // superproject's. A probe that initialized one (to build) and mutated a
+    // file in it would hand the next probe that mutant under a pristine
+    // report. A fresh `worktree add` leaves submodules uninitialized, so
+    // rebuilding is both correct and cheap.
+    const initialized = gitOut(tree, 'submodule', 'status', '--recursive')
+      .split('\n')
+      .some((line) => line.trim() !== '' && !line.startsWith('-'));
+    if (initialized) return false;
     return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
@@ -255,8 +289,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
             '(run `git status --porcelain --untracked-files=all` in that worktree for the ' +
             'full set — without that flag it collapses a whole probe directory to one entry)'
           : '') +
-        '. Other agents are reading that tree right now and will take those lines for the ' +
-        "PR's own code. Restore it before you do anything else, by shape: " +
+        '. The names are flattened for display (a filename can carry control or ' +
+        'invisible characters); `git status --porcelain --untracked-files=all` in that ' +
+        'worktree has the exact bytes if one does not match. Other agents are reading ' +
+        "that tree right now and will take those lines for the PR's own code. Restore it before you do anything else, by shape: " +
         '`git checkout HEAD -- <path>` for a tracked file (plain `git checkout --` restores ' +
         'from the INDEX, so it leaves STAGED residue in place); `rm -rf <path>` for anything ' +
         'untracked, including a directory entry (git reports an untracked directory that ' +
@@ -295,10 +331,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       sharedTreeUnmeasured: residue.unmeasured,
       note:
         `your scratch tree is at ${shellQuotePath(tree)}, restored to ${headSha.slice(0, 9)} ` +
-        '(reusing the one an earlier call created — every tracked file is back at ' +
-        'the commit and every untracked file you wrote is gone; GITIGNORED paths ' +
-        'are deliberately spared, which is what keeps the dependency farm, so a ' +
-        'build cache or a `dist/` from your last probe is still there).' +
+        '(reusing the one an earlier call created — everything that is not in the ' +
+        'commit is gone: tracked files restored, untracked and IGNORED files ' +
+        'deleted, build caches included, and the dependency farm re-linked from ' +
+        'the review worktree).' +
         dependencyNote(dependencies) +
         residueNote,
     };
@@ -389,15 +425,15 @@ function dependencyNote(farm: DependencyFarm | null): string {
     );
   }
   if (farm.linked === 0 && farm.failed === 0) {
-    // Two different states reach `{0, 0}`, and the honest sentence differs:
-    // the farm was already standing (a second call for the same shard), or the
-    // source had nothing linkable at all (the shape a killed `npm install`
-    // leaves: a `node_modules` holding only a lockfile).
-    return farm.alreadyPresent
-      ? ' Its `node_modules` was already in place.'
-      : " The review worktree's `node_modules` held nothing linkable, so a JS " +
-          'unit harness will not start here — install in the SCRATCH tree if ' +
-          'you need one, never in the review worktree.';
+    // `alreadyPresent` cannot be true here — this command always rebuilds, so a
+    // standing farm is never reused — which leaves exactly one reading: the
+    // source had nothing linkable (the shape a killed `npm install` leaves, a
+    // `node_modules` holding only a lockfile).
+    return (
+      " The review worktree's `node_modules` held nothing linkable, so a JS " +
+      'unit harness will not start here — install in the SCRATCH tree if you ' +
+      'need one, never in the review worktree.'
+    );
   }
   return (
     ` ${farm.linked} dependencies linked in` +

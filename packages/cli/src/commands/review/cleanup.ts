@@ -492,9 +492,15 @@ export function runCleanup(target: string): void {
       // `git worktree add` with `already exists`. `lstatSync` sees the link
       // itself, and `rmSync` unlinks it rather than following it, which is the
       // same reasoning `discardWorktree` documents for its own leftovers.
+      // ANY symlink here is unlinked rather than released: `git worktree
+      // remove --force <link>` follows it and deletes whichever registered
+      // worktree it points at — the user's own, or another review's live tree —
+      // while reporting the family path as swept. A dangling one is invisible
+      // to `releaseWorktree` for the opposite reason (its `existsSync` follows
+      // the link and reports "never existed"), so both go the same way.
       let dangling = false;
       try {
-        dangling = !existsSync(path) && lstatSync(path).isSymbolicLink();
+        dangling = lstatSync(path).isSymbolicLink();
       } catch {
         // Not a symlink, or gone between the two calls: fall through to the
         // ordinary release below.

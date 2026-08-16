@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
+  readFileSync,
   realpathSync,
   mkdirSync,
   readdirSync,
@@ -30,7 +31,7 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -76,13 +77,17 @@ export function discardWorktree(cwd: string, tree: string): SweepResult {
     );
   }
   rmSync(tree, { recursive: true, force: true });
-  // And clear the ADMIN entry the two steps above can leave behind. A tree
-  // whose `.git` gitfile is broken makes `worktree remove` fail; `rmSync` then
-  // takes the directory, but `.git/worktrees/<name>` survives, and the next
-  // `worktree add` at that path refuses with "missing but already registered".
-  // `prune` only drops entries whose working tree is gone, so it cannot touch a
-  // live one — including this review's own.
-  spawnSync('git', ['worktree', 'prune'], { cwd, encoding: 'utf8' });
+  // And clear the ADMIN entry the two steps above can leave behind — but only
+  // THIS path's. A tree whose `.git` gitfile is broken makes `worktree remove`
+  // fail; `rmSync` then takes the directory, and `.git/worktrees/<name>`
+  // survives, so the next `worktree add` here refuses "missing but already
+  // registered". A repo-wide `git worktree prune` clears that and much more: it
+  // deregisters ANY entry whose directory is momentarily absent — another
+  // shard's `worktree add` mid-flight (this pipeline runs discards and adds
+  // concurrently against one common dir), or the user's own worktree on a
+  // volume that happens to be unmounted. So the entry is found by its own
+  // `gitdir` file and removed alone.
+  dropWorktreeRegistration(cwd, tree);
   return sweep;
 }
 
@@ -106,6 +111,60 @@ export interface WorktreeResidue {
    * measured" instead of "clean" when this is set.
    */
   unmeasured?: string;
+}
+
+/**
+ * Remove the admin entry that names `tree`, and nothing else.
+ *
+ * `<common>/worktrees/<id>/gitdir` holds the path of the `.git` FILE inside the
+ * working tree, so the entry for a given path is identifiable without asking
+ * git to sweep. Best-effort throughout: a leftover admin entry costs the next
+ * `worktree add` at this path, which the caller reports; guessing wider costs
+ * somebody else's worktree.
+ */
+function dropWorktreeRegistration(cwd: string, tree: string): void {
+  const common = spawnSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { cwd, encoding: 'utf8' },
+  );
+  if (common.status !== 0 || typeof common.stdout !== 'string') return;
+  const dir = join(common.stdout.trim(), 'worktrees');
+  let ids: string[];
+  try {
+    ids = readdirSync(dir);
+  } catch {
+    return; // No linked worktrees at all.
+  }
+  const wanted = samePath(tree);
+  for (const id of ids) {
+    try {
+      const gitdir = readFileSync(join(dir, id, 'gitdir'), 'utf8').trim();
+      // `gitdir` names `<tree>/.git`; compare the tree it belongs to.
+      if (samePath(dirname(gitdir)) !== wanted) continue;
+      rmSync(join(dir, id), { recursive: true, force: true });
+    } catch {
+      // Unreadable entry: leave it. The next `add` will say so.
+    }
+  }
+}
+
+/**
+ * A path in the one spelling both sides of that comparison can produce.
+ *
+ * git records the entry's path as git resolved it, and this code holds the path
+ * as the caller spelled it — on macOS that is `/private/var/…` against
+ * `/var/…`, and the entry then matches nothing. The PARENT is resolved rather
+ * than the path itself, because the tree is usually already deleted by the time
+ * this runs.
+ */
+function samePath(p: string): string {
+  const abs = resolve(p);
+  try {
+    return join(realpathSync(dirname(abs)), basename(abs));
+  } catch {
+    return abs;
+  }
 }
 
 /**
@@ -343,7 +402,33 @@ function farmNodeModules(
 ): void {
   const source = join(sourceDir, 'node_modules');
   const target = join(targetDir, 'node_modules');
-  if (!existsSync(source)) return;
+  if (!existsSync(source)) {
+    // With `rebuild`, the target is cleared even when there is nothing to link
+    // from: the caller is resetting a tree it will hand to another probe, and a
+    // farm the PREVIOUS probe installed there (a member whose source has no
+    // `node_modules`, or a root the review worktree never installed) would
+    // otherwise survive a reset the report calls pristine.
+    if (rebuild && existsSync(target)) {
+      try {
+        rmSync(target, { recursive: true, force: true });
+      } catch {
+        done.failed++;
+      }
+    }
+    return;
+  }
+  // `existsSync` follows links, so a symlink at the dependency root's
+  // `node_modules` would redirect every farm — every probe tree of every shard
+  // — at whatever it points to. A real install is a directory.
+  try {
+    if (!lstatSync(source).isDirectory()) {
+      done.failed++;
+      return;
+    }
+  } catch {
+    done.failed++;
+    return;
+  }
   if (existsSync(target)) {
     // A standing farm counts only if THIS code built it: the marker is the
     // difference between "the packages I linked last time" and "whatever a

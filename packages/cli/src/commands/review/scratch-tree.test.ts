@@ -258,6 +258,99 @@ describe('runScratchTree', () => {
     expect(existsSync(join(second.path!, 'node_modules', 'vitest'))).toBe(true);
   });
 
+  it('rebuilds rather than resetting a scratch path that is a symlink', () => {
+    // Probe code has a shell in this tree and the report tells it the path. A
+    // symlink there would aim `checkout --force`, `clean -ffdx` and the farm's
+    // rebuild at whatever it resolves to — including the shared review
+    // worktree. Rebuilding is the safe answer: `discardWorktree` unlinks a
+    // symlink rather than following it.
+    const first = run();
+    const victim = join(repo, 'victim');
+    mkdirSync(join(victim, 'keep'), { recursive: true });
+    rmSync(first.path!, { recursive: true, force: true });
+    symlinkSync(victim, first.path!, 'dir');
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false);
+    expect(existsSync(join(victim, 'keep'))).toBe(true);
+  });
+
+  it('clears IGNORED probe state too — pristine means pristine', () => {
+    // Sparing ignored paths kept the farm cheap and left a probe's own
+    // `node_modules` at any depth, its build caches and its mutated `dist/`
+    // standing under a report that said the tree was back at the commit.
+    const first = run();
+    mkdirSync(join(first.path!, 'fixtures', 'node_modules'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(first.path!, 'fixtures', 'node_modules', 'planted.js'),
+      'x',
+    );
+
+    const second = run();
+    expect(second.reused).toBe(true);
+    expect(existsSync(join(second.path!, 'fixtures'))).toBe(false);
+  });
+
+  it('rebuilds when a submodule was initialized in the tree', () => {
+    // Nothing in the reset reaches inside an initialized submodule, and
+    // `rev-parse HEAD` is the superproject's — so a mutant in there would ride
+    // a "pristine" report into the next probe. A fresh tree has it
+    // uninitialized, which is why rebuilding is the answer.
+    const sub = join(repo, 'sub-origin');
+    mkdirSync(sub, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: sub });
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: sub });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: sub });
+    writeFileSync(join(sub, 's.txt'), 'x\n');
+    execFileSync('git', ['add', '-A'], { cwd: sub });
+    execFileSync('git', ['commit', '-qm', 'one'], { cwd: sub });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor',
+      ],
+      { cwd: repo },
+    );
+    execFileSync('git', ['commit', '-qm', 'add submodule'], { cwd: repo });
+    // The worktree was created from the PREVIOUS head; move it to the commit
+    // that carries the submodule, which is what the scratch tree copies.
+    headSha = execFileSync('git', ['rev-parse', 'main'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync('git', ['checkout', '--detach', '-q', headSha], {
+      cwd: worktree,
+    });
+
+    const first = run();
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '-q',
+      ],
+      { cwd: first.path! },
+    );
+    writeFileSync(join(first.path!, 'vendor', 's.txt'), 'MUTANT\n');
+
+    const second = run();
+    expect(second.reused).toBe(false);
+    expect(existsSync(join(second.path!, 'vendor', 's.txt'))).toBe(false);
+  });
+
   it('refuses a label that flattens to nothing rather than sharing one tree', () => {
     // `???` and `!!!` are two different non-empty labels with no path-safe
     // character between them: a fallback would put both shards in one tree —
@@ -413,6 +506,33 @@ describe('runScratchTree', () => {
     // The rename's ORIGINAL name comes back with checkout, not with rm --cached.
     expect(r.note).toContain('git checkout HEAD -- <original>');
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports UNMEASURED rather than clean when the residue check cannot run',
+    () => {
+      // A `git status` that dies (a tree too dirty for its buffer, an index it
+      // cannot read) returns the same empty list a pristine tree does; a script
+      // reading the field and a verifier reading the note both have to be able
+      // to tell the two apart. `rev-parse HEAD` does not need the index, so the
+      // command still gets far enough to report.
+      const index = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-path', 'index'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      chmodSync(index, 0o000);
+      try {
+        const r = runScratchTree({
+          worktree,
+          label: 'verify--round-1--unmeasured',
+        });
+        expect(r.sharedTreeUnmeasured).toBeTruthy();
+        expect(r.note).toContain('could not be measured');
+      } finally {
+        chmodSync(index, 0o644);
+      }
+    },
+  );
 
   it('says nothing about residue when the shared worktree is clean', () => {
     const r = run();

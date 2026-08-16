@@ -1406,7 +1406,14 @@ function runProbeSuite(
     deadlineAt !== undefined
       ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
       : PROBE_RUN_TIMEOUT_MS;
-  const exposed = exposeDependencies(probeTree, dependencyRoot);
+  // `rebuild` because this tree is reused across the baseline, the control,
+  // every mutant and the revert probe, and the code running in it is the PR's
+  // own test code: a suite that plants or replaces a module in `node_modules`
+  // would otherwise decide every later run's verdict. Re-linking costs about a
+  // second per run against the budget's minutes.
+  const exposed = exposeDependencies(probeTree, dependencyRoot, {
+    rebuild: true,
+  });
   const r = spawnSync(
     process.execPath,
     [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
