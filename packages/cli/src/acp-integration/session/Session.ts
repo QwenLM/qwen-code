@@ -223,7 +223,6 @@ import {
 import {
   formatAudioBridgeNotice,
   hasAudioParts,
-  replaceAudioPartsWithUnavailable,
   runAudioBridge,
 } from '../../services/audio-bridge-service.js';
 import {
@@ -5151,6 +5150,24 @@ export class Session implements SessionContext {
                   const modelOverrideFellBack =
                     modelOverrideBeforeDrain !== undefined &&
                     options.getModelOverride?.() === undefined;
+                  if (modelOverrideFellBack && drained.parts.length === 0) {
+                    preservePreparedMessageOnSkippedSend = true;
+                    preparedMessage =
+                      await this.#recheckPartsAfterModelOverrideFallback(
+                        preparedMessage,
+                        pendingSend.signal,
+                      );
+                    if (nextMessage) {
+                      nextMessage = {
+                        ...nextMessage,
+                        parts: preparedMessage,
+                      };
+                    }
+                    messageForPreservation = {
+                      role: 'user',
+                      parts: preparedMessage,
+                    };
+                  }
                   if (drained.parts.length > 0) {
                     if (drained.hasQueuedPrompt) {
                       const claim = await this.#claimTodoStopGuardContinuation(
@@ -11466,19 +11483,6 @@ export class Session implements SessionContext {
           `audio route capability check failed for '${routeSelector}': ${
             error instanceof Error ? error.message : String(error)
           }`,
-        );
-        try {
-          await this.messageEmitter.emitAgentMessage(
-            'Audio was not sent: the active model override could not be resolved.',
-          );
-        } catch (noticeError) {
-          debugLogger.debug(
-            `audio bridge: failed to emit notice; continuing with fail-closed result error=${String(noticeError instanceof Error ? noticeError.message : noticeError)}`,
-          );
-        }
-        return replaceAudioPartsWithUnavailable(
-          parts,
-          'the active model override could not be resolved',
         );
       }
     }

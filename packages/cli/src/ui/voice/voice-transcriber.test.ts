@@ -1643,7 +1643,7 @@ describe('voice-transcriber', () => {
     expect(unsupportedAudioFormat('audio/mp4')).toBe('mp4');
     expect(unsupportedAudioFormat('audio/mp4;codecs=aac')).toBe('mp4');
     expect(unsupportedAudioFormat('audio/wav')).toBeUndefined();
-    expect(unsupportedAudioFormat('audio/x-m4a')).toBeUndefined();
+    expect(unsupportedAudioFormat('audio/x-m4a')).toBe('m4a');
   });
 
   it('falls back to wav for octet-stream audio uploads', async () => {

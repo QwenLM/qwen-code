@@ -4537,6 +4537,14 @@ describe('useGeminiStream', () => {
     );
 
     resolveForModel.mockRejectedValueOnce(new Error('route unavailable'));
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: mixedPrompt }, transcriptPart, secondImagePart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
     mockRunAudioBridge.mockClear();
     const secondToolCalls: TrackedToolCall[] = [
       {
@@ -4563,18 +4571,16 @@ describe('useGeminiStream', () => {
     await waitFor(() => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
-    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockRunAudioBridge).toHaveBeenCalledOnce();
     expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
     const secondSent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
-    expect(secondSent).toContain(
-      'the active model override could not be resolved',
-    );
+    expect(secondSent).toContain('[mid-turn audio transcript]');
     expect(secondSent).toContain('[mid-turn image transcript]');
     expect(secondSent).not.toContain('inlineData');
     expect(
       mockSendMessageStream.mock.calls[1]?.[3].modelOverride,
     ).toBeUndefined();
-    expect(mockAddItem).toHaveBeenCalledWith(
+    expect(mockAddItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('Audio was not sent'),
       }),
@@ -4746,16 +4752,13 @@ describe('useGeminiStream', () => {
     },
   );
 
-  it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+  it('keeps an image-only mid-turn message when a bridge failure returns no replacement parts', async () => {
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
     const resolvedImagePart: Part = {
       inlineData: {
         mimeType: 'image/png',
         data: 'iVBORw0KGgo=',
       },
-    };
-    const resolvedTextPart: Part = {
-      text: 'inspect @/tmp/screenshot.png and summarize',
     };
     const recordMidTurnUserMessage = vi.fn();
     Object.assign(mockConfig, {
@@ -4778,7 +4781,7 @@ describe('useGeminiStream', () => {
       recordMidTurnUserMessage,
     });
     vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
-      processedQuery: [resolvedTextPart, resolvedImagePart],
+      processedQuery: [resolvedImagePart],
       shouldProceed: true,
     } as unknown as Awaited<
       ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
@@ -4865,11 +4868,19 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
     const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
-    expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
+    expect(sent).toContain('Vision bridge could not interpret');
     expect(sent).not.toContain('inlineData');
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      [resolvedTextPart],
+      [
+        expect.objectContaining({
+          text: expect.stringContaining('unavailable'),
+        }),
+      ],
       queuedPrompt,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
+      expect.any(Number),
     );
   });
 

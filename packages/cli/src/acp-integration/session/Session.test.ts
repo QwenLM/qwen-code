@@ -11409,12 +11409,12 @@ describe('Session', () => {
         });
 
         expect(resolveForModel).toHaveBeenCalledTimes(4);
-        expect(transcribeVoiceAudioSpy).toHaveBeenCalledOnce();
+        expect(transcribeVoiceAudioSpy).toHaveBeenCalledTimes(2);
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[0]).toBe('qwen3-code-plus');
         const sent = JSON.stringify(secondCall?.[1].message);
         expect(sent).toContain('recovered earlier audio');
-        expect(sent).toContain(
+        expect(sent).not.toContain(
           'the active model override could not be resolved',
         );
         expect(sent).not.toContain('audio/wav');
@@ -11451,9 +11451,7 @@ describe('Session', () => {
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getEffectiveInputModalities = vi
-            .fn()
-            .mockReturnValue({ audio: true });
+          mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
           mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
             id: 'vision-agent',
             baseUrl: 'https://vision.example.com/v1',
@@ -11480,6 +11478,9 @@ describe('Session', () => {
             voiceModel: 'qwen3-asr-flash',
             env: { OPENAI_API_KEY: 'test-key' },
           });
+          transcribeVoiceAudioSpy.mockResolvedValue(
+            '[recovered audio transcript]',
+          );
           const imageMessage = {
             content: [
               {
@@ -11537,7 +11538,7 @@ describe('Session', () => {
             ],
           });
 
-          expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+          expect(transcribeVoiceAudioSpy).toHaveBeenCalledOnce();
           expect(runVisionBridgeSpy).toHaveBeenCalledOnce();
           const secondCall = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1];
@@ -11547,7 +11548,7 @@ describe('Session', () => {
             '[recovered image transcript]',
           );
           expect(textParts(secondMessage).join('\n')).toContain(
-            'the active model override could not be resolved',
+            '[recovered audio transcript]',
           );
           expect(secondMessage.some((part) => 'inlineData' in part)).toBe(
             false,
@@ -11564,7 +11565,7 @@ describe('Session', () => {
         },
       );
 
-      it('fails closed when the active audio route cannot be resolved', async () => {
+      it('falls back to the primary audio route when the active route cannot be resolved', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: [
             { text: 'captured screen' },
@@ -11712,7 +11713,7 @@ describe('Session', () => {
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         expect(secondCall?.[0]).toBe('qwen3-code-plus');
         const secondMessage = secondCall?.[1].message as Part[];
-        expect(textParts(secondMessage).join('\n')).toContain(
+        expect(textParts(secondMessage).join('\n')).not.toContain(
           'the active model override could not be resolved',
         );
         expect(JSON.stringify(secondMessage)).toContain(
@@ -11721,6 +11722,7 @@ describe('Session', () => {
         expect(JSON.stringify(secondMessage)).toContain(
           '[recovered drained image]',
         );
+        expect(JSON.stringify(secondMessage)).toContain('audio/wav');
         expect(JSON.stringify(secondMessage)).not.toContain('image/png');
         expect(bridgeToolResultImagesSpy).toHaveBeenCalledTimes(3);
         expect(fullTurnSelections).toEqual([true, false]);
@@ -11741,7 +11743,7 @@ describe('Session', () => {
           '[recovered drained image]',
         );
         expect(JSON.stringify(recordedLaterImage)).not.toContain('image/png');
-        expect(agentMessageChunks()).toContain(
+        expect(agentMessageChunks()).not.toContain(
           'Audio was not sent: the active model override could not be resolved.',
         );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
@@ -30354,9 +30356,22 @@ describe('Session', () => {
       );
     });
 
-    it('repairs staged tool images when Guard preparation drain falls back', async () => {
+    it('repairs staged tool images when cancellation empties a fallen-back Guard drain', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
+      vi.spyOn(audioBridgeService, 'runAudioBridge').mockImplementation(
+        async () => {
+          await session.cancelPendingPrompt();
+          return {
+            status: 'ok',
+            parts: [{ text: '[recovered audio transcript]' }],
+            audioCount: 1,
+            convertedCount: 1,
+            egressCount: 1,
+            modelId: 'qwen3-asr-flash',
+          };
+        },
+      );
       const todoTool = mockToolRegistry.getTool(core.ToolNames.TODO_WRITE);
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
@@ -30483,24 +30498,25 @@ describe('Session', () => {
         )
         .mockResolvedValue(createEmptyStream());
 
-      await runGuardPrompt();
+      await expect(runGuardPrompt()).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
 
-      const nestedUserModel = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[3]?.[0];
-      const nestedUserCall = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[3]?.[1] as { message: Part[] };
-      expect(nestedUserModel).toBe('qwen3-code-plus');
-      expect(
-        nestedUserCall.message.some((part) => 'functionResponse' in part),
-      ).toBe(true);
-      expect(JSON.stringify(nestedUserCall.message)).toContain(
-        '[recovered guard image]',
-      );
-      expect(JSON.stringify(nestedUserCall.message)).toContain(
-        'the active model override could not be resolved',
-      );
-      expect(JSON.stringify(nestedUserCall.message)).not.toContain('image/png');
-      expect(JSON.stringify(nestedUserCall.message)).not.toContain('audio/wav');
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      const preserved = vi
+        .mocked(mockChat.addHistory)
+        .mock.calls.map(([message]) => message)
+        .findLast(
+          (message) =>
+            message.role === 'user' &&
+            JSON.stringify(message).includes(
+              'read-before-nested-midturn-fallback',
+            ),
+        );
+      expect(preserved).toBeDefined();
+      expect(JSON.stringify(preserved)).toContain('[recovered guard image]');
+      expect(JSON.stringify(preserved)).not.toContain('image/png');
+      expect(JSON.stringify(preserved)).not.toContain('audio/wav');
       expect(fullTurnSelections).toEqual([true]);
     });
 

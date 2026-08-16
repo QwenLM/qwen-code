@@ -764,7 +764,10 @@ function inputAudioFormat(mimeType: string): string {
 // `mp4` nor `m4a`, so fail closed instead of sending an undocumented format.
 // If the endpoint is ever verified to accept `m4a`, replace this with an
 // `mp4: 'm4a'` entry in AUDIO_FORMAT_ALIASES.
-const UNSUPPORTED_INPUT_AUDIO_FORMATS: ReadonlySet<string> = new Set(['mp4']);
+const UNSUPPORTED_INPUT_AUDIO_FORMATS: ReadonlySet<string> = new Set([
+  'm4a',
+  'mp4',
+]);
 
 export function unsupportedAudioFormat(mimeType: string): string | undefined {
   const format = inputAudioFormat(mimeType);

@@ -1253,12 +1253,18 @@ export const useGeminiStream = (
         return { parts: bridgeResult.parts, shouldProceed: true };
       }
       // The bridge produced no usable replacement. Never forward images to a
-      // text-only model (it can't read them): drop them and proceed on the
-      // remaining text, or stop if nothing is left.
+      // text-only model (it can't read them): keep any remaining text and add
+      // a fail-closed marker so an image-only steered message is not lost.
       const textOnly = splitImageParts(parts).nonImageParts;
-      return textOnly.length > 0
-        ? { parts: textOnly, shouldProceed: true }
-        : { parts: null, shouldProceed: false };
+      return {
+        parts: [
+          ...textOnly,
+          {
+            text: '[Vision bridge could not interpret the attached image(s). The image content is unavailable; do not assume or invent what it shows, and do not call a tool to read the image file.]',
+          },
+        ],
+        shouldProceed: true,
+      };
     },
     [addItem, config],
   );
@@ -1304,20 +1310,18 @@ export const useGeminiStream = (
           }
           targetSupportsAudio = supportsAudio;
           if (!supportsAudio) {
-            if (
-              inlineModelOverrideActiveRef.current ||
-              modelOverrideResolutionFailed
-            ) {
+            const failClosed = inlineModelOverrideActiveRef.current;
+            if (modelOverrideResolutionFailed) {
+              clearModelOverride(
+                modelOverrideRef,
+                inlineModelOverrideActiveRef,
+              );
+            }
+            if (failClosed) {
               const reason = modelOverrideResolutionFailed
                 ? 'the active model override could not be resolved'
                 : 'the active model override does not support audio';
               nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
-              if (modelOverrideResolutionFailed) {
-                clearModelOverride(
-                  modelOverrideRef,
-                  inlineModelOverrideActiveRef,
-                );
-              }
               addItem(
                 {
                   type: MessageType.ERROR,
