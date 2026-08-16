@@ -9571,7 +9571,14 @@ describe('Session', () => {
               sessionId: 'test-session-id',
               prompt: [{ type: 'text', text: 'run the failing tool' }],
             }),
-          ).resolves.toEqual({ stopReason: 'end_turn' });
+          ).rejects.toMatchObject({
+            message: LOOP_DETECTED_TURN_ERROR_MESSAGE,
+            data: {
+              code: 'LOOP_DETECTED',
+              errorKind: 'loop_detected',
+              loopType: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            },
+          });
 
           expect(logLoopDetectedSpy).toHaveBeenCalledWith(
             mockConfig,
