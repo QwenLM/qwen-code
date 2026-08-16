@@ -194,6 +194,9 @@ export class TeamManager {
   /** Manual or auto-claimed assignments already delivered to an agent. */
   private readonly deliveredTaskAssignments = new Map<string, string>();
 
+  /** Increments whenever a task mutation invalidates assignment delivery. */
+  private taskAssignmentDeliveryEpoch = 0;
+
   /** Cleanup functions for event bridge listeners, keyed by
    *  agentId so we can release each agent's listeners as soon as
    *  it reaches a terminal status — not just at full team
@@ -717,9 +720,9 @@ export class TeamManager {
 
   /**
    * Reject an owner that cannot receive a leader-assigned task before that
-   * assignment is persisted.
+   * assignment is persisted, returning the stored canonical name.
    */
-  assertAssignableTaskOwner(owner: string): void {
+  assertAssignableTaskOwner(owner: string): string {
     const member = findMemberByName(this.teamFile.members, owner);
     if (!member) {
       throw new Error(`Teammate "${owner}" not found.`);
@@ -732,6 +735,7 @@ export class TeamManager {
     if (!agent || isTerminalStatus(agent.getStatus())) {
       throw new Error(`Teammate "${member.name}" is no longer active.`);
     }
+    return member.name;
   }
 
   /**
@@ -753,8 +757,14 @@ export class TeamManager {
     return 'delivered';
   }
 
-  invalidateTaskAssignmentDelivery(taskId: string): void {
-    this.deliveredTaskAssignments.delete(taskId);
+  invalidateTaskAssignmentDelivery(
+    taskId: string,
+    clearDelivered = true,
+  ): void {
+    this.taskAssignmentDeliveryEpoch++;
+    if (clearDelivered) {
+      this.deliveredTaskAssignments.delete(taskId);
+    }
   }
 
   /**
@@ -1825,10 +1835,13 @@ export class TeamManager {
   ): Promise<boolean> {
     if (this._shutdownPending.has(agentName)) return false;
 
+    const deliveryEpoch = this.taskAssignmentDeliveryEpoch;
     const assignments = await listTasks(this.teamFile.name, {
       status: 'in_progress',
       owner: agentName,
     });
+    if (deliveryEpoch !== this.taskAssignmentDeliveryEpoch) return false;
+
     const activeIds = new Set(assignments.map((task) => task.id));
     for (const [taskId, owner] of this.deliveredTaskAssignments) {
       if (owner === agentId && !activeIds.has(taskId)) {

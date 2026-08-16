@@ -263,19 +263,18 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // claim. We compute the caller name here and pass it through so
     // the in-lock check has the identity it needs.
     const teammateCallerName = isTeammate() ? getAgentName() : undefined;
-    const taskBeforeUpdate = await getTask(teamName, taskId);
 
     const hasExplicitNonblankOwner =
       this.params.owner !== undefined && this.params.owner !== '';
-    const isExplicitLeaderAssignment =
-      teammateCallerName === undefined &&
-      hasExplicitNonblankOwner &&
-      (this.params.status ?? taskBeforeUpdate?.status) === 'in_progress';
+    const isExplicitLeaderOwnerUpdate =
+      teammateCallerName === undefined && hasExplicitNonblankOwner;
 
-    const assignmentManager = isExplicitLeaderAssignment
-      ? this.config.getTeamManager()
+    const teamManager = this.config.getTeamManager?.();
+    const assignmentManager = isExplicitLeaderOwnerUpdate
+      ? teamManager
       : undefined;
-    if (isExplicitLeaderAssignment) {
+    let canonicalAssignmentOwner: string | undefined;
+    if (isExplicitLeaderOwnerUpdate) {
       if (!assignmentManager) {
         const msg = `Cannot assign task #${taskId} without an active team.`;
         return {
@@ -285,7 +284,9 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         };
       }
       try {
-        assignmentManager.assertAssignableTaskOwner(this.params.owner!);
+        canonicalAssignmentOwner = assignmentManager.assertAssignableTaskOwner(
+          this.params.owner!,
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
@@ -300,13 +301,13 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     if (this.params.status === 'deleted') {
       let ok: boolean;
       try {
-        ok = await deleteTask(
-          teamName,
-          taskId,
-          teammateCallerName !== undefined
+        ok = await deleteTask(teamName, taskId, {
+          ...(teammateCallerName !== undefined
             ? { callerName: teammateCallerName }
-            : undefined,
-        );
+            : {}),
+          onDeleted: () =>
+            teamManager?.invalidateTaskAssignmentDelivery?.(taskId),
+        });
       } catch (err) {
         if (err instanceof TaskOwnershipError) {
           return {
@@ -436,6 +437,11 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       };
     }
 
+    let assignmentDispatch:
+      | 'delivered'
+      | 'deferred'
+      | 'unavailable'
+      | undefined;
     let task;
     try {
       task = await updateTask(
@@ -443,7 +449,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         taskId,
         {
           status: this.params.status,
-          owner: this.params.owner ?? autoOwner,
+          owner: canonicalAssignmentOwner ?? this.params.owner ?? autoOwner,
           subject: this.params.subject,
           description: this.params.description,
           activeForm: this.params.activeForm,
@@ -451,9 +457,34 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           addBlocks: this.params.addBlocks,
           addBlockedBy: this.params.addBlockedBy,
         },
-        teammateCallerName !== undefined
-          ? { callerName: teammateCallerName }
-          : undefined,
+        {
+          ...(teammateCallerName !== undefined
+            ? { callerName: teammateCallerName }
+            : {}),
+          onUpdated: (updated, previous) => {
+            const deliveryChanged =
+              updated.status !== previous.status ||
+              updated.owner !== previous.owner;
+            const contentChanged =
+              updated.subject !== previous.subject ||
+              updated.description !== previous.description ||
+              updated.activeForm !== previous.activeForm;
+            if (deliveryChanged || contentChanged) {
+              teamManager?.invalidateTaskAssignmentDelivery?.(
+                updated.id,
+                deliveryChanged,
+              );
+            }
+            if (
+              assignmentManager &&
+              updated.status === 'in_progress' &&
+              updated.owner === canonicalAssignmentOwner
+            ) {
+              assignmentDispatch =
+                assignmentManager.dispatchAssignedTask(updated);
+            }
+          },
+        },
       );
     } catch (err) {
       if (err instanceof TaskOwnershipError) {
@@ -473,15 +504,6 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         returnDisplay: msg,
         error: { message: msg },
       };
-    }
-
-    if (
-      this.params.status === 'completed' ||
-      taskBeforeUpdate?.owner !== task.owner
-    ) {
-      this.config
-        .getTeamManager?.()
-        ?.invalidateTaskAssignmentDelivery?.(task.id);
     }
 
     // Mirror dependency edges so auto-claim and completion-unblock
@@ -535,8 +557,12 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     }
 
     const releasedUnavailableAssignment =
-      assignmentManager?.dispatchAssignedTask(task) === 'unavailable' &&
-      (await releaseOwnedTask(teamName, taskId, this.params.owner!));
+      assignmentDispatch === 'unavailable' &&
+      (await releaseOwnedTask(
+        teamName,
+        taskId,
+        canonicalAssignmentOwner ?? this.params.owner!,
+      ));
     if (releasedUnavailableAssignment) {
       notifyTasksUpdated(teamName);
     }

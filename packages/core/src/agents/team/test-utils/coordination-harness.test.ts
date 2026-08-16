@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
@@ -13,8 +14,43 @@ import { ApprovalMode } from '../../../config/config.js';
 import { TaskUpdateTool } from '../../../tools/task-update.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
-import { createTask, getTask, listTasks, updateTask } from '../tasks.js';
+import {
+  createTask,
+  getTask,
+  getTaskPath,
+  listTasks,
+  updateTask,
+} from '../tasks.js';
+import { getTasksDir } from '../teamHelpers.js';
 import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
+
+const taskReadGate = vi.hoisted(() => ({
+  taskPath: undefined as string | undefined,
+  gated: false,
+  snapshotRelease: undefined as Promise<void> | undefined,
+  resolveSnapshotRead: undefined as (() => void) | undefined,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    readFile: async (...args: Parameters<typeof original.readFile>) => {
+      const contents = await original.readFile(...args);
+      const snapshotRelease = taskReadGate.snapshotRelease;
+      if (
+        taskReadGate.taskPath === args[0] &&
+        !taskReadGate.gated &&
+        snapshotRelease
+      ) {
+        taskReadGate.gated = true;
+        taskReadGate.resolveSnapshotRead?.();
+        await snapshotRelease;
+      }
+      return contents;
+    },
+  };
+});
 
 // Mock Storage so all file I/O uses the harness's temp dir.
 vi.mock('../../../config/storage.js', async (importOriginal) => {
@@ -62,6 +98,47 @@ function expectTeamMessage(
   expect(match, `not a team_message envelope: ${received}`).not.toBeNull();
   expect(match![2]).toBe(from);
   expect(match![3]).toBe(text);
+}
+
+async function waitForManagerWork(
+  manager: TeamCoordinationHarness['teamManager'],
+): Promise<void> {
+  const state = manager as unknown as {
+    pendingAsyncWork: Set<Promise<unknown>>;
+  };
+  while (state.pendingAsyncWork.size > 0) {
+    await Promise.allSettled([...state.pendingAsyncWork]);
+  }
+}
+
+/** Pause a task-list read after it captured the target file's content. */
+function gateTaskSnapshotRead(taskPath: string): {
+  snapshotRead: Promise<void>;
+  release(): void;
+  restore(): void;
+} {
+  let releaseSnapshot!: () => void;
+  const snapshotRelease = new Promise<void>((resolve) => {
+    releaseSnapshot = resolve;
+  });
+  let resolveSnapshotRead!: () => void;
+  const snapshotRead = new Promise<void>((resolve) => {
+    resolveSnapshotRead = resolve;
+  });
+  taskReadGate.taskPath = taskPath;
+  taskReadGate.gated = false;
+  taskReadGate.snapshotRelease = snapshotRelease;
+  taskReadGate.resolveSnapshotRead = resolveSnapshotRead;
+
+  return {
+    snapshotRead,
+    release: () => releaseSnapshot(),
+    restore: () => {
+      taskReadGate.taskPath = undefined;
+      taskReadGate.snapshotRelease = undefined;
+      taskReadGate.resolveSnapshotRead = undefined;
+    },
+  };
 }
 
 // ─── Tests ────────────────────────────────────────────────────
@@ -412,6 +489,330 @@ describe('TeamCoordinationHarness', () => {
       );
     });
 
+    it('delivers a busy owner’s reactivated assignment after a pending transition', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      const task = await createTask(h.teamName, {
+        subject: 'Reactivated assignment',
+        description: 'Deliver after returning to in progress.',
+      });
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+      target.goIdle();
+      await target.waitForMessageCount(2);
+
+      await tool
+        .build({ taskId: task.id, status: 'pending' })
+        .execute(new AbortController().signal);
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+
+      target.goIdle();
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(3);
+      expect(target.getReceivedMessages()[2]).toContain(
+        'Reactivated assignment',
+      );
+    });
+
+    it('canonicalizes a display-form owner before deferred delivery', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Canonical owner assignment',
+        description: 'Deliver after the existing turn.',
+      });
+      const target = await h.spawnTeammate('QA Tester', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('qa-tester', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+
+      const result = await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'QA Tester' })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      expect(target.getReceivedMessages()[1]).toContain(
+        'Canonical owner assignment',
+      );
+      expect(await getTask(h.teamName, task.id)).toEqual(
+        expect.objectContaining({ status: 'in_progress', owner: 'qa-tester' }),
+      );
+    });
+
+    it('discards a stale deleted assignment snapshot before delivering its replacement', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      const original = await createTask(h.teamName, {
+        subject: 'Original assignment',
+        description: 'Must not reach the replacement generation.',
+      });
+      await tool
+        .build({ taskId: original.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      await waitForManagerWork(h.teamManager);
+
+      const gate = gateTaskSnapshotRead(getTaskPath(h.teamName, original.id));
+      try {
+        target.goIdle();
+        await gate.snapshotRead;
+        target.setStatus(AgentStatus.RUNNING);
+
+        await tool
+          .build({ taskId: original.id, status: 'deleted' })
+          .execute(new AbortController().signal);
+        const replacement = await createTask(h.teamName, {
+          subject: 'Replacement assignment',
+          description: 'Must replace the stale snapshot.',
+        });
+        expect(replacement.id).toBe(original.id);
+        await tool
+          .build({
+            taskId: replacement.id,
+            status: 'in_progress',
+            owner: 'target',
+          })
+          .execute(new AbortController().signal);
+      } finally {
+        gate.restore();
+        gate.release();
+      }
+
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(2);
+      target.goIdle();
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(3);
+      expect(target.getReceivedMessages()[2]).toContain(
+        'Replacement assignment',
+      );
+    });
+
+    it('clears deleted delivery state before locked cleanup permits replacement', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      const dependent = await createTask(h.teamName, {
+        subject: 'Dependent cleanup task',
+        description: 'Keeps deletion cleanup in flight.',
+      });
+      const original = await createTask(h.teamName, {
+        subject: 'Original assignment',
+        description: 'Must not reach the replacement generation.',
+      });
+      await updateTask(h.teamName, original.id, {
+        addBlocks: [dependent.id],
+      });
+      await updateTask(h.teamName, dependent.id, {
+        addBlockedBy: [original.id],
+      });
+      await tool
+        .build({ taskId: original.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      await waitForManagerWork(h.teamManager);
+
+      const gate = gateTaskSnapshotRead(getTaskPath(h.teamName, original.id));
+      let resolveInvalidated!: () => void;
+      const invalidated = new Promise<void>((resolve) => {
+        resolveInvalidated = resolve;
+      });
+      const invalidate = h.teamManager.invalidateTaskAssignmentDelivery.bind(
+        h.teamManager,
+      );
+      const invalidationSpy = vi
+        .spyOn(h.teamManager, 'invalidateTaskAssignmentDelivery')
+        .mockImplementation((taskId, clearDelivered) => {
+          invalidate(taskId, clearDelivered);
+          resolveInvalidated();
+        });
+      const releaseDependencyLock = await lockfile.lock(
+        path.join(getTasksDir(h.teamName), `${dependent.id}.json`),
+      );
+      let deletion: Promise<unknown> | undefined;
+      try {
+        target.goIdle();
+        await gate.snapshotRead;
+        target.setStatus(AgentStatus.RUNNING);
+
+        deletion = tool
+          .build({ taskId: original.id, status: 'deleted' })
+          .execute(new AbortController().signal);
+        await invalidated;
+        const replacement = await createTask(h.teamName, {
+          subject: 'Cleanup replacement assignment',
+          description: 'Must replace the deleted assignment.',
+        });
+        expect(replacement.id).toBe(original.id);
+        await tool
+          .build({
+            taskId: replacement.id,
+            status: 'in_progress',
+            owner: 'target',
+          })
+          .execute(new AbortController().signal);
+      } finally {
+        gate.restore();
+        gate.release();
+        await releaseDependencyLock().catch(() => {});
+        await deletion;
+        invalidationSpy.mockRestore();
+      }
+
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(2);
+      target.goIdle();
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(3);
+      expect(target.getReceivedMessages()[2]).toContain(
+        'Cleanup replacement assignment',
+      );
+    });
+
+    it('discards a stale completed assignment snapshot before delivering a reopened task', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      const task = await createTask(h.teamName, {
+        subject: 'Original assignment',
+        description: 'Must not reach the reopened generation.',
+      });
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+      target.goIdle();
+      await target.waitForMessageCount(2);
+      await waitForManagerWork(h.teamManager);
+
+      const gate = gateTaskSnapshotRead(getTaskPath(h.teamName, task.id));
+      try {
+        target.goIdle();
+        await gate.snapshotRead;
+        target.setStatus(AgentStatus.RUNNING);
+
+        await tool
+          .build({ taskId: task.id, status: 'completed' })
+          .execute(new AbortController().signal);
+        await tool
+          .build({
+            taskId: task.id,
+            status: 'in_progress',
+            owner: 'target',
+            subject: 'Reopened assignment',
+            description: 'Must replace the stale completed snapshot.',
+          })
+          .execute(new AbortController().signal);
+      } finally {
+        gate.restore();
+        gate.release();
+      }
+
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(2);
+      target.goIdle();
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(3);
+      expect(target.getReceivedMessages()[2]).toContain('Reopened assignment');
+    });
+
+    it('discards a stale assignment snapshot after its queued content changes', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      const tool = new TaskUpdateTool({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      } as never);
+
+      await h.teamManager.sendMessage('target', 'current work', 'leader');
+      await target.waitForMessageCount(1);
+      const task = await createTask(h.teamName, {
+        subject: 'Original assignment',
+        description: 'Must not reach the revised generation.',
+      });
+      await tool
+        .build({ taskId: task.id, status: 'in_progress', owner: 'target' })
+        .execute(new AbortController().signal);
+
+      const gate = gateTaskSnapshotRead(getTaskPath(h.teamName, task.id));
+      try {
+        target.goIdle();
+        await gate.snapshotRead;
+        target.setStatus(AgentStatus.RUNNING);
+
+        await tool
+          .build({
+            taskId: task.id,
+            subject: 'Revised assignment',
+            description: 'Must replace the stale content snapshot.',
+          })
+          .execute(new AbortController().signal);
+      } finally {
+        gate.restore();
+        gate.release();
+      }
+
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(1);
+      target.goIdle();
+      await waitForManagerWork(h.teamManager);
+      expect(target.getReceivedMessages()).toHaveLength(2);
+      expect(target.getReceivedMessages()[1]).toContain('Revised assignment');
+    });
+
     it('delivers multiple persisted assignments in task order without repeating one', async () => {
       const h = await createHarness();
       const first = await createTask(h.teamName, {
@@ -508,17 +909,14 @@ describe('TeamCoordinationHarness', () => {
         .execute(new AbortController().signal);
 
       target.goIdle();
-      await vi.waitFor(
-        () => expect(target.getReceivedMessages()).toHaveLength(2),
-        { timeout: 1000 },
-      );
+      await target.waitForMessageCount(2);
       expect(target.getReceivedMessages()[1]).toContain('Repeat assignment');
 
       await tool
         .build({ taskId: task.id, description: 'Clarified details.' })
         .execute(new AbortController().signal);
       target.goIdle();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await waitForManagerWork(h.teamManager);
       expect(target.getReceivedMessages()).toHaveLength(2);
     });
 

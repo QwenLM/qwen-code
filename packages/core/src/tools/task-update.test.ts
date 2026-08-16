@@ -112,6 +112,7 @@ describe('TaskUpdateTool', () => {
     expect(teamManager.invalidateTaskAssignmentDelivery).toHaveBeenCalledOnce();
     expect(teamManager.invalidateTaskAssignmentDelivery).toHaveBeenCalledWith(
       task.id,
+      true,
     );
   });
 
@@ -174,7 +175,7 @@ describe('TaskUpdateTool', () => {
       description: 'desc',
     });
     const teamManager = {
-      assertAssignableTaskOwner: vi.fn(),
+      assertAssignableTaskOwner: vi.fn(() => 'worker'),
       dispatchAssignedTask: vi.fn(() => 'unavailable'),
     };
     const leaderTool = new TaskUpdateTool({

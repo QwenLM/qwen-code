@@ -370,7 +370,10 @@ export async function updateTask(
     addBlocks?: string[];
     addBlockedBy?: string[];
   },
-  opts?: { callerName?: string },
+  opts?: {
+    callerName?: string;
+    onUpdated?: (task: SwarmTask, previous: SwarmTask) => void;
+  },
 ): Promise<SwarmTask | undefined> {
   const taskPath = getTaskPath(teamName, taskId);
 
@@ -389,6 +392,12 @@ export async function updateTask(
         throw err;
       }
       const task = JSON.parse(raw) as SwarmTask;
+      const previous: SwarmTask = {
+        ...task,
+        blocks: [...task.blocks],
+        blockedBy: [...task.blockedBy],
+        metadata: task.metadata ? { ...task.metadata } : undefined,
+      };
 
       if (
         opts?.callerName !== undefined &&
@@ -498,6 +507,7 @@ export async function updateTask(
       }
 
       await atomicWriteJSON(taskPath, task);
+      opts?.onUpdated?.(task, previous);
 
       notifyTasksUpdated(teamName);
       return task;
@@ -534,7 +544,7 @@ export async function updateTask(
 export async function deleteTask(
   teamName: string,
   taskId: string,
-  opts?: { callerName?: string },
+  opts?: { callerName?: string; onDeleted?: () => void },
 ): Promise<boolean> {
   const taskPath = getTaskPath(teamName, taskId);
 
@@ -579,6 +589,7 @@ export async function deleteTask(
         if (isNodeError(err) && err.code === 'ENOENT') return null;
         throw err;
       }
+      opts?.onDeleted?.();
       return deps;
     },
     () => null,
