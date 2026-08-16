@@ -663,7 +663,10 @@ function useWorkspaceSessionCatalog(
     cwd: string,
     options?: { archiveState?: string; group?: string },
   ) => Promise<DaemonSessionSummary[]>,
-): void {
+): {
+  channelCatalogCwds: string[];
+} {
+  const channelCatalogCwds: string[] = [];
   workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
     listWorkspaceSessions: (options?: {
       archiveState?: string;
@@ -673,6 +676,14 @@ function useWorkspaceSessionCatalog(
       return resolve(cwd, options);
     },
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    workspaceChannelTypes: vi.fn().mockImplementation(() => {
+      channelCatalogCwds.push(cwd);
+      return Promise.resolve([]);
+    }),
+    workspaceChannels: vi.fn().mockImplementation(() => {
+      channelCatalogCwds.push(cwd);
+      return Promise.resolve({ revision: '0', instances: {} });
+    }),
     archiveSessionsData,
     unarchiveSessionsData,
     deleteSessionsData,
@@ -681,6 +692,7 @@ function useWorkspaceSessionCatalog(
     exportSession,
     exportArchivedSession,
   }));
+  return { channelCatalogCwds };
 }
 
 function openRemoval(cwd: string): void {
@@ -4406,6 +4418,7 @@ describe('WebShellSidebar session list notices', () => {
 
 describe('WebShellSidebar Live group', () => {
   it('shows Live sessions without exposing the backing Conversations workspace', async () => {
+    enableChannelOrganization();
     const liveWorkspace: DaemonWorkspaceCapability = {
       id: 'live',
       cwd: '/Users/test/Documents/Qwen Code/Conversations',
@@ -4414,7 +4427,7 @@ describe('WebShellSidebar Live group', () => {
       trusted: true,
       kind: 'live',
     };
-    useWorkspaceSessionCatalog(async (cwd) =>
+    const channelCatalog = useWorkspaceSessionCatalog(async (cwd) =>
       cwd === liveWorkspace.cwd
         ? [{ sessionId: 'live-session', displayName: 'Voice check' }]
         : [],
@@ -4438,8 +4451,31 @@ describe('WebShellSidebar Live group', () => {
     expect(container.textContent).toContain('Voice check');
     expect(listWorkspaceSessions).toHaveBeenCalledWith(
       liveWorkspace.cwd,
-      expect.objectContaining({ archiveState: 'active' }),
+      expect.objectContaining({
+        archiveState: 'active',
+        sourceType: 'default',
+      }),
     );
+
+    await switchSessionSource('Channels');
+    expect(
+      listWorkspaceSessions.mock.calls.findLast(
+        ([cwd]) => cwd === liveWorkspace.cwd,
+      )?.[1],
+    ).toEqual(
+      expect.objectContaining({
+        archiveState: 'active',
+        sourceType: 'default',
+      }),
+    );
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    // Sections start expanded, so non-live workspaces legitimately load
+    // their own channel catalog; the live section must never join in.
+    expect(channelCatalog.channelCatalogCwds).not.toContain(liveWorkspace.cwd);
+    expect(container.textContent).not.toContain('Other channels');
+    expect(container.textContent).toContain('Voice check');
   });
 });
 
