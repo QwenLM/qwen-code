@@ -763,9 +763,18 @@ jobs:
                   # prefix; --update-only never mints a comment
                   # (#9193 review). A failed invalidation only warns: the
                   # worst case is one more strip of a re-applied label.
+                  #
+                  # GH_TOKEN must bind the MARKER AUTHOR's identity: the
+                  # upsert lookup is author-scoped, the marker is posted by
+                  # the triage agent under QWEN_CODE_BOT_TOKEN/CI_BOT_PAT,
+                  # and this step's GITHUB_TOKEN resolves to
+                  # github-actions[bot] — authenticating as anyone else
+                  # makes --update-only a SILENT no-op (exit 0, no PATCH),
+                  # leaving the marker live. Mirrors the sibling upsert
+                  # sites' CI_BOT_PAT binding (docs-only relay/supersede).
                   invalidated_marker_file="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-triage-marker-invalidated.XXXXXX")"
                   printf '%s\n' "<!-- qwen-triage on-hold invalidated: stale pin stripped with the label at head ${HEAD_SHA} base ${BASE_SHA} (#9193). -->" > "$invalidated_marker_file"
-                  if ! .github/scripts/upsert-bot-comment.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" 'qwen-triage on-hold sha=' "$invalidated_marker_file" --update-only; then
+                  if ! GH_TOKEN="${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}" .github/scripts/upsert-bot-comment.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" 'qwen-triage on-hold sha=' "$invalidated_marker_file" --update-only; then
                     echo "::warning::could not invalidate the stale triage marker comment (#9193)."
                   fi
                   rm -f "$invalidated_marker_file"

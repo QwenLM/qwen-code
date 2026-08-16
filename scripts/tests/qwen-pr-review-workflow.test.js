@@ -2561,6 +2561,11 @@ describe('qwen pr review triage-only skip (#7411)', () => {
       '${{ github.event.inputs.pr_number }}': '4242',
       '${{ github.event.inputs.review_mode }}': 'dry-run',
       "${{ github.event.inputs.timeout_minutes || '180' }}": '180',
+      // The stale-marker invalidation binds the marker AUTHOR's token
+      // inline (the upsert lookup is author-scoped); give it a distinct
+      // stub token so the stub's `gh api user` can answer per identity.
+      '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}':
+        'stub-triage-bot-pat',
     };
     for (const [expr, value] of Object.entries(subs)) {
       run = run.split(expr).join(value);
@@ -2592,13 +2597,17 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             // case words and bash rejects the line outright.
             '  *"-X DELETE"*) if [ "${CONTEXT_DELETE_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi ;;',
             // Fast answers for the marker-invalidation upsert the strip
-            // branch now runs (upsert-bot-comment.sh): a bot login and an
-            // EMPTY listing, so --update-only no-ops instead of retrying
-            // its way through the stub's silent branches (3x sleep 10).
-            // `[]`, not `[[]]`: the upsert jq runs with -s (slurp), which
-            // wraps the document once itself.
-            '  "api user"*) echo "qwen-code-ci-bot" ;;',
-            '  *"--method GET"*) echo "[]" ;;',
+            // branch now runs (upsert-bot-comment.sh). The user answer is
+            // IDENTITY-SCOPED: only the marker author's token resolves to
+            // the marker author — dropping the workflow's inline GH_TOKEN
+            // override leaves the upsert authenticated as
+            // github-actions[bot], the author filter matches nothing, and
+            // no PATCH is issued (the R13-1 regression this pins). The
+            // listing carries one marker comment authored by that bot so
+            // the matching run reaches the PATCH. Slurp note: the upsert
+            // jq runs with -s, which wraps the document once itself.
+            '  "api user"*) if [ "$GH_TOKEN" = "stub-triage-bot-pat" ]; then echo "qwen-code-ci-bot"; else echo "github-actions[bot]"; fi ;;',
+            '  *"--method GET"*) echo "[{\\"id\\":123,\\"user\\":{\\"login\\":\\"qwen-code-ci-bot\\"},\\"body\\":\\"<!-- qwen-triage on-hold sha=stale -->\\"}]" ;;',
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
             '  */comments*)',
             '    if [ "${CONTEXT_MARKERS_FAIL:-0}" = "1" ]; then echo "API error" >&2; exit 1; fi',
@@ -2714,6 +2723,18 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.summary).toContain('Removed stale status/on-hold');
     expect(r.ghCalls).toContain('labels/status%2Fon-hold');
     expect(r.ghCalls).toContain('-X DELETE');
+    // The marker invalidation must actually PATCH: it runs under the
+    // marker AUTHOR's token (inline GH_TOKEN override — the upsert lookup
+    // is author-scoped; this step's own GITHUB_TOKEN is
+    // github-actions[bot], which would make --update-only a silent no-op
+    // and leave the marker live, R13-1). The stub answers `gh api user`
+    // per token and only lists the marker to the author identity, so
+    // dropping the override removes the PATCH and fails these pins.
+    expect(r.ghCalls).toContain('--method PATCH');
+    expect(r.ghCalls).toContain('qwen-triage on-hold invalidated');
+    expect(r.summary).not.toContain(
+      'could not invalidate the stale triage marker',
+    );
     rmSync(r.dir, { recursive: true, force: true });
   });
 
