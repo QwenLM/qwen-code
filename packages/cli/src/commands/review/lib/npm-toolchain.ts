@@ -63,6 +63,19 @@ function buildCommand(dir: string): string {
 function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
+/**
+ * The one grammar `testCommand` above emits. Exported for the `--resume`
+ * shape gate: a continuation re-executes report-stored `test[].command`
+ * strings verbatim under `shell: true`, and the run-identity check pins a
+ * report to this run's TREE, not to this program's authorship — a report
+ * edited in place keeps its identity. Anything outside the emitter's own
+ * grammar is therefore refused before it can be re-run, the same policy
+ * `test-delta` already applies to report-derived commands it re-executes.
+ * The character class covers every workspace dir this repo shape produces;
+ * a dir exotic enough to fall outside it costs that report its resume (a
+ * named refusal, pointing at a fresh run), never a verbatim re-execution.
+ */
+export const TEST_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
 
 /**
  * Workspace packages the compiler said it could not resolve.

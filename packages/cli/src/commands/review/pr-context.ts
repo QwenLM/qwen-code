@@ -1379,7 +1379,14 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       let login: string | null = null;
       try {
         login = currentUser();
-        identityKnown = true;
+        // An empty login is exit-0-with-empty-output — a stubbed or proxied
+        // `gh` shape, not a confirmed identity. `recoverLedger` already treats
+        // '' as unknown (its `me` is null), so counting it as KNOWN here let
+        // the deletion flag below fire over an identity that was never proven
+        // (sawOwnReview cannot become true for a null me), deleting the side
+        // file and resetting the round counter. Same precedent as presubmit's
+        // own '' handling: empty is unknown.
+        identityKnown = login !== '';
       } catch {
         login = null;
       }

@@ -47,7 +47,7 @@ import {
   DEFAULT_WHOLE_CALL_BUDGET_S,
 } from './lib/build-budget.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { npmToolchainAdapter } from './lib/npm-toolchain.js';
+import { npmToolchainAdapter, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
@@ -554,6 +554,26 @@ function previousReport(out: string | undefined): BuildTestReport {
     throw new Error(
       `build-test: --resume expected a build-test report at ${out}, and that ` +
         `file is not one. Run build-test without --resume first.`,
+    );
+  }
+  // Shape is not authorship. The identity check pins a report to this run's
+  // tree/sha/plan — an edited-in-place report keeps all three — and the
+  // continuation re-executes clamped `test[].command` strings VERBATIM under
+  // `shell: true`. So the commands themselves are held to the grammar the
+  // emitter can produce, the same policy test-delta applies before re-running
+  // report-derived commands. Checked over every entry, not only the clamped
+  // ones: `clamped` is a field of the same untrusted file, and a report
+  // carrying any command this emitter cannot write is not this emitter's.
+  const alien = (shape.test as Array<{ command: string }>).find(
+    (t) => !TEST_COMMAND_RE.test(t.command),
+  );
+  if (alien) {
+    throw new Error(
+      `build-test: --resume refuses the report at ${out}: test command ` +
+        `${JSON.stringify(alien.command)} is not one build-test itself runs ` +
+        `(npm test [--workspace="<dir>"]), so the report is not a build-test ` +
+        `run this command can continue. Run build-test without --resume ` +
+        `first.`,
     );
   }
   return parsed as BuildTestReport;

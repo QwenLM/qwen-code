@@ -1862,6 +1862,24 @@ describe('runPrContext identity failure (handler level)', () => {
     });
     expect(rmSyncMock).not.toHaveBeenCalled();
   });
+
+  it('never deletes the side file over an EMPTY login — exit 0 is not identity', async () => {
+    // A stubbed, proxied or GHES `gh` can answer `api user` with empty output
+    // and exit 0. `recoverLedger` already reads '' as unknown (its `me` is
+    // null, so `sawOwnReview` can never become true), and a flag that counted
+    // it as KNOWN deleted the side file — resetting the round counter — over
+    // an identity that was never proven. Same rule as the throw above: only a
+    // non-empty login licenses deletion.
+    currentUserMock.mockReturnValue('');
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('runPrContext host baking (handler level)', () => {
