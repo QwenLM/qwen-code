@@ -1680,6 +1680,27 @@ jobs:
             echo "Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Re-runs of failed jobs keep the same run id: a prior attempt that
+          # died before reaching this step already got a fallback comment for
+          # this run from the fallback-comment job. Dedup on the marker plus
+          # this run's URL exactly as that job does; a FAILED lookup defers to
+          # it (it retries and fails closed) instead of risking a duplicate —
+          # posting on a failed listing is how a transient 5xx mints one.
+          bot_login="$(gh api user --jq '.login' 2>/dev/null)" || bot_login=""
+          fallback_bodies=""
+          if [ -n "$bot_login" ] \
+            && fallback_bodies="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
+              --jq ".comments[] | select(.author.login == \"$bot_login\") | select(.body | contains(\"$FALLBACK_MARKER\")) | .body")"; then
+            case "$fallback_bodies" in
+              *"actions/runs/${GITHUB_RUN_ID})"*)
+                echo "A fallback comment for this run already exists; skipping." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+            esac
+          else
+            echo "Fallback comment dedup lookup failed; deferring to the fallback-comment job." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
           if [ "$FAILURE_KIND" = "timeout" ]; then
             if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then
@@ -1765,8 +1786,15 @@ jobs:
   # fallback comment for this run already exists — matched by the
   # qwen-review-fallback marker plus this run's URL, since the ack comment
   # also links the run and must not suppress this one; the same check dedupes
-  # re-runs, which keep the same run id. The PR number comes from the event
-  # payload, not the dead job's outputs, which do not survive a crash.
+  # re-runs, which keep the same run id. A review-pr that dies to its own
+  # job-level timeout is auto-CANCELLED by GitHub — result 'cancelled' and
+  # failure() false — which opens neither a failure-only gate nor the in-job
+  # step, so the gate admits 'cancelled' too; a run-level cancel cancels this
+  # queued job with it, so a live gate evaluation seeing 'cancelled' is
+  # overwhelmingly the timeout case, and the residual manual single-job
+  # cancel just gets a benign retry-guidance comment. The PR number comes
+  # from the event payload, not the dead job's outputs, which do not survive
+  # a crash.
   fallback-comment:
     needs:
       [
@@ -1779,6 +1807,7 @@ jobs:
     if: |-
       always() &&
       (needs.review-pr.result == 'failure' ||
+       needs.review-pr.result == 'cancelled' ||
        needs.authorize.result == 'failure' ||
        needs.review-config.result == 'failure' ||
        needs.delay-automatic-review.result == 'failure' ||
@@ -1860,7 +1889,7 @@ jobs:
             echo "Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          body="**Qwen Code review did not complete successfully.** The review job failed before it could post details. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           body="$(printf '%s\n\n%s' "$FALLBACK_MARKER" "$body")"
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
