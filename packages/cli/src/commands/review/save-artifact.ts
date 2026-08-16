@@ -239,6 +239,20 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.deferredCount must be a non-negative integer.',
     );
   }
+  // Same absence semantics as deferredCount, and for the same reason: a
+  // composed JSON persisted before floor enforcement existed carries no
+  // `floorEnforced`, and it names indices this artifact only re-displays.
+  const floorEnforced = verdict['floorEnforced'] ?? [];
+  if (
+    !Array.isArray(floorEnforced) ||
+    floorEnforced.some(
+      (i) => typeof i !== 'number' || !Number.isInteger(i) || i < 0,
+    )
+  ) {
+    throw new Error(
+      'Composed verdict.floorEnforced must be an array of non-negative integers.',
+    );
+  }
   return {
     event: event(verdict['event'], 'Composed verdict.event'),
     body: string(verdict['body'], 'Composed verdict.body'),
@@ -251,6 +265,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.remediation',
     ),
     deferredCount,
+    floorEnforced: floorEnforced as number[],
     lowSignal:
       lowSignal === null
         ? null

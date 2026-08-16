@@ -67,6 +67,8 @@ const verdict = {
   // Non-zero on purpose: the copy test then proves passthrough, not just
   // the validator's absent-means-zero default.
   deferredCount: 2,
+  // Non-empty for the same reason — absent defaults to [].
+  floorEnforced: [1],
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };

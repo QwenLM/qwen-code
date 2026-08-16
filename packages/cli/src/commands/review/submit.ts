@@ -218,6 +218,13 @@ function compose(
   event: string;
   body: string;
   cappedBy: string[];
+  /**
+   * Indices of drafted comments compose-review's floor enforcement moved
+   * into the body's deferral list — the caller removes exactly these from
+   * the posting set. Same array, same order: `draftedComments` below IS
+   * `payload.comments`, so the indices line up by construction.
+   */
+  floorEnforced: number[];
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -253,7 +260,12 @@ function compose(
     cliVersion,
     attribution,
   );
-  return { event: r.event, body: r.body, cappedBy: r.cappedBy };
+  return {
+    event: r.event,
+    body: r.body,
+    cappedBy: r.cappedBy,
+    floorEnforced: r.floorEnforced,
+  };
 }
 
 /** What the caller may not bring. Checked before the verdict is computed from it. */
@@ -489,12 +501,37 @@ export function runSubmit(
   let event: string;
   let body: string;
   let cappedBy: string[];
+  let floorEnforced: number[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
+    ({ event, body, cappedBy, floorEnforced } = compose(
+      payload,
+      cliVersion,
+      attribution,
+    ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
         `  - ${(err as Error).message}`,
+    );
+  }
+
+  // The floor, enforced: compose-review already described the reduced set —
+  // the body's deferral list carries these findings and the ledger work
+  // list excludes them — so posting the full array would make the review
+  // disagree with its own body. The removal happens BEFORE the consistency
+  // gate: a rerouted comment is no longer posting, so it is no longer the
+  // gate's business (an unmarked comment is never rerouted and still
+  // refuses below).
+  if (floorEnforced.length > 0) {
+    const drop = new Set(floorEnforced);
+    payload = {
+      ...payload,
+      comments: (payload.comments ?? []).filter((_, i) => !drop.has(i)),
+    };
+    writeStderrLine(
+      `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
+        `drafted past the resolved critical floor were moved into the ` +
+        `body's deferral list and will not post inline.`,
     );
   }
 
@@ -523,7 +560,14 @@ export function runSubmit(
     );
     writeStdoutLine(
       JSON.stringify(
-        { posted: false, wouldPost: true, target, event, cappedBy },
+        {
+          posted: false,
+          wouldPost: true,
+          target,
+          event,
+          cappedBy,
+          floorEnforced: floorEnforced.length,
+        },
         null,
         2,
       ),
@@ -599,6 +643,7 @@ export function runSubmit(
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        floorEnforced: floorEnforced.length,
         ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,

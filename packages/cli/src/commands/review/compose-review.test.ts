@@ -3433,6 +3433,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       baseEvent: 'COMMENT',
       cappedBy: [],
       downgraded: false,
+      floorEnforced: [],
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
@@ -5895,5 +5896,150 @@ describe('composeReview — continuity renders on every verdict', () => {
     const r = composeReview(resumedInput({ suggestionsInline: 1 }));
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+});
+
+describe('floor enforcement — the posture, as code', () => {
+  // SKILL Step 6 resolves the posting floor in prose and tells the MODEL to
+  // defer; six live PRs measured 2026-08-16 posted double-digit Suggestions
+  // at rounds ≥ 6 anyway. The floor is the operator's configured policy, so
+  // `composeReview` now enforces it mechanically: drafted Suggestions leave
+  // the posting set and join the deferral list. Every case here is a row of
+  // the decision table (floor × round × knowability), and the fail-open rows
+  // matter as much as the firing ones — a posting bar in doubt posts.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'floor-enf-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+  const sideFile = (round: number) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round, findings: [] }),
+    );
+  const drafts = () => [
+    { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+    { path: 'b.ts', line: 7, body: '**[Suggestion]** R2-4: tidy this' },
+    { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+  ];
+  const compose = (over: Partial<ComposeReviewInput> = {}) =>
+    composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: drafts(),
+      ...over,
+    });
+
+  it('reroutes drafted Suggestions under an explicit critical floor, any round', () => {
+    const r = compose({ severityFloor: 'critical' });
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(r.deferredCount).toBe(2);
+    // The finding is not lost: the body discloses the move and lists the
+    // entries, carried ids included — the record survives on the PR.
+    expect(r.body).toContain('floor enforcement');
+    expect(r.body).toContain('b.ts:7');
+    expect(r.body).toContain('R2-4: tidy this');
+    // The ledger work list holds only what posts — the same semantics as a
+    // model-side deferral.
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings.map((f) => f.sev)).toEqual(['C']);
+    // A posting decision, never a cap: the licence holds by construction.
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    // The Critical still posts and still counts toward the base event (on
+    // this bare plan the existing criticals-unverified cap then softens the
+    // posted event, exactly as it would without enforcement — enforcement
+    // itself moved no verdict).
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(verdictLine(r)).toContain('moved by CLI floor enforcement');
+  });
+
+  it('enforces auto from round 6 — the side-file round decides', () => {
+    sideFile(5); // this review is round 6
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(parseLedger(r.body)?.round).toBe(6);
+  });
+
+  it('does not enforce auto before round 6 — the rounds-2-5 age rule stays model-side', () => {
+    sideFile(4); // this review is round 5
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('floor enforcement');
+  });
+
+  it('fails open when auto cannot know the round — context-unavailable', () => {
+    sideFile(9);
+    const r = compose({ severityFloor: 'auto', contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('fails open when auto recovered no round — round 1', () => {
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('an explicit suggestion floor turns the posture off — no enforcement', () => {
+    sideFile(9);
+    const r = compose({ severityFloor: 'suggestion' });
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('an absent floor fails open — the licence cannot be checked', () => {
+    sideFile(9);
+    const r = compose({});
+    expect(r.floorEnforced).toEqual([]);
+  });
+
+  it('leaves a pathless Suggestion inline — fail open, the submit gate refuses it anyway', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: [
+        { line: 7, body: '**[Suggestion]** no path to defer to' },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+  });
+
+  it('an all-enforced round reads as deferrals, never as silence', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 2,
+      draftedComments: drafts().slice(1),
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    expect(r.deferredCount).toBe(2);
+    // A deferral must not regenerate a review round: nothing counts toward S.
+    expect(r.body).toContain('Deferred under the convergence posture');
+    expect(r.body).not.toContain('Suggestions are inline.');
+  });
+
+  it('merges enforced entries after the model deferrals — one list, one count', () => {
+    const r = compose({
+      severityFloor: 'critical',
+      deferredSuggestions: [
+        {
+          file: 'd.ts',
+          line: 1,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'model deferred this',
+        },
+      ],
+    });
+    expect(r.deferredCount).toBe(3);
+    expect(r.body).toContain('model deferred this');
+    expect(r.body).toContain('rename the flag');
   });
 });

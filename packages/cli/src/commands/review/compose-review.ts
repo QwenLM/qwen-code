@@ -329,6 +329,78 @@ function splitDeferralChannel(raw: unknown): {
 }
 
 /**
+ * The posting floor, enforced in code — the backstop for the posture SKILL
+ * Step 6 resolves in prose.
+ *
+ * Step 6 tells the MODEL to route otherwise-postable Suggestions into the
+ * deferral channel once the floor resolves to `critical` (an explicit
+ * `--severity-floor critical`, or `auto` from round 6). A model instruction
+ * is the layer of this pipeline that has failed at every boundary it
+ * guarded (this file's own header history), and the floor is the OPERATOR'S
+ * configured policy — moving a drafted Suggestion out of the inline set is
+ * faithful execution of that policy, not a tool decision. So the move also
+ * exists as code, here, where the drafts are already in hand.
+ *
+ * Enforcement fires ONLY where the deferral licence already holds: an
+ * explicit `critical` floor at any round, or `auto` at round ≥ 6 with the
+ * round knowable. Everything else fails OPEN exactly as the posture itself
+ * does — an unrecognisable floor, `auto` before round 6, `auto` in the
+ * context-unavailable state (the round is unknowable), `--severity-floor
+ * suggestion` (posture off): a posting bar in doubt posts. The rounds-2–5
+ * code-age rule stays model-side on purpose — it needs the worktree git
+ * checks this module does not have.
+ *
+ * The entries are CONSTRUCTED typed rather than routed through
+ * `toDeferredEntries`: that boundary validates a MODEL-written channel and
+ * throws on malformed shapes, and a throw here would lose the whole round
+ * over a comment this code itself chose to move (the cap-not-refusal
+ * doctrine). A drafted comment that cannot yield a usable entry — no
+ * path — is left inline instead (fail open; `submit`'s consistency gate
+ * refuses pathless comments before anything posts anyway).
+ */
+export function floorEnforcedReroute(
+  severityFloor: unknown,
+  contextUnavailable: boolean,
+  prevRound: number,
+  drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
+): { indices: number[]; entries: DeferredEntry[] } {
+  const floor =
+    typeof severityFloor === 'string'
+      ? severityFloor.trim().toLowerCase()
+      : severityFloor;
+  const enforced =
+    floor === 'critical' ||
+    (floor === 'auto' && !contextUnavailable && prevRound >= 5);
+  if (!enforced) return { indices: [], entries: [] };
+  const indices: number[] = [];
+  const entries: DeferredEntry[] = [];
+  drafted.forEach((c, i) => {
+    if (severityOf(c) !== 'suggestion') return;
+    const file =
+      typeof c.path === 'string' && c.path.trim() !== '' ? c.path : null;
+    if (file === null) return;
+    const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
+    indices.push(i);
+    entries.push({
+      file,
+      ...(typeof c.line === 'number' &&
+      Number.isSafeInteger(c.line) &&
+      c.line > 0
+        ? { line: c.line }
+        : {}),
+      source: 'review',
+      severity: 'Suggestion',
+      // A carried id (`R2-4: …`) stays inside the title so the human record
+      // keeps the cross-round identity; `renderDeferredEntry` never
+      // re-parses it. An all-marker comment gets the same locatable
+      // fallback the ledger builder uses, for the same reason.
+      title: claim && claim.trim() !== '' ? claim : '(comment carried no text)',
+    });
+  });
+  return { indices, entries };
+}
+
+/**
  * Reads a PR's description body, given its `owner/repo` and number. The one
  * production implementation calls `gh pr view`; the bilingual fallback uses it
  * to recover the Han signal from the live PR when the plan does not carry it.
@@ -511,12 +583,27 @@ export interface ComposeReviewResult {
   remediation: string[];
   /**
    * How many non-Critical findings the convergence posture deferred — the
-   * count of `deferredSuggestions` entries that survived validation. On the
-   * verdict surface so `verdictLine` can say a deferrals-only Approve
-   * deferred findings rather than implying none existed: the low-signal
-   * sentence's premise is "zero findings", and a deferral is a finding.
+   * count of `deferredSuggestions` entries that survived validation, plus
+   * any CLI floor-enforced reroutes (below). On the verdict surface so
+   * `verdictLine` can say a deferrals-only Approve deferred findings
+   * rather than implying none existed: the low-signal sentence's premise
+   * is "zero findings", and a deferral is a finding.
    */
   deferredCount: number;
+  /**
+   * Indices (into the caller's drafted-comments array) of Suggestion
+   * comments the CLI moved into the deferral list under a resolved
+   * `critical` posting floor — SKILL Step 6's posture, enforced in code as
+   * the backstop for the model-side resolution (`floorEnforcedReroute`).
+   * The caller that owns the posting array (`submit`) removes exactly
+   * these before the write; they are already counted in `deferredCount`,
+   * rendered in the body's deferral list with a disclosure sentence, and
+   * excluded from the ledger work list — the same semantics as a
+   * model-side deferral. Empty when nothing was enforced. A posting
+   * decision, never a cap: `cappedBy` is untouched and the anchor rides
+   * iff the round is otherwise clean.
+   */
+  floorEnforced: number[];
   /**
    * Set on an APPROVE composed from zero findings over a non-trivial source
    * diff (the plan's `srcDiffLines` above `LOW_SIGNAL_SRC_DIFF_LINES`).
@@ -796,13 +883,57 @@ export function composeReview(
   // would let a mid-compose update publish two different round numbers in
   // one review.
   const prevRound = prevRoundFor(input.planPath);
-  const result = composeReviewBody(input, cliVersion, attribution, prevRound);
+  // The floor, enforced before anything is composed or counted: everything
+  // downstream — the counts, the body, the ledger marker — must describe
+  // the set that actually posts. `contextUnavailable` is read leniently
+  // here (`=== true`); the authoritative shape check stays in
+  // `composeReviewBody`, which runs on the same input immediately after
+  // and throws the same TypeError either way.
+  const reroute = floorEnforcedReroute(
+    input.severityFloor,
+    input.contextUnavailable === true,
+    prevRound,
+    Array.isArray(input.draftedComments) ? input.draftedComments : [],
+  );
+  let effective = input;
+  if (reroute.indices.length > 0) {
+    const drop = new Set(reroute.indices);
+    effective = {
+      ...input,
+      draftedComments: (input.draftedComments ?? []).filter(
+        (_, i) => !drop.has(i),
+      ),
+      // The seam counts were derived from the pre-enforcement drafts by the
+      // boundary; keep them in agreement with the set that remains. Clamped:
+      // a caller whose count already disagreed with its drafts must degrade
+      // to a wrong-but-composable zero, never to a toCount refusal that
+      // loses the round.
+      ...(typeof input.suggestionsInline === 'number'
+        ? {
+            suggestionsInline: Math.max(
+              0,
+              input.suggestionsInline - reroute.indices.length,
+            ),
+          }
+        : {}),
+    };
+  }
+  const result = composeReviewBody(
+    effective,
+    cliVersion,
+    attribution,
+    prevRound,
+    reroute,
+  );
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input, result.cappedBy, prevRound);
+  // It reads the EFFECTIVE input: a floor-enforced Suggestion left the
+  // posting set, and the work list holds only findings the review posts —
+  // the same semantics as a model-side deferral.
+  const marker = ledgerMarkerFor(effective, result.cappedBy, prevRound);
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -908,6 +1039,10 @@ function composeReviewBody(
   cliVersion: string,
   attribution: boolean,
   prevRound: number,
+  reroute: { indices: number[]; entries: DeferredEntry[] } = {
+    indices: [],
+    entries: [],
+  },
 ): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -933,10 +1068,18 @@ function composeReviewBody(
   // shared helper: the ledger marker performs the same one, so a relocated
   // blocker also rides the work list.
   const {
-    deferred: deferredSuggestions,
+    deferred: modelDeferred,
     relocated: relocatedCriticals,
     relocatedDeterministic,
   } = splitDeferralChannel(input.deferredSuggestions);
+  // The floor-enforced reroutes join the model's deferrals AFTER the split:
+  // they are constructed typed by this module's own code (see
+  // `floorEnforcedReroute`), so routing them through the model-channel
+  // validation would only add a throw path to entries that cannot be
+  // malformed. Enforcement fires only under conditions where the deferral
+  // licence below already holds, so the merge can never create an
+  // unlicensed state that the model's own entries did not.
+  const deferredSuggestions = [...modelDeferred, ...reroute.entries];
   for (const stray of relocatedCriticals) {
     bodyCriticals.push(stray);
   }
@@ -2073,8 +2216,24 @@ function composeReviewBody(
             zh: `⚠️ ${deferredSuggestions.length} 条发现在姿态未授权的情况下被延后——${unlicensedDeferral}。清单见下，但本判定已被限制：本轮发现可能未被完整发布。`,
           },
         ];
+  // The floor-enforcement disclosure rides INSIDE the deferral block so
+  // every event branch that renders the list renders the sentence — a
+  // reroute the body never mentions would make the posted record disagree
+  // with the drafted set the orchestrator saw. Not a cap: the finding is
+  // recorded two lines down; what changed is the posting surface, and the
+  // policy that changed it is the operator's own floor.
+  const floorEnforcedNote: Bi[] =
+    reroute.entries.length > 0
+      ? [
+          {
+            en: `${reroute.entries.length} Suggestion(s) were drafted inline past the resolved critical posting floor; the CLI moved them into the deferral list below (floor enforcement — the drafted set had not deferred them).`,
+            zh: `${reroute.entries.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论；CLI 已将其移入下方延后清单（下限强制执行——草稿集未自行延后）。`,
+          },
+        ]
+      : [];
   const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length
     ? [
+        ...floorEnforcedNote,
         {
           en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker) — recorded, not requested in this round:\n\n${deferredShown
             .map((entry) => `- ${mdField(entry)}`)
@@ -2128,6 +2287,7 @@ function composeReviewBody(
       downgradedFrom,
       remediation,
       deferredCount: deferredSuggestions.length,
+      floorEnforced: reroute.indices,
       lowSignal,
     };
   }
@@ -2172,6 +2332,7 @@ function composeReviewBody(
       downgradedFrom,
       remediation,
       deferredCount: deferredSuggestions.length,
+      floorEnforced: reroute.indices,
       lowSignal,
     };
   }
@@ -2351,6 +2512,7 @@ function composeReviewBody(
     downgradedFrom,
     remediation,
     deferredCount: deferredSuggestions.length,
+    floorEnforced: reroute.indices,
     lowSignal,
   };
 }
@@ -3146,6 +3308,15 @@ export function verdictLine(r: ComposeReviewResult): string {
         ? ', truncated — the rest are counted in the run report'
         : ''
     })`;
+  }
+  // The enforcement is the CLI overriding what the drafted set was about to
+  // post; the operator reading the terminal must see that the override
+  // happened, or the drafted comments they watched Step 6 write silently
+  // differ from what posted. Read tolerantly (`?.`): this function also
+  // runs over parsed result JSONs, and one persisted before the field
+  // existed must render its line, not throw over a feature it predates.
+  if ((r.floorEnforced?.length ?? 0) > 0) {
+    line += ` — ${r.floorEnforced.length} of those moved by CLI floor enforcement (drafted inline past the critical floor)`;
   }
   return line;
 }

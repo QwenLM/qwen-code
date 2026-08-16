@@ -1058,6 +1058,49 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     );
   });
 
+  it('floor enforcement removes drafted Suggestions from the posted set', () => {
+    // The posture SKILL Step 6 resolves in prose, enforced in code: under a
+    // resolved critical floor, a Suggestion the drafted set did NOT defer is
+    // moved into the body's deferral list by compose-review, and this — the
+    // one boundary that posts — must remove it from what GitHub receives, or
+    // the review would post inline comments its own body says were deferred.
+    const review = file('floor-enforced.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+      },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    // The Suggestion did not post inline; the Critical did, and still blocks.
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.comments[0].path).toBe('a.ts');
+    expect(sent.event).toBe('REQUEST_CHANGES');
+    // The finding is not lost: the body carries the disclosure and the entry.
+    expect(sent.body).toContain('floor enforcement');
+    expect(sent.body).toContain('- `b.ts:7 — [review] tidy this`');
+    // Both operator channels say the override happened.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('Floor enforcement'),
+      ),
+    ).toBe(true);
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      inlineComments: number;
+      floorEnforced: number;
+    };
+    expect(out.inlineComments).toBe(1);
+    expect(out.floorEnforced).toBe(1);
+  });
+
   it('rejects a line that is not a positive whole number', () => {
     // Every one of these 422s, and a 422 discards every blocker in the review.
     for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {
