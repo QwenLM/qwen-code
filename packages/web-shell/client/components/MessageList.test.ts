@@ -2040,22 +2040,22 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
   });
 
-  it('hides mid-turn injected debug rows with collapsed tool steps', () => {
+  it('keeps mid-turn injected user messages visible with collapsed tool steps', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       {
         id: 's1',
         role: 'system',
-        content: '已插入消息：hi',
+        content: 'hi',
         variant: 'info',
         source: 'mid_turn_message_injected',
       },
       makeAssistantMessage('a1'),
     ]);
     const out = collapseItems(items);
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
-    expect(collapseOf(out, 0)?.hiddenCount).toBe(2);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 's1', 'a1']);
+    expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
   });
 
   it('does not collapse a turn whose only response is a system row', () => {

@@ -692,6 +692,10 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['local-control', ['--local-control']],
+      [
+        'local-control-address',
+        ['--local-control-address', '192.168.1.2'],
+      ],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
@@ -737,6 +741,7 @@ describe('serve fast path argument parsing', () => {
       'external-tool-guard-timeout-ms',
       'help',
       'local-control',
+      'local-control-address',
       'version',
     ]);
 
