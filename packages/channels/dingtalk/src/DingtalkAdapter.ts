@@ -170,15 +170,9 @@ function formatChatRecord(content?: DingTalkMessageContent): string {
   const rawSummary = nonEmptyString(content?.summary);
   const parsedSummary = parseJsonArray(rawSummary);
   const summaryLines: string[] = parsedSummary
-    ? parsedSummary.flatMap((item) => {
-        const line = nonEmptyString(item);
-        return line ? [line] : [];
-      })
-    : rawSummary
-        ?.split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean) || [];
-  const summary = summaryLines.join('\n');
+    ? parsedSummary.map((item) => nonEmptyString(item) || '')
+    : rawSummary?.split('\n').map((line) => line.trim()) || [];
+  const summary = summaryLines.filter(Boolean).join('\n');
   const entries = parseJsonArray(
     content?.chatRecord ?? content?.records ?? content?.messages,
   );
@@ -191,9 +185,10 @@ function formatChatRecord(content?: DingTalkMessageContent): string {
         }
         if (!entry || typeof entry !== 'object') return [];
         const record = entry as Record<string, unknown>;
-        const summarySender = nonEmptyString(
-          summaryLines[index]?.match(/^([^:：]+)[:：]/)?.[1],
-        );
+        const summarySender =
+          summaryLines.length === entries.length
+            ? nonEmptyString(summaryLines[index]?.match(/^([^:：]+)[:：]/)?.[1])
+            : undefined;
         const sender =
           nonEmptyString(record['senderName']) ||
           nonEmptyString(record['senderNick']) ||

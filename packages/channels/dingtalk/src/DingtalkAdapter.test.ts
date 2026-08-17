@@ -2459,6 +2459,46 @@ describe('DingtalkChannel chat records', () => {
   });
 
   it.each([
+    ['JSON', JSON.stringify(['Alice: a', '', 'Carol: c'])],
+    ['plain text', 'Alice: a\n\nCarol: c'],
+  ])('keeps %s summary sender positions aligned', (_encoding, summary) => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: `direct-forward-${_encoding}`,
+        conversationType: '1',
+        conversationId: 'cid-direct-forward',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isForwardMsg: '1',
+        msgtype: 'chatRecord',
+        content: {
+          summary,
+          chatRecord: JSON.stringify([
+            { msgType: 'text', content: 'a' },
+            { msgType: 'text', content: 'b' },
+            { msgType: 'text', content: 'c' },
+          ]),
+        },
+      }),
+      headers: { messageId: `direct-forward-${_encoding}` },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Chat record] Alice: a\nCarol: c\n\n[Chat record messages]\nAlice: a\nUnknown: b\nCarol: c',
+      }),
+    );
+  });
+
+  it.each([
     ['chatRecord', false],
     ['records', true],
     ['messages', false],
