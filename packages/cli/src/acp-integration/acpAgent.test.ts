@@ -219,6 +219,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   GoalPersistenceUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).GoalPersistenceUnavailableError,
+  SessionIdCaseConflictError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionIdCaseConflictError,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
     payload !== null &&
@@ -903,6 +906,7 @@ import {
   SessionEndReason,
   MCPServerConfig,
   SessionService,
+  SessionIdCaseConflictError,
   MCPDiscoveryState,
   MCPServerStatus,
   getMCPDiscoveryState,
@@ -16113,6 +16117,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   function bindRestoreMocks(opts: {
     sessionExists: boolean;
+    resolverError?: Error;
     resumedConversation?: { messages: unknown[] };
     replayHistoryImpl?: (...args: unknown[]) => Promise<void>;
     primeTurnFromHistoryImpl?: (...args: unknown[]) => unknown;
@@ -16209,7 +16214,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     vi.mocked(SessionService).mockImplementation(
       () =>
         ({
-          sessionExists: vi.fn().mockResolvedValue(opts.sessionExists),
+          findSessionIdIgnoringCase: opts.resolverError
+            ? vi.fn().mockRejectedValue(opts.resolverError)
+            : vi
+                .fn()
+                .mockImplementation(async (sessionId: string) =>
+                  opts.sessionExists ? sessionId : undefined,
+                ),
           loadSession,
           readRestoreProjection,
           readLiveRestoreProjection,
@@ -16464,10 +16475,38 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
         const sessionService = vi.mocked(SessionService).mock.results[0]?.value;
         expect(sessionService).toBeDefined();
-        expect(sessionService!.sessionExists).toHaveBeenCalledWith(sessionId);
+        expect(sessionService!.findSessionIdIgnoringCase).toHaveBeenCalledWith(
+          sessionId,
+        );
 
         await agent.cancel({ sessionId: params.sessionId });
         expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s rejects case-only persisted session conflicts',
+    async (action) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      bindRestoreMocks({
+        sessionExists: false,
+        resolverError: new SessionIdCaseConflictError(sessionId),
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const request = { cwd: '/tmp', sessionId, mcpServers: [] };
+        const result =
+          action === 'load'
+            ? agent.loadSession(request)
+            : agent.unstable_resumeSession(request);
+        await expect(result).rejects.toMatchObject({
+          data: { errorKind: 'session_id_conflict', sessionId },
+        });
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -16481,9 +16520,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const existsGate = new Promise<void>((resolve) => {
       releaseExists = resolve;
     });
-    const sessionExists = vi.fn(async () => {
+    const findSessionIdIgnoringCase = vi.fn(async (sessionId: string) => {
       await existsGate;
-      return true;
+      return sessionId;
     });
     const loadSession = vi
       .fn()
@@ -16492,7 +16531,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     vi.mocked(SessionService).mockImplementation(
       () =>
         ({
-          sessionExists,
+          findSessionIdIgnoringCase,
           loadSession,
           readRestoreProjection: projectionService.readRestoreProjection,
           readLiveRestoreProjection:
@@ -16508,7 +16547,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     };
 
     const first = agent.loadSession(params);
-    await vi.waitFor(() => expect(sessionExists).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(findSessionIdIgnoringCase).toHaveBeenCalledOnce(),
+    );
     await expect(agent.unstable_resumeSession(params)).rejects.toMatchObject({
       code: -32602,
       data: {
@@ -16517,7 +16558,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       },
     });
     expect(loadSettings).toHaveBeenCalledOnce();
-    expect(sessionExists).toHaveBeenCalledOnce();
+    expect(findSessionIdIgnoringCase).toHaveBeenCalledOnce();
 
     releaseExists();
     await expect(first).resolves.toBeDefined();

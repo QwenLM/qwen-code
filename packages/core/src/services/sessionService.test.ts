@@ -20,6 +20,7 @@ import {
 import { getProjectHash } from '../utils/paths.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
+  SessionIdCaseConflictError,
   SessionService,
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
@@ -2498,7 +2499,9 @@ describe('SessionService', () => {
   describe('findSessionIdIgnoringCase', () => {
     it('finds a legacy mixed-case transcript', async () => {
       const legacySessionId = sessionIdA.toUpperCase();
-      readdirSyncSpy.mockReturnValue([`${legacySessionId}.jsonl`] as never);
+      readdirSyncSpy
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never)
+        .mockReturnValueOnce([] as never);
       vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
         async (sessionId) =>
           sessionId === legacySessionId ? 'active' : undefined,
@@ -2507,6 +2510,61 @@ describe('SessionService', () => {
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
       ).resolves.toBe(legacySessionId);
+    });
+
+    it('returns the single authoritative spelling after scanning both states', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy
+        .mockReturnValueOnce([] as never)
+        .mockReturnValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        'archived',
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('rejects case-only duplicate spellings instead of choosing by enumeration order', async () => {
+      readdirSyncSpy
+        .mockReturnValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${sessionIdA.toUpperCase()}.jsonl`,
+        ] as never)
+        .mockReturnValueOnce([] as never);
+      const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toBeInstanceOf(SessionIdCaseConflictError);
+      expect(getLocation).not.toHaveBeenCalled();
+    });
+
+    it('rejects one spelling that exists in both active and archive state', async () => {
+      readdirSyncSpy.mockReturnValue([`${sessionIdA}.jsonl`] as never);
+      const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+      });
+      expect(getLocation).not.toHaveBeenCalled();
+    });
+
+    it('returns undefined when the matching transcript disappears during resolution', async () => {
+      readdirSyncSpy
+        .mockReturnValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockReturnValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
     });
   });
 

@@ -30,6 +30,7 @@ import {
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
+  SessionIdCaseConflictError,
   SessionService,
   SESSION_WRITER_RPC_CODES,
   SessionWriterUnavailableError,
@@ -5279,10 +5280,18 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              throw new RequestError(
+                ACP_ERROR_CODES.INVALID_PARAMS,
+                `Multiple persisted sessions match ${sessionId} by case.`,
+                { errorKind: 'session_id_conflict', sessionId },
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5595,10 +5604,18 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) {
-            return sessionId;
+          try {
+            return await sessionService.findSessionIdIgnoringCase(sessionId);
+          } catch (error) {
+            if (error instanceof SessionIdCaseConflictError) {
+              throw new RequestError(
+                ACP_ERROR_CODES.INVALID_PARAMS,
+                `Multiple persisted sessions match ${sessionId} by case.`,
+                { errorKind: 'session_id_conflict', sessionId },
+              );
+            }
+            throw error;
           }
-          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         }),
       );
       if (!persistedSessionId) {

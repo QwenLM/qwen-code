@@ -39,6 +39,7 @@ import {
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../conversations/session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -1052,7 +1053,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) throw new SessionNotFoundError(sessionId);
     }
@@ -1537,9 +1538,8 @@ export function registerSessionRoutes(
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, (candidateId) =>
-          service.readCreationMetadata(candidateId),
-        )) !== undefined
+        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
+        undefined
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -1776,7 +1776,7 @@ export function registerSessionRoutes(
       if (!exists) continue;
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
@@ -1872,7 +1872,7 @@ export function registerSessionRoutes(
         if (!exists) continue;
         const metadata = await readLoadableLiveConversationMetadata(
           sessionId,
-          (candidateId) => service.readCreationMetadata(candidateId),
+          service,
         );
         if (!assertCurrentInternalGeneration(entry, generation, res)) {
           return undefined;
@@ -1927,7 +1927,7 @@ export function registerSessionRoutes(
       }
       const metadata = await readLoadableLiveConversationMetadata(
         sessionId,
-        (candidateId) => service.readCreationMetadata(candidateId),
+        service,
       );
       if (!metadata) {
         throw new SessionNotFoundError(sessionId);
@@ -2209,6 +2209,21 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    if (
+      isReservedStandaloneSessionSource({
+        sourceType:
+          typeof body['sourceType'] === 'string'
+            ? body['sourceType']
+            : undefined,
+      })
+    ) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned standalone sessions.',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
     const source = parseSessionSource(body['sourceType'], body['sourceId']);
     if ('error' in source) {
       res.status(400).json({
@@ -2979,13 +2994,24 @@ export function registerSessionRoutes(
           throw error;
         }
       }
+      let restoredStorageSessionId = sessionId;
       try {
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
+            const sessionService =
+              createWorkspaceRuntimeSessionService(runtime);
+            if (isInternalWorkspaceRuntime(runtime)) {
+              restoredStorageSessionId =
+                (await sessionService.findSessionIdIgnoringCase(sessionId)) ??
+                '';
+              if (!restoredStorageSessionId) {
+                throw new SessionNotFoundError(sessionId);
+              }
+            }
             const location = await assertSessionLoadable(
               workspaceCwd,
-              sessionId,
+              restoredStorageSessionId,
               runtime.sessionRuntimeBaseDir,
             );
             if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
@@ -2994,17 +3020,19 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const sessionService =
-              createWorkspaceRuntimeSessionService(runtime);
             const metadata =
               runtime.provenance === 'live-conversation'
                 ? await readLoadableLiveConversationMetadata(
-                    sessionId,
-                    (candidateId) =>
-                      sessionService.readCreationMetadata(candidateId),
+                    restoredStorageSessionId,
+                    sessionService,
                   )
-                : await sessionService.readCreationMetadata(sessionId);
-            if (metadata === undefined) {
+                : await sessionService.readCreationMetadata(
+                    restoredStorageSessionId,
+                  );
+            if (
+              metadata === undefined ||
+              isReservedStandaloneSessionSource(metadata)
+            ) {
               throw new SessionNotFoundError(sessionId);
             }
             assertRuntimeGenerationOpen?.();
@@ -3025,7 +3053,7 @@ export function registerSessionRoutes(
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
               }
-              liveConversationCwd = await materialize(sessionId);
+              liveConversationCwd = await materialize(restoredStorageSessionId);
             }
             assertRuntimeGenerationOpen?.();
             const restored =
@@ -3165,7 +3193,7 @@ export function registerSessionRoutes(
           const sidecar = await readWorktreeSession(
             createWorkspaceRuntimeSessionService(
               runtime,
-            ).getWorktreeSessionPath(sessionId),
+            ).getWorktreeSessionPath(restoredStorageSessionId),
           ).catch(() => null);
           if (sidecar) {
             // Defense-in-depth: resolve symlinks on both the target and

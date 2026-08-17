@@ -78,6 +78,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
+  SessionIdCaseConflictError,
   SessionService,
   Storage,
   TrustGateError,
@@ -9934,9 +9935,9 @@ describe('createServeApp', () => {
         undefined,
         { workspaceRegistry },
       );
-      const scan = deferred<undefined>();
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
+      const scan = deferred<string | undefined>();
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockReturnValue(scan.promise);
 
       try {
@@ -9945,7 +9946,7 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sessionId: '550e8400-e29b-41d4-a716-446655440004' })
           .then((response) => response);
-        await vi.waitFor(() => expect(locationSpy).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(resolverSpy).toHaveBeenCalledOnce());
         expect(
           workspaceRegistry.beginReplacement(
             workspaceRegistry.primaryEntry,
@@ -9960,7 +9961,7 @@ describe('createServeApp', () => {
         expect(bridge.calls).toEqual([]);
       } finally {
         scan.resolve(undefined);
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10017,6 +10018,24 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('reserved_session_source');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('rejects the reserved standalone source before validating sourceId', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceType: 'standalone', sourceId: 42 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('reserved_session_source');
+      expect(res.body.error).toContain('standalone');
       expect(bridge.calls).toHaveLength(0);
     });
 
@@ -10122,9 +10141,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
-        .mockResolvedValue('active');
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => sessionId);
       try {
         const res = await request(app)
           .post('/session')
@@ -10135,7 +10154,7 @@ describe('createServeApp', () => {
         expect(res.body.code).toBe('session_id_conflict');
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10146,8 +10165,8 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockRejectedValue(new Error('EACCES: runtime directory unreadable'));
       try {
         const res = await request(app)
@@ -10162,7 +10181,7 @@ describe('createServeApp', () => {
         });
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10173,9 +10192,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
-        .mockResolvedValue('active');
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => sessionId);
       const runWithSpy = vi.spyOn(Storage, 'runWithRuntimeBaseDir');
       try {
         const res = await request(app)
@@ -10188,7 +10207,7 @@ describe('createServeApp', () => {
         expect(runWithSpy).not.toHaveBeenCalled();
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
         runWithSpy.mockRestore();
       }
     });
@@ -11942,6 +11961,35 @@ describe('createServeApp', () => {
         ]);
       }
     });
+
+    it.each(['load', 'resume'] as const)(
+      'hides explicit standalone transcripts from generic %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({ sourceType: 'standalone' });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/explicit-standalone/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(404);
+          expect(res.body.code).toBe('session_not_found');
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
 
     it('releases restore ownership after invalid approvalMode', async () => {
       const bridge = fakeBridge();
@@ -30625,8 +30673,8 @@ describe('Live conversation runtime lifecycle', () => {
   it('boots an exact Conversations restore target before source proof', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
-    const getLocation = vi
-      .spyOn(SessionService.prototype, 'getSessionLocation')
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
       .mockResolvedValue(undefined);
     mockWt.realpath = (candidate) => candidate;
     try {
@@ -30644,10 +30692,10 @@ describe('Live conversation runtime lifecycle', () => {
       expect(response.status).toBe(404);
       expect(response.body.code).toBe('session_not_found');
       expect(setup.liveBridge.loadCalls).toHaveLength(0);
-      expect(getLocation).toHaveBeenCalled();
+      expect(findSessionId).toHaveBeenCalled();
     } finally {
       mockWt.realpath = undefined;
-      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await restoreLiveSettings();
     }
   });
@@ -30917,7 +30965,18 @@ describe('Live conversation runtime lifecycle', () => {
       .spyOn(SessionService.prototype, 'readCreationMetadata')
       .mockImplementation(async (sessionId) => {
         if (sessionId === 'worker-session') {
-          return { parentSessionId: 'live-load' };
+          return {
+            parentSessionId: '550e8400-e29b-41d4-a716-446655440001',
+          };
+        }
+        if (sessionId === '550e8400-e29b-41d4-a716-446655440001') {
+          return {
+            sourceType: 'default',
+            sourceId: 'realtime_voice:p1:h1:a1:live-load',
+          };
+        }
+        if (sessionId === 'explicit-standalone') {
+          return { sourceType: 'standalone' };
         }
         return sessionId.startsWith('live-')
           ? {
@@ -30929,6 +30988,9 @@ describe('Live conversation runtime lifecycle', () => {
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) => sessionId);
     try {
       const rejectedNew = await request(setup.app)
         .post('/session')
@@ -30958,6 +31020,21 @@ describe('Live conversation runtime lifecycle', () => {
         sessionId: 'generic-session',
         path: `${setup.root.canonicalRoot}/conversation-generic-session`,
       });
+
+      const loadCountBeforeExplicit = setup.liveBridge.loadCalls.length;
+      const materializeCountBeforeExplicit =
+        setup.conversationWorkspace.materializeConversationDirectory.mock.calls
+          .length;
+      const explicitStandaloneRestore = await request(setup.app)
+        .post('/session/explicit-standalone/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(explicitStandaloneRestore.status).toBe(404);
+      expect(explicitStandaloneRestore.body.code).toBe('session_not_found');
+      expect(setup.liveBridge.loadCalls).toHaveLength(loadCountBeforeExplicit);
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).toHaveBeenCalledTimes(materializeCountBeforeExplicit);
 
       for (const action of ['load', 'resume'] as const) {
         const sessionId = `live-${action}`;
@@ -31006,8 +31083,69 @@ describe('Live conversation runtime lifecycle', () => {
       expect(setup.liveBridge.loadCalls).toHaveLength(5);
       expect(setup.liveBridge.resumeCalls).toHaveLength(1);
     } finally {
+      findSessionId.mockRestore();
       getLocation.mockRestore();
       readCreationMetadata.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('uses authoritative persisted spelling for internal restore and rejects case conflicts', async () => {
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const storageSessionId = canonicalSessionId.toUpperCase();
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) =>
+        sessionId === canonicalSessionId ? storageSessionId : sessionId,
+      );
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({
+        sourceType: 'default',
+        sourceId: `realtime_voice:p1:h1:a1:${canonicalSessionId}`,
+      });
+    try {
+      const restored = await request(setup.app)
+        .post(`/session/${canonicalSessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+
+      expect(restored.status).toBe(200);
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({ sessionId: canonicalSessionId }),
+      );
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).toHaveBeenCalledWith(storageSessionId);
+      expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
+        sessionId: canonicalSessionId,
+        path: `${setup.root.canonicalRoot}/conversation-${storageSessionId}`,
+      });
+
+      findSessionId.mockRejectedValueOnce(
+        new SessionIdCaseConflictError(canonicalSessionId),
+      );
+      const conflict = await request(setup.app)
+        .post(`/session/${canonicalSessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: canonicalSessionId,
+      });
+      expect(setup.liveBridge.resumeCalls).toHaveLength(0);
+    } finally {
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();

@@ -24,6 +24,7 @@ import {
   getConversationRootPath,
   revalidateConversationRoot,
 } from './conversation-workspace.js';
+import { ConversationDirectoryIdentityError } from '../../utils/conversation-directory-identity.js';
 
 const cleanup: string[] = [];
 
@@ -139,6 +140,34 @@ describe('Live conversation workspace root', () => {
     await expect(workspace.revalidate()).rejects.toThrow(/identity changed/);
   });
 
+  it('preserves Live filesystem errors while standalone keeps root scope', async () => {
+    const liveHome = await tempHome();
+    const liveWorkspace = new ConversationWorkspace({ homeDir: liveHome });
+    const liveRoot = await liveWorkspace.getRoot();
+    await rm(liveRoot.configuredRoot, { recursive: true });
+    await expect(liveWorkspace.revalidate()).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    const standaloneHome = await tempHome();
+    const standaloneWorkspace = new ConversationWorkspace({
+      homeDir: standaloneHome,
+    });
+    const standaloneRoot = await standaloneWorkspace.getRoot();
+    await rename(
+      standaloneRoot.configuredRoot,
+      `${standaloneRoot.configuredRoot}-old`,
+    );
+    await mkdir(standaloneRoot.configuredRoot, { mode: 0o700 });
+    await expect(
+      standaloneWorkspace.inspectStandaloneDirectory('standalone'),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      scope: 'root',
+      reason: 'identity_changed',
+    });
+  });
+
   it('accepts only the exact configured or canonical root identity', async () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
@@ -211,5 +240,85 @@ describe('Live conversation workspace root', () => {
       workspace.discardEmptyConversationDirectory('occupied'),
     ).resolves.toBe(false);
     expect((await lstat(occupied)).isDirectory()).toBe(true);
+  });
+
+  it('prepares only a new or reusable empty standalone child', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+
+    const created = await workspace.prepareStandaloneDirectory('standalone');
+    const reused = await workspace.prepareStandaloneDirectory('standalone');
+    expect(created.created).toBe(true);
+    expect(reused.created).toBe(false);
+    expect(reused.identity).toEqual(created.identity);
+
+    await writeFile(join(created.identity.canonicalPath, 'keep.txt'), 'keep');
+    await expect(
+      workspace.prepareStandaloneDirectory('standalone'),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      scope: 'child',
+      reason: 'not_empty',
+    });
+    expect((await lstat(created.identity.canonicalPath)).isDirectory()).toBe(
+      true,
+    );
+  });
+
+  it('sanitizes standalone child filesystem errors', async () => {
+    if (process.platform === 'win32') return;
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await chmod(prepared.identity.canonicalPath, 0o000);
+    try {
+      const error = await workspace
+        .prepareStandaloneDirectory('standalone')
+        .catch((cause: unknown) => cause);
+      expect(error).toMatchObject({
+        name: 'ConversationDirectoryIdentityError',
+        scope: 'child',
+        reason: 'io_error',
+      });
+      expect((error as Error).message).not.toContain(
+        prepared.identity.canonicalPath,
+      );
+      expect(JSON.stringify(error)).not.toContain(
+        prepared.identity.canonicalPath,
+      );
+    } finally {
+      await chmod(prepared.identity.canonicalPath, 0o700);
+    }
+  });
+
+  it('inspects, recreates, and rejects replaced standalone child identities', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+
+    await expect(
+      workspace.inspectStandaloneDirectory('standalone'),
+    ).resolves.toEqual({ status: 'missing' });
+    const recreated = await workspace.ensureStandaloneDirectory('standalone');
+    expect(recreated.status).toBe('recreated');
+    if (recreated.status !== 'recreated') throw new Error('expected recreate');
+
+    await expect(
+      workspace.inspectStandaloneDirectory('standalone', recreated.identity),
+    ).resolves.toMatchObject({ status: 'ready' });
+
+    await rm(recreated.identity.canonicalPath, { recursive: true });
+    await mkdir(recreated.identity.canonicalPath, { mode: 0o700 });
+    const compromised = await workspace.inspectStandaloneDirectory(
+      'standalone',
+      recreated.identity,
+    );
+    expect(compromised.status).toBe('compromised');
+    if (compromised.status !== 'compromised') {
+      throw new Error('expected compromised');
+    }
+    expect(compromised.error).toBeInstanceOf(
+      ConversationDirectoryIdentityError,
+    );
+    expect(compromised.error.reason).toBe('unexpected_identity');
   });
 });

@@ -58,6 +58,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         );
       }
 
+      async getSessionLocation(sessionId: string) {
+        return (await this.sessionExists(sessionId)) ? 'active' : undefined;
+      }
+
       readParentSessionId(sessionId: string) {
         return Promise.resolve(parentSessions.get(sessionId));
       }

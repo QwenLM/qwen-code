@@ -117,7 +117,7 @@ interface ConversationSessionMetadataStore {
 
 PR2A保留现有`readLoadableLiveConversationMetadata()`导出作为薄兼容adapter，改为接收同一个existence-aware store并复用新reader的分类结果，但对现有Live与legacy projectless caller返回PR2前的metadata shape：legacy不能在这一子PR提前被改写成ACP看到的normalized standalone source。它也不能让explicit standalone穿过generic REST/ACP restore。这样PR2A只提供可审查的分类primitive和reserved-source gate，不在daemon preflight/service存在前部分激活containment。PR2B再把explicit standalone cold restore以及generic legacy standalone兼容恢复迁移到service：generic REST/ACP只调用`restoreLegacyForCompatibility()`窄入口，该入口在任何materialize/bridge调用前重读并要求`kind: "standalone"`且`persistence: "legacy"`，并从此处开始把legacy source归一化为ACP所见的standalone；explicit standalone仍只允许dedicated service consumer。Live和legacy-Live-child继续走Live adapter。若grep确认旧adapter只剩Live consumer则收窄为Live-only或删除无调用导出，不同时维护两套分类规则。
 
-Generic legacy restore在调用reader前也必须通过唯一case-insensitive resolver把canonical caller ID解析为authoritative storage ID。Archive/lifecycle admission继续使用canonical ID；metadata、bridge session ID和conversation-directory hash统一使用storage spelling。这样现有mixed-case transcript不会先被legacy route绑定到lowercase hash目录、再被PR2B service切换到另一目录。仅大小写不同的重复transcript在任何materialize/bridge调用前fail closed。
+Generic legacy restore在调用reader前也必须通过唯一case-insensitive resolver把canonical caller ID解析为authoritative storage ID。Archive/lifecycle admission与daemon bridge的live entry key继续使用canonical ID；metadata、ACP child Config/session storage和conversation-directory hash使用storage spelling。这样现有mixed-case transcript不会先被legacy route绑定到lowercase hash目录、再被PR2B service切换到另一目录，同时后续owner-routed REST/ACP请求仍能以canonical UUID找到同一bridge entry。仅大小写不同的重复transcript在任何materialize/bridge调用前fail closed。
 
 Lineage规则固定为当前daemon支持的depth 1，同时保持父子lifecycle独立：
 
@@ -502,7 +502,7 @@ ACP relocation warning与filesystem error message也不能原样进入standalone
 
 - Source矩阵：explicit standalone、legacy none/default、exact Live、empty Live id、standalone with sourceId、other source、top-level/child/grandchild/self/cycle；explicit child在parent active/archived/deleted时仍独立分类，legacy orphan不猜测；新reader标记explicit/legacy，旧adapter允许Live与legacy但拒绝explicit standalone。
 - Generic REST与ACP create/restore在任何bridge/admission调用前拒绝explicit standalone；legacy restore仍保持PR2前metadata shape和行为，Live reserved gate回归不变。
-- Mixed-case restore：单一legacy storage ID在REST、ACP HTTP和ACP child load/resume中都保留storage spelling用于bridge与directory hash；lowercase exact与uppercase twin并存时四个入口都在materialize/bridge前返回conflict；global admission仍视为persisted占用。
+- Mixed-case restore：单一legacy storage ID在REST、ACP HTTP和ACP child load/resume中保留storage spelling用于metadata、ACP child持久化与directory hash，同时daemon bridge live key保持canonical；lowercase exact与uppercase twin并存时四个入口都在materialize/bridge前返回conflict；global admission仍视为persisted占用。
 - Root/child：new、valid empty reuse、non-empty conflict、missing recreate、symlink/junction、wrong owner/mode、file、nested、root replacement、child inode replacement、TOCTOU revalidation、Windows case/canonical behavior；standalone失败路径不调用目录删除，保留empty child可由同UUID重试复用，Live现有empty cleanup行为不变。
 
 ### PR2B service tests

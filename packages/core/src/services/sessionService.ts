@@ -143,6 +143,14 @@ export type SessionArchiveState = 'active' | 'archived';
 
 export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
 
+export class SessionIdCaseConflictError extends Error {
+  override readonly name = 'SessionIdCaseConflictError';
+
+  constructor(readonly sessionId: string) {
+    super(`Multiple persisted sessions match "${sessionId}" by case.`);
+  }
+}
+
 /**
  * Pagination options for listing sessions.
  */
@@ -688,6 +696,7 @@ export class SessionService {
     sessionId: string,
   ): Promise<string | undefined> {
     const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+    const candidates = new Map<string, Set<SessionArchiveState>>();
     for (const state of ['active', 'archived'] as const) {
       let fileNames: string[];
       try {
@@ -699,11 +708,25 @@ export class SessionService {
       for (const fileName of fileNames) {
         if (fileName.toLowerCase() !== expectedFileName) continue;
         const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
-        const location = await this.getSessionLocation(candidateSessionId);
-        if (location !== undefined) return candidateSessionId;
+        const states = candidates.get(candidateSessionId) ?? new Set();
+        states.add(state);
+        candidates.set(candidateSessionId, states);
       }
     }
-    return undefined;
+    if (candidates.size > 1) {
+      throw new SessionIdCaseConflictError(sessionId);
+    }
+    const candidate = candidates.entries().next().value;
+    if (candidate === undefined) return undefined;
+    const [candidateSessionId, states] = candidate;
+    if (states.size > 1) {
+      throw new SessionIdCaseConflictError(sessionId);
+    }
+    const location = await this.getSessionLocation(candidateSessionId);
+    if (location === 'conflict') {
+      throw new SessionIdCaseConflictError(sessionId);
+    }
+    return location === undefined ? undefined : candidateSessionId;
   }
 
   private removeFileIfExists(filePath: string): void {

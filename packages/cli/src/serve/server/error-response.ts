@@ -9,6 +9,7 @@ import {
   InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionIdCaseConflictError,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
@@ -412,6 +413,14 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionIdCaseConflictError) {
     res.status(409).json({
       error: err.message,
       code: 'session_conflict',

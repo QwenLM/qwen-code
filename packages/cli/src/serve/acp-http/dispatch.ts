@@ -55,6 +55,7 @@ import { parseSessionSource } from '@qwen-code/acp-bridge';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../conversations/session-source.js';
 import {
@@ -851,6 +852,15 @@ export function toRpcError(err: unknown): {
           sessionId: (err as { sessionId?: unknown }).sessionId,
         },
       };
+    case 'SessionIdCaseConflictError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_conflict',
+          sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
     case 'SessionArchivingError':
       return {
         code: RPC.INTERNAL_ERROR,
@@ -1633,6 +1643,23 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
+          if (
+            isReservedStandaloneSessionSource({
+              sourceType:
+                typeof params['sourceType'] === 'string'
+                  ? params['sourceType']
+                  : undefined,
+            })
+          ) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                'The requested session source is reserved for daemon-owned standalone sessions.',
+              ),
+            );
+            return;
+          }
           const source = parseSessionSource(
             params['sourceType'],
             params['sourceId'],
@@ -1800,30 +1827,42 @@ export class AcpDispatcher {
               [sessionId],
               async () => {
                 assertGenerationOpen?.();
+                const sessionService = new SessionService(cwd, {
+                  runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
+                });
+                let storageSessionId = sessionId;
+                if (this.liveSessionIsolation) {
+                  storageSessionId =
+                    (await sessionService.findSessionIdIgnoringCase(
+                      sessionId,
+                    )) ?? '';
+                  if (!storageSessionId) {
+                    throw new SessionNotFoundError(sessionId);
+                  }
+                }
                 await assertSessionLoadable(
                   cwd,
-                  sessionId,
+                  storageSessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session
                 // still reports its parent over the ACP transport (parity with the
                 // REST restore handler); the bridge creates the entry without it.
-                const sessionService = new SessionService(cwd, {
-                  runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
-                });
                 const metadata = this.liveSessionIsolation
                   ? await readLoadableLiveConversationMetadata(
-                      sessionId,
-                      (candidateId) =>
-                        sessionService.readCreationMetadata(candidateId),
+                      storageSessionId,
+                      sessionService,
                     )
-                  : await sessionService.readCreationMetadata(sessionId);
-                if (metadata === undefined) {
+                  : await sessionService.readCreationMetadata(storageSessionId);
+                if (
+                  metadata === undefined ||
+                  isReservedStandaloneSessionSource(metadata)
+                ) {
                   throw new SessionNotFoundError(sessionId);
                 }
                 const liveConversationCwd = this.liveSessionIsolation
                   ? await this.liveSessionIsolation.materializeConversationDirectory(
-                      sessionId,
+                      storageSessionId,
                     )
                   : undefined;
                 assertGenerationOpen?.();

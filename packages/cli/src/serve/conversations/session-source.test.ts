@@ -6,71 +6,186 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  classifyTopLevelConversationSource,
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
+  readLoadableConversationSession,
   readLoadableLiveConversationMetadata,
+  type ConversationSessionMetadataStore,
+  type LiveSessionCreationMetadata,
 } from './session-source.js';
 
-describe('readLoadableLiveConversationMetadata', () => {
-  const records = new Map([
+const LIVE_ID = '550e8400-e29b-41d4-a716-446655440000';
+const LIVE_CHILD_ID = '550e8400-e29b-41d4-a716-446655440001';
+const LEGACY_ID = '550e8400-e29b-41d4-a716-446655440002';
+const LEGACY_CHILD_ID = '550e8400-e29b-41d4-a716-446655440003';
+const EXPLICIT_ID = '550e8400-e29b-41d4-a716-446655440004';
+const EXPLICIT_CHILD_ID = '550e8400-e29b-41d4-a716-446655440005';
+const DELETED_PARENT_ID = '550e8400-e29b-41d4-a716-446655440006';
+const ORPHAN_ID = '550e8400-e29b-41d4-a716-446655440007';
+const GRANDCHILD_ID = '550e8400-e29b-41d4-a716-446655440008';
+const ATTRIBUTED_CHILD_ID = '550e8400-e29b-41d4-a716-446655440009';
+const MALFORMED_LIVE_ID = '550e8400-e29b-41d4-a716-44665544000a';
+const SELF_ID = '550e8400-e29b-41d4-a716-44665544000b';
+const CYCLE_A_ID = '550e8400-e29b-41d4-a716-44665544000c';
+const CYCLE_B_ID = '550e8400-e29b-41d4-a716-44665544000d';
+const LEGACY_CHILD_OF_EXPLICIT_ID = '550e8400-e29b-41d4-a716-44665544000e';
+
+function createStore(
+  records: ReadonlyMap<string, LiveSessionCreationMetadata>,
+): ConversationSessionMetadataStore {
+  return {
+    async getSessionLocation(sessionId) {
+      return records.has(sessionId) ? 'active' : undefined;
+    },
+    async readCreationMetadata(sessionId) {
+      return records.get(sessionId) ?? {};
+    },
+  };
+}
+
+describe('conversation session source classification', () => {
+  const records = new Map<string, LiveSessionCreationMetadata>([
+    [LIVE_ID, { sourceType: 'default', sourceId: 'realtime_voice:call-1' }],
+    [LIVE_CHILD_ID, { parentSessionId: LIVE_ID }],
+    [LEGACY_ID, { sourceType: 'default' }],
+    [LEGACY_CHILD_ID, { parentSessionId: LEGACY_ID }],
+    [EXPLICIT_ID, { sourceType: 'standalone' }],
     [
-      'coordinator',
-      {
-        sourceType: 'default',
-        sourceId: 'realtime_voice:call-1',
-      },
+      EXPLICIT_CHILD_ID,
+      { sourceType: 'standalone', parentSessionId: DELETED_PARENT_ID },
     ],
-    ['worker', { parentSessionId: 'coordinator' }],
-    ['nested-worker', { parentSessionId: 'worker' }],
+    [ORPHAN_ID, { parentSessionId: DELETED_PARENT_ID }],
+    [GRANDCHILD_ID, { parentSessionId: LEGACY_CHILD_ID }],
     [
-      'attributed-worker',
+      ATTRIBUTED_CHILD_ID,
       {
-        parentSessionId: 'coordinator',
+        parentSessionId: LIVE_ID,
         sourceType: 'default',
         sourceId: 'realtime_voice:forged-worker',
       },
     ],
-    ['generic', { sourceType: 'default' }],
-    ['generic-child', { parentSessionId: 'generic' }],
-    ['empty-call-id', { sourceType: 'default', sourceId: 'realtime_voice:' }],
+    [MALFORMED_LIVE_ID, { sourceType: 'default', sourceId: 'realtime_voice:' }],
+    [SELF_ID, { parentSessionId: SELF_ID }],
+    [CYCLE_A_ID, { parentSessionId: CYCLE_B_ID }],
+    [CYCLE_B_ID, { parentSessionId: CYCLE_A_ID }],
+    [LEGACY_CHILD_OF_EXPLICIT_ID, { parentSessionId: EXPLICIT_ID }],
   ]);
-  const read = async (sessionId: string) => records.get(sessionId) ?? {};
+  const store = createStore(records);
 
-  it('reserves even a malformed empty Live call id from generic creation', () => {
+  it('reserves Live and standalone source strings before full validation', () => {
     expect(
       isReservedLiveSessionSource({
         sourceType: 'default',
         sourceId: 'realtime_voice:',
       }),
     ).toBe(true);
+    expect(
+      isReservedStandaloneSessionSource({ sourceType: 'standalone' }),
+    ).toBe(true);
   });
 
-  it('accepts a versioned Coordinator and its direct worker', async () => {
-    await expect(
-      readLoadableLiveConversationMetadata('coordinator', read),
-    ).resolves.toEqual(records.get('coordinator'));
-    await expect(
-      readLoadableLiveConversationMetadata('worker', read),
-    ).resolves.toEqual(records.get('worker'));
+  it('classifies compatible top-level sources', () => {
+    expect(
+      classifyTopLevelConversationSource(records.get(LIVE_ID)!),
+    ).toMatchObject({ kind: 'live', persistence: 'explicit' });
+    expect(
+      classifyTopLevelConversationSource(records.get(LEGACY_ID)!),
+    ).toMatchObject({ kind: 'standalone', persistence: 'legacy' });
+    expect(
+      classifyTopLevelConversationSource(records.get(EXPLICIT_ID)!),
+    ).toMatchObject({ kind: 'standalone', persistence: 'explicit' });
+    expect(
+      classifyTopLevelConversationSource({
+        sourceType: 'standalone',
+        sourceId: 'unexpected',
+      }),
+    ).toBeUndefined();
   });
 
-  it('accepts a standalone projectless task and its direct child', async () => {
+  it.each([
+    [LIVE_ID, 'live', 'explicit'],
+    [LIVE_CHILD_ID, 'live', 'legacy'],
+    [LEGACY_ID, 'standalone', 'legacy'],
+    [LEGACY_CHILD_ID, 'standalone', 'legacy'],
+    [EXPLICIT_ID, 'standalone', 'explicit'],
+    [EXPLICIT_CHILD_ID, 'standalone', 'explicit'],
+    [LEGACY_CHILD_OF_EXPLICIT_ID, 'standalone', 'legacy'],
+  ] as const)(
+    'classifies %s as %s %s',
+    async (sessionId, kind, persistence) => {
+      await expect(
+        readLoadableConversationSession(sessionId, store),
+      ).resolves.toMatchObject({ kind, persistence });
+    },
+  );
+
+  it.each([
+    ORPHAN_ID,
+    GRANDCHILD_ID,
+    ATTRIBUTED_CHILD_ID,
+    MALFORMED_LIVE_ID,
+    SELF_ID,
+    CYCLE_A_ID,
+  ])('rejects malformed or ambiguous lineage for %s', async (sessionId) => {
     await expect(
-      readLoadableLiveConversationMetadata('generic', read),
-    ).resolves.toEqual(records.get('generic'));
-    await expect(
-      readLoadableLiveConversationMetadata('generic-child', read),
-    ).resolves.toEqual(records.get('generic-child'));
+      readLoadableConversationSession(sessionId, store),
+    ).resolves.toBeUndefined();
   });
 
-  it('rejects nested, attributed, and malformed Live sessions', async () => {
+  it('keeps the compatibility adapter limited to Live and legacy projectless sessions', async () => {
     await expect(
-      readLoadableLiveConversationMetadata('nested-worker', read),
+      readLoadableLiveConversationMetadata(LIVE_CHILD_ID, store),
+    ).resolves.toEqual(records.get(LIVE_CHILD_ID));
+    await expect(
+      readLoadableLiveConversationMetadata(LEGACY_ID, store),
+    ).resolves.toEqual(records.get(LEGACY_ID));
+    await expect(
+      readLoadableLiveConversationMetadata(EXPLICIT_ID, store),
     ).resolves.toBeUndefined();
     await expect(
-      readLoadableLiveConversationMetadata('attributed-worker', read),
+      readLoadableLiveConversationMetadata(EXPLICIT_CHILD_ID, store),
     ).resolves.toBeUndefined();
     await expect(
-      readLoadableLiveConversationMetadata('empty-call-id', read),
+      readLoadableLiveConversationMetadata(LEGACY_CHILD_OF_EXPLICIT_ID, store),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects missing and conflicting transcripts without reading metadata', async () => {
+    let reads = 0;
+    const unavailableStore: ConversationSessionMetadataStore = {
+      async getSessionLocation(sessionId) {
+        return sessionId === LEGACY_ID ? 'conflict' : undefined;
+      },
+      async readCreationMetadata() {
+        reads++;
+        return {};
+      },
+    };
+
+    await expect(
+      readLoadableConversationSession(LEGACY_ID, unavailableStore),
+    ).resolves.toBeUndefined();
+    await expect(
+      readLoadableConversationSession(EXPLICIT_ID, unavailableStore),
+    ).resolves.toBeUndefined();
+    expect(reads).toBe(0);
+  });
+
+  it('rejects a transcript that disappears while its metadata is read', async () => {
+    let locationReads = 0;
+    const disappearingStore: ConversationSessionMetadataStore = {
+      async getSessionLocation() {
+        locationReads++;
+        return locationReads === 1 ? 'active' : undefined;
+      },
+      async readCreationMetadata() {
+        return {};
+      },
+    };
+
+    await expect(
+      readLoadableConversationSession(LEGACY_ID, disappearingStore),
     ).resolves.toBeUndefined();
   });
 });

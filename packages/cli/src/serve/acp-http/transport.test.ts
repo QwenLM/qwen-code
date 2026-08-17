@@ -39,6 +39,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   SessionOrganizationService,
+  SessionIdCaseConflictError,
   SessionService,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -82,6 +83,9 @@ import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
 } from '../validation-limits.js';
+import { AcpDispatcher } from './dispatch.js';
+import { ConnectionRegistry } from './connection-registry.js';
+import type { TransportStream } from './transport-stream.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -1563,6 +1567,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: {
         code: -32602,
         message: expect.stringContaining('reserved'),
+      },
+    });
+  });
+
+  it('session/new rejects standalone before validating sourceId', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 90,
+      method: 'session/new',
+      params: {
+        cwd: '/ws',
+        sourceType: 'standalone',
+        sourceId: 42,
+      },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame).toMatchObject({
+      id: 90,
+      error: {
+        code: -32602,
+        message: expect.stringContaining('standalone'),
       },
     });
   });
@@ -4772,6 +4805,204 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     },
   );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s hides explicit standalone transcripts from generic restore',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440133'
+            : '550e8400-e29b-41d4-a716-446655440134';
+        await writeStoredSession(sessionId, 'active', undefined, 'standalone');
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 218,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 218,
+          error: { message: expect.stringContaining('No session with id') },
+        });
+        reader.close();
+
+        expect(bridge.loadRequests).toHaveLength(loadCount);
+        expect(bridge.resumeRequests).toHaveLength(resumeCount);
+      });
+    },
+  );
+
+  it('keeps the bridge key canonical while isolating mixed-case storage', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440135';
+    const storageSessionId = sessionId.toUpperCase();
+    const explicitSessionId = '550e8400-e29b-41d4-a716-446655440136';
+    const materializeConversationDirectory = vi.fn(
+      async (candidateId: string) => `/live/conversation-${candidateId}`,
+    );
+    await writeStoredSession(storageSessionId, 'active', undefined, 'default');
+    await writeStoredSession(
+      explicitSessionId,
+      'active',
+      undefined,
+      'standalone',
+    );
+    const changeSessionCwd = vi.fn(
+      async (candidateId: string, request: { path: string }) => ({
+        sessionId: candidateId,
+        previousCwd: TEST_WORKSPACE,
+        newCwd: request.path,
+        warnings: [],
+      }),
+    );
+    Object.assign(bridge, { changeSessionCwd });
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const registry = new ConnectionRegistry();
+    const rememberLane = new WorkspaceRememberTaskLane(
+      bridge as unknown as HttpAcpBridge,
+    );
+    const dispatcher = new AcpDispatcher(
+      bridge as unknown as HttpAcpBridge,
+      TEST_WORKSPACE,
+      () => process.env,
+      fakeWorkspace,
+      rememberLane,
+      createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          {
+            workspaceCwd: TEST_WORKSPACE,
+            runtimeBaseDir: Storage.getRuntimeBaseDir(),
+          },
+        ],
+      }),
+      undefined,
+      undefined,
+      false,
+      registry,
+      archiveCoordinator,
+      () => true,
+      () => undefined,
+      {
+        materializeConversationDirectory,
+        isSessionActive: () => false,
+      },
+      Storage.getRuntimeBaseDir(),
+    );
+    const conn = registry.create(true)!;
+    const frames: unknown[] = [];
+    let resolverSpy: { mockRestore(): void } | undefined;
+    conn.attachConnStream({
+      kind: 'sse',
+      isClosed: false,
+      async send(message: unknown): Promise<void> {
+        frames.push(message);
+      },
+      async sendSerialized(payload: Buffer) {
+        frames.push(JSON.parse(payload.toString('utf8')));
+        return 'delivered' as const;
+      },
+      close(): void {},
+    } satisfies TransportStream);
+
+    try {
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 217,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await waitUntil(() => frames.length > 0);
+      expect(frames).toContainEqual(
+        expect.objectContaining({ id: 217, result: expect.any(Object) }),
+      );
+      expect(bridge.loadRequests).toContainEqual(
+        expect.objectContaining({ sessionId }),
+      );
+      expect(materializeConversationDirectory).toHaveBeenCalledWith(
+        storageSessionId,
+      );
+      expect(changeSessionCwd).toHaveBeenCalledWith(sessionId, {
+        path: `/live/conversation-${storageSessionId}`,
+        allowedRoots: [TEST_WORKSPACE],
+        managedRelocation: 'live-conversation',
+      });
+
+      const loadCount = bridge.loadRequests.length;
+      const materializeCount =
+        materializeConversationDirectory.mock.calls.length;
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: 'session/load',
+        params: { sessionId: explicitSessionId },
+      });
+      await waitUntil(() =>
+        frames.some(
+          (frame) =>
+            typeof frame === 'object' &&
+            frame !== null &&
+            'id' in frame &&
+            frame.id === 218,
+        ),
+      );
+      expect(frames).toContainEqual(
+        expect.objectContaining({
+          id: 218,
+          error: expect.objectContaining({
+            message: expect.stringContaining('No session with id'),
+          }),
+        }),
+      );
+      expect(bridge.loadRequests).toHaveLength(loadCount);
+      expect(materializeConversationDirectory).toHaveBeenCalledTimes(
+        materializeCount,
+      );
+
+      resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockRejectedValueOnce(new SessionIdCaseConflictError(sessionId));
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 219,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await waitUntil(() =>
+        frames.some(
+          (frame) =>
+            typeof frame === 'object' &&
+            frame !== null &&
+            'id' in frame &&
+            frame.id === 219,
+        ),
+      );
+      expect(frames).toContainEqual(
+        expect.objectContaining({
+          id: 219,
+          error: expect.objectContaining({
+            message: expect.stringContaining('by case'),
+            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+          }),
+        }),
+      );
+      expect(bridge.loadRequests).toHaveLength(loadCount);
+      expect(materializeConversationDirectory).toHaveBeenCalledTimes(
+        materializeCount,
+      );
+    } finally {
+      resolverSpy?.mockRestore();
+      registry.dispose();
+      rememberLane.dispose();
+    }
+  });
 
   it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
