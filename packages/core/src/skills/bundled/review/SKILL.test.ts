@@ -198,6 +198,13 @@ describe('bundled review skill', () => {
     // A section with no verdict at all is a mismatch, not a pass: the side
     // file can outlive the round that vouched for it.
     expect(body).toContain('A ledger section that states no verdict');
+    // …and the recovery path is reached from a cache-path WITHHOLD too, not
+    // only from an absent or refused anchor. Without that clause a round
+    // whose cache held another model's anchor stops at the cache and never
+    // looks at the marker — which may hold one this model certified.
+    expect(body).toContain(
+      'including the case where it HELD one that the cache-path gate withheld',
+    );
     // The work list crosses models even when the anchor does not.
     expect(body).toContain('the work list carries across models');
   });

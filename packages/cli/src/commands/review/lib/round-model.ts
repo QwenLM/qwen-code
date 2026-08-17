@@ -20,9 +20,10 @@
  * a bare model id is unique only inside one provider configuration, so two of
  * them exposing the same name would otherwise pass each other's same-model
  * gate and skip code neither reviewed. Falls back to the bare id for a runtime
- * that publishes no identity, and to `''` — meaning "unknown", which every
- * caller reads as a mismatch rather than as agreement — for one that publishes
- * neither.
+ * that publishes no identity — whether the slot is absent or BLANK, which are
+ * the same fact said two ways — and to `''`, meaning "unknown" and read by
+ * every caller as a mismatch rather than as agreement, for a runtime that
+ * publishes neither.
  *
  * The empty case is reachable in normal operation, not just in tests: the
  * identity slot is blanked (not omitted) when a session has none to publish,
@@ -31,11 +32,17 @@
  * and it must never compare equal to another empty one.
  */
 export function roundModelIdFrom(env: NodeJS.ProcessEnv): string {
-  return (
-    env['QWEN_CODE_MODEL_IDENTITY'] ??
-    env['QWEN_CODE_MODEL'] ??
-    ''
-  ).trim();
+  // `??` would be wrong here, and was: it falls back on absent, not on EMPTY,
+  // and the identity slot is deliberately written as `''` when a session has
+  // none to publish (an omitted key is not withheld — the spawn-site
+  // `{...process.env, ...}` spread leaks the parent's stale one). So `??` made
+  // a blanked slot mean "this round has no identity at all" rather than "no
+  // qualification, use the bare id", and every such round then certified
+  // nobody and re-reviewed the full diff for ever after. Blanking must cost
+  // the qualification, never the identity.
+  const identity = (env['QWEN_CODE_MODEL_IDENTITY'] ?? '').trim();
+  if (identity !== '') return identity;
+  return (env['QWEN_CODE_MODEL'] ?? '').trim();
 }
 
 /**

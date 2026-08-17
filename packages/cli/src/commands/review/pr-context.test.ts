@@ -170,6 +170,35 @@ describe('buildMarkdown section order', () => {
     line: 2,
   };
 
+  it('feeds buildMarkdown\u2019s ledger section the RUNNING identity', () => {
+    // The wiring, not the renderer. `renderLedgerSection` rules the
+    // same-model gate from the identity it is handed, and the only place that
+    // identity is read from the environment is this call — hard-coding `''`
+    // there, or dropping the argument, leaves every recovered anchor refused
+    // with the renderer's own tests still green.
+    const ledger: Ledger = {
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def567890',
+      model: 'wired-model@1a2b3c4d',
+    };
+    const prev = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = 'wired-model@1a2b3c4d';
+    try {
+      expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
+        'the same-model contract HOLDS',
+      );
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'other-model@9f8e7d6c';
+      expect(buildMarkdown('1', 'o/r', meta, [], [], [], ledger)).toContain(
+        'Do NOT pass the reviewed-at sha',
+      );
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+      else process.env['QWEN_CODE_MODEL_IDENTITY'] = prev;
+    }
+  });
+
   it('puts the open comments before the already-discussed ones', () => {
     const md = buildMarkdown('1', 'o/r', meta, [root, reply, open], [], []);
     const openAt = md.indexOf('## Open inline comments');
@@ -1108,6 +1137,11 @@ describe('latestLedger — the split trust surface', () => {
       'maintainer',
     );
     expect(foreign?.ledger.sha).toBeUndefined();
+    // The certifying identity goes with it. Left behind, `model` says a
+    // foreign round was certified by someone while the range it certified is
+    // gone — and every reader of this object would then have to know to
+    // ignore it.
+    expect(foreign?.ledger.model).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(anchored.findings);
     expect(foreign?.ledger.round).toBe(2);
   });
