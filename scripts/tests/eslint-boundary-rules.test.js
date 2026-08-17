@@ -1131,4 +1131,88 @@ describe('eslint cli serve boundary rules', () => {
       "import { Worker as W } from 'worker_threads';\nnew W('../serve/worker.js');",
     );
   });
+
+  // ── Round-13 review pins ─────────────────────────────────────────────
+
+  // R13-1: backslash normalization must run AFTER percent-decoding too —
+  // %5c/%5C reintroduce backslashes that decode into the already-pinned
+  // literal-backslash traversal.
+  it('rejects percent-encoded backslash traversal into serve', async () => {
+    for (const code of [
+      "import '..%5cserve%5cindex.js';",
+      "import '..%5Cserve%5Cindex.js';",
+      "export async function load() { await import('..%5cserve%5cindex.js'); }",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+  });
+
+  // R13-2: a nonexistent target reached through a symlinked ancestor must
+  // canonicalize via the deepest existing ancestor instead of failing open
+  // with the textual path. The link points runtime/ at src/, so
+  // `./r13-src-link/serve/...` resolves into the real serve tree even
+  // though the final file does not exist.
+  it('fails closed through symlinked ancestors for missing targets', async () => {
+    const link = path.join(repoRoot, 'packages/cli/src/runtime/r13-src-link');
+    rmSync(link, { force: true });
+    try {
+      symlinkSync('..', link);
+      await expectServeBoundaryError(
+        'packages/cli/src/runtime/boundary-fixture.ts',
+        "import './r13-src-link/serve/r13-nonexistent.js';",
+      );
+      // Negative control: the same mechanism resolving OUTSIDE serve
+      // stays allowed (over-blocking regression pin).
+      await expectNoBoundaryHits(
+        'packages/cli/src/runtime/boundary-fixture.ts',
+        "import './r13-src-link/utils/r13-nonexistent.js';",
+      );
+    } finally {
+      rmSync(link, { force: true });
+    }
+  });
+
+  // R13-3: the Worker eval-option contract fails closed on every shape
+  // whose effect on the final eval value is statically undecided — an
+  // opaque computed key, a prototype-inherited eval, and a quoted key.
+  it('fails closed on undecided Worker eval option shapes', async () => {
+    for (const code of [
+      "const k = 'eval';\nnew Worker('x', { [k]: true });",
+      "new Worker('x', { __proto__: { eval: true } });",
+      "new Worker('x', { 'eval': true });",
+    ]) {
+      await expectServeBoundaryError(ACP_FIXTURE, code);
+    }
+    // A LATER literal false still wins over an earlier opaque key, and a
+    // static null prototype severs the chain — both stay on the
+    // specifier path (over-blocking regression pins).
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
+      "const k = 'noise';\nnew Worker('../utils/worker.js', { [k]: true, eval: false });",
+    );
+    await expectNoBoundaryHits(
+      ACP_FIXTURE,
+      "new Worker('../utils/worker.js', { __proto__: null });",
+    );
+  });
+
+  // R13-4: the opaque-key fail-closed check applies at composition depth —
+  // one hop below .call, as a Reflect target, and on the getBuiltinModule
+  // object side. All three keep the moduleBuiltin message of the process
+  // family.
+  it('fails closed on opaque-key compositions of guarded globals', async () => {
+    for (const code of [
+      "const k = 'getBuiltinModule';\nprocess[k].call(process, 'node:module');",
+      "const k = 'getBuiltinModule';\nReflect.apply(process[k], null, ['node:module']);",
+      "const p = 'pro' + 'cess';\nglobalThis[p].getBuiltinModule('node:module');",
+    ]) {
+      const [result] = await lintCliFile(ACP_FIXTURE, code);
+      expect(
+        result.messages.some(
+          (message) =>
+            message.ruleId === RULE_ID && message.messageId === 'moduleBuiltin',
+        ),
+      ).toBe(true);
+    }
+  });
 });

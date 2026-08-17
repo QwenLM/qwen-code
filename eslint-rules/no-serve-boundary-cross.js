@@ -64,7 +64,27 @@ function resolvePath(candidate) {
   try {
     return fs.realpathSync.native(resolved);
   } catch {
-    return resolved;
+    // ENOENT: an import target does not have to exist for the resolver
+    // (tsc/esbuild resolve extensionless and not-yet-written paths).
+    // Canonicalize the deepest EXISTING ancestor and re-append the
+    // missing tail — returning the textual path here lets candidates
+    // reached through a symlinked ancestor (macOS /tmp, symlink-mounted
+    // workspaces) miss the realpath'd serveDir and fail open (#8084
+    // R13-2). Only a filesystem root that cannot be realpath'd keeps
+    // the raw path.
+    const tail = [];
+    let base = resolved;
+    for (;;) {
+      const parent = path.dirname(base);
+      if (parent === base) return resolved;
+      tail.unshift(path.basename(base));
+      base = parent;
+      try {
+        return path.join(fs.realpathSync.native(base), ...tail);
+      } catch {
+        // keep walking up
+      }
+    }
   }
 }
 
@@ -187,14 +207,24 @@ export default {
       // unconditionally; guarded trees have no legitimate absolute-path
       // imports.
       if (trimmed.startsWith('/')) {
-        const decoded = decodeSpecifier(stripUrlSuffixes(trimmed));
+        // Decode first, THEN re-normalize: %5c/%5C reintroduce
+        // backslashes that the pre-decode normalization cannot see, and
+        // the decoded '..\\serve' form resolves like '../serve'
+        // (#8084 R13-1).
+        const decoded = decodeSpecifier(stripUrlSuffixes(trimmed))?.replace(
+          /\\/g,
+          '/',
+        );
         if (decoded === undefined) return 'unknown';
         return isInServeDir(resolvePath(decoded), serveDir)
           ? 'inside'
           : 'unknown';
       }
 
-      const cleaned = decodeSpecifier(stripUrlSuffixes(trimmed));
+      const cleaned = decodeSpecifier(stripUrlSuffixes(trimmed))?.replace(
+        /\\/g,
+        '/',
+      );
       if (cleaned === undefined) return 'unknown';
 
       // Relative specifiers resolve against the importing file.
@@ -302,8 +332,13 @@ export default {
      *  (`vi[`mock`]` is as resolvable as vi.mock). */
     function staticPropertyName(propertyNode, computed) {
       if (!computed) {
-        return propertyNode.type === 'Identifier'
-          ? propertyNode.name
+        if (propertyNode.type === 'Identifier') return propertyNode.name;
+        // A QUOTED key in an object literal (`{ 'eval': true }`) is
+        // runtime-identical to the identifier key — resolving only
+        // Identifiers fails open on the quoted spelling (#8084 R13-3).
+        return propertyNode.type === 'Literal' &&
+          typeof propertyNode.value === 'string'
+          ? propertyNode.value
           : undefined;
       }
       if (
@@ -347,6 +382,17 @@ export default {
           );
         })()
       );
+    }
+
+    /** Message for an opaque-key fail-closed hit on a guarded global:
+     *  the process family's opaque key stands in for getBuiltinModule,
+     *  so it keeps the dedicated moduleBuiltin message; every other
+     *  guarded global gets the generic failClosed advice (#8084 R13-4). */
+    function opaqueGuardMessage(memberExpr) {
+      const processFamily =
+        isProcessObject(memberExpr.object) ||
+        rightmostObjectName(memberExpr.object) === 'process';
+      return processFamily ? 'moduleBuiltin' : 'failClosed';
     }
 
     /** Inline lazy vm imports as callee objects: `(await import('node:vm'))`
@@ -559,6 +605,19 @@ export default {
               }
               return;
             }
+            // Opaque composition one hop down: `process[k].call(...)` —
+            // the callee BELOW `.call/.apply/.bind` carries a statically
+            // unresolvable key on a guarded global, so the name-based
+            // cascade above sees `undefined` and falls through. Fail
+            // closed at composition depth with the family message
+            // (#8084 R13-4).
+            if (
+              node.arguments.length > 0 &&
+              namedGuardedObjectWithOpaqueKey(callee.object)
+            ) {
+              reportUnknown(node, opaqueGuardMessage(callee.object));
+              return;
+            }
           }
           // A named guarded global with an opaque computed key is one
           // variable rename away from a guarded entrance — fail closed
@@ -690,6 +749,13 @@ export default {
           (callee.type === 'MemberExpression' &&
             isProcessObject(callee.object) &&
             builtinModuleProperty(callee)) ||
+          // Opaque object side: `globalThis[p].getBuiltinModule(...)` —
+          // the callee's own property resolves, but the OBJECT is an
+          // opaque computed member of a guarded-global family, which
+          // isProcessObject cannot see (#8084 R13-4).
+          (callee.type === 'MemberExpression' &&
+            builtinModuleProperty(callee) &&
+            namedGuardedObjectWithOpaqueKey(callee.object)) ||
           (callee.type === 'Identifier' && callee.name === 'getBuiltinModule')
         ) {
           reportUnknown(node, 'moduleBuiltin');
@@ -717,6 +783,14 @@ export default {
             builtinModuleProperty(target)
           ) {
             reportUnknown(node, 'moduleBuiltin');
+            return;
+          }
+          // Opaque composition as the Reflect target:
+          // `Reflect.apply(process[k], ...)` — targetName one hop down is
+          // undefined and every name-based check below misses it; fail
+          // closed at composition depth (#8084 R13-4).
+          if (targetMember && namedGuardedObjectWithOpaqueKey(target)) {
+            reportUnknown(node, opaqueGuardMessage(target));
             return;
           }
           if (targetMember) {
@@ -815,12 +889,17 @@ export default {
               staticPropertyName(callee.property, callee.computed) === 'Worker';
         if (workerCallee && node.arguments.length > 0) {
           // new Worker(codeString, { eval: true }) executes arg0 as CODE,
-          // not as a specifier. Static analysis must match runtime
-          // object-literal semantics (R12-1): the LAST `eval` key wins
-          // (duplicates included), an options object WITHOUT `eval`
-          // defaults to false (arg0 stays a specifier), and a spread
-          // AFTER the last literal `eval` makes the final value
-          // unverifiable — fail closed on anything not statically false.
+          // not as a specifier. Contract (R12-1, modeled once in R13-3):
+          // fail closed on ANYTHING whose effect on the final `eval`
+          // value is statically undecided. Runtime object-literal
+          // semantics the scan must reproduce: the LAST `eval` key wins
+          // (duplicates included); an options object WITHOUT `eval`
+          // defaults to false (arg0 stays a specifier); a spread makes
+          // the final value unverifiable unless a LATER literal `eval`
+          // wins; a statically UNRESOLVABLE computed key may BE `eval`;
+          // and a non-computed `__proto__` key installs a PROTOTYPE, so
+          // `eval` can be inherited through the prototype chain even
+          // when no own `eval` exists.
           const opts = node.arguments[1];
           if (opts) {
             let evalState = 'absent'; // 'absent' | 'false' | 'true' | 'unknown'
@@ -832,11 +911,29 @@ export default {
                   evalState = 'unknown';
                   continue;
                 }
-                if (
-                  staticPropertyName(property.key, property.computed) !== 'eval'
-                ) {
+                const key = staticPropertyName(property.key, property.computed);
+                if (key === undefined) {
+                  // A statically unresolvable computed key may be 'eval'
+                  // at runtime — same posture as a spread: only a LATER
+                  // literal `eval` settles the final value (R13-3).
+                  evalState = 'unknown';
                   continue;
                 }
+                if (key === '__proto__' && !property.computed) {
+                  // Non-computed `__proto__` sets the prototype; Node
+                  // reads `opts.eval` with prototype lookup, so an
+                  // inherited `eval: true` executes arg0 as code. Only a
+                  // static null severs the chain (R13-3).
+                  if (
+                    property.value.type === 'Literal' &&
+                    property.value.value === null
+                  ) {
+                    continue;
+                  }
+                  evalState = 'unknown';
+                  continue;
+                }
+                if (key !== 'eval') continue;
                 if (
                   property.value.type === 'Literal' &&
                   typeof property.value.value === 'boolean'
