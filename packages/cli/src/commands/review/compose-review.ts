@@ -39,8 +39,14 @@ import {
 } from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
+  BUDGET_STOP_PHRASE_ZH,
   ROUND_CAP_PHRASE,
+  ROUND_CAP_PHRASE_ZH,
   budgetStopDisclosure,
+  budgetStopEntry,
+  budgetStopEntryZh,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
   roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
@@ -67,6 +73,7 @@ import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_ID_READBACK,
+  LEDGER_MAX_ROUND,
   serializeLedger,
   type Ledger,
   type LedgerFinding,
@@ -535,6 +542,55 @@ export interface ComposeReviewResult {
    * coverage would have capped — and `srcDiffLines` the plan's own count.
    */
   lowSignal: { agents: number; srcDiffLines: number } | null;
+  /**
+   * True when the machine-derived coverage evidence leaves doubt that the
+   * whole diff was READ — a chunk with no receipt, an uncoverable chunk, an
+   * idle/blind/never-opened agent, unreadable transcripts, a context fetch
+   * that failed. Deliberately narrower than `cappedBy`: it says nothing about
+   * how DEEPLY the diff was reviewed, only about whether it was reached.
+   *
+   * The incremental anchor is the one consumer (`ledgerMarkerFor`). Emitted in
+   * the composed artifact too, because "why did this round not certify a
+   * range?" was otherwise unanswerable from the artifact alone.
+   *
+   * Optional for readers, always written by this module: a composed artifact
+   * from a build that predates the field has no answer, and a reader that
+   * needs one must fail closed (treat absent as unproven) rather than read
+   * `undefined` as "proven".
+   */
+  scopeUnproven?: boolean;
+  /**
+   * True when every `unreviewedDimensions` entry is a DEPTH claim: it names
+   * the one dimension that reads no diff (build-and-test), or it is the
+   * machine's own relayed budget/round-cap stop entry — exact minted text,
+   * and only while the stop marker exists (`isRelayedStopEntry`). Vacuously
+   * true when there are no entries.
+   *
+   * The anchor reads this beside `scopeUnproven`: a dimension nobody could
+   * run and a truncated audit over receipt-proven lines say nothing about
+   * WHICH lines were read, but a whiffed lens says exactly that, and only
+   * the orchestrator's prose ever reports it.
+   */
+  dimensionGapsAreDepthOnly?: boolean;
+}
+
+/**
+ * Does this `unreviewedDimensions` entry name a dimension that reads no diff?
+ *
+ * Entries are prose the orchestrator writes, in the shape the skill documents:
+ * a dimension name, optionally followed by its own reason after an em-dash
+ * (`build-and-test — the integration suite never ran`). Only the head is
+ * matched, and only against the ONE dimension whose brief sets
+ * `readsDiff: false`.
+ */
+export function isNonDiffDimensionGap(entry: string): boolean {
+  const head = entry
+    .split(/[—–-]{1,2}\s/)[0]
+    .trim()
+    .toLowerCase();
+  return /^(?:the\s+)?build[-\s]?(?:and|&)[-\s]?test(?:\s+check|\s+verification)?$/.test(
+    head,
+  );
 }
 
 /**
@@ -822,7 +878,16 @@ export function composeReview(
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input, result.cappedBy, prevRound);
+  // Absent means "not recorded", never "proven" — fail closed, as the field's
+  // own contract says. This module always sets it, so the fallback is for a
+  // result assembled elsewhere.
+  const marker = ledgerMarkerFor(
+    input,
+    result.cappedBy,
+    result.scopeUnproven ?? true,
+    result.dimensionGapsAreDepthOnly ?? false,
+    prevRound,
+  );
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -865,6 +930,8 @@ function prevRoundFor(planPath: string | undefined): number {
 function ledgerMarkerFor(
   input: ComposeReviewInput,
   cappedBy: string[],
+  scopeUnproven: boolean,
+  dimensionGapsAreDepthOnly: boolean,
   prevRound: number,
 ): string | null {
   try {
@@ -878,31 +945,56 @@ function ledgerMarkerFor(
       (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
       (typeof pr === 'string' && /^\d+$/.test(pr));
     if (!isPr) return null;
-    // The anchor rides only when this round's scope was clean, and "clean" is
-    // the verdict this module just computed: `cappedBy` aggregates every
-    // fail-closed state — each named input pushes its own cap entry, plus the
-    // caps with no input channel at all (a chunk nobody read, findings still
-    // `— [unverified]`, the deterministic gates' enrichments). The input
-    // fields alone were measured leaking exactly those channel-less caps: a
-    // round the module stamped "could not certify that any of this diff was
-    // reviewed" still carried the anchor. One raw check stays alongside, for
-    // the sliver the cap list deliberately drops: a whitespace-only
+    // The anchor rides only when this round's SCOPE was clean. An anchor
+    // written past unreviewed scope scopes the NEXT round's incremental diff
+    // past it, and no later round ever re-covers the gap — so every cap that
+    // could mean "part of this diff went unread" withholds it, plus one raw
+    // check for the sliver the cap list drops (a whitespace-only
     // `cannotTellCriticals` entry is filtered out of the rendered caps, but
     // Step 8's contract is "any entry" — an undecided blocker whose text was
-    // lost is still an undecided blocker. An anchor written past unreviewed
-    // or undecided scope scopes the NEXT round's incremental diff past it,
-    // and no later round ever re-covers the gap. The findings always ride —
-    // a fail-closed round's work list is still a work list; it just cannot
+    // lost is still an undecided blocker). The findings always ride: a
+    // fail-closed round's work list is still a work list; it just cannot
     // certify a range.
+    //
+    // `unreviewed-dimension` is the ONE cap that does not withhold on its own,
+    // and even then only when every entry names the build-and-test dimension
+    // (`dimensionGapsAreDepthOnly` — the single role that reads no diff). A
+    // whiffed lens is recorded in the same field and IS a claim about lines
+    // that no machine detector can see, so it withholds like any other doubt.
+    // The exception is measured, not theoretical. That cap fires for the
+    // orchestrator's `unreviewedDimensions` prose — on this repo, "the
+    // integration suite CI skipped did not run locally", which is true of
+    // every round because `build-test`'s whole-call budget cannot fit the
+    // suites (measured on PR #9113: 4 of 7 suites `notRun`, 50% of the budget
+    // spent on one SIGTERM'd suite). The result was a closed loop: an
+    // untestable dimension capped the verdict, the cap withheld the anchor,
+    // the missing anchor forced the next round to re-review the full diff —
+    // 119 minutes and 34M tokens on a PR whose code had not changed a line
+    // since the round before (measured, PR #9113 round 2). A dimension nobody
+    // could run says nothing about WHICH LINES were read, and the anchor's
+    // only claim is about lines. When the machine coverage evidence does show
+    // doubt about the reading itself, `scopeUnproven` carries it here and the
+    // anchor is withheld exactly as before.
     const failClosed =
-      (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
+      (input.cannotTellCriticals?.length ?? 0) > 0 ||
+      scopeUnproven ||
+      !dimensionGapsAreDepthOnly ||
+      cappedBy.some((cap) => cap !== 'unreviewed-dimension');
     const sha =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
         : undefined;
     return serializeLedger({
       ...buildLedger(
-        prevRound + 1,
+        // Capped, because the round is the id space and the parser refuses an
+        // id from past the cap: an uncapped stamp of prevRound + 1 met the
+        // serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
+        // marker whose own parser dropped every finding — invisibly, with the
+        // anchor still riding. The recovery path already refuses rounds above
+        // the cap, so prevRound can reach it only AT the cap, where staying
+        // there loses id uniqueness across those rounds and nothing else —
+        // against a counter no real PR approaches.
+        Math.min(prevRound + 1, LEDGER_MAX_ROUND),
         (input.draftedComments ?? []) as Array<{
           path?: unknown;
           line?: unknown;
@@ -1125,18 +1217,68 @@ function composeReviewBody(
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
   // likeliest.
+  /**
+   * Entries the budget-phrase splice below removes from the rendered list.
+   *
+   * The splice exists so the body does not say the same gap twice, and it
+   * matches on a PHRASE — so an entry that merely mentions the review time
+   * budget in its free-form reason ("security — the review time budget ended
+   * the round before the security relaunch returned evidence") is spliced out
+   * too. Harmless while every cap withheld the anchor; not harmless now that
+   * one cap does not, because the spliced entry is exactly the line-coverage
+   * claim the anchor decision must see. Kept here so the decision can read the
+   * list AS DISCLOSED while the body renders the spliced one.
+   *
+   * Collected rather than snapshotted: the deterministic gates push their own
+   * machine-owed debts into `unreviewed` AFTER this point, and a snapshot
+   * taken here would miss them — a round capped solely by an unlinted script
+   * or an unwalked defect layer would classify as depth-only and anchor. The
+   * decision therefore reads the LIVE list plus these.
+   */
+  const splicedForBudgetPhrase: string[] = [];
+  /** The exact entries the stop machinery mints — the ONLY exempt relays.
+   *  Non-null iff the machine's own budget-stop marker exists: the exemption
+   *  is marker-anchored, so stop-shaped prose with no marker behind it buys
+   *  nothing. */
+  let canonicalStopEntries: Set<string> | null = null;
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
+      canonicalStopEntries =
+        stop.cause === 'round-cap'
+          ? new Set([
+              roundCapStopEntry(
+                typeof stop.cap === 'number'
+                  ? stop.cap
+                  : LARGE_REVERSE_AUDIT_ROUNDS,
+              ),
+              roundCapStopEntryZh(
+                typeof stop.cap === 'number'
+                  ? stop.cap
+                  : LARGE_REVERSE_AUDIT_ROUNDS,
+              ),
+            ])
+          : new Set([
+              budgetStopEntry(stop.round ?? undefined),
+              budgetStopEntryZh(stop.round ?? undefined),
+            ]);
       // A round-cap stop and a time-budget stop both cap the verdict, but
       // read differently and dedup against a different relayed phrase. The
       // marker's `cause` picks which; an absent cause is a time stop, for
       // markers written before the cause field existed.
       const isRoundCap = stop.cause === 'round-cap';
-      const phrase = isRoundCap ? ROUND_CAP_PHRASE : BUDGET_STOP_PHRASE;
+      // BOTH languages: the exemption admits the Chinese pair as a compliant
+      // relay, so the splice must retire it too — an English-only phrase let
+      // a relayed `budgetStopEntryZh` survive into the whiffed-dimension
+      // rendering beside the structural stop line, the same gap said twice
+      // with the wrong cause on one of them.
+      const phrases = isRoundCap
+        ? [ROUND_CAP_PHRASE, ROUND_CAP_PHRASE_ZH]
+        : [BUDGET_STOP_PHRASE, BUDGET_STOP_PHRASE_ZH];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (unreviewed[i].includes(phrase)) {
+        if (phrases.some((ph) => unreviewed[i].includes(ph))) {
+          splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
       }
@@ -1656,6 +1798,71 @@ function composeReviewBody(
   if (findingsUnverifiedAtCompose) {
     cappedBy.push('findings-unverified-at-compose');
   }
+
+  // Is there any doubt that the whole diff was READ? That is a narrower
+  // question than "did anything cap the verdict", and it is the only one the
+  // incremental anchor needs — see `ledgerMarkerFor`. Every entry counted here
+  // is machine-derived (recomputed from the harness's own transcripts a few
+  // hundred lines above), never the orchestrator's prose: an agent that made
+  // no tool call, one launched without the diff in its prompt, one that never
+  // opened it, a chunk with no receipt, a plan or transcript set that could
+  // not be read, a context fetch that failed. `budgetEntry` is excluded on
+  // purpose — a disclosed budget gap is the ceiling working, and it says
+  // something about DEPTH, not about which lines were read.
+  const scopeUnproven =
+    missingReceipts.length > 0 ||
+    uncoverable.length > 0 ||
+    contextUnavailable ||
+    coverageEntries.some((entry) => entry !== budgetEntry);
+
+  // Is every dimension gap the orchestrator disclosed about DEPTH rather than
+  // about which lines were read?
+  //
+  // Only one dimension can answer yes, and it is not a judgement call: Agent 7
+  // is the single role whose brief declares `readsDiff: false` (agent-briefs).
+  // Its gap — "the integration suite CI skipped did not run locally" — says
+  // nothing about the diff, because that agent never reads the diff.
+  //
+  // Every OTHER entry is a line-coverage claim wearing dimension prose, and
+  // the machine cannot see it: a whole-diff lens that made tool calls, opened
+  // files and returned a bare "No issues found" twice is a whiff, the
+  // orchestrator's entry is the ONLY detector, and `coverageFromTranscripts`
+  // (idle / blind / never-opened) reports nothing. Exempting those from the
+  // anchor would let a twice-whiffed Security lens advance the range past the
+  // lines it never reviewed — the harm the skill's own paragraph warns about,
+  // and the reason the first cut of this exemption was wrong.
+  // Read at the DECISION point, not at any earlier one: `unreviewed` is written
+  // both before this line (the orchestrator's own entries) and after the
+  // snapshot an earlier fix took (the script-lint and layer-audit gates, whose
+  // debts are machine-owed line-coverage claims). Reading it here plus the
+  // entries the phrase splice removed is the only list that sees every writer.
+  //
+  // The stop's own relayed entry classifies as DEPTH, and only against the
+  // marker. A budget/round-cap stop truncates how many audit PASSES ran over
+  // lines whose reading the receipts already prove — the same depth claim the
+  // build-and-test exemption rests on — and its verdict cap (`budgetEntry`) is
+  // pushed from the marker whether or not the orchestrator relayed the entry.
+  // Without this the outcome was relay-dependent: a compliant run (entry
+  // relayed, as stderr mandates) withheld the anchor while an identical run
+  // that dropped the entry carried it.
+  //
+  // Exempt on the EXACT machine text, nothing looser. The first cut matched
+  // head-plus-phrase, and that shape also covers a genuine line-coverage claim
+  // whose whiffed scope IS the reverse audit — `reverse audit — the review
+  // time budget ended the round before the chunk-2 relaunch returned
+  // evidence` — which the phrase splice then also removes from the rendered
+  // body, so the anchor rode past a whiffed audit while the posted review
+  // showed only the benign disclosure. The machinery mints its entries from
+  // one generator pair, the stderr instruction relays them verbatim, and only
+  // that text is exempt: marker-anchored (no marker, no exemption) AND
+  // text-anchored (an edited or paraphrased entry withholds — over-withholding
+  // is the safe direction).
+  const isRelayedStopEntry = (entry: string): boolean =>
+    canonicalStopEntries?.has(entry.trim()) ?? false;
+  const dimensionGapsAreDepthOnly = [
+    ...unreviewed,
+    ...splicedForBudgetPhrase,
+  ].every((entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry));
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
@@ -2249,6 +2456,8 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       lowSignal,
+      scopeUnproven,
+      dimensionGapsAreDepthOnly,
     };
   }
 
@@ -2293,6 +2502,8 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       lowSignal,
+      scopeUnproven,
+      dimensionGapsAreDepthOnly,
     };
   }
 
@@ -2472,6 +2683,8 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     lowSignal,
+    scopeUnproven,
+    dimensionGapsAreDepthOnly,
   };
 }
 

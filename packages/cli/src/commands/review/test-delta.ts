@@ -50,9 +50,7 @@ import {
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
-
-// eslint-disable-next-line no-control-regex -- ESC is the character under test
-const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+import { failingFilesOf } from './lib/failing-files.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
@@ -75,48 +73,10 @@ const RERUNNABLE_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
 /** `trimOutput`'s own marker — the one signal that a stored output is partial. */
 const TRIM_MARKER_RE = /\.\.\. \[\d+ characters omitted/;
 
-/**
- * Test files a runner named as failing, out of one command's output.
- *
- * Two shapes cover vitest and jest, the runners build-test drives:
- * `FAIL  src/x.test.ts > name` (both, in the failure section) and vitest's
- * per-file `❯ src/x.test.ts (12 tests | 3 failed)` progress line. Matching is
- * on the path token, so a `FAIL` line whose path was truncated mid-token by
- * output trimming simply does not match — an unparsed failure surfaces as a
- * count mismatch in the caller's disclosure, never as an invented path.
- */
-export function failingFilesOf(output: string, root = ''): string[] {
-  const text = output.replace(ANSI_SGR_RE, '');
-  const files = new Set<string>();
-  const re =
-    // `\\` and `:` in the path class: a Windows runner prints
-    // `FAIL  C:\\repo\\src\\x.test.ts`, which the POSIX-only class missed —
-    // and a missed parse is an unattributed failure, not a loud error.
-    /(?:^|\s)(?:FAIL\s+|❯\s+)(?:\|([^|]+)\|\s+)?([\w@.:\\/-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b([^\n]*)/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    // The `❯` progress line lists every file; only a failing one counts.
-    if (m[0].trimStart().startsWith('❯') && !/failed/.test(m[3] ?? ''))
-      continue;
-    // ROOT-RELATIVE, and keyed by project. The two sides run in DIFFERENT
-    // roots (the PR worktree and the base tree), so comparing absolute paths
-    // verbatim made every pre-existing failure a fabricated netNew. The vitest
-    // project token is part of the identity too: dropping it collapsed
-    // same-named files across workspaces, suppressing a real Critical as a
-    // "measurement" — the worse of the two failure directions.
-    files.add(`${m[1] ? `${m[1].trim()}::` : ''}${relativeToRoot(m[2], root)}`);
-  }
-  return [...files].sort();
-}
-
-/** Strip the run's own root (and any leading `./`) so the two sides compare. */
-export function relativeToRoot(file: string, root: string): string {
-  const norm = (v: string) => v.replace(/\\/g, '/').replace(/\/+$/, '');
-  const f = norm(file);
-  const r = root ? norm(root) : '';
-  const rel = r && f.startsWith(`${r}/`) ? f.slice(r.length + 1) : f;
-  return rel.replace(/^\.\//, '');
-}
+// The failing-file parser lives in lib/ because build-test needs it too: the
+// PR side has to be measured off its UNTRIMMED output, at capture time.
+// Re-exported here for the callers (and tests) that have always found it here.
+export { failingFilesOf, relativeToRoot } from './lib/failing-files.js';
 
 /** One rerun: the same command, in the base tree. */
 export interface DeltaEntry {
@@ -137,8 +97,13 @@ export interface DeltaEntry {
    */
   unparsed: boolean;
   /**
-   * True when the PR-side output this read was already trimmed by `build-test`.
-   * The failing-file list may be short, which can only understate `shared`.
+   * True when the PR side had to be re-parsed out of the TRIMMED stored
+   * output — the report carried no capture-time `failingFiles` (or a
+   * malformed one) AND the trim marker is present. A report whose set was
+   * measured before the trim never sets this. When it is set, the loss cuts
+   * BOTH ways: a missing file understates `shared` when base fails it too,
+   * and understates `netNew` — the direction that loses a failure the PR
+   * caused — when only the PR side does.
    */
   prTruncated: boolean;
 }
@@ -316,10 +281,27 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       skippedForBudget.push(t.command);
       continue;
     }
-    const prFailingFiles = failingFilesOf(
-      t.output ?? '',
-      args.prWorktree ?? '',
-    );
+    // Prefer the set build-test measured off its untrimmed output; fall back to
+    // re-parsing the bounded report only for a report written before that field
+    // existed. Same precedence the base side uses below, and for the same
+    // reason: the trim is lossy and the capture site is not.
+    //
+    // Shape-checked here because this is the one consumer and the report is a
+    // file anything may have edited: a `failingFiles` that is not a string
+    // array reached `.filter` as-is and threw where the honest reading is
+    // "this seam supplied no measurement" — the same fallback an absent field
+    // has always taken.
+    // Non-empty too: the producer OMITS the field when nothing failed to
+    // parse, so an empty array can only be hand-made — and taking it as
+    // authoritative would skip the reparse and understate both sets.
+    const measured =
+      Array.isArray(t.failingFiles) &&
+      t.failingFiles.length > 0 &&
+      t.failingFiles.every((f) => typeof f === 'string')
+        ? t.failingFiles
+        : undefined;
+    const prFailingFiles =
+      measured ?? failingFilesOf(t.output ?? '', args.prWorktree ?? '');
     // A clamped deadline is not the same fact as a slow command: if the
     // budget cut this rerun short, "timed out — infrastructure" would send the
     // reader hunting a hang that is really an exhausted budget. Record which.
@@ -336,12 +318,18 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // managed to parse. Requiring both sides to be empty silently dropped a
     // failed command whose FAIL lines the trim had scattered.
     const unparsed = prFailingFiles.length === 0;
-    // The PR side is read out of build-test's STORED output, which that command
-    // trimmed on the same rules. The base side is parsed raw (see BaseRunResult)
-    // so it can never be the short one, but nothing here can un-trim the report:
-    // a PR-side set missing files makes `shared` — not `netNew` — too small, so
-    // the loss is silence, and silence still gets said out loud.
-    const prTruncated = TRIM_MARKER_RE.test(t.output ?? '');
+    // Only when the PR side had to be re-parsed out of build-test's STORED
+    // output, which that command trimmed. A report that carries `failingFiles`
+    // was measured before the trim, so its set is complete and the disclosure
+    // would be a false alarm.
+    //
+    // When the fallback IS in use the loss cuts both ways, and the earlier
+    // wording ("`shared`, not `netNew`") understated it: a file the trim
+    // dropped is missing from `shared` when base fails it too, and missing from
+    // `netNew` when only the PR side does — the direction that loses a failure
+    // the PR caused. Hence the capture-time field; this is the legacy seam.
+    const prTruncated =
+      measured === undefined && TRIM_MARKER_RE.test(t.output ?? '');
     // A base run that never finished attributes NOTHING: with its failing set
     // unknowable, promoting the PR side's failures to net-new would
     // manufacture the strongest evidence this command produces out of an
@@ -401,7 +389,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (truncated) {
     parts.push(
-      `${truncated} command(s) had their PR-side output trimmed before this ran, so their failing-file list may be partial — a file missing there is one this delta could not call pre-existing, never one it invented`,
+      `${truncated} command(s) reached this from a report that trimmed their PR-side output and recorded no failing-file set, so their failing-file list may be partial — a file the trim dropped is missing from BOTH lists: unattributed, never invented`,
     );
   }
   const unusable = entries.filter(

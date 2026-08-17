@@ -157,6 +157,8 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonSessionMediaData,
+  DaemonSessionMediaReference,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -3252,16 +3254,105 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
+  async uploadSessionMedia(
+    sessionId: string,
+    data: Blob,
+    mimeType: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionMediaReference> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/media`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': mimeType }, opts?.clientId),
+        body: data,
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/media');
+        }
+        return (await res.json()) as DaemonSessionMediaReference;
+      },
+    );
+  }
+
+  async readSessionMedia(
+    sessionId: string,
+    mediaId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionMediaData> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/media/${urlEncode(mediaId)}`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/media/:mediaId');
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        // This package also targets browsers, where Node's Buffer is absent.
+        // Chunking keeps the spread call below the engine's argument limit.
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(
+            ...bytes.subarray(offset, offset + 0x8000),
+          );
+        }
+        return {
+          data: btoa(binary),
+          mimeType:
+            res.headers.get('content-type') ?? 'application/octet-stream',
+        };
+      },
+    );
+  }
+
+  async removeSessionMedia(
+    sessionId: string,
+    mediaId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<boolean> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/media/${urlEncode(mediaId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /session/:id/media/:mediaId',
+          );
+        }
+        return ((await res.json()) as { removed?: unknown }).removed === true;
+      },
+    );
+  }
+
   /**
    * Queue a user message typed while the session's turn is still running. The
    * ACP child drains it between tool batches so the model sees it before the
    * turn ends. Every accepted request is daemon-owned; a caller-supplied id
-   * makes ambiguous retries idempotent.
+   * makes ambiguous retries idempotent. `opts.content` carries media content
+   * image blocks alongside the text — pre-flight the
+   * `session_media` capability; older daemons ignore the
+   * field and drop the media.
    */
   async enqueueMidTurnMessage(
     sessionId: string,
     message: string,
-    opts?: { signal?: AbortSignal; clientId?: string; messageId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      clientId?: string;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult> {
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
@@ -3275,7 +3366,13 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ message, messageId: opts?.messageId }),
+        body: JSON.stringify({
+          message,
+          messageId: opts?.messageId,
+          ...(opts?.content && opts.content.length > 0
+            ? { content: opts.content }
+            : {}),
+        }),
         signal: opts?.signal,
       },
       async (res) => {
@@ -5930,6 +6027,19 @@ export class WorkspaceDaemonClient {
       `/workspaces/${this.workspaceSelector}/session/${urlEncode(sessionId)}/archive/export`,
       'GET /workspaces/:workspace/session/:id/archive/export',
       opts,
+    );
+  }
+
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return this.client.workspaceJsonRequest<SessionMetadataResult>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/metadata`,
+      'PATCH /workspaces/:workspace/session/:id/metadata',
+      { method: 'PATCH', body: metadata, clientId, mode: 'rest' },
     );
   }
 

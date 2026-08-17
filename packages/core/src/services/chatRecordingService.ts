@@ -8,6 +8,7 @@ import { type Config } from '../config/config.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
   Content,
@@ -18,6 +19,11 @@ import { createModelContent, createUserContent } from '../core/genai-compat.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../utils/tool-result-boundary-diagnostics.js';
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
@@ -408,6 +414,7 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+  mediaReferences?: UserPromptMediaReference[];
   backgroundTask?: {
     taskId: string;
     status: string;
@@ -429,6 +436,15 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** Daemon-owned media references used to restore prompt previews. */
+  mediaReferences?: UserPromptMediaReference[];
+}
+
+export interface UserPromptMediaReference {
+  type: 'image' | 'audio';
+  mediaId: string;
+  mimeType: string;
+  size: number;
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -1571,8 +1587,9 @@ export class ChatRecordingService {
    */
   recordMidTurnUserMessage(
     message: PartListUnion,
-    displayText?: string,
+    displayText: string,
     goalContext?: GoalTurnPermit,
+    mediaReferences?: UserPromptMediaReference[],
   ): void {
     try {
       const record: ChatRecord = {
@@ -1580,9 +1597,10 @@ export class ChatRecordingService {
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
-        systemPayload: displayText
-          ? ({ displayText } as NotificationRecordPayload)
-          : undefined,
+        systemPayload: {
+          displayText,
+          ...(mediaReferences ? { mediaReferences } : {}),
+        },
       };
       this.appendRecord(record);
     } catch (error) {
@@ -1684,7 +1702,10 @@ export class ChatRecordingService {
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
       message: createUserContent(message),
       systemPayload: displayText
-        ? ({ displayText, backgroundTask } as NotificationRecordPayload)
+        ? {
+            displayText,
+            ...(backgroundTask ? { backgroundTask } : {}),
+          }
         : undefined,
     };
   }
@@ -1868,6 +1889,80 @@ export class ChatRecordingService {
     options?: RecordToolResultOptions,
   ): void {
     try {
+      const persistedOutputFiles = toolCallResult?.persistedOutputFiles;
+      const artifacts = [
+        toolResultBoundaryArtifact(
+          persistedOutputFiles,
+          toolCallResult?.artifacts,
+        ),
+      ];
+      const inputDisplay = toolCallResult?.resultDisplay;
+      const inputValues = () => [
+        ...toolResultPartDiagnosticValues(message),
+        ...(typeof inputDisplay === 'string'
+          ? [
+              {
+                representation: 'display' as const,
+                value: inputDisplay,
+              },
+            ]
+          : []),
+      ];
+      let recordingToolCallResult:
+        | (Partial<ToolCallResponseInfo> & { status: Status })
+        | undefined;
+      if (toolCallResult) {
+        const recordableToolCallResult = { ...toolCallResult };
+        delete recordableToolCallResult.persistedOutputFiles;
+        delete recordableToolCallResult.boundaryArtifact;
+        recordingToolCallResult = sanitizeToolCallResultForRecording(
+          recordableToolCallResult,
+        );
+        if (
+          typeof recordingToolCallResult.resultDisplay === 'object' &&
+          recordingToolCallResult.resultDisplay !== null &&
+          'type' in recordingToolCallResult.resultDisplay &&
+          recordingToolCallResult.resultDisplay.type === 'task_execution'
+        ) {
+          const taskResult =
+            recordingToolCallResult.resultDisplay as AgentResultDisplay;
+          recordingToolCallResult = {
+            ...recordingToolCallResult,
+            resultDisplay: { ...taskResult, toolCalls: [] },
+          };
+        }
+      }
+      const outputDisplay = recordingToolCallResult?.resultDisplay;
+      let displayMutated: boolean | undefined;
+      const mutated = () =>
+        (displayMutated ??= !isDeepStrictEqual(inputDisplay, outputDisplay));
+      observeToolResultBoundary({
+        stage: 'recorder_input',
+        sessionId: this.getSessionId(),
+        toolCallId: toolCallResult?.callId,
+        artifacts,
+        mutated,
+        values: inputValues,
+      });
+      observeToolResultBoundary({
+        stage: 'recorder_output',
+        sessionId: this.getSessionId(),
+        toolCallId: toolCallResult?.callId,
+        artifacts,
+        mutated,
+        values: () => [
+          ...toolResultPartDiagnosticValues(message),
+          ...(typeof outputDisplay === 'string'
+            ? [
+                {
+                  representation: 'display' as const,
+                  value: outputDisplay,
+                },
+              ]
+            : []),
+        ],
+      });
+
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
         ...(options?.goalContext
@@ -1877,29 +1972,8 @@ export class ChatRecordingService {
         message: createUserContent(message),
       };
 
-      if (toolCallResult) {
-        const recordingToolCallResult =
-          sanitizeToolCallResultForRecording(toolCallResult);
-
-        // special case for task executions - we don't want to record the tool calls
-        if (
-          typeof recordingToolCallResult.resultDisplay === 'object' &&
-          recordingToolCallResult.resultDisplay !== null &&
-          'type' in recordingToolCallResult.resultDisplay &&
-          recordingToolCallResult.resultDisplay.type === 'task_execution'
-        ) {
-          const taskResult =
-            recordingToolCallResult.resultDisplay as AgentResultDisplay;
-          record.toolCallResult = {
-            ...recordingToolCallResult,
-            resultDisplay: {
-              ...taskResult,
-              toolCalls: [],
-            },
-          };
-        } else {
-          record.toolCallResult = recordingToolCallResult;
-        }
+      if (recordingToolCallResult) {
+        record.toolCallResult = recordingToolCallResult;
       }
 
       this.appendRecord(record);
