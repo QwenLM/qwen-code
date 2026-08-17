@@ -928,6 +928,14 @@
     overflow: hidden;
   }
 
+  /* The custom-footer variant renders the composer footer `display: contents`,
+     so this wrap stays the containing block for the absolutely-positioned
+     bottom panels (status panel) anchored above it. */
+  .appChatEmpty
+    .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
+    position: relative;
+  }
+
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
     position: absolute;
     right: 0;
