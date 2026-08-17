@@ -434,6 +434,7 @@ describe('parseArguments', () => {
     ['attach', ['attach', 'the', 'server']],
     ['logs', ['logs', 'the', 'server']],
     ['respawn', ['respawn', 'the', 'server']],
+    ['agents', ['agents', 'explain', 'this', 'project']],
   ])(
     'still parses verb-initial input starting with `%s` as a positional prompt',
     async (_verb, args) => {

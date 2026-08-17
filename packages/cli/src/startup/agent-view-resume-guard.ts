@@ -65,7 +65,9 @@ export async function releaseExitedManagedSessionForContinue(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  if (isAgentViewWorkerEnv(env)) return;
+  // Same strict predicate as the /resume block: a lone marker must not
+  // suppress the release in an ordinary foreground session.
+  if (readAgentViewWorkerSidebandEnv(env) !== undefined) return;
   const state = await readAgentViewSessionState(sessionId);
   if (state?.ownership !== 'managed' || state.processState !== 'exited') {
     return;

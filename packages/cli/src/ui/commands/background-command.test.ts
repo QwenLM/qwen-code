@@ -8,16 +8,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { backgroundCommand } from './background-command.js';
 import { CommandKind, type AgentViewIdleGateState } from './types.js';
+import type { AgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
 
-const mockIsAgentViewWorkerEnv = vi.hoisted(() => vi.fn(() => false));
+const mockReadAgentViewWorkerSidebandEnv = vi.hoisted(() =>
+  vi.fn<() => AgentViewWorkerSidebandEnv | undefined>(() => undefined),
+);
 
 vi.mock('../../agent-view/worker-sideband.js', () => ({
-  isAgentViewWorkerEnv: mockIsAgentViewWorkerEnv,
+  readAgentViewWorkerSidebandEnv: mockReadAgentViewWorkerSidebandEnv,
 }));
 
 describe('backgroundCommand', () => {
   beforeEach(() => {
-    mockIsAgentViewWorkerEnv.mockReturnValue(false);
+    mockReadAgentViewWorkerSidebandEnv.mockReturnValue(undefined);
   });
 
   it('has command metadata', () => {
@@ -109,7 +112,12 @@ describe('backgroundCommand', () => {
   );
 
   it('detaches managed Agent View workers while a turn is running', async () => {
-    mockIsAgentViewWorkerEnv.mockReturnValue(true);
+    mockReadAgentViewWorkerSidebandEnv.mockReturnValue({
+      sessionId: 'session-1',
+      sidebandEndpoint: 'unix:/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
 
     const result = await backgroundCommand.action?.(
       createMockCommandContext({

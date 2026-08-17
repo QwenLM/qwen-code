@@ -549,6 +549,33 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
+// Subcommands and listing flags of `qwen agents`; any other token after
+// `agents` means the input is a natural-language prompt, not the command.
+const AGENTS_COMMAND_TOKENS = new Set([
+  'attach',
+  'logs',
+  'stop',
+  'kill',
+  'respawn',
+  'rm',
+  'daemon',
+  '--json',
+  '--all',
+  '--cwd',
+  '--help',
+  '-h',
+  '--version',
+  '-v',
+]);
+
+function isAgentsPromptFallback(rawArgv: readonly string[]): boolean {
+  return (
+    rawArgv.length >= 2 &&
+    rawArgv[0] === 'agents' &&
+    !AGENTS_COMMAND_TOKENS.has(rawArgv[1])
+  );
+}
+
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
 
@@ -561,6 +588,12 @@ export async function parseArguments(): Promise<CliArgs> {
   ) {
     rawArgv = rawArgv.slice(1);
   }
+
+  // `qwen agents explain this project` must stay a positional prompt: when
+  // the second token is not a real `agents` subcommand, skip registering
+  // the command group so the tokens route to the default prompt command
+  // instead of dying in strict mode.
+  const agentsPromptFallback = isAgentsPromptFallback(rawArgv);
 
   const yargsInstance = yargs(rawArgv)
     .locale('en')
@@ -1222,10 +1255,14 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
-    // Register Agent View Phase 1 command surface
-    .command(agentsCommand)
     // Register update command
     .command(updateCommand);
+
+  // Register Agent View Phase 1 command surface (skipped on the
+  // agents-initial positional-prompt fallback above).
+  if (!agentsPromptFallback) {
+    yargsInstance.command(agentsCommand);
+  }
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1251,7 +1288,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
-      result._[0] === 'agents' ||
+      (result._[0] === 'agents' && !agentsPromptFallback) ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks

@@ -127,9 +127,26 @@ describe('managed Agent View resume guards', () => {
 
     await releaseExitedManagedSessionForContinue('session-1', {
       QWEN_AGENT_VIEW_WORKER: '1',
+      QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
+      QWEN_AGENT_VIEW_SIDEBAND: 'unix:/tmp/qwen-agent-view.sock',
+      QWEN_AGENT_VIEW_TOKEN: 'token-1',
+      QWEN_AGENT_VIEW_ACTIVE_CWD: '/repo',
     });
 
     expect(mockPatchAgentViewSessionState).not.toHaveBeenCalled();
+  });
+
+  it('still releases ownership when only a stray worker marker is set', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+
+    await releaseExitedManagedSessionForContinue('session-1', {
+      QWEN_AGENT_VIEW_WORKER: '1',
+    });
+
+    expect(mockPatchAgentViewSessionState).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ ownership: 'unmanaged' }),
+    );
   });
 });
 

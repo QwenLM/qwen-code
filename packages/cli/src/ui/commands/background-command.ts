@@ -11,7 +11,7 @@ import {
   type SlashCommand,
 } from './types.js';
 import { t } from '../../i18n/index.js';
-import { isAgentViewWorkerEnv } from '../../agent-view/worker-sideband.js';
+import { readAgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
 
 export const backgroundCommand: SlashCommand = {
   name: 'background',
@@ -24,7 +24,7 @@ export const backgroundCommand: SlashCommand = {
   action: async (
     context,
   ): Promise<AgentViewDetachActionReturn | MessageActionReturn> => {
-    if (isAgentViewWorkerEnv()) {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
       return { type: 'agent_view_detach' };
     }
 
