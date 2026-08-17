@@ -8,13 +8,14 @@
  */
 
 import type { FC } from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { FileLink } from '../layout/FileLink.js';
 import {
   groupContent,
   mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import { usePlatform } from '../../context/PlatformContext.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 import type {
   BaseToolCallProps,
   ToolCallContainerProps,
@@ -69,7 +70,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
   const { kind, title, content, locations, toolCallId } = toolCall;
   const platform = usePlatform();
   const openedDiffsRef = useRef<Map<string, string>>(new Map());
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(false);
 
   // Group content by type; memoize to avoid new array identities on every render
   const { errors, diffs, textOutputs } = useMemo(

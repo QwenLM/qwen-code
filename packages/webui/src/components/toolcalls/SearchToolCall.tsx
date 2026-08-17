@@ -6,7 +6,7 @@
  * Search tool call component - specialized for search operations
  */
 
-import { useState, type FC } from 'react';
+import { type FC } from 'react';
 import {
   safeTitle,
   groupContent,
@@ -16,6 +16,7 @@ import {
 import type { BaseToolCallProps, ContainerStatus } from './shared/index.js';
 import { FileLink } from '../layout/FileLink.js';
 import { getToolDisplayLabel } from './labelUtils.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 
 /**
  * Collapsible output component for search results
@@ -29,7 +30,7 @@ const CollapsibleOutput: FC<{
   /** Whether to start expanded (default: false) */
   defaultExpanded?: boolean;
 }> = ({ summary, children, defaultExpanded = false }) => {
-  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(defaultExpanded);
 
   return (
     <div className="flex flex-col">

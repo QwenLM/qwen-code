@@ -7,7 +7,7 @@
  * Displays web fetch and search operations with URL/query and output
  */
 
-import { useState, type FC } from 'react';
+import { type FC } from 'react';
 import {
   ToolCallContainer,
   safeTitle,
@@ -17,6 +17,7 @@ import {
 import type { BaseToolCallProps } from './shared/index.js';
 import { getToolDisplayLabel } from './labelUtils.js';
 import { MarkdownRenderer } from '../messages/MarkdownRenderer/MarkdownRenderer.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 
 type WebVariant = 'fetch' | 'search';
 
@@ -60,7 +61,7 @@ const OutputCard: FC<{
   content: string;
   isError?: boolean;
 }> = ({ content, isError = false }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(false);
   const isLongContent = content.length > EXPAND_THRESHOLD;
 
   return (
