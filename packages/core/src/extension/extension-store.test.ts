@@ -314,28 +314,31 @@ describe('ExtensionStore', () => {
     });
   });
 
-  it.each([{ demo: {} }, { demo: { overrides: '!/legacy/*' } }, null])(
-    'rejects a malformed live V1 projection %#',
-    async (projection) => {
-      const store = makeStore();
-      const original = JSON.stringify(projection);
-      await fsp.writeFile(enablementPath, original);
-
-      await expect(
-        store.setDefaultActivations(
-          [{ id: 'cf'.repeat(32), name: 'demo' }],
-          'disabled',
-        ),
-      ).rejects.toMatchObject({ code: 'extension_store_corrupt' });
-
-      await expect(
-        fsp.stat(path.join(storeDir, 'state.json')),
-      ).rejects.toMatchObject({ code: 'ENOENT' });
-      await expect(fsp.readFile(enablementPath, 'utf8')).resolves.toBe(
-        original,
-      );
+  it.each([
+    { demo: {} },
+    { demo: { overrides: '!/legacy/*' } },
+    {
+      Demo: { overrides: ['!/upper/*'] },
+      demo: { overrides: ['!/lower/*'] },
     },
-  );
+    null,
+  ])('rejects a malformed live V1 projection %#', async (projection) => {
+    const store = makeStore();
+    const original = JSON.stringify(projection);
+    await fsp.writeFile(enablementPath, original);
+
+    await expect(
+      store.setDefaultActivations(
+        [{ id: 'cf'.repeat(32), name: 'demo' }],
+        'disabled',
+      ),
+    ).rejects.toMatchObject({ code: 'extension_store_corrupt' });
+
+    await expect(
+      fsp.stat(path.join(storeDir, 'state.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fsp.readFile(enablementPath, 'utf8')).resolves.toBe(original);
+  });
 
   it('keeps a newer V1 removal from resurrecting a persisted remainder', async () => {
     const store = makeStore();

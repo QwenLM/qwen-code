@@ -152,21 +152,28 @@ function projectionHash(projection: AllExtensionsEnablementConfig): string {
 function validLegacyProjection(
   projection: unknown,
 ): projection is AllExtensionsEnablementConfig {
-  return (
-    !!projection &&
-    !Array.isArray(projection) &&
-    typeof projection === 'object' &&
-    Object.values(projection).every(
-      (config) =>
-        !!config &&
-        !Array.isArray(config) &&
-        typeof config === 'object' &&
-        Array.isArray((config as { overrides?: unknown }).overrides) &&
-        (config as { overrides: unknown[] }).overrides.every(
-          (rule) => typeof rule === 'string',
-        ),
-    )
-  );
+  if (
+    !projection ||
+    Array.isArray(projection) ||
+    typeof projection !== 'object'
+  ) {
+    return false;
+  }
+  const names = new Set<string>();
+  return Object.entries(projection).every(([name, config]) => {
+    const normalizedName = name.toLowerCase();
+    if (names.has(normalizedName)) return false;
+    names.add(normalizedName);
+    return (
+      !!config &&
+      !Array.isArray(config) &&
+      typeof config === 'object' &&
+      Array.isArray((config as { overrides?: unknown }).overrides) &&
+      (config as { overrides: unknown[] }).overrides.every(
+        (rule) => typeof rule === 'string',
+      )
+    );
+  });
 }
 
 function findLegacyRules(
