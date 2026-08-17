@@ -9,7 +9,7 @@
 // pre-existing flake into a public Critical (or the reverse). The base rerun
 // itself is a seam — one command in one cwd — so the exec is injected.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,22 @@ import {
   type TestDeltaReport,
 } from './test-delta.js';
 import type { BuildTestReport, CommandResult } from './build-test.js';
+
+// A passthrough spy on the real spawn: the fractional-timeout pin below must
+// observe the OPTIONS handed to spawnSync. A reverted coercion throws
+// ERR_OUT_OF_RANGE synchronously and nothing on the call path catches it, so
+// the outcome-level test catches the revert as a hard failure — but a crash
+// only proves spawn REJECTED the value; this probe proves what it RECEIVED.
+const spawnSpy = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual =
+    (await importOriginal()) as typeof import('node:child_process');
+  spawnSpy.mockImplementation((...args: unknown[]) =>
+    (actual.spawnSync as (...a: unknown[]) => unknown)(...args),
+  );
+  const mod = { ...actual, spawnSync: spawnSpy };
+  return { ...mod, default: mod };
+});
 
 const cmd = (over: Partial<CommandResult>): CommandResult => ({
   command: 'npm test --workspace="packages/core"',
@@ -170,6 +186,52 @@ describe('runTestDelta', () => {
     // nothing asserted: running it in the PR worktree would compare a tree
     // with itself and report every failure pre-existing.
     expect(cwds).toEqual([baseline]);
+  });
+
+  it('does not admit a timed-out NON-Maven command that merely echoes a maven marker', () => {
+    // R2-2 over-inclusion: the timed-out arm gates on the STRUCTURED Maven
+    // fact, so an `npm test` that echoes a `[maven-test-failure] ` line
+    // (this repo's own suites carry literal marker strings failing
+    // assertions echo) is not admitted and re-executed — a green rerun
+    // would manufacture netNew failures out of an infrastructure timeout.
+    const calls: string[] = [];
+    runWith(
+      [
+        cmd({
+          command: 'npm test',
+          timedOut: true,
+          exitCode: null,
+          output: '[maven-test-failure] core/target/x.xml: T#fails',
+        }),
+      ],
+      (command) => {
+        calls.push(command);
+        return cmd({ command, output: '' });
+      },
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('admits a timed-out Maven command carrying stdout-only failure evidence', () => {
+    // R2-2 under-inclusion: a timed-out `./mvnw test` with a failing
+    // Surefire summary but NO report markers still carries failure evidence
+    // and must join the disclosure, not drop out to the all-clear note (the
+    // opposite of build-test's verdict). A Maven command never matches the
+    // rerun grammar, so it lands in skippedUnrecognised.
+    const r = runWith(
+      [
+        cmd({
+          command:
+            './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+          timedOut: true,
+          exitCode: null,
+          output: '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0',
+          maven: { lifecycle: 'test', modules: ['core'], alsoMake: true },
+        }),
+      ],
+      () => cmd({ output: '' }),
+    );
+    expect(r.note).not.toContain('no PR-side test command failed');
   });
 
   it('an empty netNew with everything shared is the pre-existing verdict', () => {
@@ -332,8 +394,73 @@ describe('runTestDelta', () => {
     expect(ran).toEqual([]);
     expect(r.entries).toEqual([]);
     expect(r.netNew).toEqual([]);
-    expect(r.note).toContain('not the shape');
+    expect(r.note).toContain('outside the npm rerun grammar');
     expect(r.note).toContain('judge them by the diff');
+  });
+
+  it('refuses the Maven lifecycle commands the Maven adapter records', () => {
+    // build-test's test[] can now carry Maven command strings; the rerun
+    // grammar stays npm-only. Pin the guard so a future widening of
+    // RERUNNABLE_COMMAND_RE — or a Maven report handed straight to
+    // `qwen review test-delta --report` — cannot re-execute a Maven
+    // lifecycle command in the base worktree.
+    const ran: string[] = [];
+    const r = runWith(
+      [
+        cmd({
+          command:
+            './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+          output: '[ERROR] Tests failed',
+        }),
+      ],
+      (command) => {
+        ran.push(command);
+        return cmd({ command, output: '' });
+      },
+    );
+    expect(ran).toEqual([]);
+    expect(r.entries).toEqual([]);
+    expect(r.note).toContain('outside the npm rerun grammar');
+    // The disclosure names the deliberate exclusion, not a grammar accident.
+    expect(r.note).toContain('Maven lifecycle commands');
+  });
+
+  it('reads the exit-0 Maven verdict flags as failures, not an all-clear', () => {
+    // The adapter marks these runs ok:false at exit 0 — a fail-never
+    // setting swallowing failures, a skip setting suppressing the phase,
+    // a wrapper that never started Maven, evidence the adapter refused to
+    // certify. Reading "no PR-side test command failed" off the exit
+    // codes alone would state the opposite of build-test's verdict. The
+    // commands are still never re-executed (the npm rerun grammar), but
+    // they join the disclosure instead of the reassuring all-clear.
+    for (const flag of [
+      { swallowedFailure: true },
+      { testsSuppressed: true },
+      { neverRan: true },
+      { evidenceCapped: true },
+      // Exit 0 over fresh FAILING reports: no other flag fires for this
+      // shape, and missing it reported the all-clear over a run build-test
+      // marked ok:false.
+      { swallowedReports: true },
+    ] as const) {
+      const ran: string[] = [];
+      const r = runWith(
+        [
+          cmd({
+            command: './mvnw --batch-mode --no-transfer-progress test',
+            exitCode: 0,
+            ...flag,
+          }),
+        ],
+        (command) => {
+          ran.push(command);
+          return cmd({ command, output: '' });
+        },
+      );
+      expect(ran).toEqual([]);
+      expect(r.note).not.toContain('no PR-side test command failed');
+      expect(r.note).toContain('outside the npm rerun grammar');
+    }
   });
 
   it('reruns both shapes build-test actually emits', () => {
@@ -451,6 +578,50 @@ describe('runTestDelta', () => {
       () => (t += 490_000),
     );
     expect(r.note).toContain('the whole-command budget shortened');
+  });
+
+  it('coerces a fractional --timeout at the spawn boundary', () => {
+    // A decimal --timeout lands as a fractional deadline (60.123s * 1000
+    // = 60122.99999999999); spawnSync validates `timeout` as an unsigned
+    // integer and throws ERR_OUT_OF_RANGE on the raw value — with no
+    // report at all. Every other test injects the exec seam and bypasses
+    // the coercion, so this one drives the REAL spawn.
+    const r = runTestDelta({
+      report: writeReport([
+        cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
+      ]),
+      baseline,
+      timeout: 60.1234,
+    });
+    // The rerun executed (npm fails fast in the empty base dir) instead
+    // of throwing out of the whole call.
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0].base.timedOut).toBe(false);
+    // The base output is the trim's TEXT — a plain string, never the
+    // `{text, evidenceDropped}` shape trimOutput returns. Losing the
+    // `.text` adaptation would serialize a nested object into the report.
+    expect(typeof r.entries[0].base.output).toBe('string');
+  });
+
+  it('hands spawnSync an integral, positive timeout for a fractional budget', () => {
+    // The outcome-level probe above catches a reverted coercion as a hard
+    // crash — the ERR_OUT_OF_RANGE throw propagates out of the whole call,
+    // so NO report of any shape is produced — but the crash only proves
+    // spawn rejected the value; pin the spawn OPTIONS directly to prove
+    // what it received. The input is genuinely fractional (60.1234 * 1000
+    // is not integral): 60.123 used to pass even with the coercion
+    // reverted, because its deadline is exact in JS.
+    spawnSpy.mockClear();
+    runTestDelta({
+      report: writeReport([
+        cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
+      ]),
+      baseline,
+      timeout: 60.1234,
+    });
+    const opts = spawnSpy.mock.calls[0]?.[1] as { timeout?: number };
+    expect(Number.isInteger(opts.timeout)).toBe(true);
+    expect(opts.timeout).toBeGreaterThanOrEqual(1);
   });
 
   it('refuses an unreadable report and a missing base tree without throwing', () => {

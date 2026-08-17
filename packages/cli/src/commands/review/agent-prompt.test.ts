@@ -2528,8 +2528,30 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // send the reader to fix a prompt that is correct.
     const p = buildRoleBrief(PR_PLAN, '7');
     expect(p).not.toContain(PLAN.diffPathAbsolute);
-    expect(p).toContain('npm run build');
+    expect(p).toContain('`toolchain: "maven"`');
+    expect(p).toContain('Do not run `test-delta` for Maven in this release');
     expect(p).toContain('Source: [build]');
+    // The only steering against hand-run full builds — the pattern the same
+    // paragraph records as timing out 71 times and verifying nothing. The
+    // prohibition is scoped to what build-test runs: the unsupported
+    // fallback below it is the sanctioned hand-run path, and the wording
+    // must not forbid it.
+    expect(p).toContain(
+      'Do **not** substitute hand-written npm or Maven commands ' +
+        'for what `build-test` runs — the `toolchain: "unsupported"` fallback ' +
+        'below is the only sanctioned hand-run path',
+    );
+    // The unsupported bullet's steering rules: a fail-closed adapter
+    // result must not be replaced by an ad hoc command, the mixed-root
+    // note names the Maven half the npm run did not verify (and forbids
+    // filling it ad hoc), and a CI-named command lifts neither rule.
+    // Reverting the bullet to the old precedence list left all tests green
+    // before these pins.
+    expect(p).toContain(
+      'do not replace that fail-closed result with an ad hoc Maven command',
+    );
+    expect(p).toContain('do not run Maven ad hoc to fill the gap');
+    expect(p).toContain('does **not** lift the two rules above');
   });
 
   it('pins Agent 7 to the PR worktree and hands it the test-efficacy probe', () => {

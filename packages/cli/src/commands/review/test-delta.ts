@@ -50,13 +50,19 @@ import {
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
+import {
+  isFailingSurefireSummaryLine,
+  isGoalFailureLine,
+  isSourceFailureLine,
+} from './lib/maven-toolchain.js';
 
 // eslint-disable-next-line no-control-regex -- ESC is the character under test
 const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
 
 /**
- * The exact shapes `build-test` emits for a test command — and the only ones
- * this command will hand to a shell.
+ * The exact shapes this command will hand to a shell: build-test's npm test
+ * commands. Maven lifecycle commands build-test ALSO records are skipped and
+ * disclosed, never re-executed in the base worktree.
  *
  * The report is a FILE this reads and then executes from, with `shell: true`,
  * in the base worktree. Nothing else in the pipeline re-executes a string it
@@ -65,10 +71,10 @@ const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
  * pull request can choose: `packages/x";curl …|sh;"` is a legal path in git
  * and on Linux, and it round-trips through the report into a shell.
  *
- * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched here —
- * and anything outside it is skipped and disclosed rather than run, which is
- * the same treatment every other thing this command cannot do gets.
+ * Restricting to the npm grammar costs nothing real — `build-test` produces
+ * `npm test` and `npm test --workspace="<dir>"`, both matched here — and
+ * anything outside it is skipped and disclosed rather than run, which is the
+ * same treatment every other thing this command cannot do gets.
  */
 const RERUNNABLE_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
 
@@ -209,7 +215,10 @@ function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
     shell: true,
     cwd,
     encoding: 'utf8',
-    timeout: timeoutMs,
+    // build-test's coercion, deliberately: spawnSync validates `timeout` as
+    // an unsigned integer, and a fractional --timeout reaches it through
+    // the same budget arithmetic.
+    timeout: Math.max(1, Math.round(timeoutMs)),
     env: buildRunEnv(process.env),
     maxBuffer: 64 * 1024 * 1024,
     // build-test's, deliberately: "a build that asks a question is a build that
@@ -232,7 +241,7 @@ function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
     // is JSON.stringify'd to --out, and the verdict fields sit AFTER it — an
     // untrimmed megabyte pushes exactly what the command produces past any
     // reader's truncation.
-    output: trimOutput(raw),
+    output: trimOutput(raw).text,
   };
 }
 
@@ -273,9 +282,49 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     );
   }
 
-  // Failed for real: a timeout is an infrastructure result and reruns as one.
+  // Failed for real: a timeout is an infrastructure result and reruns as
+  // one. Maven's exit-0 verdict flags are failures too — the adapter marks
+  // the report ok:false with them, and reading "no PR-side test command
+  // failed" off exit codes alone would state the opposite of build-test's
+  // verdict for a run that swallowed failures or tested nothing. They are
+  // still never re-executed (the npm rerun grammar below), but they join
+  // the disclosure instead of the reassuring all-clear.
   const failed = (report.test ?? []).filter(
-    (t) => !t.timedOut && t.exitCode !== 0,
+    (t) =>
+      (!t.timedOut &&
+        (t.exitCode !== 0 ||
+          t.swallowedFailure === true ||
+          t.testsSuppressed === true ||
+          t.neverRan === true ||
+          t.evidenceCapped === true ||
+          // Exit 0 over fresh failing reports (a testFailureIgnore-style
+          // setting): no other flag fires for this shape, and without it the
+          // filter reports the all-clear over a run build-test marked
+          // ok:false — the exact opposite of that verdict.
+          t.swallowedReports === true)) ||
+      // A deadline kill does not retroactively excuse the test failures
+      // Surefire already recorded: build-test marks the run ok:false and its
+      // note says "treat those as test failures", yet every exit-0 flag
+      // requires !timedOut, so the entry carries none and this filter would
+      // drop it — reporting the opposite of build-test's verdict. Gate on
+      // the STRUCTURED Maven fact (only the Maven adapter sets `maven`), so
+      // an npm test that merely echoes a marker string is not admitted, and
+      // broaden to the stdout-only failure shapes a timed-out run can carry
+      // without the report markers. Route it into the disclosure: a Maven
+      // command never matches the rerun grammar and lands in
+      // skippedUnrecognised, named rather than silently lost.
+      (t.timedOut === true &&
+        t.maven !== undefined &&
+        (/^\[maven-test-failure\] /m.test(t.output ?? '') ||
+          (t.output ??
+            ''
+              .split('\n')
+              .some(
+                (line) =>
+                  isFailingSurefireSummaryLine(line) ||
+                  isSourceFailureLine(line) ||
+                  isGoalFailureLine(line),
+              )))),
   );
   if (failed.length === 0) {
     return empty(
@@ -396,7 +445,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (skippedUnrecognised.length) {
     parts.push(
-      `${skippedUnrecognised.length} failed command(s) were not rerun because they are not the shape \`build-test\` emits (${skippedUnrecognised.join(', ')}) — this command executes what the report names, so it executes only that grammar; their failures stay unattributed, judge them by the diff`,
+      `${skippedUnrecognised.length} failed command(s) were not rerun because they are outside the npm rerun grammar (${skippedUnrecognised.join(', ')}) — build-test also records Maven lifecycle commands, which this command deliberately never re-runs in the base worktree; their failures stay unattributed, judge them by the diff`,
     );
   }
   if (truncated) {

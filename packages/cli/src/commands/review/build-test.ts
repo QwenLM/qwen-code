@@ -42,6 +42,17 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  ANSI_SGR_RE,
+  isDependencyFailureLine,
+  isDiskFailureLine,
+  isFailingSurefireSummaryLine,
+  isGoalFailureLine,
+  isSourceFailureLine,
+  isSurefireSummaryLine,
+  isTestsSkippedLine,
+  mavenToolchainAdapter,
+} from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
@@ -49,13 +60,33 @@ import {
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
 
-/**
- * The root toolchains build-test can select. One today; the registry exists so
- * the next one is a registration rather than another branch in this file.
- */
+/** The root toolchains build-test can select. */
 export const toolchainAdapters: readonly ReviewToolchainAdapter[] = [
   npmToolchainAdapter,
+  mavenToolchainAdapter,
 ];
+
+/**
+ * What a Maven lifecycle command this run generated actually scopes.
+ *
+ * The adapter builds the command line FROM these values, so a consumer that
+ * needs them reads them here rather than parsing the string back. Parsing is
+ * for the free text a PR author writes in a Test Plan; re-deriving our own
+ * command's meaning from its rendering adds a second grammar that can drift
+ * from the one that produced it.
+ */
+export interface MavenCommandFacts {
+  /** The lifecycle phase the command ends in — `test` or `test-compile`. */
+  lifecycle: string;
+  /** Repo-relative `-pl` module dirs, or null for a reactor-wide run. */
+  modules: string[] | null;
+  /** Whether `-am` upstream expansion was passed. */
+  alsoMake: boolean;
+  /** A GLOBAL skip setting applied (config-declared), so the whole run's test
+   * phase was suppressed — as opposed to a module-local skip seen only in
+   * stdout. Absent on non-Maven results and older fixtures. */
+  globalSkip?: boolean;
+}
 
 /** A command this run actually executed, and what it did. */
 export interface CommandResult {
@@ -67,6 +98,64 @@ export interface CommandResult {
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
   /**
+   * The adapter classified this failure as infrastructure — Maven/Java or
+   * dependency acquisition, an unlaunchable wrapper: a result `test-plan`
+   * must not settle a Test Plan claim against.
+   */
+  infrastructure?: boolean;
+  /**
+   * The command exited 0 but its output records failures Maven did not fail
+   * on (a fail-never or skip-tests setting swallowed them): `test-plan`
+   * must not rule a Test Plan claim reproduced against this run.
+   */
+  swallowedFailure?: boolean;
+  /**
+   * The command's verdict cannot stand on its evidence: fresh reports the
+   * parser rejected or a truncated sweep never saw, or the output trim
+   * dropped failure-evidence lines past its rescue cap. The adapter refused
+   * to certify the run, and `test-plan` must not settle a Test Plan claim
+   * against it. Exit-code independent — on an exit-0 run it withholds a
+   * pass; on a non-zero exit the exit remains definitive. (A `-l`/`--log-
+   * file` redirect is NOT a producer — it routes to `neverRan`. Reports
+   * past the parse CAP are the opposite: disclosed in the note, because the
+   * parsed reports remain evidence.)
+   */
+  evidenceCapped?: boolean;
+  /**
+   * A skip setting suppressed the entire test phase (`Tests are skipped.`):
+   * zero tests ran, and `test-plan` must word the contradiction as
+   * suppression rather than recorded failures.
+   */
+  testsSuppressed?: boolean;
+  /**
+   * The command exited 0 over fresh failing Surefire/Failsafe reports (a
+   * `testFailureIgnore`-style setting swallowed them). None of the other
+   * flags fire for this shape — they all key on the ABSENCE of fresh
+   * failing reports — yet the verdict is `ok: false`: consumers filtering
+   * on the flags must read this as a failed run, never as a pass.
+   */
+  swallowedReports?: boolean;
+  /**
+   * The command exited 0 but cannot prove the toolchain started: no fresh
+   * reports and no toolchain output (an empty or stub wrapper passes the
+   * launch gates and exits 0). The run verified nothing, and `test-plan`
+   * must not rule a claim reproduced against it.
+   */
+  neverRan?: boolean;
+  /**
+   * The output trim's rescue cap dropped failure-evidence lines from the
+   * omitted middle (dependency/source/goal/disk failures, module errors,
+   * failing Surefire summaries): the classifiers read an output whose
+   * verdict-relevant lines may be gone — the same epistemic state as
+   * `evidenceCapped`, which the Maven adapter folds it into.
+   */
+  rescueOverflow?: boolean;
+  /**
+   * Present on a Maven LIFECYCLE command (not the dependency warm-up): what
+   * it scopes, as the adapter knew it when it built the command line.
+   */
+  maven?: MavenCommandFacts;
+  /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
    * quote the number that fired, not the flag default.
@@ -76,8 +165,8 @@ export interface CommandResult {
 
 export interface BuildTestReport {
   /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
-  toolchain: 'npm' | 'unsupported';
-  /** Workspace dirs the diff changed. */
+  toolchain: 'npm' | 'maven' | 'unsupported';
+  /** Workspace or Maven module dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
@@ -154,17 +243,37 @@ const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
  */
 const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s+\d/;
 
-/** SGR color sequences — stripped per line before the summary test, because a
- *  real runner interleaves them BETWEEN tokens (`Tests\x1b[2m  \x1b[22m3 failed`),
- *  where no anchored pattern can step over them. The rescued line itself keeps
- *  its original bytes. */
-// eslint-disable-next-line no-control-regex -- ESC is the character under test
-const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
-
-export function trimOutput(s: string): string {
-  if (s.length <= KEEP_HEAD + KEEP_TAIL) return s;
-  const middle = s.slice(KEEP_HEAD, s.length - KEEP_TAIL);
-  // Rescue module-resolution errors from the omitted middle. The widening loop
+/** SGR color sequences come from the Maven adapter's `ANSI_SGR_RE` export,
+ *  shared so the rescue below and the adapter's own classification strip the
+ *  same bytes: a real runner interleaves them BETWEEN tokens
+ *  (`Tests\x1b[2m  \x1b[22m3 failed`), where no anchored pattern can step
+ *  over them. The rescued line itself keeps its original bytes. */
+export function trimOutput(s: string): {
+  /** The trimmed output the report carries. */
+  text: string;
+  /**
+   * The rescue cap dropped failure-evidence lines from the omitted middle:
+   * classification reads an output whose verdict-relevant lines may be
+   * gone — the Maven adapter folds this into `evidenceCapped`.
+   */
+  evidenceDropped: boolean;
+} {
+  if (s.length <= KEEP_HEAD + KEEP_TAIL)
+    return { text: s, evidenceDropped: false };
+  // Align both cuts to line boundaries: every rescue and classification
+  // predicate is line-anchored, so a verdict-critical line straddling a
+  // mid-line cut would fragment into two pieces that match nothing —
+  // neither rescued nor classified.
+  const headNewline = s.lastIndexOf('\n', KEEP_HEAD);
+  const headEnd = headNewline === -1 ? KEEP_HEAD : headNewline + 1;
+  const tailNewline = s.indexOf('\n', s.length - KEEP_TAIL);
+  const tailStart = tailNewline === -1 ? s.length - KEEP_TAIL : tailNewline + 1;
+  // Head and tail already cover the whole string line-wise — one long line
+  // spans the middle, and splitting it would break the very line the
+  // alignment exists to protect.
+  if (headEnd >= tailStart) return { text: s, evidenceDropped: false };
+  const middle = s.slice(headEnd, tailStart);
+  // Rescue verdict-relevant lines from the omitted middle. The widening loop
   // reads this trimmed output to decide what to add to the build set — a `Cannot
   // find module` line lost to trimming (a long TypeScript log can push one past the
   // head and before the tail) would end the widening early and surface a real
@@ -172,21 +281,80 @@ export function trimOutput(s: string): string {
   // CAPPED: the rescue exists to save a handful of summary/module-error lines,
   // and an uncapped predicate made the whole trim a no-op on 40k lines of
   // `Test <n>: …` prose (measured in review — 1.6 MB in, 1.6 MB out). Past the
-  // cap the trim's bounded-output contract wins and the rest stays omitted.
+  // cap the trim's bounded-output contract wins and the rest stays omitted —
+  // but evidence lines take the slots FIRST: benign matches (green Surefire
+  // summaries, skip markers, runner summaries) must not exhaust the cap in
+  // positional order and drop the failure lines a verdict reads. Dropped
+  // evidence lines fail closed through `evidenceDropped`.
   const RESCUE_MAX = 40;
-  const rescued = middle
-    .split('\n')
-    .filter(
-      (l) =>
-        MODULE_ERROR_RE.test(l) ||
-        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')),
-    )
-    .slice(0, RESCUE_MAX);
-  const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
+  const matched: Array<{ line: string; index: number; evidence: boolean }> = [];
+  middle.split('\n').forEach((line, index) => {
+    // The widening loop reads module errors from the ORIGINAL bytes.
+    if (MODULE_ERROR_RE.test(line)) {
+      matched.push({ line, index, evidence: true });
+      return;
+    }
+    // Strip SGR ONCE per line: the classifiers below all read the same
+    // stripped copy.
+    const stripped = line.replace(ANSI_SGR_RE, '');
+    // Maven infra classification runs on this trimmed output; a
+    // dependency-failure line lost to the trim would file a network
+    // outage against the PR, a source-failure line lost there would
+    // launder a compile error into infrastructure, a goal-failure line
+    // lost there would read a fail-never plugin failure green, and a
+    // disk-failure line lost there would file an ENOSPC death against
+    // the PR (or, under fail-never, read the run green) — the exact
+    // errors this command prevents. A FAILING Surefire stdout summary is
+    // the same class: the exit-0 cross-check's one defense for
+    // relocated-`<reportsDirectory>` runs.
+    if (
+      isDependencyFailureLine(stripped) ||
+      isSourceFailureLine(stripped) ||
+      isGoalFailureLine(stripped) ||
+      isDiskFailureLine(stripped) ||
+      isFailingSurefireSummaryLine(stripped) ||
+      // The adapter's testsSuppressed guard reads the skip marker from this
+      // trimmed output; a large reactor's trailing Reactor Summary pushes
+      // every `Tests are skipped.` line into the omitted middle, and losing
+      // it certifies a run that tested zero. The marker carries a verdict
+      // (suppression), so it takes an evidence slot — benign matches must
+      // not exhaust the cap and drop it while `evidenceDropped` stays
+      // false.
+      isTestsSkippedLine(stripped)
+    ) {
+      matched.push({ line, index, evidence: true });
+      return;
+    }
+    // Green Surefire summaries and runner summaries carry counts, never
+    // verdicts.
+    if (isSurefireSummaryLine(stripped) || RUNNER_SUMMARY_RE.test(stripped)) {
+      matched.push({ line, index, evidence: false });
+    }
+  });
+  const evidenceCount = matched.reduce(
+    (sum, item) => sum + (item.evidence ? 1 : 0),
+    0,
+  );
+  const kept =
+    matched.length <= RESCUE_MAX
+      ? matched
+      : [
+          ...matched.filter((item) => item.evidence).slice(0, RESCUE_MAX),
+          ...matched
+            .filter((item) => !item.evidence)
+            .slice(0, RESCUE_MAX - Math.min(evidenceCount, RESCUE_MAX)),
+        ].sort((a, b) => a.index - b.index);
+  const rescued = kept.map((item) => item.line);
+  const evidenceDropped = evidenceCount > RESCUE_MAX;
+  const omitted = middle.length;
+  const dropped = matched.length - kept.length;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept${dropped > 0 ? ` — first ${RESCUE_MAX} matches kept, failure evidence before benign lines, ${dropped} more omitted` : ''}] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
-  return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
+  return {
+    text: s.slice(0, headEnd) + marker + s.slice(tailStart),
+    evidenceDropped,
+  };
 }
 
 /**
@@ -236,12 +404,14 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
   const timedOut = spawnTimedOut(r);
+  const trimmed = trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`);
   return {
     command,
     exitCode: r.status,
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
-    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    output: trimmed.text,
+    ...(trimmed.evidenceDropped ? { rescueOverflow: true } : {}),
     deadlineMs,
   };
 }
@@ -343,26 +513,34 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   );
   if (!adapter) {
     if (applicable.length > 1) {
-      // Unreachable with one registered adapter, and deliberately kept: the
-      // selection contract is "exactly one, or nothing", and the second
-      // adapter must land in a file that already refuses to guess between
-      // them rather than one that has to grow the branch.
-      return {
-        toolchain: 'unsupported',
-        affected: [],
-        buildSet: [],
-        widenedWith: [],
-        install: null,
-        build: [],
-        test: [],
-        ok: true,
-        timedOut: [],
-        note:
-          'More than one toolchain applies at the repository root. build-test will ' +
-          'not guess which one owns this diff, so it ran nothing — report the ' +
-          'ambiguity as a handoff instead of substituting ad hoc build or test ' +
-          'commands.',
-      };
+      // Both toolchains apply at the root. Preferring npm preserves what a
+      // review verified on this shape before the Maven adapter existed —
+      // running NOTHING at all shipped a broken JS build through review
+      // with zero evidence. The note discloses the Maven half so a green
+      // npm run never certifies it.
+      const report = npmToolchainAdapter.run(runArgs);
+      // npm's applies() held but run() can still concede or return WITHOUT
+      // executing — a cold yarn/pnpm/bun repo concedes `unsupported`; a
+      // workspace-shaped diff that maps zero affected files, an install disk
+      // preflight, or an exhausted budget all return `toolchain: 'npm'` with
+      // zero commands executed. In every such shape nothing ran, so there is
+      // no npm half to disclose and the Maven half must run instead of
+      // certifying nothing (or appending a note that claims the npm
+      // toolchain ran). The Maven adapter's own mixed-root caveat discloses
+      // the unscopable npm side of this root.
+      if (
+        report.toolchain === 'unsupported' ||
+        (report.install === null &&
+          report.build.length === 0 &&
+          report.test.length === 0)
+      ) {
+        return mavenToolchainAdapter.run(runArgs);
+      }
+      report.note +=
+        ' Mixed root: Maven also applies at the repository root (pom.xml), but ' +
+        'this run executed the npm toolchain only — Maven-built modules were ' +
+        'NOT verified here.';
+      return report;
     }
     // A root package.json marks an npm-shaped repo that npm's own gate refused
     // (an unmodeled workspace glob, workspaces that resolve to no package, or
@@ -386,7 +564,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ok: true,
       timedOut: [],
       note:
-        'No supported npm project here to scope. Fall back to the ' +
+        'No supported npm or Maven project here to scope. Fall back to the ' +
         'build/test precedence in your brief — installing dependencies first — ' +
         'and give each command a deadline it can actually meet.',
     };
@@ -397,8 +575,8 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 export const buildTestCommand: CommandModule = {
   command: 'build-test',
   describe:
-    'Build the workspaces the diff changes (and what they compile against), ' +
-    'test those plus their dependents, with a deadline the commands can ' +
+    'Build what the diff changes (npm: plus their dependents; Maven: plus ' +
+    'their upstream closure), test it, with a deadline the commands can ' +
     'actually meet',
   builder: (yargs) =>
     yargs
@@ -445,7 +623,9 @@ export const buildTestCommand: CommandModule = {
         type: 'boolean',
         default: true,
         describe:
-          'Fetch dependencies first: `npm ci` when node_modules is absent',
+          'Fetch dependencies first: `npm ci` when node_modules is absent (npm), ' +
+          'or a best-effort `dependency:go-offline` warm-up with its own deadline ' +
+          '(Maven)',
       })
       .option('build-only', {
         type: 'boolean',

@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  chmodSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,6 +20,7 @@ import {
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
+import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
 import {
   npmToolchainAdapter,
   unresolvedWorkspaceDeps as toolchainUnresolvedWorkspaceDeps,
@@ -134,9 +141,9 @@ describe('runBuildTest', () => {
 
   it('treats a package.json with no build role as no npm project at all', () => {
     // Docs sites, husky, and lint configs put a script-less package.json in
-    // repos with nothing npm can scope. It must not make npm apply, or such a
-    // root would claim the selection away from a second adapter that could
-    // have verified the diff.
+    // repos with nothing npm can scope. It must not make npm apply — that is
+    // what used to collide with a root pom.xml and drop the whole repo to
+    // `unsupported` where the Maven adapter could have verified the diff.
     // The handoff note is still npm's precise one: the repo IS npm-shaped,
     // and naming why it cannot be scoped beats a generic "no project here".
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
@@ -203,16 +210,223 @@ describe('runBuildTest', () => {
       ok: true,
       timedOut: [],
       note:
-        'No supported npm project here to scope. Fall back to the ' +
+        'No supported npm or Maven project here to scope. Fall back to the ' +
         'build/test precedence in your brief — installing dependencies first — ' +
         'and give each command a deadline it can actually meet.',
     });
+  });
+
+  it('prefers npm and discloses the Maven half when both apply at the root', () => {
+    // Running NOTHING at all on this shape shipped a broken JS build
+    // through review with zero evidence — npm is what a review verified
+    // here before the Maven adapter existed, so it runs, and the note
+    // discloses the Maven half a green npm run must not certify.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'polyglot', scripts: { build: 'exit 0' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: 0,
+        seconds: 1,
+        timedOut: false,
+        output: '',
+      }),
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.build.length).toBeGreaterThan(0);
+    expect(rep.ok).toBe(true);
+    expect(rep.note).toContain('Maven also applies');
+    expect(rep.note).toContain('NOT verified');
+  });
+
+  it('runs the Maven half when npm concedes a mixed root without executing', () => {
+    // The mixed-root note says "this run executed the npm toolchain only"
+    // — a lie when npm's run() concedes WITHOUT executing (a cold
+    // yarn/pnpm/bun repo — the common case for a review worktree):
+    // nothing ran, and the Maven half was never attempted. The Maven
+    // adapter must run instead of certifying nothing; its own mixed-root
+    // caveat discloses the unscopable npm side.
+    rmSync(join(root, 'package-lock.json'));
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    writeFileSync(join(root, 'yarn.lock'), '');
+    pkg('.', {
+      name: 'polyglot',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writeFileSync(
+      join(root, 'pom.xml'),
+      '<project><modules><module>core</module></modules></project>',
+    );
+    mkdirSync(join(root, 'core'), { recursive: true });
+    writeFileSync(join(root, 'core', 'pom.xml'), '<project/>');
+    writePlan(['core/src/Main.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '[INFO] BUILD SUCCESS',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.ok).toBe(true);
+    expect(rep.note).not.toContain('executed the npm toolchain only');
+    expect(rep.note).toContain('Mixed root: a root package.json exists');
+  });
+
+  it('runs the Maven half when npm maps zero affected files at a workspace mixed root', () => {
+    // R1-22/R1-1: the fallback keyed only on `toolchain === 'unsupported'`
+    // missed npm's workspace-mode return for a diff that touches only Maven
+    // modules — `toolchain: 'npm'`, `ok: true`, but zero commands executed —
+    // so the changed modules were never compiled or tested and the note
+    // falsely claimed the npm toolchain ran. Fire the fallback on
+    // no-execution, not just on the unsupported concession.
+    pkg('.', {
+      name: 'polyglot',
+      workspaces: ['packages/*'],
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    mkdirSync(join(root, 'packages', 'a'), { recursive: true });
+    pkg('packages/a', {
+      name: 'a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writeFileSync(
+      join(root, 'pom.xml'),
+      '<project><modules><module>core</module></modules></project>',
+    );
+    mkdirSync(join(root, 'core'), { recursive: true });
+    writeFileSync(join(root, 'core', 'pom.xml'), '<project/>');
+    // The diff touches ONLY the Maven module — npm maps zero workspaces.
+    writePlan(['core/src/Main.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '[INFO] BUILD SUCCESS',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.ok).toBe(true);
+    expect(rep.note).not.toContain('executed the npm toolchain only');
+  });
+
+  it('does not replace a failing-but-executed npm run at a mixed root', () => {
+    // R1-23: the fallback's negative boundary — an npm run that DID execute
+    // and failed must not be discarded under the Maven adapter's verdict. A
+    // reformulation like `!report.ok` would pass the positive mixed-root
+    // tests yet silently drop a genuine npm failure.
+    pkg('.', {
+      name: 'polyglot',
+      scripts: { build: 'exit 1', test: 'exit 0' },
+    });
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: command.includes('build') ? 1 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: command.includes('build') ? 'error: build failed' : '',
+      }),
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('Maven also applies');
+  });
+
+  it('does not fall back to Maven when npm ran an install but no build/test commands', () => {
+    // The fallback's `install === null` clause's negative boundary: npm
+    // returns a NON-NULL install with zero build/test commands when the
+    // install itself failed. That is a genuine npm-side failure and must
+    // not be discarded under a Maven run that could certify green — a
+    // reformulation of the fallback to just `build.length === 0 &&
+    // test.length === 0` would launder it.
+    pkg('.', {
+      name: 'polyglot',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+    // Cold the node_modules marker so `npm ci` actually runs (a warm tree
+    // skips the install, leaving install null — the fallback's positive
+    // case, not this negative boundary).
+    rmSync(join(root, 'node_modules', '.package-lock.json'));
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => ({
+        command,
+        // The install fails; no build/test command is ever reached.
+        exitCode: command.trim().startsWith('npm') ? 1 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: 'npm error install failed',
+      }),
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('Maven also applies');
   });
 
   it('coerces fractional and zero deadlines at the spawn boundary', () => {
     // spawnSync validates `timeout` as an unsigned integer: a decimal
     // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no
     // report, no --out file), and --timeout 0 armed no kill timer at all.
+    // The boundary is in build-test.ts, above every adapter, so the fixture
+    // stays npm — this case must not move when a toolchain is added.
     pkg('.', { name: 'r', scripts: { test: 'vitest run' } });
     writePlan(['src/a.ts']);
 
@@ -270,6 +484,98 @@ describe('runBuildTest', () => {
     ).toThrow(/--budget must be a finite number/);
   });
 
+  it('leaves a Maven repo with a build-less package.json to the Maven adapter', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'husky-only', scripts: { prepare: 'husky' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
+  });
+
+  it('delegates Maven-only repositories through the facade', () => {
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 7,
+      install: false,
+      buildOnly: true,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    expect(runSpy).toHaveBeenCalledWith({
+      root,
+      changedFiles: ['src/Main.java'],
+      timeout: 7,
+      install: false,
+      buildOnly: true,
+      exec,
+    });
+  });
+
+  it('carries the Maven classification flags and command facts into the recorded CommandResult', () => {
+    // The adapter's own unit tests cover the classification, but nothing
+    // pinned that the fields survive into the report shape test-plan
+    // consumes — vitest transpiles without type-checking, so a renamed or
+    // dropped field anywhere in between reads as undefined downstream.
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec: (command: string) => ({
+        command,
+        exitCode: 0,
+        seconds: 1,
+        timedOut: false,
+        output:
+          '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check on project fixture',
+      }),
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(false);
+    const recorded = report.test[0];
+    expect(recorded?.swallowedFailure).toBe(true);
+    expect(recorded?.maven).toEqual({
+      lifecycle: 'test',
+      modules: ['.'],
+      alsoMake: true,
+      globalSkip: false,
+    });
+    expect(recorded?.infrastructure).toBeUndefined();
+    expect(recorded?.evidenceCapped).toBeUndefined();
+  });
+
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {
     // `packages/**` matches real paths that the walker cannot resolve, so a diff
     // inside it would otherwise yield an empty affected set and a confident green.
@@ -298,6 +604,128 @@ describe('runBuildTest', () => {
       'uses a workspace glob shape this command does not model',
     );
     expect(rep.note).not.toContain('no package to build');
+  });
+
+  it('selects Maven when the npm half uses unmodeled workspace globs', () => {
+    // The guard exists for exactly this root: npm cannot scope `packages/**`.
+    // The fixture pairs the unmodeled glob with a modeled one resolving a
+    // real package. The pin is on the SELECTION PATH, not just the outcome:
+    // `applies()` must refuse npm here, so npm's run() is never invoked and
+    // Maven is selected directly. (Asserting only that Maven ran would also
+    // pass via the concede-then-fallback path if the conjunct were dropped,
+    // because npm's run() concedes unsupported at its own unmodeled gate
+    // before executing.)
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'frontend',
+        workspaces: ['packages/**', 'apps/*'],
+      }),
+    );
+    mkdirSync(join(root, 'apps/a'), { recursive: true });
+    writeFileSync(
+      join(root, 'apps/a/package.json'),
+      JSON.stringify({ name: 'a', scripts: { build: 'tsc', test: 'vitest' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+    const npmRunSpy = vi.spyOn(npmToolchainAdapter, 'run');
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    // The applies() gate refused npm: its run() was never reached.
+    expect(npmRunSpy).not.toHaveBeenCalled();
+    runSpy.mockRestore();
+    npmRunSpy.mockRestore();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'records rescueOverflow from the real executor end to end',
+    () => {
+      // Both halves of the rescue-overflow contract are otherwise pinned
+      // through seams that bypass the real-executor wiring: direct
+      // trimOutput tests and fixture execs injecting rescueOverflow. This
+      // drives runBuildTest's OWN run executor (no injected exec) with
+      // output carrying >40 evidence lines in the omitted middle, so
+      // deleting the wiring ships red.
+      writeFileSync(join(root, 'pom.xml'), '<project/>');
+      writeFileSync(
+        join(root, 'mvnw'),
+        [
+          '#!/bin/sh',
+          'i=0',
+          'while [ $i -lt 40 ]; do',
+          '  echo "[INFO] padding line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"',
+          '  i=$((i+1))',
+          'done',
+          'i=0',
+          'while [ $i -lt 60 ]; do',
+          '  echo "[ERROR] Failed to execute goal org.example:plugin:1:check (check) on project m$i: boom"',
+          '  i=$((i+1))',
+          'done',
+          'i=0',
+          'while [ $i -lt 120 ]; do',
+          '  echo "[INFO] tail padding line $i yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"',
+          '  i=$((i+1))',
+          'done',
+          'exit 1',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(root, 'mvnw'), 0o755);
+      writePlan(['src/Main.java']);
+
+      const report = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 30,
+        install: false,
+      });
+
+      expect(report.toolchain).toBe('maven');
+      expect(report.ok).toBe(false);
+      expect(report.test[0]?.rescueOverflow).toBe(true);
+      expect(report.test[0]?.evidenceCapped).toBe(true);
+    },
+  );
+
+  it('selects Maven when the npm glob matches zero packages', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'frontend', workspaces: ['packages/*'] }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
   });
 
   it('reinstalls when node_modules exists but is INCOMPLETE (no .package-lock.json)', () => {
@@ -793,15 +1221,128 @@ describe('runBuildTest', () => {
     const summary = 'Tests  3 failed | 1132 passed (1135)';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${summary}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(summary);
     expect(trimmed).toContain('runner summaries kept');
     // The colored form a real pipe delivers is rescued too.
     const colored = `Tests\x1b[2m  \x1b[22m\x1b[31m3 failed\x1b[39m | 1132 passed`;
     expect(
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
+    ).toContain(colored);
+  });
+
+  it('rescues Maven dependency-failure lines from a trimmed middle', () => {
+    // Maven infra classification runs on trimmed output; when the error
+    // summary lands in the omitted middle, the rescue is what keeps a
+    // network outage classified as infrastructure instead of a Critical.
+    const line =
+      '[ERROR] Could not resolve dependencies for project example:core:jar:1';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    ).text;
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('dependency failures');
+    // The colored form a `-Dstyle.color=always` reactor delivers — the SGR
+    // strip is what the predicate runs on, and the rescued line keeps its
+    // original bytes.
+    const colored =
+      '\x1b[1;31m[ERROR]\x1b[m Could not resolve dependencies for project example:core:jar:1';
+    expect(
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
+    ).toContain(colored);
+  });
+
+  it('rescues Maven source-failure lines from a trimmed middle', () => {
+    // The source markers outrank the infra carve-out; one lost to the trim
+    // would launder a compile failure into infrastructure.
+    const line = '[ERROR] COMPILATION ERROR :';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    ).text;
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('source failures');
+    // The colored form too — losing the SGR strip here would drop the marker
+    // that keeps a compile failure from laundering into infrastructure.
+    const colored = '\x1b[1;31m[ERROR]\x1b[m COMPILATION ERROR :';
+    expect(
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
+    ).toContain(colored);
+  });
+
+  it('rescues Maven goal-failure lines from a trimmed middle', () => {
+    // The swallowed-failure check runs on trimmed output; a fail-never
+    // plugin goal failure lost to the trim would read the run green.
+    const line =
+      '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check (validate) on project core: You have 1 Checkstyle violation.';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    ).text;
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('goal failures');
+  });
+
+  it('rescues Maven disk-failure lines from a trimmed middle', () => {
+    // The launch-failure classification runs on trimmed output; an ENOSPC
+    // line lost to the trim would file a disk failure against the PR (or,
+    // under fail-never, read the run green).
+    const line =
+      '[ERROR] Failed to write target/x.txt: No space left on device';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    ).text;
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('disk failures');
+  });
+
+  it('rescues the Maven skipped-tests marker from a trimmed middle', () => {
+    // The adapter's testsSuppressed guard reads the skip marker from the
+    // trimmed output: a large reactor's trailing Reactor Summary pushes every
+    // `Tests are skipped.` line into the omitted middle, and losing the marker
+    // certified a run that tested zero.
+    const line = '[INFO] Tests are skipped.';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    ).text;
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('skipped-test markers');
+    // The colored form too — the rescue strips SGR before the predicate and
+    // keeps the original bytes.
+    const colored = '\x1b[1;34m[INFO]\x1b[m Tests are skipped.';
+    expect(
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
+    ).toContain(colored);
+  });
+
+  it('rescues Surefire stdout summaries from a trimmed middle', () => {
+    // The adapter's exit-0 stdout cross-check is the ONE defense for
+    // relocated-`<reportsDirectory>` runs, and it reads these summaries
+    // from the trimmed output: a large reactor's trailing Reactor Summary
+    // pushes them into the omitted middle exactly like the skip marker.
+    for (const framing of ['[INFO]', '[ERROR]']) {
+      const line = `${framing} Tests run: 5, Failures: 2, Errors: 0, Skipped: 0`;
+      const trimmed = trimOutput(
+        'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+      ).text;
+      expect(trimmed).toContain(line);
+    }
+    expect(
       trimOutput(
-        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
-      ),
+        'head\n' +
+          'x'.repeat(3000) +
+          '\n[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\n' +
+          'y'.repeat(9000),
+      ).text,
+    ).toContain('Surefire stdout summaries');
+    // The colored form too — the rescue strips SGR before the predicate.
+    const colored =
+      '\x1b[1;31m[ERROR]\x1b[m Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
+    expect(
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
     ).toContain(colored);
   });
 
@@ -815,8 +1356,105 @@ describe('runBuildTest', () => {
       ) +
       '\n' +
       'y'.repeat(9000);
-    const trimmed = trimOutput(hostile);
+    const trimmed = trimOutput(hostile).text;
     expect(trimmed.length).toBeLessThan(hostile.length / 4);
+  });
+
+  it('discloses when rescued lines outgrow the rescue cap', () => {
+    // The omission marker claims every category was kept; once the cap
+    // drops matching lines it must say so instead of asserting the
+    // impossible.
+    const input =
+      'h'.repeat(2500) +
+      '\n' +
+      Array.from({ length: 50 }, (_, i) => `Tests: ${i} failed`).join('\n') +
+      '\n' +
+      't'.repeat(6500);
+    const trimmed = trimOutput(input).text;
+    expect(trimmed).toContain(
+      'runner summaries kept — first 40 matches kept, failure evidence before benign lines, 10 more omitted',
+    );
+  });
+
+  it('aligns both cuts to line boundaries so seam-straddling lines survive', () => {
+    // The cuts used to sit at fixed CHARACTER offsets while every rescue
+    // and classification predicate is line-anchored: a verdict-critical
+    // line straddling either cut fragmented into two pieces that matched
+    // nothing — neither rescued nor disclosed. No hostile input needed.
+    const headLine =
+      '[ERROR] Failed to execute goal org.example:plugin:1:check (check) on project core: boom';
+    // `headLine` starts at offset 1999, straddling the old 2000-char head
+    // cut; the newline before it re-roots the head.
+    const headSeam =
+      'head\n' + 'x'.repeat(1993) + '\n' + headLine + '\n' + 'y'.repeat(9000);
+    expect(trimOutput(headSeam).text).toContain(headLine);
+    expect(trimOutput(headSeam).evidenceDropped).toBe(false);
+
+    const tailLine = '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
+    // `tailLine` straddles the old len-6000 tail cut.
+    const tailSeam =
+      'head\n' + 'x'.repeat(3000) + '\n' + tailLine + '\n' + 'y'.repeat(5970);
+    expect(trimOutput(tailSeam).text).toContain(tailLine);
+  });
+
+  it('keeps failure-evidence lines when benign matches outgrow the rescue cap', () => {
+    // One shared cap in positional order let benign matches (green Surefire
+    // summaries) exhaust the slots and drop a failing module's summary —
+    // the adapter then read the trimmed output green over a failing run.
+    // Evidence takes the slots first.
+    const evidence = '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
+    const benign = Array.from(
+      { length: 50 },
+      () => '[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0',
+    ).join('\n');
+    const input =
+      'head\n' +
+      'x'.repeat(3000) +
+      `\n${benign}\n${evidence}\n` +
+      'y'.repeat(9000);
+    const trimmed = trimOutput(input);
+    expect(trimmed.text).toContain(evidence);
+    expect(trimmed.evidenceDropped).toBe(false);
+  });
+
+  it('keeps the skipped-tests marker when benign matches outgrow the rescue cap', () => {
+    // The marker carries a VERDICT (suppression), not a count: with benign
+    // matches filling the 40 rescue slots, the benign classification
+    // dropped every `Tests are skipped.` line from the rescued middle
+    // while `evidenceDropped` stayed false — and the adapter certified a
+    // run that tested zero. As evidence, the marker takes a slot ahead of
+    // benign lines.
+    const marker = '[INFO] Tests are skipped.';
+    const benign = Array.from(
+      { length: 50 },
+      () => '[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0',
+    ).join('\n');
+    const input =
+      'head\n' +
+      'x'.repeat(3000) +
+      `\n${benign}\n${marker}\n` +
+      'y'.repeat(9000);
+    const trimmed = trimOutput(input);
+    expect(trimmed.text).toContain(marker);
+    expect(trimmed.evidenceDropped).toBe(false);
+  });
+
+  it('fails closed when evidence lines themselves outgrow the rescue cap', () => {
+    // When the cap drops EVIDENCE lines the trimmed output no longer holds
+    // the verdict's inputs — the flag the Maven adapter folds into
+    // evidenceCapped must say so; benign-only overflow stays disclosed text.
+    const evidence = Array.from(
+      { length: 45 },
+      (_, i) =>
+        `[ERROR] Failed to execute goal org.example:plugin:1:check (check) on project m${i}: boom`,
+    ).join('\n');
+    const input =
+      'head\n' + 'x'.repeat(3000) + `\n${evidence}\n` + 'y'.repeat(9000);
+    const trimmed = trimOutput(input);
+    expect(trimmed.evidenceDropped).toBe(true);
+    expect(trimmed.text).toContain(
+      'first 40 matches kept, failure evidence before benign lines, 5 more omitted',
+    );
   });
 
   it('buildOnly builds the same set but runs NO tests', () => {

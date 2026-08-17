@@ -15,8 +15,12 @@ import { statfsSync } from 'node:fs';
  * stays contained to that command. The installed `node_modules` here is ~1.4G,
  * and npm stages cache and temp writes on the same filesystem while it
  * materialises the tree, so 3 GiB is the least an install can be trusted with.
- * The build phase writes far less (`dist/` and tsbuildinfo) and gets a lower
- * floor — enough that a compile cannot be the thing that fills the disk.
+ * Maven resolves the same class of artifacts (plugins, dependencies, `target/`
+ * dirs) inside its lifecycle command, so its entry preflight uses the install
+ * floor too when the warm-up runs (`--no-install` gets the build floor); the
+ * preflight re-checked before the lifecycle command itself uses the build
+ * floor. The build phase writes far less (`dist/` and tsbuildinfo) and gets a
+ * lower floor — enough that a compile cannot be the thing that fills the disk.
  * Like the deadline, a floor violation is skip-and-disclose, never a finding:
  * an environment that cannot fit the command is not a defect in the diff.
  */
