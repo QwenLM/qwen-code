@@ -25,6 +25,7 @@ import {
   currentSessionId,
 } from '../../../services/skill-args-file.js';
 import { parseReviewArgs } from '../parse-args.js';
+import { isOwnerRepo } from './gh.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -83,15 +84,6 @@ export interface WriteAuthorizationRequest {
    * skill's own review.)
    */
   host?: string;
-  /**
-   * The standing `review.severityFloor` setting, raw, resolved by the caller
-   * from operator scopes. Passed through to the same args re-parse this gate
-   * already performs, so an authorised write can also recover the OPERATOR'S
-   * posting floor (flag or configured) from the CLI's verbatim record —
-   * rather than trusting the model-transcribed state field for a policy the
-   * model layer is precisely what enforcement distrusts.
-   */
-  defaultSeverityFloor?: string;
 }
 
 /**
@@ -105,34 +97,9 @@ export interface WriteAuthorizationRequest {
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
-  /**
-   * The posting floor the RECORDED arguments carry — present only when the
-   * record was read AND the floor in it is the OPERATOR'S decision: an
-   * explicit `--severity-floor` flag, or a valid configured setting
-   * (`severityFloorSource` of `explicit`/`configured`). A default-resolved
-   * `auto` — including one produced by silently discarding an invalid
-   * configured value — is NOT a recorded decision and recovers nothing:
-   * letting it outrank a state floor would stand enforcement down over a
-   * record that decided no floor at all. Recovered best-effort on the
-   * `--user-authorized` path too — the sanctioned report-first-then-publish
-   * flow carries a parseable record on disk, and returning before reading
-   * it left that flow's enforcement decided by exactly the transcription
-   * the rest of the gate distrusts. `submit` prefers this over the state
-   * JSON's floor: the record is the operator's verbatim input, the state is
-   * the model's transcription of it.
-   */
-  recordedSeverityFloor?: 'critical' | 'suggestion' | 'auto';
 } {
   if (req.userAuthorized) {
-    return {
-      ok: true,
-      why: 'the user asked for this review to be published',
-      recordedSeverityFloor: recordedSeverityFloor({
-        pr: req.pr,
-        defaultSeverityFloor: req.defaultSeverityFloor,
-        skillArgs: req.skillArgs,
-      }),
-    };
+    return { ok: true, why: 'the user asked for this review to be published' };
   }
 
   const sessionScoped = defaultSkillArgsPath();
@@ -160,10 +127,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     };
   }
 
-  const verdict = parseReviewArgs(raw, {
-    comment: req.defaultComment,
-    severityFloor: req.defaultSeverityFloor,
-  });
+  const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
   if (!verdict.comment.effective) {
     // The refusal must name the REAL blocker. When comment was requested —
     // by the flag or the standing `review.comment` setting — but the target
@@ -232,43 +196,90 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     why: verdict.comment.requested
       ? `\`--comment\` was in the review arguments for #${authorisedPr}`
       : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
-    recordedSeverityFloor:
-      verdict.severityFloorSource === 'default'
-        ? undefined
-        : verdict.severityFloor,
   };
 }
 
 /**
  * Best-effort recovery of the operator's recorded posting floor, shared by
- * every boundary that must resolve the floor from the CLI's verbatim record
- * rather than the model-written state: the authorization gate's
- * `--user-authorized` path above, and `compose-review`'s CLI handler — the
- * boundary that writes the archived composed JSON and the terminal verdict.
- * Both boundaries resolving through this ONE function is what keeps the
- * registered artifact and the posted review describing the same floor;
- * resolving it at `submit` alone made them describe two different reviews
- * whenever the override fired.
+ * the two boundaries that must resolve the floor from the CLI's verbatim
+ * record rather than the model-written state: `submit` (the posting write)
+ * and `compose-review`'s CLI handler (the archived composed JSON and the
+ * terminal verdict). Both resolving through this ONE function — with the
+ * SAME identity source — is what keeps the registered artifact and the
+ * posted review describing the same floor.
  *
- * Returns the floor only when the record is readable, carries an operator
- * decision (`severityFloorSource` of `explicit`/`configured`), AND names
- * the same pull request the caller is composing or posting — the record is
- * last-writer-wins (`writeSkillArgs` truncates), so a later `/review` of a
- * DIFFERENT PR overwrites it, and an unbound recovery would apply PR B's
- * floor to PR A's publish. The `--comment` authorisation binds
- * `authorisedPr === req.pr` for exactly this reason; the floor recovery
- * holds the same record to the same bar. Every failure mode — no record,
- * unreadable, no decision, another PR's record — returns undefined and
- * leaves the caller's state value standing, the same fail-open direction
- * enforcement itself takes. The path rule is the gate's own: the
- * caller-supplied seam is honoured only when no session id is present.
+ * **The identity is the PLAN'S**, not each caller's own notion of the PR.
+ * Binding compose to the plan's number while submit bound a skill-typed
+ * `--pr` let the two recoveries bind different pull requests and reopen the
+ * archive/post split on exactly the `--user-authorized` flow where no gate
+ * cross-checks them; the plan is CLI-written by fetch-pr, both boundaries
+ * hold the same one, so it is the shared source. `fallbackPr` (submit's own
+ * target) applies only when the plan names no PR.
+ *
+ * The record is bound to that identity at the SAME bar the `--comment`
+ * authorisation applies to the same record: the number always, and — for a
+ * URL-shaped record — the repo (when an identity repo is known) and the
+ * host, both case-insensitive with an absent host reading as github.com.
+ * The record is last-writer-wins (`writeSkillArgs` truncates), so a later
+ * `/review` of a different PR — or the same number in a DIFFERENT repo —
+ * must recover nothing.
+ *
+ * Returns the floor with its source only when the record carries an
+ * operator decision (`severityFloorSource` of `explicit`/`configured`) —
+ * the source rides along so the boundaries' audit notes can name the true
+ * origin instead of claiming a flag the operator never typed. A
+ * default-resolved `auto` (including one produced by silently discarding an
+ * invalid configured value) is not a decision and recovers nothing. Every
+ * failure mode — no plan PR, no record, unreadable, no decision, another
+ * PR's or repo's record — returns undefined and leaves the caller's state
+ * value standing, the same fail-open direction enforcement itself takes.
+ * The path rule is the gate's own: the caller-supplied seam is honoured
+ * only when no session id is present.
  */
 export function recordedSeverityFloor(opts: {
-  /** The pull request the caller is composing or posting for. */
-  pr: number;
+  /** The CLI-written plan of the review being composed or posted. */
+  planPath?: string;
+  /** The caller's own PR number, used only when the plan names none. */
+  fallbackPr?: number;
+  /** The caller's repo / effective host, used for the URL-record bar when
+   * the plan carries none. */
+  callerRepo?: string;
+  callerHost?: string;
   defaultSeverityFloor?: string;
   skillArgs?: string;
-}): 'critical' | 'suggestion' | 'auto' | undefined {
+}):
+  | {
+      floor: 'critical' | 'suggestion' | 'auto';
+      source: 'explicit' | 'configured';
+    }
+  | undefined {
+  let planPr: number | undefined;
+  let planRepo: string | undefined;
+  let planHost: string | undefined;
+  try {
+    if (opts.planPath) {
+      const plan = JSON.parse(readFileSync(opts.planPath, 'utf8')) as {
+        prNumber?: unknown;
+        ownerRepo?: unknown;
+        host?: unknown;
+      };
+      const n = plan?.prNumber;
+      if (typeof n === 'number' && Number.isInteger(n) && n > 0) planPr = n;
+      else if (typeof n === 'string' && /^\d+$/.test(n)) planPr = Number(n);
+      if (typeof plan?.ownerRepo === 'string' && isOwnerRepo(plan.ownerRepo)) {
+        planRepo = plan.ownerRepo;
+      }
+      if (typeof plan?.host === 'string' && plan.host.trim() !== '') {
+        planHost = plan.host;
+      }
+    }
+  } catch {
+    /* the identity falls back to the caller's, exactly as with no plan */
+  }
+  const pr = planPr ?? opts.fallbackPr;
+  if (pr === undefined) return undefined;
+  const repo = planRepo ?? opts.callerRepo;
+  const host = (planHost ?? opts.callerHost ?? 'github.com').toLowerCase();
   const path =
     currentSessionId() === '' && opts.skillArgs
       ? opts.skillArgs
@@ -278,12 +289,25 @@ export function recordedSeverityFloor(opts: {
       severityFloor: opts.defaultSeverityFloor,
     });
     const t = verdict.target;
-    const recordedPr =
-      t.type === 'pr-number' || t.type === 'pr-url' ? t.number : undefined;
-    if (recordedPr !== opts.pr) return undefined;
-    return verdict.severityFloorSource === 'default'
-      ? undefined
-      : verdict.severityFloor;
+    if (t.type === 'pr-number') {
+      if (t.number !== pr) return undefined;
+    } else if (t.type === 'pr-url') {
+      if (t.number !== pr) return undefined;
+      if (
+        repo !== undefined &&
+        `${t.owner}/${t.repo}`.toLowerCase() !== repo.toLowerCase()
+      ) {
+        return undefined;
+      }
+      if (t.host.toLowerCase() !== host) return undefined;
+    } else {
+      return undefined;
+    }
+    if (verdict.severityFloorSource === 'default') return undefined;
+    return {
+      floor: verdict.severityFloor,
+      source: verdict.severityFloorSource,
+    };
   } catch {
     return undefined;
   }

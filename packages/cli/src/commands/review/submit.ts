@@ -58,7 +58,10 @@ import {
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
-import { reviewWriteAuthorization } from './lib/authorization.js';
+import {
+  recordedSeverityFloor,
+  reviewWriteAuthorization,
+} from './lib/authorization.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -179,8 +182,7 @@ function normalizeInlineComments(
 function authorization(
   args: SubmitArgs,
   defaultComment: boolean,
-  defaultSeverityFloor?: string,
-): ReturnType<typeof reviewWriteAuthorization> {
+): { ok: boolean; why: string } {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
     defaultComment,
@@ -191,7 +193,6 @@ function authorization(
     // child inherits an operator-exported GH_HOST, so that is where this
     // write would route — and what the gate must bind.
     host: resolveGhHost(args.host),
-    defaultSeverityFloor,
   });
 }
 
@@ -445,7 +446,7 @@ export function runSubmit(
     );
   }
 
-  const auth = authorization(args, defaultComment, opts.defaultSeverityFloor);
+  const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
@@ -506,30 +507,47 @@ export function runSubmit(
   };
 
   // The operator's floor, from the CLI's verbatim record — never only the
-  // state's transcription of it. The gate re-parsed the recorded arguments
-  // (explicit flag beats the configured setting beats `auto`) on BOTH of
-  // its paths — the `--comment` binding and, best-effort, the
-  // `--user-authorized` branch, whose sanctioned report-first flow carries
-  // a parseable record on disk. The state field is a model-written copy of
-  // that same policy, and a copy that can drift must not decide whether
-  // enforcement stands down. The recorded value wins whenever the recovery
-  // yields one; when it yields nothing — no record, unreadable, no floor
-  // decision in it, or a record naming another PR — the state's value
-  // stands, the same fail-open the enforcement itself applies.
+  // state's transcription of it. The state field is a model-written copy of
+  // the operator's policy, and a copy that can drift must not decide
+  // whether enforcement stands down. The recovery is the SHARED helper both
+  // posting boundaries call with the SAME identity source — the plan's,
+  // with this command's own target only as the plan-less fallback — so the
+  // archived compose and this post can never resolve different floors for
+  // one review. The recovered value wins whenever the recovery yields one
+  // that differs; when it yields nothing — no record, unreadable, no floor
+  // decision in it, another PR's or repo's record — the state's value
+  // stands, the same fail-open the enforcement itself applies. The note
+  // names the TRUE source (flag vs setting): "the record outranks the
+  // state" over a setting-sourced floor sent auditors hunting the record
+  // for a flag nobody typed.
+  const recovered = recordedSeverityFloor({
+    planPath:
+      typeof payload.state?.planPath === 'string'
+        ? payload.state.planPath
+        : undefined,
+    fallbackPr: args.pr,
+    callerRepo: args.repo,
+    callerHost: resolveGhHost(args.host),
+    defaultSeverityFloor: opts.defaultSeverityFloor,
+    skillArgs: args.skillArgs,
+  });
   if (
-    auth.recordedSeverityFloor !== undefined &&
+    recovered !== undefined &&
     payload.state != null &&
-    payload.state.severityFloor !== auth.recordedSeverityFloor
+    payload.state.severityFloor !== recovered.floor
   ) {
     writeStderrLine(
-      `Severity floor: using the recorded ` +
-        `${JSON.stringify(auth.recordedSeverityFloor)} over the state's ` +
+      `Severity floor: using ${JSON.stringify(recovered.floor)} from ` +
+        (recovered.source === 'explicit'
+          ? 'the recorded `--severity-floor` flag'
+          : 'the `review.severityFloor` setting resolved against the recorded invocation') +
+        `, over the state's ` +
         `${JSON.stringify(payload.state.severityFloor ?? null)} — the ` +
-        `CLI's record of the invocation outranks the state JSON.`,
+        `CLI's verbatim record outranks the state JSON.`,
     );
     payload = {
       ...payload,
-      state: { ...payload.state, severityFloor: auth.recordedSeverityFloor },
+      state: { ...payload.state, severityFloor: recovered.floor },
     };
   }
 

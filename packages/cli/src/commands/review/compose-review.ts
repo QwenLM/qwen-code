@@ -76,6 +76,7 @@ import {
   SUGGESTION_PREFIX,
   carriedClaimLine,
   countInlineFindings,
+  markerStrippedBody,
   severityOf,
   unmarkedComments,
   type DraftedComment,
@@ -416,15 +417,9 @@ export function floorEnforcedReroute(
     // (`R2-4: …`) stays at the front so the human record keeps the
     // cross-round identity; an all-marker comment gets the same locatable
     // fallback the ledger builder uses.
-    const sevMarker =
-      severityOf(c) === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-    const rest = stripReviewFooter(
-      body
-        .trimStart()
-        .slice(sevMarker.length)
-        .replace(/^:?\s*/, ''),
+    const title = collapseToLine(
+      stripReviewFooter(markerStrippedBody(body) ?? ''),
     );
-    const title = collapseToLine(rest);
     indices.push(i);
     entries.push({
       file,
@@ -945,18 +940,27 @@ export function composeReview(
         (_, i) => !drop.has(i),
       ),
       // The seam counts were derived from the pre-enforcement drafts by the
-      // boundary; keep them in agreement with the set that remains. Clamped:
-      // a caller whose count already disagreed with its drafts must degrade
-      // to a wrong-but-composable zero, never to a toCount refusal that
-      // loses the round.
-      ...(typeof input.suggestionsInline === 'number'
-        ? {
-            suggestionsInline: Math.max(
-              0,
-              input.suggestionsInline - reroute.indices.length,
-            ),
-          }
-        : {}),
+      // boundary; keep them in agreement with the set that remains. Both
+      // shapes `toCount` accepts adjust — the number, and the legacy list
+      // form counted by its length — or an array-shaped seam would skip the
+      // adjustment and the count would disagree with the reduced posting
+      // set. Clamped: a caller whose count already disagreed with its
+      // drafts must degrade to a wrong-but-composable zero, never to a
+      // toCount refusal that loses the round.
+      ...(() => {
+        const seam = input.suggestionsInline as unknown;
+        const counted =
+          typeof seam === 'number'
+            ? seam
+            : Array.isArray(seam)
+              ? seam.length
+              : undefined;
+        return counted === undefined
+          ? {}
+          : {
+              suggestionsInline: Math.max(0, counted - reroute.indices.length),
+            };
+      })(),
     };
   }
   const result = composeReviewBody(
@@ -3159,46 +3163,28 @@ export const composeReviewCommand: CommandModule = {
       );
     }
     // The operator's floor, from the CLI's verbatim record — resolved through
-    // the SAME function `submit`'s authorization gate uses, which is what
-    // keeps this boundary's archived composed JSON and terminal verdict
-    // describing the same review the posted body describes. Resolving the
-    // record at submit alone split the two: the archive kept the state's
-    // transcription while the post obeyed the record. The recovery is BOUND
-    // to the PR this compose is for (the plan's own number — the same
-    // tolerant read `prevRoundFor` applies): the record is last-writer-wins
-    // across `/review` invocations, and an unbound read would apply another
-    // PR's floor to this one. No plan PR — a local target — recovers
-    // nothing; every failure mode returns undefined and leaves the state's
-    // value standing.
-    const planPr = (() => {
-      try {
-        if (!parsed.planPath) return undefined;
-        const plan = JSON.parse(readFileSync(parsed.planPath, 'utf8')) as {
-          prNumber?: unknown;
-        };
-        const n = plan?.prNumber;
-        if (typeof n === 'number' && Number.isInteger(n) && n > 0) return n;
-        if (typeof n === 'string' && /^\d+$/.test(n)) return Number(n);
-        return undefined;
-      } catch {
-        return undefined;
-      }
-    })();
-    const recorded =
-      planPr === undefined
-        ? undefined
-        : recordedSeverityFloor({
-            pr: planPr,
-            defaultSeverityFloor: operatorReviewSettings().severityFloor,
-            skillArgs,
-          });
-    if (recorded !== undefined && parsed.severityFloor !== recorded) {
+    // the SAME shared helper `submit` uses, with the SAME identity source
+    // (the plan's — number, ownerRepo and host, binding a URL-shaped record
+    // to all three), which is what keeps this boundary's archived composed
+    // JSON and terminal verdict describing the same review the posted body
+    // describes. A plan-less or local target recovers nothing; every failure
+    // mode returns undefined and leaves the state's value standing. The
+    // note names the true source (flag vs setting).
+    const recovered = recordedSeverityFloor({
+      planPath: parsed.planPath,
+      defaultSeverityFloor: operatorReviewSettings().severityFloor,
+      skillArgs,
+    });
+    if (recovered !== undefined && parsed.severityFloor !== recovered.floor) {
       writeStderrLine(
-        `Severity floor: using the recorded ${JSON.stringify(recorded)} ` +
-          `over the state's ${JSON.stringify(parsed.severityFloor ?? null)} ` +
-          `— the CLI's record of the invocation outranks the state JSON.`,
+        `Severity floor: using ${JSON.stringify(recovered.floor)} from ` +
+          (recovered.source === 'explicit'
+            ? 'the recorded `--severity-floor` flag'
+            : 'the `review.severityFloor` setting resolved against the recorded invocation') +
+          `, over the state's ${JSON.stringify(parsed.severityFloor ?? null)} ` +
+          `— the CLI's verbatim record outranks the state JSON.`,
       );
-      parsed.severityFloor = recorded;
+      parsed.severityFloor = recovered.floor;
     }
     const drafted = readDraftedComments(comments);
     const result = composeReview(
@@ -3437,7 +3423,10 @@ export function verdictLine(r: ComposeReviewResult): string {
   // runs over parsed result JSONs, and one persisted before the field
   // existed must render its line, not throw over a feature it predates.
   if ((r.floorEnforced?.length ?? 0) > 0) {
-    line += ` — ${r.floorEnforced.length} of those moved by CLI floor enforcement (drafted inline past the critical floor)`;
+    // "RESOLVED critical floor", like both sibling disclosure surfaces: the
+    // enforcement also fires under `auto` from round 6, where no literal
+    // critical floor exists in the invocation — the round resolved to one.
+    line += ` — ${r.floorEnforced.length} of those moved by CLI floor enforcement (drafted inline past the resolved critical floor)`;
   }
   return line;
 }

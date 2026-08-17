@@ -2127,7 +2127,9 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       written,
       stderrHasOverride: (
         writeStderrLine as ReturnType<typeof vi.fn>
-      ).mock.calls.some((c) => String(c[0]).includes('using the recorded')),
+      ).mock.calls.some((c) =>
+        String(c[0]).includes('verbatim record outranks'),
+      ),
     };
   }
 
@@ -6189,6 +6191,16 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.deferredCount).toBe(2);
   });
 
+  it('an unrecognised present floor fails open — a posting bar in doubt posts', () => {
+    // Model-transcribed drift ("Critical-only", "blocker", "high") must not
+    // enforce: the absent-floor row alone cannot catch a mutation that fires
+    // on any unknown non-empty string.
+    for (const floor of ['blocker', 'Critical-only', 'high']) {
+      const r = compose({ severityFloor: floor as never });
+      expect(r.floorEnforced).toEqual([]);
+    }
+  });
+
   it('an explicit critical floor enforces even when the round is unknowable', () => {
     // context-unavailable stands only `auto` down — what is unknowable there
     // is the ROUND, and an explicit critical floor applies the posture from
@@ -6281,10 +6293,42 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.body).toContain('rename the flag');
     // The two disclosure surfaces count from the same basis: the moved
     // count can never exceed its antecedent (a "2 of 1" verdict line was
-    // the observed self-contradiction under anchor-keyed dedup).
+    // the observed self-contradiction under anchor-keyed dedup), and the
+    // body note's N is the MOVED count, not the merged list's — swapping
+    // its basis for deferredSuggestions.length would overclaim "2 moved"
+    // here.
     const line = verdictLine(r);
     expect(line).toContain('2 non-Critical finding(s) deferred');
     expect(line).toContain('1 of those moved by CLI floor enforcement');
+    expect(r.body).toContain(
+      '1 Suggestion(s) were drafted inline past the resolved critical posting floor',
+    );
+  });
+
+  it('renders the zh disclosure arm beside the en one on a bilingual review', () => {
+    // The zh non-overflow arm posts on Han-flagged plans; a broken
+    // interpolation there ships a Chinese disclosure contradicting the
+    // English note beside it. (The overflow arm's zh twin is pinned in the
+    // cap-aware test.)
+    const hanPlan = join(dir, 'plan-han-note.json');
+    writeFileSync(
+      hanPlan,
+      JSON.stringify({ prNumber: 8255, prDescriptionHasHan: true }),
+    );
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      planPath: hanPlan,
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).toContain(
+      '1 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论',
+    );
+    expect(r.body).toContain('下限强制执行）。');
   });
 
   it('turns the enforcement note cap-aware when the moved entries overflow the render cap', () => {
@@ -6340,6 +6384,10 @@ describe('floor enforcement — the posture, as code', () => {
       ],
     });
     expect(r.floorEnforced).toEqual([0]);
+    // And the forged footer never reaches the moved record: without the
+    // strip, collapseToLine folds the attribution into the published
+    // deferral title.
+    expect(r.body).not.toContain('qwen3.7-max');
   });
 
   it('carries the whole marker-stripped body into the moved record, not just line one', () => {
@@ -6385,6 +6433,14 @@ describe('floor enforcement — the posture, as code', () => {
     // never point at a list that truncated away the entries it names.
     expect(r.body).toContain('rename the flag');
     expect(r.body).toContain('and 1 more');
+    // The note counts MOVED comments and its overflow qualifier keys on the
+    // ENFORCED entries, not the merged list: with the one moved entry
+    // rendered in full, a "1 listed, 20 more inside the overflow count"
+    // claim would be false — the model deferrals overflowed, not the move.
+    expect(r.body).toContain(
+      '1 Suggestion(s) were drafted inline past the resolved critical posting floor',
+    );
+    expect(r.body).not.toContain('inside the overflow count');
   });
 
   it('omits an unusable line and falls back on an all-marker body', () => {
@@ -6404,5 +6460,22 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.body).not.toContain('b.ts:0');
     expect(r.body).toContain('zero-line anchor');
     expect(r.body).toContain('(comment carried no text)');
+  });
+
+  it('omits a non-integer line the same way — no fabricated locator', () => {
+    // The Number.isSafeInteger conjunct is the only guard between a
+    // model-transcribed `line: 2.5` and a `c.ts:2.5` anchor published into
+    // the PR's permanent deferral record.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'c.ts', line: 2.5, body: '**[Suggestion]** fractional line' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).not.toContain('c.ts:2.5');
+    expect(r.body).toContain('fractional line');
   });
 });

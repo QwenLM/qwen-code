@@ -20,7 +20,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { reviewWriteAuthorization } from './lib/authorization.js';
+import {
+  recordedSeverityFloor,
+  reviewWriteAuthorization,
+} from './lib/authorization.js';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { parseLedger } from './lib/ledger.js';
@@ -173,52 +176,114 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     } as never);
   }
 
+  let floorSeq = 0;
+  /** A fresh record + optional plan, driven through the shared recovery. */
+  function recoverFloor(line: string, opts: Record<string, unknown> = {}) {
+    const argsFile = join(dir, `floor-args-${floorSeq++}.txt`);
+    writeFileSync(argsFile, `${line}\n`);
+    return recordedSeverityFloor({
+      fallbackPr: 123,
+      skillArgs: argsFile,
+      ...opts,
+    } as never);
+  }
+  function floorPlan(contents: Record<string, unknown>): string {
+    const p = join(dir, `floor-plan-${floorSeq++}.json`);
+    writeFileSync(p, JSON.stringify(contents));
+    return p;
+  }
+
   it('recovers the recorded floor only when the record DECIDED one', () => {
     // A default-resolved `auto` is not an operator decision — letting it
     // outrank the state's floor would stand enforcement down over a record
     // that recorded no floor at all. An invalid configured value is
-    // discarded by the parser and must read the same way.
+    // discarded by the parser and must read the same way. An explicit
+    // `--severity-floor auto` IS a decision (parse-args pins its source as
+    // explicit) — conflating it with the default-resolved auto would let a
+    // drifted state floor stand over the operator's recorded posture.
+    expect(recoverFloor('123 --comment --severity-floor critical')).toEqual({
+      floor: 'critical',
+      source: 'explicit',
+    });
+    expect(recoverFloor('123 --comment')).toBeUndefined();
     expect(
-      authFor('123 --comment --severity-floor critical').recordedSeverityFloor,
-    ).toBe('critical');
-    expect(authFor('123 --comment').recordedSeverityFloor).toBeUndefined();
+      recoverFloor('123 --comment', { defaultSeverityFloor: 'critical' }),
+    ).toEqual({ floor: 'critical', source: 'configured' });
     expect(
-      authFor('123 --comment', { defaultSeverityFloor: 'critical' })
-        .recordedSeverityFloor,
-    ).toBe('critical');
-    expect(
-      authFor('123 --comment', { defaultSeverityFloor: 'crtical' })
-        .recordedSeverityFloor,
+      recoverFloor('123 --comment', { defaultSeverityFloor: 'crtical' }),
     ).toBeUndefined();
+    expect(recoverFloor('123 --severity-floor auto')).toEqual({
+      floor: 'auto',
+      source: 'explicit',
+    });
   });
 
-  it('recovers the recorded floor on the --user-authorized path too', () => {
-    // The sanctioned report-first → user-publishes flow carries a parseable
-    // record on disk; returning before reading it left that flow's
-    // enforcement decided by exactly the model transcription the gate
-    // distrusts.
-    const argsFile = join(dir, 'ua-args.txt');
-    writeFileSync(argsFile, '123 --severity-floor critical\n');
-    const verdict = reviewWriteAuthorization({
-      userAuthorized: true,
-      skillArgs: argsFile,
-      pr: 123,
-    } as never);
-    expect(verdict.ok).toBe(true);
-    expect(verdict.recordedSeverityFloor).toBe('critical');
-
-    // Bound to the PR: the record is last-writer-wins across /review
-    // invocations, so another PR's record must recover nothing — unbound,
-    // PR 999's floor would ride into PR 123's publish.
-    const otherArgs = join(dir, 'ua-other-args.txt');
-    writeFileSync(otherArgs, '999 --severity-floor critical\n');
-    const other = reviewWriteAuthorization({
-      userAuthorized: true,
-      skillArgs: otherArgs,
-      pr: 123,
-    } as never);
-    expect(other.ok).toBe(true);
-    expect(other.recordedSeverityFloor).toBeUndefined();
+  it('binds the recovery to the full recorded identity — number, repo, host', () => {
+    // The record is last-writer-wins across /review invocations, so another
+    // PR's — or the same number in another repo, or on another host —
+    // recovers nothing; the bar is the one the --comment authorisation
+    // applies to the same record.
+    expect(recoverFloor('999 --severity-floor critical')).toBeUndefined();
+    expect(
+      recoverFloor(
+        'https://github.com/o/r/pull/123 --severity-floor critical',
+        {
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        { callerRepo: 'o/r' },
+      ),
+    ).toBeUndefined();
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        { callerRepo: 'o/r' },
+      ),
+    ).toBeUndefined();
+    // The plan is the identity source; the caller's own pr only the
+    // fallback — divergent identities between the two boundaries were the
+    // archive/post split's reopening.
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: 123 }),
+        fallbackPr: 456,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    expect(
+      recoverFloor('456 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: 123 }),
+        fallbackPr: 456,
+      }),
+    ).toBeUndefined();
+    // Digit-string plan numbers bind like their numeric siblings — the
+    // shape every other plan reader tolerates.
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: '123' }),
+        fallbackPr: 456,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // The plan's ownerRepo binds a URL record even without a caller repo.
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        { planPath: floorPlan({ prNumber: 123, ownerRepo: 'o/r' }) },
+      ),
+    ).toBeUndefined();
+    // Absent record and plan-less caller both fail open, never throw.
+    expect(
+      recordedSeverityFloor({
+        fallbackPr: 123,
+        skillArgs: join(dir, 'no-such-record.txt'),
+      }),
+    ).toBeUndefined();
+    expect(
+      recordedSeverityFloor({ skillArgs: join(dir, 'no-such-record.txt') }),
+    ).toBeUndefined();
   });
 
   it('binds the repo of a URL-shaped authorisation', () => {
@@ -1249,9 +1314,102 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).toContain('floor enforcement');
     expect(
       writeStderrSpy.mock.calls.some((c) =>
-        String(c[0]).includes('using the recorded'),
+        String(c[0]).includes('verbatim record outranks'),
       ),
     ).toBe(true);
+  });
+
+  it('does not fire the override note when the recovered floor equals the state', () => {
+    // The equality guard is the only thing keeping a recovered-but-identical
+    // floor from emitting the "record outranks state" note on every
+    // non-drifted enforced post — a wrong claim on exactly the operator
+    // audit channel this feature builds.
+    const review = file('floor-equal.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-equal-args.txt',
+          '6771 --comment --severity-floor critical',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(ghMock.mock.calls[0][0] as string).comments).toHaveLength(
+      1,
+    );
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('verbatim record outranks'),
+      ),
+    ).toBe(false);
+  });
+
+  it('a recorded explicit auto outranks a drifted critical — and does not enforce at round 1', () => {
+    // An explicit `--severity-floor auto` is a real operator decision; a
+    // maintainer conflating it with the default-resolved auto would let the
+    // drifted state 'critical' stand and withhold findings the operator's
+    // recorded policy posts at rounds ≤ 5.
+    const review = file('floor-auto.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-auto-args.txt',
+          '6771 --comment --severity-floor auto',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(ghMock.mock.calls[0][0] as string).comments).toHaveLength(
+      2,
+    );
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('verbatim record outranks'),
+      ),
+    ).toBe(true);
+  });
+
+  it('the recovery also runs under --user-authorized — the report-first flow', () => {
+    // The sanctioned report-first → user-publishes flow carries a parseable
+    // record on disk; skipping recovery there left that flow's enforcement
+    // decided by exactly the transcription enforcement distrusts.
+    const review = file('floor-ua.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'suggestion' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      authorized({
+        review,
+        skillArgs: file('floor-ua-args.txt', '6771 --severity-floor critical'),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
   });
 
   it('overrides in BOTH directions — a recorded posture-off outranks a drifted critical', () => {
@@ -1284,7 +1442,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).not.toContain('floor enforcement');
     expect(
       writeStderrSpy.mock.calls.some((c) =>
-        String(c[0]).includes('using the recorded'),
+        String(c[0]).includes('verbatim record outranks'),
       ),
     ).toBe(true);
   });
@@ -1341,6 +1499,18 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).toContain('zero-line anchor');
     expect(sent.body).toContain('no line at all');
     expect(sent.body).toContain('floor enforcement');
+    // The report channels count the MOVED comments, not the post-removal
+    // remainder — the only shape where the two differ (2 moved, 1 remains),
+    // so a count-source regression is visible only here.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('2 Suggestion comment(s)'),
+      ),
+    ).toBe(true);
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      floorEnforced: number;
+    };
+    expect(out.floorEnforced).toBe(2);
   });
 
   it('rejects a line that is not a positive whole number', () => {

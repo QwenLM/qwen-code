@@ -57,14 +57,27 @@ export function severityOf(
  * shared regex removed for the id half (#9212 review).
  */
 export function carriedClaimLine(body: string): string | null {
+  const rest = markerStrippedBody(body);
+  return rest === null ? null : rest.split('\n')[0].trim();
+}
+
+/**
+ * The WHOLE body past the severity marker (and any colon/whitespace right
+ * after it) — the multi-line form of the readback strip above, and the same
+ * ONE statement: `carriedClaimLine` is its first line, and the floor
+ * enforcement's moved-record title is its collapsed whole. A second
+ * restatement of the marker slice in either consumer is the drift class
+ * this file's header exists to prevent. Null when the body opens with
+ * neither marker.
+ */
+export function markerStrippedBody(body: string): string | null {
   const sev = severityOf({ body });
   if (!sev) return null;
   const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-  const rest = body
+  return body
     .trimStart()
     .slice(marker.length)
     .replace(/^:?\s*/, '');
-  return rest.split('\n')[0].trim();
 }
 
 /** How many drafted comments open with each severity marker. */
