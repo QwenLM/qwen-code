@@ -10,7 +10,7 @@
 
 // Core configuration
 export * from './config/config.js';
-export { Storage } from './config/storage.js';
+export { enableStartupSweep, Storage } from './config/storage.js';
 
 // Permission system
 export * from './permissions/index.js';

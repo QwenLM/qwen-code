@@ -106,6 +106,10 @@ export async function sweepStaleWorktreeProjects(
   } catch {
     realTmpdir = os.tmpdir();
   }
+  // A tmpdir that IS the filesystem root (TMPDIR=/) would put every launch
+  // cwd "inside the temp dir" and turn arm 2 into sweep-everything; treat it
+  // as no temp dir at all so arm 2 never fires.
+  const tmpdirIsUsable = realTmpdir !== path.parse(realTmpdir).root;
 
   const removed: string[] = [];
   for (const entry of entries.sort()) {
@@ -158,6 +162,7 @@ export async function sweepStaleWorktreeProjects(
         allWorktreesGone &&
         // A tmpdir root that will not stat cleanly is a downed volume, not an
         // ephemeral scratch space: keep every bucket until it comes back.
+        tmpdirIsUsable &&
         isPositivelyExistingDirectorySync(realTmpdir) &&
         sidecars.every(
           (sidecar) =>
@@ -341,6 +346,15 @@ async function hasLiveRuntime(chatsDir: string): Promise<boolean> {
 
 const staleWorktreeSweepStarted = new Set<string>();
 
+// The constructor-scheduled sweep deletes on-disk state, so it must not fire
+// from a bare Storage construction (unit tests build Storage against the real
+// default dir). Only the real CLI bootstrap opts in via enableStartupSweep().
+let startupSweepEnabled = false;
+
+export function enableStartupSweep(): void {
+  startupSweepEnabled = true;
+}
+
 function scheduleStaleWorktreeSweep(
   runtimeBaseDir: string,
   keepBucket?: string,
@@ -376,10 +390,12 @@ export class Storage {
   ) {
     this.targetDir = targetDir;
     this.runtimeBaseDir = path.resolve(runtimeBaseDir);
-    scheduleStaleWorktreeSweep(
-      this.runtimeBaseDir,
-      sanitizeCwd(this.targetDir),
-    );
+    if (startupSweepEnabled) {
+      scheduleStaleWorktreeSweep(
+        this.runtimeBaseDir,
+        sanitizeCwd(this.targetDir),
+      );
+    }
   }
 
   /**

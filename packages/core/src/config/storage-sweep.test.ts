@@ -9,7 +9,11 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Storage, sweepStaleWorktreeProjects } from './storage.js';
+import {
+  enableStartupSweep,
+  Storage,
+  sweepStaleWorktreeProjects,
+} from './storage.js';
 import { sanitizeCwd } from '../utils/paths.js';
 
 // The sweep must treat a failed removal as skippable. Simulate the failure by
@@ -425,6 +429,7 @@ describe('sweepStaleWorktreeProjects', () => {
   });
 
   it('the Storage constructor schedules the sweep once per base dir', async () => {
+    enableStartupSweep();
     const missingWorktree = path.join(base, 'missing');
     makeProjectSnapshot(base, sanitizeCwd(missingWorktree), {
       worktreePath: missingWorktree,

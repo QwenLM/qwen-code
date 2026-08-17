@@ -7,6 +7,7 @@
 import {
   AuthType,
   type Config,
+  enableStartupSweep,
   InputFormat,
   isDebugLogFileEnabled,
   isDebugLoggingDegraded,
@@ -343,6 +344,9 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // The startup sweep deletes on-disk state and must only fire in a real CLI
+  // process, never from a bare Storage construction in tests.
+  enableStartupSweep();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // GeminiClient.setTools) into the cli's startup profiler. Gated on
