@@ -32,10 +32,19 @@
 //     coverage is the error.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  lstatSync,
+  realpathSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
+import { dirname, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AnchorRequest } from './lib/anchors.js';
+import { isSameFile } from './lib/same-file.js';
 
 // These four lists have a second consumer: the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
@@ -1012,6 +1021,81 @@ export const findingsCommand: CommandModule = {
   handler: (argv) => {
     const { input, out, outcomes, print, testDelta, toAnchors } =
       argv as unknown as FindingsArgs;
+
+    // The resolver input must not share a file with anything this command
+    // reads or writes: a --to-anchors that lands on one of them destroys its
+    // counterpart while stderr reports every write as successful, and Step 7
+    // joins the pair by id — a silently destroyed member poisons the join.
+    // Identity is filesystem identity — dev/ino where a side exists, the
+    // canonicalised deepest ancestor where it does not: path strings miss
+    // hard links, case-variant spellings, and symlinked directory
+    // components. A link realpath cannot see through is refused where it can
+    // still alias — the anchor side outright, a sibling side when it dangles.
+    // Nesting is a collision too: the write sequence creates the prefix path
+    // as a directory, the paired write dies at EISDIR, and the stray
+    // directory survives every rerun.
+    if (toAnchors !== undefined) {
+      const anchorTarget = resolve(toAnchors);
+      let anchorStat: Stats | undefined;
+      try {
+        anchorStat = lstatSync(anchorTarget);
+      } catch {
+        // Not there yet — the run creates it; spelling is all it has.
+      }
+      if (anchorStat?.isSymbolicLink()) {
+        throw new Error(
+          `findings: --to-anchors must not be a symlink (${toAnchors}); ` +
+            'a link can alias a file this command also reads or writes, and no path compare would see the collision',
+        );
+      }
+      if (anchorStat?.isDirectory()) {
+        throw new Error(
+          `findings: --to-anchors must not be a directory (${toAnchors}); the anchor artifact is written as a file`,
+        );
+      }
+      const others: Array<[string, string | undefined]> = [
+        ['--input', input],
+        ['--out', out],
+        ['--outcomes', outcomes],
+        ['--test-delta', testDelta],
+      ];
+      for (const [flag, p] of others) {
+        if (p === undefined) continue;
+        const sibling = resolve(p);
+        try {
+          realpathSync(sibling);
+        } catch {
+          // realpath failed — distinguish a dangling link (which can still
+          // alias the resolver input) from a truly absent file.
+          let siblingStat: Stats | undefined;
+          try {
+            siblingStat = lstatSync(sibling);
+          } catch {
+            // Absent file — spelling is all it has.
+          }
+          if (siblingStat?.isSymbolicLink()) {
+            throw new Error(
+              `findings: ${flag} must not be a dangling symlink (${p}); ` +
+                'it could alias the resolver input, and no path compare would see the collision',
+            );
+          }
+        }
+        if (isSameFile(anchorTarget, sibling)) {
+          throw new Error(
+            `findings: --to-anchors points at the same file as ${flag} (${p}); the resolver input would overwrite it`,
+          );
+        }
+        if (
+          sibling.startsWith(anchorTarget + sep) ||
+          anchorTarget.startsWith(sibling + sep)
+        ) {
+          throw new Error(
+            `findings: --to-anchors must not nest inside ${flag} (${p}) or contain it; ` +
+              'one path would be created as a directory where the other needs a file',
+          );
+        }
+      }
+    }
 
     let findings = validateFindings(readJson(input, 'findings'));
     if (outcomes !== undefined) {
