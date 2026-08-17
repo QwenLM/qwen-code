@@ -188,22 +188,37 @@ export function claimRetirementDegradeNote(
     // (#9272).
     return true;
   }
+  // A previous-run claim must be reclaimed. Fence it by SHAPE and by its
+  // own `atMs` vs the strict plan epoch (#9272 — file mtimes are not
+  // reliable across runners, so the fence reads the claim's CONTENT).
+  // `recursive` so a directory occupant clears. A non-file, an
+  // unreadable/corrupt claim, and a readable claim older than the epoch
+  // are all NOT this run's claim and are removed; the absence case (no
+  // occupant) needs no removal.
   try {
-    try {
-      // The STRICT plan mtime, not the slack-adjusted epoch (#9272): the
-      // slack exists for `Date.now()`-stamped artifacts, and a claim file
-      // fenced by it would re-admit a dead run's claim written in the two
-      // seconds before a re-capture — silently suppressing the retried
-      // run's NOTE. The sibling fence in retirement.ts reads the strict
-      // mtime for the same reason. `recursive` so a stale DIRECTORY at
-      // the claim path clears too — an occupant that is not a plain file
-      // can never be a claim (#9272).
-      if (statSync(file).mtimeMs < statSync(planPath).mtimeMs) {
-        rmSync(file, { force: true, recursive: true });
+    const st = statSync(file);
+    let stale: boolean;
+    if (!st.isFile()) {
+      stale = true;
+    } else {
+      try {
+        stale =
+          JSON.parse(readFileSync(file, 'utf8')).atMs <
+          statSync(planPath).mtimeMs;
+      } catch {
+        // Corrupt/unreadable content is not a claim — a torn concurrent
+        // write would otherwise sit at the path and EEXIST-silence the
+        // note forever (#9272).
+        stale = true;
       }
-    } catch {
-      // No prior claim — the create below is the claimant.
     }
+    if (stale) {
+      rmSync(file, { force: true, recursive: true });
+    }
+  } catch {
+    // Absent occupant — the create below is the claimant.
+  }
+  try {
     writeFileSync(
       file,
       JSON.stringify({ round: round ?? null, atMs: Date.now() }),

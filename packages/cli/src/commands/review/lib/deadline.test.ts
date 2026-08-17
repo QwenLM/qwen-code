@@ -340,27 +340,32 @@ describe('the round-cost estimate — measured when it can be', () => {
     }
   });
 
-  it('claimRetirementDegradeNote reads no claim from a DIRECTORY at the claim path (#9272)', () => {
-    // A directory (or any non-file) occupying the claim path holds no
-    // claim: the `wx` create's EEXIST must not read as "claimed", or the
-    // NOTE silences forever — a non-file occupant never self-heals into
-    // one. Fresh occupants fail open; a stale one is cleared by the
-    // fence and the claim then lands normally.
+  it('claimRetirementDegradeNote reclaims a non-file occupant and a stale claim (#9272)', () => {
+    // The fence keys on SHAPE and the claim's own `atMs` vs the plan
+    // epoch, not the occupant's mtime — filesystem mtimes are not
+    // reliable across runners (#9272 CI). A directory at the claim path
+    // is never a claim and is removed so the claim lands; a readable
+    // claim older than the epoch belongs to the killed run and is
+    // reclaimed. Both land a real claim, so the dedup then holds.
     const p = plan();
     const dir = promptRecordDir(p);
     mkdirSync(dir, { recursive: true });
+    // A directory occupant is removed and the claim lands.
     mkdirSync(join(dir, 'retirement-degrade-note-round-3.json'));
     expect(claimRetirementDegradeNote(p, 3)).toBe(true);
-    // A stale occupant is cleared by the fence and the claim then lands
-    // normally: the plan re-captures NOW, the occupant dates an hour back.
-    const stalePath = join(dir, 'retirement-degrade-note-round-4.json');
-    mkdirSync(stalePath);
-    const stale = new Date(Date.now() - 3_600_000);
-    utimesSync(stalePath, stale, stale);
-    const now = new Date();
-    utimesSync(p, now, now);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(false);
+    // A stale claim FILE (atMs older than the plan epoch) is reclaimed.
+    writeFileSync(
+      join(dir, 'retirement-degrade-note-round-4.json'),
+      JSON.stringify({ round: 4, atMs: 1 }),
+    );
     expect(claimRetirementDegradeNote(p, 4)).toBe(true);
     expect(claimRetirementDegradeNote(p, 4)).toBe(false);
+    // A corrupt claim FILE is not a claim either — reclaimed, not
+    // EEXIST-silenced (#9272 torn-write).
+    writeFileSync(join(dir, 'retirement-degrade-note-round-5.json'), '{');
+    expect(claimRetirementDegradeNote(p, 5)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 5)).toBe(false);
   });
 
   it('ignores stamps older than the plan — a previous run of the same PR', () => {
