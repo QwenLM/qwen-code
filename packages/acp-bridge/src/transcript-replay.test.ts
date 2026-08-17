@@ -23,6 +23,7 @@ const GOAL: GoalRecord = {
   status: 'active',
   evidenceCursor: { recordId: 'record-0' },
   turnCount: 4,
+  tokensUsed: 0,
   activeTimeMs: 2000,
   createdAt: 100,
   updatedAt: 200,
