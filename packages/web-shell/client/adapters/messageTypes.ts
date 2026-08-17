@@ -82,6 +82,7 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
+  files?: Array<{ name: string; mimeType: string }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
 }

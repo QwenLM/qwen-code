@@ -109,8 +109,12 @@ describe('runMeta', () => {
     // The discovered host is applied as routing (the handler's flag/env
     // would win if set — neither is set here).
     expect(setGhHostMock).toHaveBeenLastCalledWith('ghe.example.com');
+    const authOrder = ensureAuthenticatedMock.mock.invocationCallOrder[0];
+    const repoViewOrder = ghMock.mock.invocationCallOrder[0];
     const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
     const prViewOrder = ghMock.mock.invocationCallOrder[1];
+    expect(authOrder).toBeLessThan(repoViewOrder);
+    expect(authOrder).toBeLessThan(prViewOrder);
     expect(hostOrder).toBeLessThan(prViewOrder);
   });
 
@@ -272,6 +276,7 @@ describe('metaCommand handler', () => {
     // status`), so the ordering must hold against it too, not just the
     // data call.
     expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
+    expect(authOrder).toBeLessThan(ghOrder);
   });
 
   it('prints the result as one JSON object', () => {
@@ -280,6 +285,7 @@ describe('metaCommand handler', () => {
     );
     (metaCommand.handler as (a: unknown) => void)({ _: [], $0: 'qwen' });
     expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
     expect(writeStdoutLineMock).toHaveBeenCalledWith(
       '{"platform":"github","host":"github.com","ownerRepo":"QwenLM/qwen-code"}',
     );

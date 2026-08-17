@@ -83,7 +83,7 @@ Step 3B: high, >500 src OR >3200 total: territory x dim.   [N+5..7+3H calls]
 Step 4:  Deduplicate --> Sharded verify (<=8 findings each)
            --> Aggregate                    [ceil(F/8) calls, F=findings]
 Step 5:  Iterative reverse audit, fanned out per chunk;
-           stop after 2 consecutive dry rounds (cap 5)
+           stop after 2 consecutive dry rounds (cap 10/5/3 by topology)
 Step 6:  Present findings + verdict (high; low pass: findings only)
          Canonicalize findings -> .qwen/tmp/...-findings.json
 Step 6B: Apply findings + record per-finding outcomes  (--fix only)
@@ -124,7 +124,7 @@ A **source** file that is largely rewritten (an existing file of 300+ lines that
 
 The checklist is split three ways on purpose. Handing one agent all eight checks over a 2 400-line file gets one of them done properly; three agents with two or three checks each get all of them done. Chunk agents do not substitute for this — on PR #6457 they held every one of these defects inside their assigned territory and reported none. What they lacked was not the lines but the question.
 
-Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may reject a Critical only by quoting the code that contradicts it (or when the diff's own comments document the flagged behavior as deliberate); anything less certain is downgraded to low confidence rather than deleted — a silently rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or 5 rounds, hard cap — reported as such rather than as convergence). One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
+Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may reject a Critical only by quoting the code that contradicts it (or when the diff's own comments document the flagged behavior as deliberate); anything less certain is downgraded to low confidence rather than deleted — a silently rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or at the plan's round cap — reported as such rather than as convergence). That cap follows the diff's topology: **10** on a small diff, where a round is a single auditor; **5** on a chunked one, where it is one auditor per chunk; and **3** on a huge diff (≥ 3000 effective lines) _when the run has a deadline_, because five ~90-minute rounds do not fit a six-hour CI ceiling and a review killed mid-flight posts nothing — with no deadline a huge diff keeps the chunked cap of 5. An operator can lower whichever cap applies for every review with the `review.reverseAuditRounds` setting; it can never raise one. One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
 
 ## Severity Levels
 
@@ -145,7 +145,8 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
-- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
+- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh. If the interrupted session still leaves its lease behind — a hard kill that skips this, or a multi-prompt review interrupted during a later prompt — `/review` refuses and names the lease file to delete. Clean stops release it: a finished review and the early stops (empty diff, no new changes since the last review) all run `cleanup`, which releases the lease
+- The worktree is leased to its session: a second `/review` of a PR that is already under review refuses to start (naming the holder) rather than tear down the running review's worktree
 - Review reports and cache are saved to the main project directory (not the worktree)
 
 ## Cross-repo PR Review
@@ -421,12 +422,12 @@ Why the floors are where they are: on a nine-line typo fix, six inline walks are
 
 The high-effort pipeline bounds each stage (shard size, audit rounds), but total calls scale with findings — `ceil(F/8)` verification shards — and, under 3B, with chunk count (reverse audit runs per chunk per round). Typical 3A profile:
 
-| Stage                            | LLM calls                      | Notes                                                                                                          |
-| -------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| Review agents (Step 3)           | 14 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                          |
-| Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                                              |
-| Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round                        |
-| **Total**                        | **~17-23 (~15-22)**            | 3A same-repo: ~17-23 (typical ~17-19); cross-repo or local/file: ~15-22; 3B scales with chunks (see DESIGN.md) |
+| Stage                            | LLM calls                       | Notes                                                                                                                                                                                               |
+| -------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Review agents (Step 3)           | 14 (+0-2)                       | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                                                                                                               |
+| Sharded verification (Step 4)    | ceil(F/8)                       | F = findings; at most 8 per verification agent, launched together                                                                                                                                   |
+| Iterative reverse audit (Step 5) | 2-10 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop; the cap follows the topology — 10 on a small diff, 5 on a chunked one, 3 on a huge one when the run has a deadline. 3B fans out one auditor per chunk per round |
+| **Total**                        | **~17-28 (~15-27)**             | 3A same-repo: ~17-28 (typical ~17-19); cross-repo or local/file: ~15-27; 3B scales with chunks (see DESIGN.md)                                                                                      |
 
 Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low` the review runs entirely inline — **0 subagent calls** — walking the diff once per angle instead of once in total.
 
