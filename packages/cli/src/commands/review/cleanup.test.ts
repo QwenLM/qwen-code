@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
-  readdirSync: vi.fn(() => []),
+  // The return type is declared so `mockReturnValue` can take string arrays —
+  // the sweep-retention tests hand it the tmp-dir listing.
+  readdirSync: vi.fn((): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
@@ -14,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
   clearReviewWorktreeLease: vi.fn(),
+  readReviewWorktreeLease: vi.fn((): unknown => null),
+  reviewLeaseHeldByAnotherSession: vi.fn((_lease: unknown): boolean => false),
   refExists: vi.fn(() => true),
   // The parameter is declared so `mock.calls` is typed `[string][]` rather than
   // `[][]` — the paths it was asked to free are the assertion in the sweep test.
@@ -62,6 +67,12 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
   clearReviewWorktreeLease: mocks.clearReviewWorktreeLease,
+  readReviewWorktreeLease: mocks.readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
+  reviewLeasePath: (repositoryRoot: string, target: string) =>
+    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
+  isReviewLeaseFile: (fileName: string) =>
+    /^qwen-review-lease-pr-\d+\.json$/.test(fileName),
 }));
 
 vi.mock('./lib/git.js', () => ({
@@ -81,6 +92,7 @@ vi.mock('./lib/paths.js', () => ({
   probeWorktreePath: (path: string) => `${path}-probe`,
   baseWorktreePath: (path: string) => `${path}-base`,
   reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
+  LEASE_PREFIX: 'qwen-review-lease-',
   REVIEW_TMP_DIR: '/repo/.qwen/tmp',
   tmpFile: (target: string, suffix: string) =>
     `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
@@ -105,6 +117,9 @@ describe('runCleanup', () => {
       freed: false,
       reason: undefined,
     });
+    // clearAllMocks keeps implementations a prior test set — drop them so a
+    // throwing rmSync cannot leak into tests that expect deletion to work.
+    mocks.rmSync.mockReset();
   });
 
   it('keeps the lease when branch deletion fails', () => {
@@ -136,6 +151,163 @@ describe('runCleanup', () => {
     );
   });
 
+  it('clears the lease when only a side file fails to delete', () => {
+    // The lease guards the worktree and branch, not side files: once those
+    // are freed, a residue a later sweep retries must not keep the lock held
+    // — a leftover lease refuses every later fetch-pr of this PR and skips
+    // every later cleanup, and nothing sweeps it automatically.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-diff.txt']);
+    mocks.rmSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to remove'),
+    );
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+  });
+
+  it('skips the whole target when another session holds the lease (#9205)', () => {
+    // The incident shape: session B cleans up while session A is mid-review.
+    // Nothing of A's may be touched — worktree, siblings, branch, side files,
+    // audit window, or the lease itself.
+    const lease = {
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      target: 'pr-123',
+      repositoryRoot: '/repo',
+      worktreePath: '/repo/.qwen/tmp/review-pr-123',
+      branch: 'qwen-review/pr-123',
+    };
+    mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+    mocks.reviewLeaseHeldByAnotherSession.mockImplementationOnce(
+      (l: unknown) => l === lease,
+    );
+    // Populate the tmp dir so the per-target side-file sweep actually runs
+    // once past the skip gate: a refactor that moves the sweep above the
+    // gate would reach for the holder's side files and trip the
+    // rmSync-not-called assertion below.
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-diff.txt']);
+
+    runCleanup('pr-123');
+
+    // The skip must key on THIS target's lease: mockReturnValueOnce is
+    // argument-blind, so an unwired read consults another PR's lease.
+    expect(mocks.readReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.execFileSync).not.toHaveBeenCalled();
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('skipped cleanup for "pr-123"'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('session-a'),
+    );
+    // The note must name the lease file itself — the operator cannot act on
+    // "delete the lease file" without knowing which file that is.
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('qwen-review-lease-pr-123.json'),
+    );
+  });
+
+  it('proceeds when the lease belongs to this session', () => {
+    const lease = {
+      sessionId: 'session-b',
+      promptId: 'prompt-b',
+      target: 'pr-123',
+      repositoryRoot: '/repo',
+      worktreePath: '/repo/.qwen/tmp/review-pr-123',
+      branch: 'qwen-review/pr-123',
+    };
+    mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+    mocks.reviewLeaseHeldByAnotherSession.mockReturnValueOnce(false);
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree).toHaveBeenCalledTimes(3);
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+  });
+
+  it('re-checks the lease after the network-bound audit and skips if a session moved in during it (#9205)', () => {
+    // The gate above reads the lease BEFORE the audit, but the audit spawns
+    // network-bound gh processes (seconds-scale). A review of the same PR that
+    // starts inside that window — reading no lease, then writing its own —
+    // must not be destroyed by this cleanup: re-read the lease after the audit,
+    // before any destructive step, and take the same skip path.
+    const lease = {
+      sessionId: 'session-b',
+      promptId: 'prompt-b',
+      target: 'pr-123',
+      repositoryRoot: '/repo',
+      worktreePath: '/repo/.qwen/tmp/review-pr-123',
+      branch: 'qwen-review/pr-123',
+    };
+    // First read (the gate): no lease yet. Second read (post-audit): session B
+    // has acquired one.
+    mocks.readReviewWorktreeLease
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce(lease);
+    mocks.reviewLeaseHeldByAnotherSession
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    runCleanup('pr-123');
+
+    expect(mocks.readReviewWorktreeLease).toHaveBeenCalledTimes(2);
+    // Pin the ARGUMENTS of both reads: mockReturnValueOnce is argument-blind,
+    // so a re-check that reads a malformed target stays green here while
+    // failing open in production (validTarget rejects it -> null -> not held).
+    expect(mocks.readReviewWorktreeLease).toHaveBeenNthCalledWith(
+      1,
+      process.cwd(),
+      'pr-123',
+    );
+    expect(mocks.readReviewWorktreeLease).toHaveBeenNthCalledWith(
+      2,
+      process.cwd(),
+      'pr-123',
+    );
+    // And the second read must come AFTER the audit, not merely exist:
+    // hoisting it above auditPrWrites keeps every other assertion green while
+    // the seconds-long audit again runs after the last lease check (#9205).
+    // Here the audit no-ops on the missing fetch report and names that skip
+    // on stderr — the note's position pins the audit inside the window.
+    const auditNoteIndex = mocks.writeStderrLine.mock.calls.findIndex((c) =>
+      String(c[0]).includes('bypass audit skipped'),
+    );
+    expect(auditNoteIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      mocks.readReviewWorktreeLease.mock.invocationCallOrder[1]!,
+    ).toBeGreaterThan(
+      mocks.writeStderrLine.mock.invocationCallOrder[auditNoteIndex]!,
+    );
+    // Nothing of B's may be touched.
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.execFileSync).not.toHaveBeenCalled();
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('acquired the lease'),
+    );
+  });
+
   it('releases the review worktree AND both disposable siblings', () => {
     // `base-tree` deliberately leaves its tree standing for the whole review
     // (a later verifier may need it, and a base that failed to build is kept as
@@ -164,6 +336,137 @@ describe('runCleanup', () => {
 
     expect(mocks.rmSync).toHaveBeenCalledWith(
       '/repo/.qwen/tmp/review-pr-123-base.lock',
+      { recursive: true, force: true },
+    );
+  });
+
+  it('never sweeps lease files, even for a target whose name collides with the lease prefix (#9205)', () => {
+    // `safeTarget` flattens `lease` (and `./lease`) to `lease`, so a
+    // file-review target with that name sweeps with a prefix that IS the
+    // lease prefix: unguarded, the rmSync below deletes every live PR lease
+    // — including another session's — and defeats the lock this PR adds.
+    // Lease removal belongs to `clearReviewWorktreeLease` alone.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-lease-pr-123.json']);
+
+    runCleanup('lease');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      join('/repo/.qwen/tmp', 'qwen-review-lease-pr-123.json'),
+      expect.anything(),
+    );
+    expect(
+      mocks.writeStdoutLine.mock.calls.map((c) => String(c[0])).join('\n'),
+    ).not.toContain('qwen-review-lease-pr-123.json');
+  });
+
+  it('sweeps the side files of a lease-named target that share the lease prefix', () => {
+    // The guard keys on the real lease shape, not the bare prefix: a
+    // file-review target named `lease` flattens to exactly the lease prefix,
+    // so keying on the prefix alone skips its OWN side files and nothing else
+    // ever removes them (`clearReviewWorktreeLease` no-ops off `pr-\d+`) —
+    // permanent residue. Only files shaped `…-pr-<n>.json` are real leases.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue([
+      'qwen-review-lease-diff.txt',
+      'qwen-review-lease-pr-999.json',
+    ]);
+
+    runCleanup('lease');
+
+    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-lease-diff.txt');
+    expect(mocks.rmSync).toHaveBeenCalledWith(sideFile, {
+      recursive: true,
+      force: true,
+    });
+    // A live foreign lease survives the very same sweep.
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      join('/repo/.qwen/tmp', 'qwen-review-lease-pr-999.json'),
+      expect.anything(),
+    );
+  });
+
+  it('still sweeps side files that match the target prefix', () => {
+    // The positive control for the lease guard: the skip keys on the lease
+    // prefix, not on the sweep itself.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-local-diff.txt']);
+
+    runCleanup('local');
+
+    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-local-diff.txt');
+    expect(mocks.rmSync).toHaveBeenCalledWith(sideFile, {
+      recursive: true,
+      force: true,
+    });
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      `Removed temp file: ${sideFile}`,
+    );
+  });
+
+  it('keeps the record directory of a NON-CONVERGED reverse audit (#9206)', () => {
+    // The loop writes its stop marker inside the record directory when it
+    // runs to the round cap (or the budget) without converging, and clears
+    // it on a clean convergence — so a marker on disk is exactly the run
+    // whose certification history must survive the sweep for diagnosis.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue([
+      'qwen-review-pr-123-fetch.json',
+      'qwen-review-pr-123-fetch-prompts',
+      'qwen-review-pr-123-diff.txt',
+    ]);
+    mocks.readFileSync.mockImplementation((path: string): string => {
+      if (path.endsWith('budget-stop.json')) {
+        return JSON.stringify({
+          cause: 'round-cap',
+          cap: 5,
+          entry: 'reverse audit — did not converge within the 5-round cap of 5',
+          entryZh: '反向审计——在 5 轮的反审轮数上限内未收敛',
+          round: 6,
+          remainingSeconds: 0,
+          reserveSeconds: 0,
+          atMs: Date.now(),
+        });
+      }
+      // The fetch report without `fetchedAt`: the bypass audit skips itself.
+      return JSON.stringify({});
+    });
+
+    runCleanup('pr-123');
+
+    const removed = mocks.rmSync.mock.calls.map((c) => c[0]);
+    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-fetch.json');
+    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-diff.txt');
+    expect(removed).not.toContain(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      ),
+    );
+  });
+
+  it('still sweeps the record directory once the loop converged (#9206)', () => {
+    // A converged run cleared its marker (`refuseConverged` removes it): the
+    // certification history earned nothing, and the sweep takes it like any
+    // other side file. Same entries as the retention test, no marker.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue([
+      'qwen-review-pr-123-fetch.json',
+      'qwen-review-pr-123-fetch-prompts',
+    ]);
+    mocks.readFileSync.mockReturnValue(JSON.stringify({}));
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
       { recursive: true, force: true },
     );
   });

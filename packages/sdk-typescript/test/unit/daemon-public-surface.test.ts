@@ -334,9 +334,83 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonLogMode>().not.toBeNever();
     expectTypeOf<DaemonLogHealth>().not.toBeNever();
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
-    expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
-      compactedReplayMaxBytes: number;
+    expectTypeOf<
+      DaemonStatusReport['limits']['compactedReplayMaxBytes']
+    >().toEqualTypeOf<number>();
+    expectTypeOf<
+      Pick<
+        DaemonStatusReport['limits'],
+        | 'acpPreAttachMaxFramesPerStream'
+        | 'acpPreAttachMaxFramesPerConnection'
+        | 'acpPreAttachMaxFramesGlobal'
+        | 'acpPreAttachMaxPayloadBytesPerConnection'
+        | 'acpPreAttachMaxPayloadBytesGlobal'
+      >
+    >().toEqualTypeOf<{
+      acpPreAttachMaxFramesPerStream?: number | null;
+      acpPreAttachMaxFramesPerConnection?: number | null;
+      acpPreAttachMaxFramesGlobal?: number | null;
+      acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+      acpPreAttachMaxPayloadBytesGlobal?: number | null;
     }>();
+    expectTypeOf<
+      DaemonStatusReport['limits']['acpPreAttachMaxPayloadBytesGlobal']
+    >().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<
+      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'preAttach'>
+    >().toEqualTypeOf<{
+      preAttach?: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
+    }>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      DaemonStatusReport['runtime']['transport']['acp']['preAttach']
+    >();
+    expectTypeOf<
+      Pick<
+        NonNullable<DaemonStatusReport['full']>['acpConnections'][number],
+        | 'bufferedConnectionFrames'
+        | 'bufferedSessionFrames'
+        | 'pendingDeliveryFrames'
+        | 'preAttachOwnedFrames'
+        | 'preAttachOwnedBytes'
+      >
+    >().toEqualTypeOf<{
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+    }>();
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['preAttachOwnedFrames']
+    >().toEqualTypeOf<number | undefined>();
+    const legacyAcpConnections: NonNullable<
+      DaemonStatusReport['full']
+    >['acpConnections'] = [{}];
+    expect(legacyAcpConnections).toHaveLength(1);
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['connectionIdPrefix']
+    >().toEqualTypeOf<string | undefined>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      NonNullable<DaemonStatusReport['full']>['acpMounts']
+    >();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<DaemonStatusReport['full']>['acpMounts']
+      >[number]['preAttachGuardFailures']
+    >().toEqualTypeOf<number>();
     expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
       runId?: string;
       logMode?: DaemonLogMode;

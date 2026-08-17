@@ -46,6 +46,7 @@ describe('persistRecoveredLedger', () => {
         side,
         { ledger, commitId: 'a'.repeat(40), reviewId: 42 },
         true,
+        true,
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual({
@@ -72,7 +73,7 @@ describe('persistRecoveredLedger', () => {
         side,
         JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
       );
-      persistRecoveredLedger(side, null, false);
+      persistRecoveredLedger(side, null, false, true);
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual(ledger);
       expect(written.round).toBe(3);
@@ -94,7 +95,7 @@ describe('persistRecoveredLedger', () => {
         side,
         JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
       );
-      persistRecoveredLedger(side, null, true);
+      persistRecoveredLedger(side, null, true, true);
       expect(existsSync(side)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -119,6 +120,7 @@ describe('persistRecoveredLedger', () => {
           reviewId: 20,
         },
         false,
+        true,
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // Same round, older reviewId: also kept.
@@ -126,6 +128,7 @@ describe('persistRecoveredLedger', () => {
         side,
         { ledger: { ...ledger, round: 7 }, commitId: null, reviewId: 60 },
         false,
+        true,
       );
       expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
       // A genuinely newer recovery still writes.
@@ -133,6 +136,7 @@ describe('persistRecoveredLedger', () => {
         side,
         { ledger: { ...ledger, round: 8 }, commitId: null, reviewId: 80 },
         false,
+        true,
       );
       expect(JSON.parse(readFileSync(side, 'utf8')).round).toBe(8);
     } finally {
@@ -144,13 +148,115 @@ describe('persistRecoveredLedger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
-      persistRecoveredLedger(side, null, false);
+      persistRecoveredLedger(side, null, false, true);
       expect(existsSync(side)).toBe(false);
       // No debris of any name — the temp is per-process (`.<pid>.tmp`), so
       // asserting on the directory listing is the only check independent of
       // the naming scheme (round-9 finding: the old `${side}.tmp` check
       // named a path no code path ever writes and could never fail).
       expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS same-round winner cannot replace the persisted list', () => {
+    // The R13-1 drive-by: identity lookup down, every marker foreign — the
+    // union never had an own side — and a stranger's marker at this round
+    // (later review id) won round-first selection. Wholesale writing it
+    // swapped this machine's certified list for the stranger's, permanently:
+    // the marker stays on the PR, so every later outage reopened the swap.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const own = { ...ledger, round: 7, reviewId: 100 };
+      writeFileSync(side, JSON.stringify(own));
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 7,
+            findings: [{ id: 'R7-2', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 101,
+        },
+        false,
+        false,
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(own);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS higher round advances the counter but keeps the findings', () => {
+    // Both halves matter: refusing the round too re-exposes the id-space
+    // collision (a counter that lags rounds the PR already carries re-issues
+    // their ids), while adopting the findings re-opens the swap. The anchor
+    // and the age reference go — an anonymous round cannot be re-vouched,
+    // and a sha superseded by rounds this account never certified must not
+    // scope the next review. `noOwnReview` is passed TRUE here on purpose:
+    // it is ignored on the recovered path, so a positional swap of the two
+    // booleans would delete the file and fail both assertions.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          ...ledger,
+          round: 7,
+          reviewId: 100,
+          commitId: 'b'.repeat(40),
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 8,
+            findings: [{ id: 'R8-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+            sha: 'attacker00112233',
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 200,
+        },
+        true,
+        false,
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written).toEqual({
+        v: 1,
+        round: 8,
+        findings: ledger.findings,
+        reviewId: 200,
+      });
+      expect(written.sha).toBeUndefined();
+      expect(written.commitId).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS recovery with no existing file still writes whole', () => {
+    // Nothing to protect: a machine with no side file gains round context
+    // from the write, and the list it gains is exactly what a healthy
+    // foreign-only recovery would have handed it — THEIR claims, no anchor.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        { ledger: { ...ledger, round: 4 }, commitId: null, reviewId: 40 },
+        false,
+        false,
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      expect(written.findings).toEqual(ledger.findings);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

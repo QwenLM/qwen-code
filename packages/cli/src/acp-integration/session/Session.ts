@@ -197,11 +197,13 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MEDIA_REFERENCES_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { SessionMediaReference } from '@qwen-code/acp-bridge/sessionMedia';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -347,6 +349,47 @@ const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const MAX_DAEMON_MEDIA_REFERENCES = 256;
+
+function readDaemonMediaReferences(
+  value: unknown,
+): SessionMediaReference[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DAEMON_MEDIA_REFERENCES
+  ) {
+    return undefined;
+  }
+  const references: SessionMediaReference[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return undefined;
+    }
+    const reference = item as Record<string, unknown>;
+    if (
+      reference['type'] !== 'image' ||
+      typeof reference['mediaId'] !== 'string' ||
+      reference['mediaId'].length === 0 ||
+      reference['mediaId'].length > 128 ||
+      typeof reference['mimeType'] !== 'string' ||
+      reference['mimeType'].length === 0 ||
+      reference['mimeType'].length > 128 ||
+      typeof reference['size'] !== 'number' ||
+      !Number.isSafeInteger(reference['size']) ||
+      reference['size'] <= 0
+    ) {
+      return undefined;
+    }
+    references.push({
+      type: reference['type'],
+      mediaId: reference['mediaId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    });
+  }
+  return references;
+}
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -895,7 +938,12 @@ const TRANSIENT_FS_CODES: readonly string[] = [
 
 type DrainedMidTurnMessage =
   | { kind: 'text'; message: string }
-  | { kind: 'structured'; content: ContentBlock[]; displayText: string };
+  | {
+      kind: 'structured';
+      content: ContentBlock[];
+      displayText: string;
+      mediaReferences?: SessionMediaReference[];
+    };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
@@ -1005,6 +1053,30 @@ function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
   return content.some((part) => part.type === 'image' || part.type === 'audio');
 }
 
+function stripReferencedInlineDataParts(
+  parts: Part[],
+  content: ContentBlock[],
+): Part[] {
+  const coveredByKey = new Map<string, number>();
+  for (const block of content) {
+    if (block.type !== 'image') continue;
+    const key = `${block.mimeType}\u0000${block.data}`;
+    coveredByKey.set(key, (coveredByKey.get(key) ?? 0) + 1);
+  }
+  if (coveredByKey.size === 0) return parts;
+  return parts.filter((part) => {
+    const inlineData = part.inlineData;
+    if (inlineData === undefined || typeof inlineData.data !== 'string') {
+      return true;
+    }
+    const key = `${inlineData.mimeType ?? ''}\u0000${inlineData.data}`;
+    const remaining = coveredByKey.get(key) ?? 0;
+    if (remaining === 0) return true;
+    coveredByKey.set(key, remaining - 1);
+    return false;
+  });
+}
+
 function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
   if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
 
@@ -1050,6 +1122,7 @@ function getValidMidTurnContentBlocks(
 function getStructuredMidTurnDisplayText(
   content: ContentBlock[],
   displayText: unknown,
+  willPersistReferences: boolean,
 ): string {
   if (typeof displayText === 'string' && displayText.trim().length > 0) {
     return displayText.trim();
@@ -1064,7 +1137,19 @@ function getStructuredMidTurnDisplayText(
     .join('\n')
     .trim();
 
-  return text || '[User message with attachments]';
+  if (text) return text;
+
+  // Only records that WILL persist media references keep '' (replay then
+  // projects the media ids). The gate must match #buildMidTurnParts'
+  // persistence condition exactly; a record that will not carry references
+  // needs the visible placeholder, because resume and replay fall back to the
+  // recorded parts — which start with the raw internal prefix — when
+  // displayText is empty.
+  if (!willPersistReferences && hasInlineMediaContentBlock(content)) {
+    return '[User message with attachments]';
+  }
+
+  return text;
 }
 
 function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
@@ -1081,6 +1166,17 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
           item['displayText'],
         );
         if (content.length === 0) return [];
+        const mediaReferences = readDaemonMediaReferences(
+          item['mediaReferences'],
+        );
+        // Same gate #buildMidTurnParts uses to decide whether references are
+        // persisted; display text must agree or a mixed inline+reference
+        // message records displayText:'' with NO references — a shape replay
+        // and resume cannot project.
+        const willPersistReferences =
+          mediaReferences !== undefined &&
+          mediaReferences.length ===
+            content.filter((block) => block.type === 'image').length;
         return [
           {
             kind: 'structured',
@@ -1088,7 +1184,9 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
             displayText: getStructuredMidTurnDisplayText(
               content,
               item['displayText'],
+              willPersistReferences,
             ),
+            ...(mediaReferences ? { mediaReferences } : {}),
           },
         ];
       },
@@ -1130,7 +1228,9 @@ function isValidMidTurnDrainResponse(
         isRecord(item) &&
         Array.isArray(item['content']) &&
         item['content'].length > 0 &&
-        item['content'].every(isContentBlock),
+        item['content'].every(isContentBlock) &&
+        (item['mediaReferences'] === undefined ||
+          readDaemonMediaReferences(item['mediaReferences']) !== undefined),
     );
   }
 
@@ -4081,10 +4181,11 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const promptDisplayTextValue =
+              promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
             const promptDisplayText =
-              typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
-              'string'
-                ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+              typeof promptDisplayTextValue === 'string'
+                ? promptDisplayTextValue
                 : undefined;
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
@@ -4194,11 +4295,15 @@ export class Session implements SessionContext {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
+              const mediaReferences = readDaemonMediaReferences(
+                promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+              );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined) {
+              if (promptDisplayText !== undefined || mediaReferences) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                  displayText: promptDisplayText,
+                  displayText: promptDisplayText ?? promptText,
                   hookContext: '',
+                  ...(mediaReferences ? { mediaReferences } : {}),
                 });
               } else if (goalTurn) {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
@@ -6626,9 +6731,24 @@ export class Session implements SessionContext {
         }
       }
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
-      this.config
-        .getChatRecordingService()
-        ?.recordMidTurnUserMessage(built, displayText);
+      const recorder = this.config.getChatRecordingService();
+      if (message.kind === 'structured' && message.mediaReferences) {
+        const everyMediaBlockHasAReference =
+          message.mediaReferences.length ===
+          message.content.filter((block) => block.type === 'image').length;
+        if (everyMediaBlockHasAReference) {
+          recorder?.recordMidTurnUserMessage(
+            stripReferencedInlineDataParts(built, message.content),
+            displayText,
+            undefined,
+            message.mediaReferences,
+          );
+        } else {
+          recorder?.recordMidTurnUserMessage(built, displayText);
+        }
+      } else {
+        recorder?.recordMidTurnUserMessage(built, displayText);
+      }
       parts.push(...built);
     }
     return parts;
