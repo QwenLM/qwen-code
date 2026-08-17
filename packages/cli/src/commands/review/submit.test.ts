@@ -313,8 +313,12 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
         },
       ),
     ).toEqual({ floor: 'critical', source: 'explicit' });
-    // …and host: the caller's effective host wins, and the plan's host
-    // fills only a caller-less axis (which also pins the plan.host read).
+    // …and host: NEVER plan-filled. An absent caller host IS github.com by
+    // the gate's own rule, so there is no gap for the plan to fill — with
+    // mandatory caller pr/repo flags, a gap-read here handed the
+    // model-pathed plan the one identity axis nothing else pinned, and a
+    // plan carrying a foreign host silently stood the recovery down on the
+    // common no---host github.com invocation.
     expect(
       recoverFloor(
         'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
@@ -332,6 +336,22 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(
       recoverFloor(
         'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({
+            prNumber: 123,
+            ownerRepo: 'o/r',
+            host: 'ghe.corp.example',
+          }),
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toBeUndefined();
+    // And the inverse of the reported hole: a github.com record binds on
+    // the no---host invocation even when a foreign plan host tries to
+    // stand it down.
+    expect(
+      recoverFloor(
+        'https://github.com/o/r/pull/123 --severity-floor critical',
         {
           planPath: floorPlan({
             prNumber: 123,

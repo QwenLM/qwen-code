@@ -247,9 +247,12 @@ export function recordedSeverityFloor(opts: {
   planPath?: string;
   /** The caller's CLI-typed PR number — the identity's first source. */
   callerPr?: number;
-  /** The caller's repo / effective host — first sources for the URL-record
-   * bar, plan values filling in when absent. */
+  /** The caller's repo — the URL-record bar's first repo source, the plan's
+   * `ownerRepo` filling in when absent. */
   callerRepo?: string;
+  /** The caller's EFFECTIVE host. Never plan-filled: absent means
+   * github.com by the gate's own rule, so there is no gap to fill — the
+   * axis where absence is meaningful must not read absence as a gap. */
   callerHost?: string;
   defaultSeverityFloor?: string;
   skillArgs?: string;
@@ -261,22 +264,17 @@ export function recordedSeverityFloor(opts: {
   | undefined {
   let planPr: number | undefined;
   let planRepo: string | undefined;
-  let planHost: string | undefined;
   try {
     if (opts.planPath) {
       const plan = JSON.parse(readFileSync(opts.planPath, 'utf8')) as {
         prNumber?: unknown;
         ownerRepo?: unknown;
-        host?: unknown;
       };
       const n = plan?.prNumber;
       if (typeof n === 'number' && Number.isInteger(n) && n > 0) planPr = n;
       else if (typeof n === 'string' && /^\d+$/.test(n)) planPr = Number(n);
       if (typeof plan?.ownerRepo === 'string' && isOwnerRepo(plan.ownerRepo)) {
         planRepo = plan.ownerRepo;
-      }
-      if (typeof plan?.host === 'string' && plan.host.trim() !== '') {
-        planHost = plan.host;
       }
     }
   } catch {
@@ -285,7 +283,12 @@ export function recordedSeverityFloor(opts: {
   const pr = opts.callerPr ?? planPr;
   if (pr === undefined) return undefined;
   const repo = opts.callerRepo ?? planRepo;
-  const host = (opts.callerHost ?? planHost ?? 'github.com').toLowerCase();
+  // The host axis is NEVER plan-filled: an absent caller host IS github.com
+  // by the gate's own rule ("an absent req.host means the write routes at
+  // github.com — a host like any other, not an exemption"), so there is no
+  // gap for the plan to fill — and a gap-read here handed the model-pathed
+  // plan the one identity axis the mandatory caller flags did not pin.
+  const host = (opts.callerHost ?? 'github.com').toLowerCase();
   const path =
     currentSessionId() === '' && opts.skillArgs
       ? opts.skillArgs
