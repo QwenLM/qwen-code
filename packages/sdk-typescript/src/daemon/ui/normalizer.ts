@@ -12,6 +12,7 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
+import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -42,6 +43,8 @@ type NormalizedEventBase = Pick<
   | 'eventId'
   | 'serverTimestamp'
   | 'sourceRecordIds'
+  | 'promptId'
+  | 'branchRecordId'
   | 'originatorClientId'
   | 'rawEvent'
 >;
@@ -599,10 +602,13 @@ function createBase(
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
   const sourceRecordIds = extractSourceRecordIds(event);
+  const branchRecordId = extractBranchRecordId(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -610,6 +616,18 @@ function createBase(
       ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
       : {}),
   };
+}
+
+function extractBranchRecordId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  return transcript ? getString(transcript, 'branchRecordId') : undefined;
 }
 
 /**
@@ -1494,6 +1512,7 @@ function normalizeSettingsChanged(
   if (!key) {
     return fallbackDebug(event, base, 'malformed settings_changed payload');
   }
+  const mutation = isSettingsChangedData(event.data) && event.data.mutation;
   return [
     {
       ...base,
@@ -1501,6 +1520,7 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+      ...(mutation ? { mutation } : {}),
     },
   ];
 }

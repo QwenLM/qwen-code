@@ -121,8 +121,13 @@ export class MessageEmitter extends BaseEmitter {
 
   async emitGoalStatus(
     status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+    goalState?: unknown,
   ): Promise<void> {
-    await this.sendUpdate(buildGoalStatusUpdate(status));
+    const update = buildGoalStatusUpdate(status);
+    if (goalState) {
+      update._meta = { ...update._meta, goalState };
+    }
+    await this.sendUpdate(update);
   }
 
   async emitGoalState(

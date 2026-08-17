@@ -1126,6 +1126,7 @@ describe('createWorkflowSandbox security', () => {
     // never re-armed would leave a script hung in ungated code pending
     // forever (no settlement, snapshot, or telemetry). The abort must
     // re-arm the banked remainder.
+    vi.useFakeTimers();
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
     let finish: ((value: string) => void) | undefined;
@@ -1139,24 +1140,31 @@ describe('createWorkflowSandbox security', () => {
       scheduler,
       abortOnTimeout,
     });
-    // Consume most of the budget BEFORE pausing so the banked remainder
-    // (~80 ms) is distinguishable from a fresh full budget (200 ms).
     const run = sandbox.run(`await agent('a'); return new Promise(() => {});`);
-    await vi.waitFor(() => expect(finish).toBeDefined());
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(scheduler.pause()).toBe(true);
-    finish?.('done');
-    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    let settled = false;
+    const settlement = run.catch(() => {
+      settled = true;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finish).toBeDefined();
+      await vi.advanceTimersByTimeAsync(120);
+      expect(scheduler.pause()).toBe(true);
+      finish?.('done');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler.snapshot().state).toBe('paused');
 
-    abortOnTimeout.abort();
-    const rearmAt = Date.now();
-    await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
-    // The banked remainder (~80 ms) bounds the settle: pre-fix the race
-    // never settled at all, a fresh-budget re-arm would overshoot the
-    // upper bound, and a zero-remainder re-arm would fire before the
-    // lower bound.
-    expect(Date.now() - rearmAt).toBeLessThan(150);
-    expect(Date.now() - rearmAt).toBeGreaterThan(40);
+      abortOnTimeout.abort();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
+    } finally {
+      abortOnTimeout.abort();
+      await vi.runAllTimersAsync();
+      await settlement;
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the watchdog armed when a post-abort drain lands paused', async () => {

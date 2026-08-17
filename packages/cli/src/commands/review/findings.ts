@@ -32,9 +32,19 @@
 //     coverage is the error.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  lstatSync,
+  realpathSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
+import { dirname, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { AnchorRequest } from './lib/anchors.js';
+import { isSameFile } from './lib/same-file.js';
 
 // These four lists have a second consumer: the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
@@ -194,6 +204,20 @@ function oneOf<T extends string>(
     : undefined;
 }
 
+/**
+ * The finding format the agents write mandates the bracketed tag —
+ * `Source: [review]`, `Source: [probe]` — and a finding copied forward with
+ * the tag it was born with used to die at this gate, because the artifact
+ * schema names the bare enum. Strip the brackets and validate what is inside;
+ * anything else (including an unknown word, bracketed or not) still fails.
+ */
+function normalizeSource(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const bracketed = /^\[(.*)\]$/.exec(trimmed);
+  return (bracketed ? bracketed[1] : trimmed).trim();
+}
+
 function parseLocations(
   o: Record<string, unknown>,
   index: number,
@@ -303,7 +327,7 @@ export function validateFindings(raw: unknown): Finding[] {
     const source =
       o['source'] === undefined
         ? ('review' as Source)
-        : oneOf(o['source'], SOURCES);
+        : oneOf(normalizeSource(o['source']), SOURCES);
     if (!source) {
       fail(
         i,
@@ -814,6 +838,103 @@ export function buildReport(findings: readonly Finding[]): FindingsReport {
   };
 }
 
+/**
+ * Headed for the `comments` array — the projection set. The projection and
+ * its skip disclosure must agree on exactly this set, so both read one
+ * predicate.
+ */
+function isPostable(f: Finding): boolean {
+  return (
+    f.confidence === 'high' &&
+    (f.severity === 'Critical' || f.severity === 'Suggestion')
+  );
+}
+
+/**
+ * The Step 7 resolver input, projected from the canonical findings.
+ *
+ * `resolve-anchors` wants flat `{id, path, anchor, line?}` entries — one per
+ * location — while the artifact stores `locations[]` arrays under a different
+ * key name (`file`, not `path`). Hand-writing that projection once produced
+ * all-null anchors and a redo; this is the mechanical version. Only the
+ * findings headed for the `comments` array are projected — high-confidence
+ * Criticals and Suggestions; a standalone finding keeps its own id, and an
+ * aggregate's locations carry `<id>-1`, `<id>-2`, …, the suffix scheme Step 7
+ * joins each resolution back to its finding on. Locations without an anchor
+ * are skipped: there is nothing to resolve, and the skip disclosure below
+ * names them. Their disposition follows Step 7's partial-resolution rule —
+ * while the finding still projects anchored locations, the anchorless ones
+ * add no comment and no body copy; a finding that projects nothing is the
+ * ordinary unanchorable one (body Critical, discarded Suggestion).
+ */
+export function anchorRequestsFor(
+  findings: readonly Finding[],
+): AnchorRequest[] {
+  const requests: AnchorRequest[] = [];
+  // Seed with EVERY finding's own id, not just the postable ones: Step 7
+  // joins each resolution back to the artifact by id, so a minted `<id>-N`
+  // equal to any finding's id attaches the comment to the wrong body,
+  // whether or not that finding projects a request of its own.
+  const seen = new Map<string, string>(findings.map((f) => [f.id, f.id]));
+  for (const f of findings) {
+    if (!isPostable(f)) continue;
+    const postable = f.locations.filter((l) => l.anchor !== undefined);
+    const multi = postable.length > 1;
+    for (const [i, l] of postable.entries()) {
+      const id = multi ? `${f.id}-${i + 1}` : f.id;
+      // Finding ids are unique, but an EXPANDED id can equal another finding's
+      // own id (`p1`'s first location mints `p1-1`; a standalone finding may
+      // be named `p1-1`). Resolutions join back on this id, so the collision
+      // must fail here: the emitted ids are unique, so no later gate sees it,
+      // and Step 7's join would attach the comment to the wrong finding's
+      // body. A finding matching its own id is the standalone shape, not a
+      // collision.
+      const other = seen.get(id);
+      if (other !== undefined && other !== f.id) {
+        throw new Error(
+          `findings: anchor request id "${id}" is produced twice — findings ` +
+            `"${other}" and "${f.id}" both claim it; rename one of the findings`,
+        );
+      }
+      seen.set(id, f.id);
+      requests.push({
+        id,
+        path: l.file,
+        anchor: l.anchor as string,
+        ...(l.line !== undefined ? { line: l.line } : {}),
+      });
+    }
+  }
+  return requests;
+}
+
+/**
+ * The locations the projection skips: a postable finding carrying a location
+ * with no anchor. Nothing downstream cross-checks the artifact's postable
+ * findings against the resolver input, so the command discloses them — and
+ * the disclosure splits on what the finding still projects: while anchored
+ * locations project, the anchorless ones add no comment and no body copy;
+ * only a finding that projects nothing is disposed of as unanchorable (a
+ * Critical moves to the body, a Suggestion is discarded).
+ */
+function anchorlessLocationsFor(
+  findings: readonly Finding[],
+): Array<{ id: string; count: number; anchored: number }> {
+  const skipped: Array<{ id: string; count: number; anchored: number }> = [];
+  for (const f of findings) {
+    if (!isPostable(f)) continue;
+    const count = f.locations.filter((l) => l.anchor === undefined).length;
+    if (count > 0) {
+      skipped.push({
+        id: f.id,
+        count,
+        anchored: f.locations.length - count,
+      });
+    }
+  }
+  return skipped;
+}
+
 /** One line per finding, for a terminal that will not render the JSON. */
 export function renderFindings(report: FindingsReport): string[] {
   return report.findings.map((f) => {
@@ -835,6 +956,7 @@ interface FindingsArgs {
   outcomes: string | undefined;
   print: boolean | undefined;
   testDelta: string | undefined;
+  toAnchors: string | undefined;
 }
 
 function readJson(path: string, what: string): unknown {
@@ -885,13 +1007,95 @@ export const findingsCommand: CommandModule = {
         describe:
           'The test-delta artifact. A Critical naming a test file that also failed on the merge base is held back to Suggestion, carrying the measurement that demoted it.',
       })
+      .option('to-anchors', {
+        type: 'string',
+        describe:
+          'Also write the Step 7 resolver input: one {id, path, anchor, line?} ' +
+          'per anchored location of every high-confidence Critical and ' +
+          'Suggestion, ready for resolve-anchors.',
+      })
       .option('print', {
         type: 'boolean',
         describe: 'Also print one line per finding to stdout',
       }),
   handler: (argv) => {
-    const { input, out, outcomes, print, testDelta } =
+    const { input, out, outcomes, print, testDelta, toAnchors } =
       argv as unknown as FindingsArgs;
+
+    // The resolver input must not share a file with anything this command
+    // reads or writes: a --to-anchors that lands on one of them destroys its
+    // counterpart while stderr reports every write as successful, and Step 7
+    // joins the pair by id — a silently destroyed member poisons the join.
+    // Identity is filesystem identity — dev/ino where a side exists, the
+    // canonicalised deepest ancestor where it does not: path strings miss
+    // hard links, case-variant spellings, and symlinked directory
+    // components. A link realpath cannot see through is refused where it can
+    // still alias — the anchor side outright, a sibling side when it dangles.
+    // Nesting is a collision too: the write sequence creates the prefix path
+    // as a directory, the paired write dies at EISDIR, and the stray
+    // directory survives every rerun.
+    if (toAnchors !== undefined) {
+      const anchorTarget = resolve(toAnchors);
+      let anchorStat: Stats | undefined;
+      try {
+        anchorStat = lstatSync(anchorTarget);
+      } catch {
+        // Not there yet — the run creates it; spelling is all it has.
+      }
+      if (anchorStat?.isSymbolicLink()) {
+        throw new Error(
+          `findings: --to-anchors must not be a symlink (${toAnchors}); ` +
+            'a link can alias a file this command also reads or writes, and no path compare would see the collision',
+        );
+      }
+      if (anchorStat?.isDirectory()) {
+        throw new Error(
+          `findings: --to-anchors must not be a directory (${toAnchors}); the anchor artifact is written as a file`,
+        );
+      }
+      const others: Array<[string, string | undefined]> = [
+        ['--input', input],
+        ['--out', out],
+        ['--outcomes', outcomes],
+        ['--test-delta', testDelta],
+      ];
+      for (const [flag, p] of others) {
+        if (p === undefined) continue;
+        const sibling = resolve(p);
+        try {
+          realpathSync(sibling);
+        } catch {
+          // realpath failed — distinguish a dangling link (which can still
+          // alias the resolver input) from a truly absent file.
+          let siblingStat: Stats | undefined;
+          try {
+            siblingStat = lstatSync(sibling);
+          } catch {
+            // Absent file — spelling is all it has.
+          }
+          if (siblingStat?.isSymbolicLink()) {
+            throw new Error(
+              `findings: ${flag} must not be a dangling symlink (${p}); ` +
+                'it could alias the resolver input, and no path compare would see the collision',
+            );
+          }
+        }
+        if (isSameFile(anchorTarget, sibling)) {
+          throw new Error(
+            `findings: --to-anchors points at the same file as ${flag} (${p}); the resolver input would overwrite it`,
+          );
+        }
+        if (
+          sibling.startsWith(anchorTarget + sep) ||
+          anchorTarget.startsWith(sibling + sep)
+        ) {
+          throw new Error(
+            `findings: --to-anchors must not nest inside ${flag} (${p}) or contain it; ` +
+              'one path would be created as a directory where the other needs a file',
+          );
+        }
+      }
+    }
 
     let findings = validateFindings(readJson(input, 'findings'));
     if (outcomes !== undefined) {
@@ -944,8 +1148,51 @@ export const findingsCommand: CommandModule = {
     findings = witnessHold.findings;
     const report = buildReport(findings);
 
+    // Project the resolver input from the SAME findings the artifact carries —
+    // after the holds above, so a Critical lowered to Suggestion (or a
+    // confidence lowered to terminal-only) projects as the holds intend — and
+    // BEFORE anything is written: a projection the collision guard refuses
+    // must leave the previous run's consistent pair on disk, not a rewritten
+    // findings.json beside a stale anchors.json.
+    const anchorRequests =
+      toAnchors !== undefined ? anchorRequestsFor(report.findings) : undefined;
+
     const target = resolve(out);
     mkdirSync(dirname(target), { recursive: true });
+
+    // The anchors file goes down BEFORE the artifact: Step 7 joins the pair
+    // by id, so a failure between the two writes can only leave this run's
+    // anchors.json beside the previous run's findings.json — never a
+    // rewritten findings.json beside a stale anchors.json. A failure of the
+    // FIRST write leaves the previous run's consistent pair untouched, and
+    // the anchors path is the realistic failure — a parent that cannot be
+    // created, a read-only directory — while the artifact's is the path the
+    // previous run already wrote.
+    if (toAnchors !== undefined && anchorRequests !== undefined) {
+      const anchorTarget = resolve(toAnchors);
+      mkdirSync(dirname(anchorTarget), { recursive: true });
+      writeFileSync(
+        anchorTarget,
+        `${JSON.stringify(anchorRequests, null, 2)}\n`,
+        'utf8',
+      );
+      writeStderrLine(
+        `findings: wrote ${anchorRequests.length} anchor request(s) for Step 7 to ${anchorTarget}`,
+      );
+      for (const { id, count, anchored } of anchorlessLocationsFor(
+        report.findings,
+      )) {
+        writeStderrLine(
+          `findings: ${id} carries ${count} location(s) without an anchor — ` +
+            'absent from the resolver input; ' +
+            (anchored > 0
+              ? `the finding still projects ${anchored} anchored location(s), ` +
+                'and the anchorless ones add no comment and no body copy'
+              : 'dispose as unanchorable'),
+        );
+      }
+    }
+
     writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
     const { bySeverity, byConfidence } = report.counts;

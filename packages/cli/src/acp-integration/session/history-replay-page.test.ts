@@ -11,6 +11,7 @@ import type {
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -54,6 +55,19 @@ function userRecord(): ChatRecord {
     message: {
       role: 'user',
       parts: [{ text: 'hello' }],
+    },
+  };
+}
+
+function assistantRecord(): ChatRecord {
+  return {
+    ...userRecord(),
+    uuid: 'assistant-record',
+    parentUuid: 'user-record',
+    type: 'assistant',
+    message: {
+      role: 'model',
+      parts: [{ text: 'answer' }],
     },
   };
 }
@@ -239,6 +253,98 @@ describe('history replay page', () => {
         timestamp: Date.parse(TIMESTAMP),
       }),
     ]);
+  });
+
+  it('attaches the checkpoint only to the final chunk of a multi-chunk Assistant record', async () => {
+    // One assistant record replays as text/thought/text. The checkpoint
+    // marks the END of the record, so only the last visible assistant
+    // chunk may expose the branch point.
+    const multiChunk: ChatRecord = {
+      ...assistantRecord(),
+      message: {
+        role: 'model',
+        parts: [
+          { text: 'first part' },
+          { text: 'thinking', thought: true },
+          { text: 'last part' },
+        ],
+      },
+    };
+
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [multiChunk],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const readBranchRecordId = (update: SessionUpdate): string | undefined => {
+      const meta = (update as { _meta?: Record<string, unknown> })._meta;
+      const transcript =
+        meta && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      const branchRecordId = transcript?.['branchRecordId'];
+      return typeof branchRecordId === 'string' ? branchRecordId : undefined;
+    };
+
+    const decorated = result.updates.filter(
+      (update) => readBranchRecordId(update) !== undefined,
+    );
+    expect(decorated).toHaveLength(1);
+    expect(decorated[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'last part' },
+    });
+
+    const thoughtChunk = result.updates.find(
+      (update) => update.sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtChunk).toBeDefined();
+    expect(readBranchRecordId(thoughtChunk!)).toBeUndefined();
+    const firstChunk = result.updates.find(
+      (update) =>
+        update.sessionUpdate === 'agent_message_chunk' &&
+        (update as { content?: { text?: string } }).content?.text ===
+          'first part',
+    );
+    expect(firstChunk).toBeDefined();
+    expect(readBranchRecordId(firstChunk!)).toBeUndefined();
+  });
+
+  it('fails incrementally before collecting an update above the count limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: Number.MAX_SAFE_INTEGER, maxUpdates: 0 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'updates',
+      observed: 1,
+      limit: 0,
+    });
+  });
+
+  it('fails incrementally before retaining serialized updates above the byte limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: 2, maxUpdates: 1 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'bytes',
+      limit: 2,
+    });
   });
 
   it('filters malformed replay state before encoding the next cursor', async () => {

@@ -13,6 +13,7 @@ export {
   WorkspaceDaemonClient,
   isDaemonTurnError,
   isNonBlockingAccepted,
+  isStaleBranchPointError,
   matchTurnEvent,
   type CreateSessionRequest,
   type DaemonClientOptions,
@@ -23,6 +24,10 @@ export {
   type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
+export {
+  isSessionLevelNotFound,
+  isSubagentSessionNotFound,
+} from './DaemonHttpError.js';
 // Transport abstraction layer
 export { DaemonTransportClosedError } from './DaemonTransport.js';
 export type {
@@ -226,6 +231,8 @@ export type {
   DaemonMcpServerChangedEvent,
   DaemonSettingsReloadedData,
   DaemonSettingsReloadedEvent,
+  DaemonSettingsChangedData,
+  DaemonSettingsChangedEvent,
   DaemonSessionRewoundData,
   DaemonSessionRewoundEvent,
   DaemonSessionBranchedData,
@@ -410,6 +417,8 @@ export type {
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
   DaemonSkillToggleActivation,
+  DaemonSkillToggleMutation,
+  DaemonSkillToggleMutationSkill,
   DaemonSkillToggleResult,
   DaemonSkillScope,
   DaemonSkillInstallSource,
@@ -498,7 +507,11 @@ export type {
   DaemonMode,
   DaemonProtocolVersions,
   BranchSessionRequest,
+  DaemonBranchSessionRequest,
+  DaemonBranchSessionResult,
   DaemonBranchedSession,
+  HistoricalBranchSessionRequest,
+  DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
   ForkSessionRequest,
@@ -508,6 +521,7 @@ export type {
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,
+  DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,

@@ -71,17 +71,16 @@ function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
 }
 
 /** The slice of the bridge the keepalive needs — narrowed for testability.
- * `recordHeartbeat` keeps a live session resident; `loadSession` revives one
+ * `recordHeartbeat` keeps a live session resident; `resumeSession` revives one
  * the reaper already let go (a re-enabled task's session). `spawnOrAttach`
  * and `updateSessionMetadata` bind unbound durable tasks to dedicated
  * sessions — the same flow the POST /scheduled-tasks route uses for
  * UI-created tasks, applied retroactively to cron_create tool tasks. */
 export interface KeepaliveBridge {
   recordHeartbeat(sessionId: string): unknown;
-  loadSession(req: {
+  resumeSession(req: {
     sessionId: string;
     workspaceCwd: string;
-    historyReplay?: 'stream' | 'response';
     sourceType?: string;
     sourceId?: string;
   }): Promise<unknown>;
@@ -286,9 +285,9 @@ export function startScheduledTaskKeepalive(
     string,
     { failures: number; nextAttemptAt: number }
   >();
-  // Sessions with a revive in flight. loadSession isn't abortable, so a
+  // Sessions with a revive in flight. resumeSession isn't abortable, so a
   // timed-out revive keeps running in the background; without this guard a later
-  // tick would spawn a SECOND loadSession (a duplicate child) for it. Cleared on
+  // tick would spawn a SECOND resumeSession (a duplicate child) for it. Cleared on
   // the load's TRUE settlement, not the timeout.
   const reviving = new Set<string>();
 
@@ -339,21 +338,24 @@ export function startScheduledTaskKeepalive(
         const metadata = await new SessionService(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
-        const load = bridge.loadSession({
+        const resume = bridge.resumeSession({
           sessionId,
           workspaceCwd: boundWorkspace,
-          historyReplay: 'response',
           ...metadata,
         });
-        // Clear the in-flight guard on the load's TRUE settlement (not the
+        // Clear the in-flight guard on the resume's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
-        void load
+        void resume
           .catch(() => {})
           .finally(() => {
             reviving.delete(sessionId);
           });
         try {
-          await withTimeout(load, reviveTimeoutMs, `loadSession(${sessionId})`);
+          await withTimeout(
+            resume,
+            reviveTimeoutMs,
+            `resumeSession(${sessionId})`,
+          );
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
@@ -408,7 +410,7 @@ export function startScheduledTaskKeepalive(
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
   // the revive timeout), so skip a tick while the previous is still running —
-  // overlapping passes would issue duplicate concurrent loadSession spawns for
+  // overlapping passes would issue duplicate concurrent resumeSession spawns for
   // the same dead sessions.
   let running = false;
   const timer: ReturnType<typeof setInterval> = setInterval(() => {
@@ -476,10 +478,9 @@ export function startScheduledTaskKeepalive(
 
 /** The slice of the bridge rehydration needs — narrowed for testability. */
 export interface RehydrateBridge {
-  loadSession(req: {
+  resumeSession(req: {
     sessionId: string;
     workspaceCwd: string;
-    historyReplay?: 'stream' | 'response';
     sourceType?: string;
     sourceId?: string;
   }): Promise<unknown>;
@@ -497,12 +498,12 @@ export interface RehydrateResult {
  * lock owner deliberately never fires a bound task) until something loaded it.
  *
  * Best-effort: a session whose transcript is gone (deleted out-of-band) fails
- * its `loadSession` and is skipped rather than aborting the sweep. Distinct
+ * its `resumeSession` and is skipped rather than aborting the sweep. Distinct
  * session ids only; unbound tasks are ignored (they fire via the lock owner).
  */
 /** Default caller headroom above the bridge's 60-second restore deadline. */
-const REHYDRATE_LOAD_TIMEOUT_MS = 70_000;
-/** Max sessions rehydrated at once. Each `loadSession` forks a real agent
+const REHYDRATE_RESUME_TIMEOUT_MS = 70_000;
+/** Max sessions rehydrated at once. Each `resumeSession` forks a real agent
  * child, so loading all of them (up to MAX_JOBS = 50) in one shot would spike
  * CPU/memory on boot and, on constrained hosts, hit spawn failures
  * (EAGAIN/ENOMEM) that strand healthy tasks. Load in small batches instead. */
@@ -517,7 +518,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
   onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
-  const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
+  const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_RESUME_TIMEOUT_MS;
   let tasks;
   try {
     tasks = await readCronTasks(boundWorkspace);
@@ -540,18 +541,17 @@ export async function rehydrateScheduledTaskSessions(deps: {
     const metadata = await new SessionService(
       boundWorkspace,
     ).readCreationMetadata(sessionId);
-    const load = bridge.loadSession({
+    const resume = bridge.resumeSession({
       sessionId,
       workspaceCwd: boundWorkspace,
-      historyReplay: 'response',
       ...metadata,
     });
-    // loadSession isn't abortable, so a timed-out load keeps forking/replaying
+    // resumeSession isn't abortable, so a timed-out resume keeps running
     // in the background. Swallow its eventual settlement up front so it can't
     // raise an unhandled rejection once we've stopped awaiting it below.
-    void load.catch(() => {});
+    void resume.catch(() => {});
     try {
-      await withTimeout(load, timeoutMs, `loadSession(${sessionId})`);
+      await withTimeout(resume, timeoutMs, `resumeSession(${sessionId})`);
       loaded.push(sessionId);
     } catch (err) {
       // Timed out (or the load rejected). Do NOT await the raw `load` here: a
@@ -559,7 +559,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
       // enough loads hang, the whole boot sweep never completes (`Promise.all`
       // never settles) — later task sessions would then never rehydrate. Record
       // it as failed and free the worker to pull the next queued session; the
-      // background load, if it ever settles, just warms that session late.
+      // background resume, if it ever settles, just warms that session late.
       failed.push(sessionId);
       // The onError callback must never abort the sweep: if it throws (e.g. a
       // stderr EPIPE during log rotation) the rejection would escape loadOne,
