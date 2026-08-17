@@ -98,7 +98,8 @@ const SHELL_LANES: PathRule = {
   // extensions stay a deliberate superset of pathTool: shellcheck refuses
   // zsh, but the lanes that run these files are what this syllabus exists
   // for. The hadolint arm drops pathTool's basename-prefix over-match on
-  // documents (`dockerfile.md`): prose about a Dockerfile has no lanes.
+  // documents and stray artifacts (`dockerfile.rst`, `Dockerfile.swp`,
+  // `Dockerfile.lock`): prose about a Dockerfile has no lanes.
   // The scripts arm is spelled as end-anchored suffix checks plus a
   // directory check, not one leading-anchored regex: PR paths are
   // attacker-controlled, and a `(?:^|\/)scripts\/` anchor followed by a
@@ -107,7 +108,8 @@ const SHELL_LANES: PathRule = {
     const tool = pathTool(p);
     return (
       tool === 'shellcheck' ||
-      (tool === 'hadolint' && !/\.(?:md|txt|ya?ml|json)$/i.test(p)) ||
+      (tool === 'hadolint' &&
+        !/\.(?:md|rst|adoc|html?|org|txt|ya?ml|json|lock|swp)$/i.test(p)) ||
       /\.(zsh|ps1|bat|cmd)$/i.test(p) ||
       GITHUB_ACTIONS.matches(p) ||
       /(?:^|\/)scripts\/tests\/vitest\.config\.[cm]?[jt]sx?$/i.test(p) ||

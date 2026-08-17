@@ -66,6 +66,11 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['.github/scripts/triage.py', true],
     ['.github/scripts/hook.rb', true],
     ['.github/scripts/tool.pl', true],
+    // The node spellings the script arm admits that no lane arm rescues:
+    // js pins the bare [cm]? form, cjs the c-branch, tsx the x-suffix.
+    ['.github/scripts/helper.js', true],
+    ['.github/scripts/helper.cjs', true],
+    ['.github/scripts/helper.tsx', true],
     ['.github/actions/setup/entrypoint.sh', true],
     ['.github/actions/setup/README.md', false],
     // A document under .github/scripts has no lanes and no shell.
@@ -77,6 +82,9 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // carries a live platform gate — the lane-inventory question applies.
     ['scripts/tests/vitest.config.ts', true],
     ['scripts/tests/vitest.config.mts', true],
+    // Mid-path form: the anchor is a scripts/tests directory wherever it
+    // sits, not the repo root.
+    ['packages/cli/scripts/tests/vitest.config.ts', true],
     // The scripts-test branch is anchored to a scripts/ directory, not to a
     // directory that merely ends in the word.
     ['myscripts/install.test.ts', false],
@@ -92,9 +100,20 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['Dockerfile.d/README.md', false],
     ['docker/Dockerfile.prod/app.conf', false],
     // The hadolint arm narrows pathTool's basename-prefix branch for the
-    // brief: a document about Dockerfiles is prose, not a build recipe.
+    // brief: a document about Dockerfiles is prose, not a build recipe —
+    // every extension the guard names is pinned, or a narrowing of the
+    // list ships green.
     ['docs/dockerfile.md', false],
     ['docs/dockerfile.best-practices.md', false],
+    ['docs/dockerfile.txt', false],
+    ['docs/dockerfile.rst', false],
+    ['docs/dockerfile.adoc', false],
+    ['docs/dockerfile.html', false],
+    ['docs/dockerfile.org', false],
+    ['docs/dockerfile.yaml', false],
+    ['docs/dockerfile.json', false],
+    ['Dockerfile.swp', false],
+    ['docker/Dockerfile.lock', false],
     // A test outside the script layer is not handed a shell syllabus, and a
     // document that merely talks about one is not code.
     ['src/pay.test.ts', false],
@@ -213,10 +232,14 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
   it('pins the composite-action branch of the shell rule itself', () => {
     // A table row only proves SOME rule matched; this pins that the lane
     // syllabus itself reaches a diff touching only a composite action, whose
-    // `run:` blocks are the miss this rule exists to catch.
-    expect(pathRulesFor(['.github/actions/setup/action.yml'])).toContain(
-      'Shell and CI scripts — the lanes that run them',
-    );
+    // `run:` blocks are the miss this rule exists to catch — per rule, and
+    // in both metadata spellings GitHub accepts: nothing else rescues an
+    // actions/ path, so a narrowing to one spelling fails here.
+    for (const name of ['action.yml', 'action.yaml']) {
+      const out = pathRulesFor([`.github/actions/setup/${name}`]);
+      expect(out).toContain('Shell and CI scripts — the lanes that run them');
+      expect(out).toContain('GitHub Actions workflows');
+    }
   });
 
   it.each([
@@ -225,13 +248,26 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     '.github/scripts/deploy.ps1',
     '.github/scripts/release.ts',
     '.github/actions/setup/helper.py',
+    // Spellings the lane rule rescues through its own arms — only these
+    // per-rule assertions can pin them for the workflow arm.
+    '.github/scripts/provision.bash',
+    '.github/scripts/ci/lint.zsh',
+    '.github/scripts/provision.ksh',
+    '.github/scripts/provision.dash',
+    '.github/scripts/win/build.bat',
+    '.github/scripts/win/setup.cmd',
+    // The node spellings the arm admits beyond mjs/ts.
+    '.github/scripts/helper.js',
+    '.github/scripts/helper.cjs',
+    '.github/scripts/helper.tsx',
   ])('pairs both checklists on a script-only diff (%s)', (path) => {
     // The security checklist says the scripts a workflow calls are part of
     // the workflow, so a diff touching only such a script needs the
-    // expression-injection eyes and the lane eyes together — in every
-    // extension the arm admits, not just .mjs: the .sh variant pins the
-    // shell family, .ps1 the Windows lane, .ts the node-runtime family,
-    // and .py the composite-action arm's non-shell extensions.
+    // expression-injection eyes and the lane eyes together — asserted per
+    // rule, because the lane rule rescues bash/ksh/dash through pathTool's
+    // shellcheck branch and zsh/ps1/bat/cmd through its own suffix arm: a
+    // `.some()` row then stays green when the workflow arm alone drops a
+    // spelling, and only these assertions can see the deletion.
     const out = pathRulesFor([path]);
     expect(out).toContain('GitHub Actions workflows');
     expect(out).toContain('Shell and CI scripts — the lanes that run them');
@@ -370,6 +406,14 @@ describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', 
     // nested pair of unbounded quantifiers pays that failed match once per
     // split point — quadratic in the path length.
     const path = `.github/actions/${'a/'.repeat(48_000)}a`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it("the workflow rule's scripts sub-alternative stays linear too", () => {
+    // The symmetric `.github/scripts/` side of the same arm, on the same
+    // many-segments-no-dot shape: a future edit that re-anchors it with an
+    // unbounded suffix must not ship with every timing test green.
+    const path = `.github/scripts/${'a/'.repeat(48_000)}a`;
     expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
   }, 60_000);
 
