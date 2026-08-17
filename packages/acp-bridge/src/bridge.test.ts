@@ -13180,9 +13180,11 @@ describe('createAcpSessionBridge', () => {
         { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' },
         { type: 'resource_link', uri: 'file:///visible', name: 'visible' },
       ]);
+      // The forwarded display text stays the worker's raw projection; the
+      // child's turn recording treats '' as absent and derives `[image]`.
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
-      ).toBe('[image]');
+      ).toBe('');
       abort.abort();
       await bridge.shutdown();
     });
@@ -15584,6 +15586,142 @@ describe('createAcpSessionBridge', () => {
 
       const current = await bridge.getSessionTurnStatus(session.sessionId);
       expect(current).toEqual(byId);
+      await bridge.shutdown();
+    });
+
+    it('serves repeated settled polls from the enriched overlay without rescanning', async () => {
+      const turnResult = {
+        promptId: 'prompt-cached',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'settled prompt',
+        resultText: 'settled answer',
+      };
+      let turnStatusReads = 0;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            turnStatusReads += 1;
+            return { v: 1, sessionId: 'ignored', turnResult };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settled prompt' }],
+        },
+        undefined,
+        { promptId: 'prompt-cached' },
+      );
+
+      const first = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-cached',
+      );
+      expect(first).toMatchObject({
+        sessionId: session.sessionId,
+        state: 'completed',
+        promptId: 'prompt-cached',
+        resultText: 'settled answer',
+      });
+      expect(turnStatusReads).toBe(1);
+
+      const second = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-cached',
+      );
+      expect(second).toEqual(first);
+      expect(turnStatusReads).toBe(1);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps rescanning a non-enriched terminal until the transcript record is visible', async () => {
+      let turnResult: {
+        promptId: string;
+        state: string;
+        stopReason: string;
+        startedAt: number;
+        endedAt: number;
+        promptText: string;
+        resultText: string;
+      } | null = null;
+      let turnStatusReads = 0;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            turnStatusReads += 1;
+            return { v: 1, sessionId: 'ignored', turnResult };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'late prompt' }],
+        },
+        undefined,
+        { promptId: 'prompt-late' },
+      );
+
+      // First poll: the overlay terminal exists but the child transcript has
+      // no record yet — serve the terminal without caching it as enriched.
+      const first = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-late',
+      );
+      expect(first).toMatchObject({
+        sessionId: session.sessionId,
+        state: 'completed',
+        promptId: 'prompt-late',
+      });
+      expect(first?.resultText).toBeUndefined();
+      expect(turnStatusReads).toBe(1);
+
+      // The transcript record becomes visible afterwards.
+      turnResult = {
+        promptId: 'prompt-late',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'late prompt',
+        resultText: 'late answer',
+      };
+
+      const second = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-late',
+      );
+      expect(second).toMatchObject({
+        sessionId: session.sessionId,
+        state: 'completed',
+        promptId: 'prompt-late',
+        resultText: 'late answer',
+      });
+      expect(turnStatusReads).toBe(2);
+
       await bridge.shutdown();
     });
 

@@ -1260,24 +1260,67 @@ interface AgentResponseCapture {
   agentOutput: AgentOutputMessageCapture;
 }
 
+interface ChannelDeliveryResponseBlock {
+  parts: string[];
+  chars: number;
+  /**
+   * When set, stop accumulating once `chars` reaches the cap; settle then
+   * sees a length past the turn-result bound and flags truncation. Only set
+   * for turns without a channel delivery — the delivery needs the full text,
+   * and capped turns would otherwise retain a multi-megabyte answer in full
+   * just to keep a truncated prefix.
+   */
+  capChars?: number;
+}
+
 function beginChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
-): string[] | undefined {
+): ChannelDeliveryResponseBlock | undefined {
   capture?.agentOutput.beginResponse();
   if (capture?.channelDelivery) capture.channelDelivery.finalText = '';
   if (capture?.turnResult) capture.turnResult.finalText = '';
   if (!capture?.channelDelivery && !capture?.turnResult) return undefined;
-  return [];
+  return {
+    parts: [],
+    chars: 0,
+    ...(capture?.channelDelivery
+      ? {}
+      : { capChars: TURN_RESULT_TEXT_MAX_CHARS + 1 }),
+  };
+}
+
+function appendChannelDeliveryResponseText(
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
+  text: string,
+): void {
+  if (!responseBlock) return;
+  if (
+    responseBlock.capChars !== undefined &&
+    responseBlock.chars >= responseBlock.capChars
+  ) {
+    return;
+  }
+  responseBlock.parts.push(text);
+  responseBlock.chars += text.length;
+}
+
+function rewindChannelDeliveryResponseBlock(
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
+  checkpoint: number,
+): void {
+  if (!responseBlock) return;
+  const removed = responseBlock.parts.splice(checkpoint);
+  for (const part of removed) responseBlock.chars -= part.length;
 }
 
 function commitChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
-  responseBlock: string[] | undefined,
+  responseBlock: ChannelDeliveryResponseBlock | undefined,
   hasFunctionCalls: boolean,
 ): void {
   capture?.agentOutput.commitResponse(hasFunctionCalls);
   if (responseBlock && !hasFunctionCalls) {
-    const finalText = responseBlock.join('');
+    const finalText = responseBlock.parts.join('');
     if (capture?.channelDelivery) capture.channelDelivery.finalText = finalText;
     if (capture?.turnResult) capture.turnResult.finalText = finalText;
   }
@@ -3548,11 +3591,21 @@ export class Session implements SessionContext {
       return result;
     } catch (error) {
       const pendingSend = turnRecording?.abortController;
+      const abortReason =
+        pendingSend?.signal.aborted === true
+          ? pendingSend.signal.reason
+          : undefined;
+      // Mirror the send-loop's controlled-cancellation contract: explicit
+      // user cancels and session disposal settle as `cancelled`. A
+      // successor-prompt abort does so only when the thrown error is the
+      // abort itself; the send loop deliberately excludes NEW_PROMPT from
+      // controlled cancellation so infrastructure failures are not hidden
+      // as cancellations, and a non-abort error landing after a successor
+      // aborted this turn is a real failure that must surface the same way.
       const controlledAbort =
-        pendingSend?.signal.aborted === true &&
-        (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-          pendingSend.signal.reason === NEW_PROMPT_ABORT_REASON ||
-          pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+        abortReason === USER_CANCEL_ABORT_REASON ||
+        abortReason === SESSION_DISPOSE_ABORT_REASON ||
+        (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
       if (controlledAbort) {
         const result = { stopReason: 'cancelled' as const };
         this.#settleTurnRecording('cancelled', turnRecording, result);
@@ -4570,7 +4623,9 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
                 );
-                let channelDeliveryResponseBlock: string[] | undefined;
+                let channelDeliveryResponseBlock:
+                  | ChannelDeliveryResponseBlock
+                  | undefined;
                 let channelDeliveryCheckpoint = 0;
 
                 try {
@@ -4611,7 +4666,7 @@ export class Session implements SessionContext {
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
                   channelDeliveryCheckpoint =
-                    channelDeliveryResponseBlock?.length ?? 0;
+                    channelDeliveryResponseBlock?.parts.length ?? 0;
 
                   let streamFailed = false;
                   try {
@@ -4639,7 +4694,10 @@ export class Session implements SessionContext {
                           );
                           if (!part.thought) {
                             responseCapture.agentOutput.appendText(part.text);
-                            channelDeliveryResponseBlock?.push(part.text);
+                            appendChannelDeliveryResponseText(
+                              channelDeliveryResponseBlock,
+                              part.text,
+                            );
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -4674,10 +4732,10 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
                         ) {
-                          if (channelDeliveryResponseBlock) {
-                            channelDeliveryResponseBlock.length =
-                              channelDeliveryCheckpoint;
-                          }
+                          rewindChannelDeliveryResponseBlock(
+                            channelDeliveryResponseBlock,
+                            channelDeliveryCheckpoint,
+                          );
                         }
                         await finalizeToolCallPreparations(
                           preparationTracker,
@@ -5315,7 +5373,9 @@ export class Session implements SessionContext {
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
       );
-      let channelDeliveryResponseBlock: string[] | undefined;
+      let channelDeliveryResponseBlock:
+        | ChannelDeliveryResponseBlock
+        | undefined;
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
@@ -5617,7 +5677,8 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
         );
-        channelDeliveryCheckpoint = channelDeliveryResponseBlock?.length ?? 0;
+        channelDeliveryCheckpoint =
+          channelDeliveryResponseBlock?.parts.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -5658,7 +5719,10 @@ export class Session implements SessionContext {
               );
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
-                channelDeliveryResponseBlock?.push(part.text);
+                appendChannelDeliveryResponseText(
+                  channelDeliveryResponseBlock,
+                  part.text,
+                );
                 messageDisplay?.addChunk(part.text);
               }
             }
@@ -5692,9 +5756,10 @@ export class Session implements SessionContext {
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
             ) {
-              if (channelDeliveryResponseBlock) {
-                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
-              }
+              rewindChannelDeliveryResponseBlock(
+                channelDeliveryResponseBlock,
+                channelDeliveryCheckpoint,
+              );
             }
             await finalizeToolCallPreparations(
               preparationTracker,
@@ -6004,9 +6069,15 @@ export class Session implements SessionContext {
     if (!invocationContext) return null;
     const promptMetadata = (params as { _meta?: Record<string, unknown> })
       ._meta;
+    const rawPromptDisplayText =
+      promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    // Treat an empty display text as absent so an image-only channel prompt
+    // still records `[image]` via the content fallback, without the bridge
+    // having to rewrite the forwarded value (which also feeds transcript
+    // displayText and telemetry outside this feature's surface).
     const promptDisplayText =
-      typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === 'string'
-        ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+      typeof rawPromptDisplayText === 'string' && rawPromptDisplayText !== ''
+        ? rawPromptDisplayText
         : undefined;
     const { text, truncated } = truncateTurnText(
       promptDisplayText ?? extractTurnPromptText(params.prompt),
@@ -7257,10 +7328,12 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
-                const channelDeliveryResponseBlock =
+                const channelDeliveryResponseBlock:
+                  | ChannelDeliveryResponseBlock
+                  | undefined =
                   beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
-                  channelDeliveryResponseBlock?.length ?? 0;
+                  channelDeliveryResponseBlock?.parts.length ?? 0;
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -7296,7 +7369,10 @@ export class Session implements SessionContext {
                         );
                         if (!part.thought) {
                           responseCapture.agentOutput.appendText(part.text);
-                          channelDeliveryResponseBlock?.push(part.text);
+                          appendChannelDeliveryResponseText(
+                            channelDeliveryResponseBlock,
+                            part.text,
+                          );
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -7331,10 +7407,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
                       ) {
-                        if (channelDeliveryResponseBlock) {
-                          channelDeliveryResponseBlock.length =
-                            channelDeliveryCheckpoint;
-                        }
+                        rewindChannelDeliveryResponseBlock(
+                          channelDeliveryResponseBlock,
+                          channelDeliveryCheckpoint,
+                        );
                       }
                       await finalizeToolCallPreparations(
                         preparationTracker,

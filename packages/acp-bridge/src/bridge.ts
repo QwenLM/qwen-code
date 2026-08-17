@@ -990,6 +990,13 @@ interface SessionEntry {
   pendingPromptList: PendingPromptEntry[];
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
+  /**
+   * promptIds whose overlay terminal was enriched with the child's persisted
+   * `turn_result` by `getSessionTurnStatus`. Those entries fully answer a
+   * status poll, so they can be served without re-scanning the child
+   * transcript.
+   */
+  enrichedTerminalPromptIds: Set<string>;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -1895,10 +1902,35 @@ function rememberTerminalTurnStatus(
             error: normalizeTurnResultError(terminal.err),
           };
   entry.terminalTurnStatuses.set(pending.promptId, status);
+  // A fresh bridge-published terminal replaces any enriched answer for the
+  // same promptId.
+  entry.enrichedTerminalPromptIds.delete(pending.promptId);
   while (entry.terminalTurnStatuses.size > TERMINAL_TURN_STATUS_OVERLAY_LIMIT) {
     const oldest = entry.terminalTurnStatuses.keys().next().value;
     if (oldest === undefined) break;
     entry.terminalTurnStatuses.delete(oldest);
+    entry.enrichedTerminalPromptIds.delete(oldest);
+  }
+}
+
+/**
+ * Write a `getSessionTurnStatus` answer back into the overlay so later polls
+ * for the same settled promptId are served from memory instead of forcing a
+ * full child transcript scan each time. Shares the overlay's bounded
+ * eviction.
+ */
+function rememberEnrichedTerminalTurnStatus(
+  entry: SessionEntry,
+  promptId: string,
+  status: BridgeTurnStatus,
+): void {
+  entry.terminalTurnStatuses.set(promptId, status);
+  entry.enrichedTerminalPromptIds.add(promptId);
+  while (entry.terminalTurnStatuses.size > TERMINAL_TURN_STATUS_OVERLAY_LIMIT) {
+    const oldest = entry.terminalTurnStatuses.keys().next().value;
+    if (oldest === undefined) break;
+    entry.terminalTurnStatuses.delete(oldest);
+    entry.enrichedTerminalPromptIds.delete(oldest);
   }
 }
 
@@ -5594,6 +5626,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingAgentNotificationCount: 0,
       pendingPromptList: [],
       terminalTurnStatuses: new Map(),
+      enrichedTerminalPromptIds: new Set(),
       midTurnMessageQueue: [],
       settledMidTurnMessageIds: [],
       promotedMidTurnMessageIds: [],
@@ -8061,8 +8094,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
-                  const promptDisplayText =
-                    channelDisplayText === undefined ? undefined : pendingText;
+                  const promptDisplayText = channelDisplayText;
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -10243,6 +10275,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const liveBeforeRead = findLiveTurnStatus(entry, promptId);
       if (liveBeforeRead) return liveBeforeRead;
 
+      // An overlay terminal a previous poll already enriched with the
+      // child's persisted record fully answers the query; serving it here
+      // spares settled prompts a full child transcript scan on every poll.
+      if (
+        promptId !== undefined &&
+        entry.enrichedTerminalPromptIds.has(promptId)
+      ) {
+        const enrichedTerminal = entry.terminalTurnStatuses.get(promptId);
+        if (enrichedTerminal) return enrichedTerminal;
+      }
+
       let result: {
         v: number;
         sessionId: string;
@@ -10253,6 +10296,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           sessionId,
           SERVE_CONTROL_EXT_METHODS.sessionTurnStatus,
           { ...(promptId !== undefined ? { promptId } : {}) },
+          // Transcript scans of large histories exceed the 10s init default;
+          // give the read the same budget as other transcript reads.
+          SESSION_TRANSCRIPT_TIMEOUT_MS,
         );
       } catch (error) {
         const liveAfterFailure = findLiveTurnStatus(entry, promptId);
@@ -10275,10 +10321,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         : undefined;
       if (promptId !== undefined) {
         if (terminal && persisted) {
-          return mergeTerminalWithPersisted(terminal, persisted);
+          const merged = mergeTerminalWithPersisted(terminal, persisted);
+          rememberEnrichedTerminalTurnStatus(entry, promptId, merged);
+          return merged;
         }
         if (terminal) return terminal;
-        if (persisted) return persisted;
+        if (persisted) {
+          rememberEnrichedTerminalTurnStatus(entry, promptId, persisted);
+          return persisted;
+        }
       } else {
         if (terminal && persisted && terminal.promptId === persisted.promptId) {
           return mergeTerminalWithPersisted(terminal, persisted);
@@ -10948,6 +10999,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
 
         entry.terminalTurnStatuses.clear();
+        entry.enrichedTerminalPromptIds.clear();
 
         const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
         const filesChanged = (response['filesChanged'] as string[]) ?? [];

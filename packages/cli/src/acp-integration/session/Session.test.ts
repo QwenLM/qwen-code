@@ -4665,6 +4665,48 @@ describe('Session', () => {
         );
       });
 
+      it('treats an empty display text meta as absent for the turn record', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' },
+            ],
+            _meta: { 'qwen.daemon.promptDisplayText': '' },
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '[image]',
+          }),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'projected prompt body' }],
+            _meta: { 'qwen.daemon.promptDisplayText': '' },
+          },
+          trustedContext,
+        );
+
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: 'projected prompt body',
+          }),
+        );
+      });
+
       it('accumulates streamed agent text into resultText', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks([
@@ -4804,6 +4846,56 @@ describe('Session', () => {
               type: core.StreamEventType.CHUNK,
               value: {
                 candidates: [{ content: { parts: [{ text: longText }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'long' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toHaveLength(
+          core.TURN_RESULT_TEXT_MAX_CHARS,
+        );
+        expect(payload.resultTruncated).toBe(true);
+        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
+      });
+
+      it('keeps the same surface contract when many chunks exceed the cap', async () => {
+        const chunk = 'a'.repeat(
+          Math.ceil(core.TURN_RESULT_TEXT_MAX_CHARS / 2),
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
               },
             },
           ]),
@@ -5101,9 +5193,9 @@ describe('Session', () => {
         });
       });
 
-      it('records a superseded turn as cancelled when its stream throws', async () => {
+      it('records a superseded turn as cancelled when its stream throws the abort', async () => {
         mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
-        let rejectFirst!: (error: Error) => void;
+        let rejectFirst!: (error: unknown) => void;
         const firstFailure = new Promise<never>((_resolve, reject) => {
           rejectFirst = reject;
         });
@@ -5146,7 +5238,9 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
         );
-        rejectFirst(new Error('superseded stream aborted'));
+        rejectFirst(
+          new DOMException('superseded stream aborted', 'AbortError'),
+        );
 
         const [firstResult, secondResult] = await Promise.allSettled([
           first,
@@ -5170,6 +5264,83 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
           2,
         );
+        const secondPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'second-prompt-id');
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'completed',
+        });
+      });
+
+      it('surfaces a genuine failure after a successor abort instead of cancelling', async () => {
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let rejectFirst!: (error: unknown) => void;
+        const firstFailure = new Promise<never>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'partial' }] } }],
+            },
+          };
+          await firstFailure;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'second-prompt-id',
+          },
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        const genuineFailure = new Error('model backend failed');
+        rejectFirst(genuineFailure);
+
+        const [firstResult, secondResult] = await Promise.allSettled([
+          first,
+          second,
+        ]);
+        expect(firstResult).toEqual({
+          status: 'rejected',
+          reason: genuineFailure,
+        });
+        expect(secondResult.status).toBe('fulfilled');
+
+        const firstPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'daemon-prompt-id');
+        expect(firstPayload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'error',
+          promptText: 'first prompt',
+        });
         const secondPayload =
           mockChatRecordingService.recordTurnResult.mock.calls
             .map((call) => call[0])
@@ -12992,13 +13163,31 @@ describe('Session', () => {
       });
 
       it('does not apply the turn-result limit to channel delivery text', async () => {
-        const answer = 'x'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
+        // Multi-chunk on purpose: the accumulation cap must never apply to
+        // delivery turns, and a single chunk would pass even if it did (the
+        // first append is always accepted).
+        const chunk = 'x'.repeat(
+          Math.ceil(core.TURN_RESULT_TEXT_MAX_CHARS / 2) + 50,
+        );
+        const answer = chunk + chunk + chunk;
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks([
             {
               type: core.StreamEventType.CHUNK,
               value: {
-                candidates: [{ content: { parts: [{ text: answer }] } }],
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: chunk }] } }],
               },
             },
           ]),
