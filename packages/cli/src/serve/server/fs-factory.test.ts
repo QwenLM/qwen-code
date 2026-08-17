@@ -7,8 +7,16 @@
 import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resolveBoundWorkspacesFromIdeEnv } from './fs-factory.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  parseNewFileModePolicy,
+  resolveBoundWorkspacesFromIdeEnv,
+} from './fs-factory.js';
+
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+}));
 
 const scratches: string[] = [];
 
@@ -182,5 +190,65 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
         [primary, parent, child].join(path.delimiter),
       ),
     ).toEqual([realpathSync.native(primary), realpathSync.native(parent)]);
+  });
+});
+
+describe('parseNewFileModePolicy (QWEN_SERVE_NEW_FILE_MODE)', () => {
+  // Earlier suites in this file legitimately warn through the same
+  // helper; reset before AND after so call-count assertions here only
+  // see this suite's own invocations.
+  beforeEach(() => {
+    mockWriteStderrLine.mockClear();
+  });
+  afterEach(() => {
+    mockWriteStderrLine.mockClear();
+  });
+
+  it('defaults to owner when unset or empty', () => {
+    expect(parseNewFileModePolicy({})).toBe('owner');
+    expect(parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: '' })).toBe(
+      'owner',
+    );
+    expect(parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: '   ' })).toBe(
+      'owner',
+    );
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('accepts explicit owner spellings', () => {
+    expect(parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: 'owner' })).toBe(
+      'owner',
+    );
+    expect(parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: '0600' })).toBe(
+      'owner',
+    );
+    expect(
+      parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: ' OWNER ' }),
+    ).toBe('owner');
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('accepts system case-insensitively with surrounding whitespace', () => {
+    expect(parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: 'system' })).toBe(
+      'system',
+    );
+    expect(
+      parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: ' System ' }),
+    ).toBe('system');
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown values with a warning and keeps the 0600 default', () => {
+    expect(parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: '0644' })).toBe(
+      'owner',
+    );
+    expect(
+      parseNewFileModePolicy({ QWEN_SERVE_NEW_FILE_MODE: 'everyone' }),
+    ).toBe('owner');
+    expect(mockWriteStderrLine).toHaveBeenCalledTimes(2);
+    expect(mockWriteStderrLine.mock.calls[0]?.[0]).toContain(
+      'QWEN_SERVE_NEW_FILE_MODE',
+    );
+    expect(mockWriteStderrLine.mock.calls[0]?.[0]).toContain('0600 default');
   });
 });
