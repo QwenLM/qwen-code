@@ -676,12 +676,12 @@ Operators whose deployment convention is umask-driven (e.g. a systemd unit with 
 
 | Env var                    | Values                       | Default | What it does                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `QWEN_SERVE_NEW_FILE_MODE` | `owner` (`0600`) \| `system` | `owner` | `system` creates NEW files at `0o666 & ~umask`, so agent-created files follow the daemon process's umask like any other process on the machine. `owner` keeps the umask-independent `0600` default. Values are case-insensitive; any other value is rejected with a stderr warning and the `0600` default is kept. |
+| `QWEN_SERVE_NEW_FILE_MODE` | `owner` \| `system`          | `owner` | `system` creates NEW files at `0o666 & ~umask`, so agent-created files follow the daemon process's umask like any other process on the machine. `owner` keeps the umask-independent `0600` default. Values are case-insensitive; the literal `0600` is accepted as an alias for `owner` (no other octal modes are supported), and any other value is rejected with a stderr warning and the `0600` default is kept. |
 
 Scope and limits:
 
 - Applies to NEW files created by the text-write routes (workspace targets, the same-host external host writer, and HTTP text writes). Existing files always keep their on-disk mode — editing a `0600` secret keeps it `0600`, an executable keeps `+x`.
-- Binary uploads (`POST /file/bytes`) always create at `0600` regardless of this setting.
+- Binary uploads (`POST /file/upload`) always create at `0600` regardless of this setting.
 - The daemon reads the variable at workspace-filesystem construction; restart the daemon after changing it.
 
 ## Multi-session & multi-workspace deployment

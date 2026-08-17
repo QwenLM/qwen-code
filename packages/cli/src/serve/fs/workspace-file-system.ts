@@ -228,14 +228,17 @@ export const OWNER_ONLY_NEW_FILE_MODE = 0o600;
 
 /**
  * Resolve the mode bits for a NEW file under the given policy.
- * `umask` defaults to the live process umask; tests pass an explicit
- * value to stay deterministic without mutating process state.
+ * `umask` is read lazily only when the `system` policy consumes it; the
+ * default `owner` policy never touches the process umask. Tests pass an
+ * explicit value to stay deterministic without mutating process state.
  */
 export function resolveNewFileModeBits(
   policy: NewFileModePolicy,
-  umask: number = process.umask(),
+  umask?: number,
 ): number {
-  return policy === 'system' ? 0o666 & ~umask : OWNER_ONLY_NEW_FILE_MODE;
+  return policy === 'system'
+    ? 0o666 & ~(umask ?? process.umask())
+    : OWNER_ONLY_NEW_FILE_MODE;
 }
 
 export interface WriteTextAtomicOptions extends WriteTextFileOptions {

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   parseNewFileModePolicy,
+  resolveBridgeFsFactory,
   resolveBoundWorkspacesFromIdeEnv,
 } from './fs-factory.js';
 
@@ -17,6 +18,8 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
 }));
+
+const isPosix = process.platform !== 'win32';
 
 const scratches: string[] = [];
 
@@ -250,5 +253,40 @@ describe('parseNewFileModePolicy (QWEN_SERVE_NEW_FILE_MODE)', () => {
       'QWEN_SERVE_NEW_FILE_MODE',
     );
     expect(mockWriteStderrLine.mock.calls[0]?.[0]).toContain('0600 default');
+  });
+});
+
+describe('resolveBridgeFsFactory env-var wiring (QWEN_SERVE_NEW_FILE_MODE)', () => {
+  // Guards the seam between the documented env var and the daemon: every
+  // production call site omits `newFileMode`, so `resolveBridgeFsFactory`
+  // must derive the policy from `process.env` itself. A regression that
+  // hard-codes the default here would silently disable the knob while every
+  // injected-`newFileMode` unit test stayed green.
+  it('derives the policy from process.env when newFileMode is not injected', async () => {
+    if (!isPosix) return;
+    const scratch = await mkScratch();
+    const prevEnv = process.env['QWEN_SERVE_NEW_FILE_MODE'];
+    const prevUmask = process.umask(0o002);
+    process.env['QWEN_SERVE_NEW_FILE_MODE'] = 'system';
+    try {
+      const factory = resolveBridgeFsFactory({
+        boundWorkspaces: [scratch],
+        trusted: true,
+      });
+      const fs = factory.forRequest({ route: 'TEST /op' });
+      const resolved = await fs.resolve('env-wired.txt', 'write');
+      const out = await fs.writeTextOverwrite(resolved, 'hello\n');
+      expect(out.created).toBe(true);
+      const st = await fsp.lstat(resolved as string);
+      // system policy: 0o666 & ~umask(0o002) = 0o664, not the 0o600 default.
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_SERVE_NEW_FILE_MODE'];
+      } else {
+        process.env['QWEN_SERVE_NEW_FILE_MODE'] = prevEnv;
+      }
+      process.umask(prevUmask);
+    }
   });
 });
