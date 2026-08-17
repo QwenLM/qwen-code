@@ -20,9 +20,17 @@ import type {
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
-import { isRecord } from './utils.js';
+import { detachString, isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
+/**
+ * Byte budget for retained transcript blocks. Blocks carry raw tool payloads
+ * (up to the daemon's per-frame cap each), so the block-count window alone
+ * does not bound memory; trimming evicts the oldest blocks until the running
+ * estimate is back under this budget. The ceiling is therefore budget + one
+ * worst-case block.
+ */
+const DEFAULT_MAX_RETAINED_BYTES = 128 * 1024 * 1024;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
@@ -58,6 +66,8 @@ export function createDaemonTranscriptState(
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? DEFAULT_MAX_BLOCKS,
+    retainedBytes: 0,
+    maxRetainedBytes: opts.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES,
     retainSubagentBlocks: opts.retainSubagentBlocks ?? true,
   };
   if (opts.onTruncation) truncationCallbacks.set(state, opts.onTruncation);
@@ -823,6 +833,15 @@ function upsertToolBlock(
     }
     return;
   }
+  // Measure the block as currently retained BEFORE the write path clones it
+  // (`getWritableBlockById` swaps in a COW clone, whose structure can estimate
+  // slightly differently); the delta stays exact against what is actually
+  // retained before and after.
+  const retainedIndex =
+    existingId !== undefined ? state.blockIndexById[existingId] : undefined;
+  const retainedBefore =
+    retainedIndex !== undefined ? state.blocks[retainedIndex] : undefined;
+  const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
     if (event.title !== undefined) existing.title = event.title;
@@ -915,6 +934,7 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
   }
@@ -1384,6 +1404,7 @@ function cloneTranscriptState(
     ...state,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
+    maxRetainedBytes: opts.maxRetainedBytes ?? state.maxRetainedBytes,
     retainSubagentBlocks:
       opts.retainSubagentBlocks ?? state.retainSubagentBlocks,
     // Lazy copy-on-write for
@@ -1437,9 +1458,30 @@ function cloneTranscriptState(
 function trimTranscriptState(
   state: DaemonTranscriptState,
 ): DaemonTranscriptState {
-  if (state.blocks.length <= state.maxBlocks) return state;
+  const overByteBudget = state.retainedBytes > state.maxRetainedBytes;
+  if (state.blocks.length <= state.maxBlocks && !overByteBudget) return state;
   truncationCallbacks.get(state)?.({ kind: 'blocks' });
-  const blocks = state.blocks.slice(-state.maxBlocks);
+  // Count-based floor: keep at most the last `maxBlocks` blocks.
+  let removeCount = Math.max(0, state.blocks.length - state.maxBlocks);
+  let removedBytes = 0;
+  for (let i = 0; i < removeCount; i += 1) {
+    removedBytes += estimateBlockBytes(state.blocks[i]!);
+  }
+  // Byte budget: keep evicting oldest blocks until the retained estimate is
+  // back under the budget. The last block always survives, so the ceiling is
+  // budget + one worst-case block rather than strictly the budget.
+  let bytes = state.retainedBytes - removedBytes;
+  while (
+    removeCount < state.blocks.length - 1 &&
+    bytes > state.maxRetainedBytes
+  ) {
+    const blockBytes = estimateBlockBytes(state.blocks[removeCount]!);
+    removedBytes += blockBytes;
+    bytes -= blockBytes;
+    removeCount += 1;
+  }
+  state.retainedBytes = Math.max(0, bytes);
+  const blocks = state.blocks.slice(removeCount);
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
@@ -1619,6 +1661,7 @@ function appendBlock(
   takeBlocksOwnership(state);
   state.blockIndexById[block.id] = state.blocks.length;
   (state.blocks as DaemonTranscriptBlock[]).push(block);
+  state.retainedBytes += estimateBlockBytes(block);
 }
 
 function getWritableBlockById(
@@ -1687,11 +1730,20 @@ function appendBoundedText(
   text: string,
 ): string {
   const existing = 'text' in block ? block.text : '';
+  let next: string;
   if (existing.length >= MAX_TEXT_BLOCK_LENGTH) {
     if (text) reportTextTruncation(state, block.id, block.sourceRecordIds);
-    return existing;
+    next = existing;
+  } else {
+    next = truncateText(
+      state,
+      block.id,
+      block.sourceRecordIds,
+      existing + text,
+    );
   }
-  return truncateText(state, block.id, block.sourceRecordIds, existing + text);
+  state.retainedBytes += (next.length - existing.length) * 2;
+  return next;
 }
 
 function truncateText(
@@ -1706,7 +1758,9 @@ function truncateText(
     0,
     MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
   );
-  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+  // detach: a bare slice would keep the oversized parent string's backing
+  // store alive for as long as the block is retained.
+  return `${detachString(text.slice(0, keepLength))}${TEXT_TRUNCATED_SUFFIX}`;
 }
 
 function reportTextTruncation(
@@ -1720,6 +1774,41 @@ function reportTextTruncation(
     sourceRecordIds,
   });
 }
+
+/**
+ * Cheap structural size estimate of a retained value (bytes). Strings count
+ * as 2 bytes per UTF-16 code unit; records/arrays add a small per-entry
+ * overhead. Deliberately approximate: it drives the retention byte budget,
+ * not billing. The walk is bounded by the same depth cap as cloning.
+ */
+function estimateRetainedBytes(value: unknown, depth = 0): number {
+  if (depth > MAX_CLONE_DEPTH) return 0;
+  if (typeof value === 'string') return value.length * 2;
+  if (typeof value === 'number' || typeof value === 'boolean') return 16;
+  if (Array.isArray(value)) {
+    let total = 32;
+    for (const entry of value) {
+      total += estimateRetainedBytes(entry, depth + 1);
+    }
+    return total;
+  }
+  if (isRecord(value)) {
+    let total = 64;
+    for (const [key, entry] of Object.entries(value)) {
+      total += key.length * 2 + estimateRetainedBytes(entry, depth + 1);
+    }
+    return total;
+  }
+  return 0;
+}
+
+export function estimateDaemonTranscriptBlockBytes(
+  block: DaemonTranscriptBlock,
+): number {
+  return estimateRetainedBytes(block);
+}
+
+const estimateBlockBytes = estimateDaemonTranscriptBlockBytes;
 
 function createIndex<T>(
   source?: Readonly<Record<string, T>>,

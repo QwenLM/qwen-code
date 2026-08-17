@@ -498,10 +498,12 @@ interface HeartbeatFailureState {
 // and subagent grouping survive replay. Rendering is virtualized, but message
 // normalization still rebuilds from retained blocks today, so this default is a
 // history-preservation tradeoff rather than a claim that large transcripts are
-// CPU-free. The value is also a memory ceiling: blocks can carry large tool
-// payloads, so an implicit 200k window let a single busy session exhaust
-// renderer memory. Callers can pass a smaller maxBlocks in constrained contexts.
-const DEFAULT_MAX_BLOCKS = 50_000;
+// CPU-free. This is a block-COUNT ceiling; the memory ceiling is enforced
+// separately by the transcript store's retention byte budget, because blocks
+// can carry large raw tool payloads (an implicit 200k window let a single busy
+// session exhaust renderer memory). Callers can pass a smaller maxBlocks in
+// constrained contexts.
+export const DEFAULT_MAX_BLOCKS = 50_000;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -1530,14 +1532,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               firstPersistedRecordId;
             transcriptHistoryRef.current.cursor = undefined;
           }
-          if (replayInjected) {
-            // The snapshot is injected into the store below and never read
-            // again (SSE continues from lastEventId; older history arrives
-            // via pagination). Drop the client's reference so busy-session
-            // snapshots — tens of MiB of raw wire events after adaptive
-            // journal growth — don't stay pinned for the whole attachment.
-            activeSession.consumeReplaySnapshot();
-          }
           if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
@@ -1796,6 +1790,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
+            // Release the raw snapshot only after the injection above
+            // completed: if normalization/dispatch threw, the recovery path
+            // reloads the session, and the still-retained snapshot keeps the
+            // window consistent until then. On success it is never read again
+            // (SSE continues from lastEventId; older history via pagination),
+            // so dropping it unpins busy-session snapshots that can reach
+            // tens of MiB after adaptive journal growth.
+            activeSession.consumeReplaySnapshot();
           }
           setConnection((current) => ({
             ...current,

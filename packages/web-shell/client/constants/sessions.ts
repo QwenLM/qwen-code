@@ -26,11 +26,14 @@ export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
  * (the main chat and each split pane). The daemon stays the authoritative
  * full-transcript source; this only caps the client's in-memory window.
  *
- * Matches the provider's DEFAULT_MAX_BLOCKS; passed explicitly so Web Shell
- * retention cannot drift if that default changes. Bounding the window keeps
- * very long sessions responsive: the per-dispatch reducer cost (a full
- * block-array copy) and the full-list message normalization turn a burst of
- * buffered SSE events — e.g. the stream catching up when the tab returns
- * from being hidden — into a long main-thread block on large transcripts.
+ * Intentionally equal to the provider's `DEFAULT_MAX_BLOCKS`; the equality is
+ * enforced by `sessions.test.ts` (importing the constant here instead of the
+ * provider would pull the webui barrel into every importer's module graph and
+ * break the enumerative `daemon-react-sdk` mocks in component tests). Bounding
+ * the window keeps very long sessions responsive: the per-dispatch reducer
+ * cost (a full block-array copy) and the full-list message normalization turn
+ * a burst of buffered SSE events — e.g. the stream catching up when the tab
+ * returns from being hidden — into a long main-thread block on large
+ * transcripts.
  */
 export const WEB_SHELL_MAX_TRANSCRIPT_BLOCKS = 50_000;

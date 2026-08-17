@@ -13,6 +13,7 @@ import type {
 import {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
+  estimateDaemonTranscriptBlockBytes,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
 } from './transcript.js';
@@ -141,10 +142,19 @@ function createState(
   return {
     ...createDaemonTranscriptState({
       maxBlocks: seed.maxBlocks,
+      maxRetainedBytes: seed.maxRetainedBytes,
       now: seed.now,
     }),
     ...seed,
     blocks,
+    // Seeded blocks (e.g. a replay snapshot handed to `reset`) must count
+    // toward the retention byte budget from the start.
+    retainedBytes:
+      seed.retainedBytes ??
+      blocks.reduce(
+        (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+        0,
+      ),
     blockIndexById: rebuildDaemonTranscriptBlockIndex(blocks),
     toolBlockByCallId: createNullIndex(seed.toolBlockByCallId),
     trimmedToolNotificationByCallId: createNullIndex(

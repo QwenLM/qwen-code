@@ -11,6 +11,7 @@ import {
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
   daemonUiEventToTerminalText,
+  estimateDaemonTranscriptBlockBytes,
   getOutputText,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
@@ -1206,6 +1207,91 @@ describe('daemon UI normalizer and transcript reducer', () => {
       .map(([toolCallId]) => toolCallId);
     expect(trimmedToolCallIds).toHaveLength(2);
     expect(Object.keys(state.toolBlockByCallId)).toHaveLength(4);
+  });
+
+  it('evicts oldest blocks to stay under the retention byte budget', () => {
+    // The block-count window is not a memory ceiling: blocks carry raw tool
+    // payloads. With a generous block window but a tight byte budget, heavy
+    // blocks must still be evicted oldest-first.
+    const large = 'x'.repeat(20_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 90_000,
+      now: 1,
+    });
+    for (let index = 0; index < 4; index += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId: `tool-${index}`,
+            title: `Tool ${index}`,
+            status: 'completed',
+            rawOutput: large,
+          },
+        ],
+        { now: index + 2 },
+      );
+    }
+
+    expect(state.blocks.length).toBeGreaterThan(0);
+    expect(state.blocks.length).toBeLessThan(4);
+    expect(state.retainedBytes).toBeLessThanOrEqual(90_000);
+    // Most recent blocks survive eviction.
+    const keptToolCallIds = state.blocks.map(
+      (block) => (block as { toolCallId?: string }).toolCallId,
+    );
+    expect(keptToolCallIds).toContain('tool-3');
+    expect(keptToolCallIds).not.toContain('tool-0');
+    // The running estimate matches the blocks actually retained.
+    const expected = state.blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(state.retainedBytes).toBe(expected);
+  });
+
+  it('keeps the retention estimate current when a tool payload is replaced', () => {
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 10_000_000,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-a',
+          title: 'Tool',
+          status: 'running',
+          rawOutput: 'small',
+        },
+      ],
+      { now: 2 },
+    );
+    const before = state.retainedBytes;
+    expect(before).toBeGreaterThan(0);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-a',
+          status: 'completed',
+          rawOutput: 'y'.repeat(50_000),
+        },
+      ],
+      { now: 3 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.retainedBytes).toBeGreaterThan(before);
+    expect(state.retainedBytes).toBe(
+      estimateDaemonTranscriptBlockBytes(state.blocks[0]!),
+    );
   });
 
   it('keeps active assistant text open when reporting trimmed tool updates', () => {

@@ -1055,10 +1055,18 @@ export interface DaemonTranscriptState
   now: number;
   maxBlocks: number;
   retainSubagentBlocks: boolean;
+  /**
+   * Running estimate (bytes) of what `blocks` retains. Blocks carry raw tool
+   * payloads, so a block-count cap alone is not a memory ceiling; trimming
+   * also evicts until the estimate is back under `maxRetainedBytes`.
+   */
+  retainedBytes: number;
+  maxRetainedBytes: number;
 }
 
 export interface DaemonTranscriptReducerOptions {
   maxBlocks?: number;
+  maxRetainedBytes?: number;
   now?: number;
   retainSubagentBlocks?: boolean;
   onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
