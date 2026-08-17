@@ -379,6 +379,10 @@ describe('file I/O', () => {
   });
 
   describe('tryReclaimStaleTeam', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     /** PID of a process that has already exited. */
     function deadPid(): number {
       const child = spawnSync(process.execPath, ['-e', '']);
@@ -423,6 +427,22 @@ describe('file I/O', () => {
 
       await expect(tryReclaimStaleTeam('ghost')).resolves.toBe(true);
       await expect(fs.access(tasksDir)).rejects.toThrow();
+    });
+
+    it('does not reclaim when the lead PID is alive but owned by another user', async () => {
+      // Pins teamHelpers to the shared isPidAlive: EACCES (Windows'
+      // other-user errno, alongside EPERM) means the process exists —
+      // the duplicate local copy this replaced treated it as dead and
+      // would have reclaimed a live team.
+      vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('access denied'), {
+          code: 'EACCES',
+        });
+      });
+      await writeTeamFile('other-user', makeTeamFile({ leadPid: 424242 }));
+
+      await expect(tryReclaimStaleTeam('other-user')).resolves.toBe(false);
+      expect(await readTeamFile('other-user')).toBeDefined();
     });
   });
 });

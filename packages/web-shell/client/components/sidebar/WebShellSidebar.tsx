@@ -4360,8 +4360,8 @@ export function WebShellSidebar({
                   noSessionsLabel={t('sidebar.noSessions')}
                   loadErrorLabel={t('sidebar.loadFailed')}
                   organizationEnabled={false}
-                  sourceType={selectedSessionSource}
-                  channelGroupingEnabled={channelGroupingEnabled}
+                  sourceType={sourceMetadataEnabled ? 'default' : undefined}
+                  channelGroupingEnabled={false}
                   ungroupedLabel={t('sidebar.groupUngrouped')}
                   formatTime={(iso) => formatRelativeTime(iso, t)}
                   autoExpandKey={
