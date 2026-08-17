@@ -29,9 +29,8 @@ export function getStableClientId(
  * Read the client id persisted for `sessionId` without generating one. Returns
  * `undefined` when nothing is stored (SSR, private-mode quota failure, or a
  * session this client never attached). Callers use this to act on behalf of a
- * NON-current session — e.g. removing a mid-turn message the bridge only
- * matches on an exact originator id — where `getStableClientId`'s generate-on-
- * miss would mint an unrelated id that the bridge rejects.
+ * NON-current session, where `getStableClientId`'s generate-on-miss would mint
+ * an unrelated id that is not attached to the target session.
  */
 export function getPersistedClientId(sessionId: string): string | undefined {
   if (typeof window === 'undefined') return undefined;

@@ -35,6 +35,7 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
+import { ClientSideConnection } from '@agentclientprotocol/sdk';
 import { ProcessRegistry } from './process-registry.js';
 import { createChildHeapPolicy } from './child-heap-policy.js';
 import { resolveDaemonMemoryBudget } from './daemon-memory-budget.js';
@@ -50,6 +51,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 import {
+  DAEMON_ACP_NDJSON_LIMITS,
   createSpawnChannelFactory,
   createStderrForwarder,
   getAcpMemoryArgs,
@@ -129,8 +131,9 @@ describe('createSpawnChannelFactory env policy', () => {
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
-      | { env?: NodeJS.ProcessEnv }
+      | { env?: NodeJS.ProcessEnv; windowsHide?: boolean }
       | undefined;
+    expect(spawnOptions?.windowsHide).toBe(true);
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(spawnOptions?.env).not.toHaveProperty(
@@ -225,6 +228,233 @@ describe('createSpawnChannelFactory env policy', () => {
 
     reader.releaseLock();
     writer.releaseLock();
+  });
+
+  it('terminates the tracked child when a bounded pipe fails', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const factory = createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 16,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 32,
+      },
+    });
+    const channel = await factory('/tmp/project');
+    const reader = channel.stream.readable.getReader();
+
+    (child.stdout as PassThrough).write('x'.repeat(17));
+
+    await expect(reader.closed).resolves.toBeUndefined();
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_frame_too_large',
+    });
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    reader.releaseLock();
+  });
+
+  it('rejects invalid known-method params before ACP SDK validation', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 4,
+        maxQueuedBytes: 16_384,
+      },
+    })('/tmp/project');
+    const connection = new ClientSideConnection(
+      () => ({}) as never,
+      channel.stream,
+    );
+
+    (child.stdout as PassThrough).write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'terminal/create',
+        params: { command: 'true', sessionId: 'session', args: [1] },
+      })}\n`,
+    );
+
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_invalid_message',
+    });
+    await expect(connection.closed).resolves.toBeUndefined();
+    expect(stderr).toHaveBeenCalledOnce();
+    expect(stderr.mock.calls[0]?.[0]).toBe('Failed to parse JSON message:');
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(
+      'Error handling request',
+    );
+    stderr.mockRestore();
+  });
+
+  it('terminates a bounded child that closes stdout without exiting', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 4,
+        maxQueuedBytes: 16_384,
+      },
+    })('/tmp/project');
+    const connection = new ClientSideConnection(
+      () => ({}) as never,
+      channel.stream,
+    );
+
+    (child.stdout as PassThrough).end();
+
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_unexpected_eof',
+    });
+    await expect(connection.closed).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+  });
+
+  it('terminates the tracked child when outbound serialization fails', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const factory = createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 2048,
+      },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const cyclic: Record<string, unknown> = {
+      jsonrpc: '2.0',
+      method: 'cycle',
+    };
+    cyclic['self'] = cyclic;
+
+    await expect(writer.write(cyclic as never)).rejects.toBeInstanceOf(
+      TypeError,
+    );
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    writer.releaseLock();
+  });
+
+  it('holds prepared response bytes until the response is written', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const factory = createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 5000,
+      },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const first = { text: 'x'.repeat(1000) };
+    const second = { text: 'y'.repeat(1000) };
+    const third = { text: 'z'.repeat(1000) };
+
+    const releaseOutbound = channel.transportGuard?.reserveOutboundOperation([
+      'method',
+      { optional: undefined },
+    ]);
+    releaseOutbound?.();
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(first),
+    ).not.toThrow();
+    await writer.write({ jsonrpc: '2.0', id: 1, result: first });
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(second),
+    ).not.toThrow();
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(third),
+    ).toThrow('NDJSON decoded queue is full');
+
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    writer.releaseLock();
+  });
+
+  it('stops estimating a large response once its byte budget is exceeded', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 5_000,
+      },
+    })('/tmp/project');
+    let elementReads = 0;
+    const response = new Proxy(
+      Array.from({ length: 10_000 }, () => 0),
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/u.test(property)) {
+            elementReads++;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+        getOwnPropertyDescriptor(target, property) {
+          if (typeof property === 'string' && /^\d+$/u.test(property)) {
+            elementReads++;
+          }
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      },
+    );
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
+    expect(elementReads).toBeLessThan(1_000);
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
+  it('charges JSON string escaping before admitting prepared responses', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 6_000,
+      },
+    })('/tmp/project');
+    const response = {
+      content: '\u0001'.repeat(700),
+    };
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
+  it('keeps the default factory unbounded and validates opt-in limits early', () => {
+    expect(DAEMON_ACP_NDJSON_LIMITS).toEqual({
+      maxFrameBytes: 64 * 1024 * 1024,
+      maxQueuedMessages: 256,
+      maxQueuedBytes: 64 * 1024 * 1024,
+    });
+    expect(() => createSpawnChannelFactory()).not.toThrow();
+    expect(() =>
+      createSpawnChannelFactory({
+        pipeLimits: {
+          maxFrameBytes: 0,
+          maxQueuedMessages: 1,
+          maxQueuedBytes: 1,
+        },
+      }),
+    ).toThrow('maxFrameBytes must be a positive safe integer');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('settles exited on an async spawn error only when no process exists', async () => {

@@ -17,7 +17,7 @@
 // this directory already shares between the same two commands.
 
 /** The attribution marker the strip regex anchors on. */
-const FOOTER_MARKER = 'via Qwen Code /review';
+export const FOOTER_MARKER = 'via Qwen Code /review';
 
 /** The footer naming the reviewing model and the CLI version it ran under. */
 export function reviewFooter(modelId: string, cliVersion: string): string {
@@ -44,6 +44,39 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
  */
 export const REVIEW_FOOTER_RE =
   /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[^\n)]*\))?_?\s*)+$/;
+
+/** The widest slice `stripReviewFooter` runs the strip regex over. */
+const STRIP_TAIL_LIMIT = 8192;
+
+/**
+ * Strip trailing footers when present, and nothing else.
+ *
+ * Bounded twice, because the strip regex opens `\s*` under an unanchored
+ * search, which scans quadratically on a long whitespace run — and these
+ * bodies are model-written with no length cap (measured ~20 s at 80k
+ * characters). The marker guard returns marker-less bodies unchanged without
+ * running the regex at all, but it cannot help a body that CONTAINS the
+ * marker: a quoted or truncated forged footer is the natural output of the
+ * model loop this strip exists for, and the replace still ran the unanchored
+ * search over the whole body when no trailing footer matched (probe-measured
+ * ~4× per doubling of the whitespace run). So the replace runs only over the
+ * last STRIP_TAIL_LIMIT characters — the regex is `$`-anchored, so a match
+ * can only live at the tail, and one footer is ~40 characters, which bounds
+ * the strip to a few hundred accumulated footers, far past any real
+ * re-compose loop. Bounding at the last marker occurrence does NOT work: the
+ * whitespace run sits after the last marker line and stays inside that
+ * bound. Shared by both strip sites — `compose-review`'s drafted entries and
+ * `submit`'s inline comments — because one guard is one guard, and a second
+ * copy is how one site eventually forgets it.
+ */
+export function stripReviewFooter(body: string): string {
+  if (!body.includes(FOOTER_MARKER)) return body;
+  const tail = body.slice(-STRIP_TAIL_LIMIT);
+  const stripped = tail.replace(REVIEW_FOOTER_RE, '');
+  return stripped === tail
+    ? body
+    : body.slice(0, body.length - tail.length) + stripped;
+}
 
 /**
  * A modelId the footer can interpolate. The footer is one line, and the

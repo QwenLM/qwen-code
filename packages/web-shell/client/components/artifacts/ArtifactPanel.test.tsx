@@ -12,6 +12,7 @@ import type {
   DaemonSessionActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
 
@@ -193,6 +194,22 @@ const validCodeReviewDocument = JSON.stringify({
   markdownReportPath: '.qwen/reviews/review.md',
 });
 
+function linkArtifact(): DaemonSessionArtifact {
+  return {
+    id: 'review-artifact',
+    kind: 'link',
+    storage: 'external_url',
+    source: 'tool',
+    status: 'available',
+    title: 'Issue 9059',
+    url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    retention: 'ephemeral',
+    clientRetained: false,
+    createdAt: '2026-08-13T06:13:59.048Z',
+    updatedAt: '2026-08-13T06:13:59.048Z',
+  };
+}
+
 function artifactPanel(
   artifact: DaemonSessionArtifact,
   owner: { workspaceCwd: string; workspaceId: string } | null = {
@@ -289,6 +306,7 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
     container.remove();
@@ -646,6 +664,125 @@ describe('ArtifactPanel code review artifacts', () => {
       'workspace files',
     );
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('opens external_url link artifacts through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    expect(button!.getAttribute('href')).toBe(
+      'https://github.com/QwenLM/qwen-code/issues/9059',
+    );
+    expect(button!.getAttribute('target')).toBe('_blank');
+    act(() => {
+      button!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
+  it('routes modified external_url link clicks through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
+  it('requests an error toast when opening a link artifact fails', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const toasts: ToastRequestDetail[] = [];
+    const onToast = (e: Event) =>
+      toasts.push((e as CustomEvent<ToastRequestDetail>).detail);
+    window.addEventListener(TOAST_REQUEST_EVENT, onToast);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    act(() => {
+      button!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await flush();
+    window.removeEventListener(TOAST_REQUEST_EVENT, onToast);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe('error');
+    expect(toasts[0].message).toContain('no browser');
+  });
+
+  it('keeps relative link artifacts on the native anchor path', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(artifactPanel({ ...linkArtifact(), url: '#artifact' })),
+    );
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it('still sends an ordinary JSON artifact to the generic editor', async () => {
@@ -2018,5 +2155,151 @@ describe('ArtifactPanel shell tab', () => {
     expect(container.textContent).toContain('/work/project');
     expect(container.textContent).toContain('Exit code');
     expect(container.textContent).toContain('Command failed');
+  });
+});
+
+describe('ArtifactPanel fullscreen toggle', () => {
+  function renderPanel(props: {
+    fullscreen?: boolean;
+    onToggleFullscreen?: () => void;
+  }) {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'monitor:monitor-1',
+                kind: 'monitor',
+                title: task.description,
+                task,
+              },
+            ]}
+            activeTabId="monitor:monitor-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            fullscreen={props.fullscreen}
+            onToggleFullscreen={props.onToggleFullscreen}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  it('shows a fullscreen toggle and reports clicks', () => {
+    const onToggleFullscreen = vi.fn();
+    const container = renderPanel({ onToggleFullscreen });
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    act(() => {
+      toggle?.click();
+    });
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the panel full-bleed and flips the toggle when fullscreen', () => {
+    const container = renderPanel({
+      fullscreen: true,
+      onToggleFullscreen: () => {},
+    });
+    const aside = container.querySelector('aside');
+    expect(aside?.className).toContain('panelFullscreen');
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('omits the toggle when fullscreen is unsupported', () => {
+    const container = renderPanel({});
+    expect(
+      container.querySelector('button[aria-label="Fullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Exit fullscreen"]'),
+    ).toBeNull();
+  });
+});
+
+describe('ArtifactPanel image preview tabs', () => {
+  it('renders one preview tab per image and shows the active image', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'image:a',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,aWFh',
+                alt: 'Uploaded image 1',
+              },
+              {
+                id: 'image:b',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,iWJi',
+              },
+            ]}
+            activeTabId="image:a"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    const preview = container.querySelector(
+      'img[class*="imagePreview"]',
+    ) as HTMLImageElement;
+    expect(preview).not.toBeNull();
+    expect(preview.getAttribute('src')).toBe('data:image/png;base64,aWFh');
+    expect(preview.getAttribute('alt')).toBe('Uploaded image 1');
+
+    const download = container.querySelector(
+      'a[class*="imageDownloadButton"]',
+    ) as HTMLAnchorElement;
+    expect(download).not.toBeNull();
+    expect(download.getAttribute('href')).toBe('data:image/png;base64,aWFh');
+    expect(download.getAttribute('download')).toBe('image.png');
   });
 });

@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -73,10 +74,25 @@ export type BridgeSessionLifecycle = (
  */
 export interface ExternalToolGuardPrepareRequest {
   readonly sessionId: string;
-  readonly promptId: string;
+  /**
+   * Runtime-owned active-prompt binding. Absent for context-less shell
+   * checks: subagent reasoning loops, cron turns, background notifications,
+   * and resumed background agents run without an invocation context by
+   * design. A host policy that requires a live prompt must fail closed when
+   * the binding is missing.
+   */
+  readonly promptId?: string;
   readonly toolCallId: string;
   readonly toolName: string;
   readonly arguments: Readonly<Record<string, unknown>>;
+  /** Daemon-owned current session working directory. */
+  readonly effectiveCwd?: string;
+  /**
+   * Directory the child will actually run the tool in, when it differs from
+   * the session's own. Untrusted: the host validates it against state it
+   * owns before using it as a containment basis.
+   */
+  readonly invocationCwd?: string;
 }
 
 export type ExternalToolGuardPrepareResult =
@@ -195,6 +211,12 @@ export interface BridgeOptions {
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
+   * How long to wait for `session/load` and `session/resume`. Defaults to
+   * 60 seconds; an explicitly configured `initializeTimeoutMs` can raise it,
+   * but never lower it.
+   */
+  sessionRestoreTimeoutMs?: number;
+  /**
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
    * existing session (same workspace under `single` scope) are not
@@ -240,18 +262,58 @@ export interface BridgeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal (the current unfinished turn). When exceeded, the oldest
-   * journal entries are dropped. Defaults to 10 000. Must be a positive
-   * safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal
+   * (the current unfinished turn). Consecutive compatible text/thought chunks
+   * share bounded entries. When exceeded, the oldest journal entries are
+   * dropped. Defaults to 10 000. Must be a positive safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. When exceeded, the
-   * oldest journal entries are dropped (at least one entry is always kept).
-   * Defaults to 8 MiB. Must be a positive safe integer.
+   * Per-session source-event byte cap on the in-flight live journal (the
+   * current unfinished turn) — accounted from serialized source events even
+   * when compatible chunks share a replay entry. When exceeded, the oldest
+   * journal entries are dropped whole (at least one entry is always kept),
+   * so the retained tail can be much smaller than the cap. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
+  /**
+   * Pool, in bytes, that per-session live-journal caps may grow into when
+   * an in-flight turn outgrows `maxJournalEvents` / `maxJournalBytes`
+   * (adaptive growth). The bridge doubles a breaching session's caps —
+   * never past a per-session hard cap of 256 MiB — while the growth
+   * granted across every live session sharing the pool stays within it.
+   * The pool is a DAEMON-WIDE ceiling: `runQwenServe` derives one from the
+   * memory budget and hands the same value plus a shared session-limits
+   * provider (see `journalGrowthSessionLimits`) to every bridge it
+   * constructs, so concurrent growth across workspaces is accounted
+   * against one aggregate, not one pool per bridge. `undefined` (the
+   * default) disables growth: fixed-cap eviction, exactly the pre-growth
+   * behavior. `runQwenServe` skips the pool when the operator pinned the
+   * journal flags or the budget resolution leaves no usable headroom. Must
+   * be a positive safe integer when provided.
+   */
+  journalGrowthPoolBytes?: number;
+  /**
+   * Current journal byte caps of EVERY live session sharing this bridge's
+   * growth pool, including this bridge's own, each with the baseline cap
+   * that session started at (bridges sharing a pool may run different
+   * baselines). `runQwenServe` wires an aggregator over all of its
+   * bridges so the daemon-wide pool is accounted once; a standalone
+   * bridge leaves it unset and the advisor accounts only this bridge's
+   * sessions. Ignored without `journalGrowthPoolBytes`.
+   */
+  journalGrowthSessionLimits?: () => readonly JournalGrowthSessionLimit[];
+  /**
+   * Registers this bridge's own live-session journal-cap enumerator with
+   * the shared pool (called once at construction when growth is enabled)
+   * and receives the unregister hook, invoked on bridge shutdown. Wired by
+   * `runQwenServe` alongside `journalGrowthSessionLimits`; ignored without
+   * `journalGrowthPoolBytes`.
+   */
+  registerJournalGrowthSessionLimits?: (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ) => () => void;
   /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as

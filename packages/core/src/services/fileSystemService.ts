@@ -24,6 +24,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
+import type { ToolWriteOrigin } from './tool-write-origin.js';
 
 export type LineEnding = 'crlf' | 'lf';
 
@@ -53,6 +54,17 @@ export type CoreReadTextFileRequest = Omit<
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: Stats;
+};
+
+export type CoreWriteTextFileRequest = Omit<
+  WriteTextFileRequest,
+  'sessionId'
+> & {
+  /**
+   * Internal core provenance for a final built-in tool write. This is not part
+   * of any tool schema and is serialized only at the ACP boundary.
+   */
+  toolWriteOrigin?: ToolWriteOrigin;
 };
 
 /**
@@ -123,7 +135,7 @@ export interface FileSystemService {
   ): Promise<ReadTextFileResponse>;
 
   writeTextFile(
-    params: Omit<WriteTextFileRequest, 'sessionId'>,
+    params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse>;
 
   /**
@@ -445,7 +457,7 @@ export class StandardFileSystemService implements FileSystemService {
   }
 
   async writeTextFile(
-    params: Omit<WriteTextFileRequest, 'sessionId'>,
+    params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
     const { path: filePath, _meta } = params;
     const prepared = await prepareTextFileContentAsync(

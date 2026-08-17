@@ -15,7 +15,9 @@ import {
   resetEnvironmentTrackingForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
+import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
+import { TrustLevel } from './trustedFolders.js';
 
 const TRACKED_ENV = [
   'CLOUD_SHELL',
@@ -38,6 +40,42 @@ const TRACKED_ENV = [
   'Node_Options',
   'ZDOTDIR',
   'BASH_FUNC_id%%',
+  'OPENSSL_CONF',
+  'NODE_REPL_EXTERNAL_MODULE',
+  'npm_config_node_gyp',
+  'npm_config_init_module',
+  'SSL_CERT_FILE',
+  'GIT_SSH_COMMAND',
+  'GIT_SSH',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_KEY_0',
+  'GIT_CONFIG_VALUE_0',
+  'GIT_EXEC_PATH',
+  'GIT_TEMPLATE_DIR',
+  'GIT_ASKPASS',
+  'GIT_PROXY_COMMAND',
+  'GIT_EDITOR',
+  'GIT_SSL_CAPATH',
+  'npm_config_cafile',
+  'npm_config_ca',
+  'npm_config_strict_ssl',
+  'PIP_CERT',
+  'PIP_CONFIG_FILE',
+  'SSH_ASKPASS',
+  'LESSOPEN',
+  'LESSCLOSE',
+  'CURL_HOME',
+  'WGETRC',
+  'PYTHON',
+  'GIT_SEQUENCE_EDITOR',
+  'XDG_CONFIG_HOME',
+  'VISUAL',
+  'EDITOR',
+  'PYTHONSTARTUP',
+  'BROWSER',
+  'QWEN_CDP_MCP_COMMAND',
+  'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'NODE_EXTRA_CA_CERTS',
@@ -47,7 +85,9 @@ const TRACKED_ENV = [
   'qwen_cli_entry',
   'Qwen_Cli_Entry',
   'QWEN_HOME',
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
+  'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
@@ -120,6 +160,7 @@ describe('buildRuntimeEnvironment', () => {
         'NPM_CONFIG_NODE_OPTIONS=--require ./bad.js',
         'QWEN_SERVER_TOKEN=dotenv-token',
         'QWEN_HOME=/tmp/ignored-qwen-home',
+        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD}=enforce`,
         '',
       ].join('\n'),
     );
@@ -142,6 +183,7 @@ describe('buildRuntimeEnvironment', () => {
           // line pins the settings.env gate in buildRuntimeEnvironment.
           NPM_CONFIG_NODE_OPTIONS: '--require ./bad.js',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
+          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'warn',
         },
       }),
       workspace,
@@ -163,6 +205,9 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_RUNTIME_DIR']).toBeUndefined();
+    expect(
+      snapshot.effectiveEnv[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD],
+    ).toBeUndefined();
     expect(snapshot.overlayKeys).toEqual([
       'RUNTIME_DOTENV',
       'RUNTIME_EMPTY',
@@ -210,6 +255,34 @@ describe('buildRuntimeEnvironment', () => {
       }),
     ]);
     expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBeUndefined();
+  });
+
+  it('does not load a distrusted parent .env for a trusted child workspace', () => {
+    const parent = makeWorkspace();
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    fs.writeFileSync(
+      path.join(parent, '.env'),
+      'QWEN_SERVER_TOKEN=from-distrusted-parent-env\n',
+    );
+    const trustedFoldersPath = path.join(parent, 'trustedFolders.json');
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({
+        [parent]: TrustLevel.DO_NOT_TRUST,
+        [child]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+
+    const snapshot = buildRuntimeEnvironment(
+      testSettings({ security: { folderTrust: { enabled: true } } }),
+      child,
+      {},
+    );
+
+    expect(snapshot.envFilePaths).not.toContain(path.join(parent, '.env'));
+    expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 });
 
@@ -268,6 +341,7 @@ describe('loadEnvironment', () => {
           BASH_ENV: '/tmp/bad-profile',
           NODE_OPTIONS: '--require ./bad.js',
           QWEN_SERVER_TOKEN: 'bad-token',
+          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'enforce',
         },
       }),
       workspace,
@@ -277,6 +351,7 @@ describe('loadEnvironment', () => {
     expect(process.env['BASH_ENV']).toBeUndefined();
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]).toBeUndefined();
   });
 
   // Regression for #8653: the daemon scrubs loader vars from process.env,
@@ -305,6 +380,225 @@ describe('loadEnvironment', () => {
     expect(process.env['NODE_PATH']).toBeUndefined();
     expect(process.env['LD_PRELOAD']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // #8663 follow-up: pure-injection loader keys (dlopen/require/exec redirects)
+  // join the scrubbed loader set and are rejected from every .env scope.
+  it('never applies the follow-up code-injection loader keys from .env', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'OPENSSL_CONF=/workspace-a/evil.cnf',
+        'NODE_REPL_EXTERNAL_MODULE=/workspace-a/hook.js',
+        'npm_config_node_gyp=/workspace-a/evil-gyp.js',
+        'npm_config_init_module=/workspace-a/evil-init.js',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['OPENSSL_CONF']).toBeUndefined();
+    expect(process.env['NODE_REPL_EXTERNAL_MODULE']).toBeUndefined();
+    expect(process.env['npm_config_node_gyp']).toBeUndefined();
+    expect(process.env['npm_config_init_module']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // #8663 follow-up: TLS trust anchors, the git command-exec family (incl.
+  // numbered GIT_CONFIG_KEY_/VALUE_ pairs), and node-gyp interpreter selection
+  // join the hardcoded reject-from-project-.env tier.
+  it('never applies the follow-up TLS/git/interpreter keys from a project .env', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'SSL_CERT_FILE=/workspace-a/evil-ca.pem',
+        'GIT_SSH_COMMAND=/workspace-a/evil-ssh.sh',
+        'GIT_SSH=/workspace-a/evil-legacy-ssh.sh',
+        'GIT_CONFIG_COUNT=1',
+        'GIT_CONFIG_PARAMETERS=core.hooksPath=/workspace-a/evil-hooks',
+        'GIT_CONFIG_KEY_0=core.hooksPath',
+        'GIT_CONFIG_VALUE_0=/workspace-a/evil-hooks',
+        'GIT_EXEC_PATH=/workspace-a/evil-exec',
+        'GIT_TEMPLATE_DIR=/workspace-a/evil-templates',
+        'GIT_ASKPASS=/workspace-a/evil-askpass',
+        'GIT_PROXY_COMMAND=/workspace-a/evil-proxy.sh',
+        'GIT_EDITOR=/workspace-a/evil-editor.sh',
+        'GIT_SSL_CAPATH=/workspace-a/evil-capath',
+        'npm_config_cafile=/workspace-a/evil-ca.pem',
+        'npm_config_ca=/workspace-a/evil-ca-inline',
+        'npm_config_strict_ssl=false',
+        'PIP_CERT=/workspace-a/evil-ca.pem',
+        'CURL_HOME=/workspace-a',
+        'WGETRC=/workspace-a/evil-wgetrc',
+        'PYTHON=/workspace-a/evil-python',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['SSL_CERT_FILE']).toBeUndefined();
+    expect(process.env['GIT_SSH_COMMAND']).toBeUndefined();
+    expect(process.env['GIT_SSH']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_COUNT']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_PARAMETERS']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_KEY_0']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBeUndefined();
+    expect(process.env['GIT_EXEC_PATH']).toBeUndefined();
+    expect(process.env['GIT_TEMPLATE_DIR']).toBeUndefined();
+    expect(process.env['GIT_ASKPASS']).toBeUndefined();
+    expect(process.env['GIT_PROXY_COMMAND']).toBeUndefined();
+    expect(process.env['GIT_EDITOR']).toBeUndefined();
+    expect(process.env['GIT_SSL_CAPATH']).toBeUndefined();
+    expect(process.env['npm_config_cafile']).toBeUndefined();
+    expect(process.env['npm_config_ca']).toBeUndefined();
+    expect(process.env['npm_config_strict_ssl']).toBeUndefined();
+    expect(process.env['PIP_CERT']).toBeUndefined();
+    expect(process.env['CURL_HOME']).toBeUndefined();
+    expect(process.env['WGETRC']).toBeUndefined();
+    expect(process.env['PYTHON']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // #8663 review round: PIP_CONFIG_FILE redirects all of pip's configuration
+  // (index-url / trusted-host / proxy / cert) at an attacker file, SSH_ASKPASS
+  // is the askpass program git/ssh execute on an auth challenge, and LESSOPEN/
+  // LESSCLOSE are run by `less` as input preprocessors. Each must be rejected
+  // on every application boundary — initial load and reload alike.
+  it('never applies pip config / ssh askpass / less preprocessor keys from a project .env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      [
+        'PIP_CONFIG_FILE=/workspace-a/pip.conf',
+        'SSH_ASKPASS=/workspace-a/evil-askpass',
+        'LESSOPEN=| /workspace-a/evil-lessopen.sh %s',
+        'LESSCLOSE=/workspace-a/evil-lessclose.sh %s %s',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['LESSCLOSE']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    // A mid-session reload must not apply them either.
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['LESSCLOSE']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // The settings.env application (load and reload) and the daemon's
+  // per-workspace runtime env build consult the same hardcoded predicate.
+  it('rejects pip config / ssh askpass / less preprocessor keys from settings.env and the runtime env build', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const settings = testSettings({
+      env: {
+        PIP_CONFIG_FILE: '/workspace-a/pip.conf',
+        SSH_ASKPASS: '/workspace-a/evil-askpass',
+        LESSOPEN: '| /workspace-a/evil-lessopen.sh %s',
+        RUNTIME_SETTINGS_ONLY: 'from-settings',
+      },
+    });
+
+    loadEnvironment(settings, workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    // Reload force-writes settings.env keys; the hardcoded gate must keep
+    // rejecting them there too.
+    reloadEnvironment(settings, workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+    expect(snapshot.effectiveEnv['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(snapshot.effectiveEnv['SSH_ASKPASS']).toBeUndefined();
+    expect(snapshot.effectiveEnv['LESSOPEN']).toBeUndefined();
+    expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
+      'from-settings',
+    );
+  });
+
+  // #8663 round-4: git executes GIT_SEQUENCE_EDITOR on `git rebase -i` and
+  // merges `$XDG_CONFIG_HOME/git/config` with `~/.gitconfig` (bypassing the
+  // GIT_CONFIG_* blocks); $VISUAL/$EDITOR are git's editor fallback and the
+  // CLI's own editor launch; CPython executes PYTHONSTARTUP at interactive
+  // startup; the CLI execs $BROWSER via openBrowserSecurely; the daemon
+  // spawns QWEN_CDP_MCP_COMMAND as the browser-automation MCP adapter and
+  // QWEN_SERVE_CDP_TUNNEL_OVER_WS switches that tunnel surface on.
+  it('never applies the round-4 exec-redirect keys from project .env or settings.env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'GIT_SEQUENCE_EDITOR=/workspace-a/evil-sequence.sh',
+        'VISUAL=/workspace-a/evil-visual.sh',
+        'EDITOR=/workspace-a/evil-editor.sh',
+        'PYTHONSTARTUP=/workspace-a/evil-startup.py',
+        'XDG_CONFIG_HOME=/workspace-a/.xdg',
+        'BROWSER=/workspace-a/evil-browser.sh',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+    const settings = testSettings({
+      env: {
+        QWEN_CDP_MCP_COMMAND: '/workspace-a/evil-adapter',
+        QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
+        RUNTIME_SETTINGS_ONLY: 'from-settings',
+      },
+    });
+
+    const expectRound4Rejected = (env: Readonly<NodeJS.ProcessEnv>) => {
+      expect(env['GIT_SEQUENCE_EDITOR']).toBeUndefined();
+      expect(env['VISUAL']).toBeUndefined();
+      expect(env['EDITOR']).toBeUndefined();
+      expect(env['PYTHONSTARTUP']).toBeUndefined();
+      expect(env['XDG_CONFIG_HOME']).toBeUndefined();
+      expect(env['BROWSER']).toBeUndefined();
+      expect(env['QWEN_CDP_MCP_COMMAND']).toBeUndefined();
+      expect(env['QWEN_SERVE_CDP_TUNNEL_OVER_WS']).toBeUndefined();
+    };
+
+    loadEnvironment(settings, workspace);
+    expectRound4Rejected(process.env);
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    // A mid-session reload must not apply them either.
+    reloadEnvironment(settings, workspace);
+    expectRound4Rejected(process.env);
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    // The daemon's per-workspace runtime env build consults the same gate.
+    const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+    expectRound4Rejected(snapshot.effectiveEnv);
+    expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe('allowed');
+    expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
+      'from-settings',
+    );
   });
 
   // The privileged <workspace>/.qwen/.env scope deliberately bypasses
@@ -729,6 +1023,62 @@ describe('loadEnvironment', () => {
     );
     expect(process.env['qwen_server_token']).toBeUndefined();
     expect(process.env['tmpdir']).toBe('/workspace-a/first');
+  });
+
+  // The numbered GIT_CONFIG_KEY_/VALUE_ pairs are hardcoded exclusions via
+  // prefix matching; the reload gate must freeze them exactly like their
+  // literal sibling GIT_CONFIG_COUNT, or a home `.env` edit rotates one half
+  // of the mechanism mid-session while the other half stays at the boot
+  // value. Home-scoped files are exempt from the reject-only tier at boot,
+  // so the boot value applies — and then freezes, edits and removals alike.
+  it('freezes the numbered GIT_CONFIG pairs on reload like GIT_CONFIG_COUNT', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const homeEnvPath = path.join(process.env['HOME']!, '.env');
+    fs.writeFileSync(
+      homeEnvPath,
+      [
+        'GIT_CONFIG_COUNT=1',
+        'GIT_CONFIG_KEY_0=core.hooksPath',
+        'GIT_CONFIG_VALUE_0=/home-a/hooks',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['GIT_CONFIG_COUNT']).toBe('1');
+    expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    fs.writeFileSync(
+      homeEnvPath,
+      [
+        'GIT_CONFIG_COUNT=2',
+        'GIT_CONFIG_KEY_0=core.fsmonitor',
+        'GIT_CONFIG_VALUE_0=/home-a/fsmonitor',
+        'RUNTIME_DOTENV=rotated',
+        '',
+      ].join('\n'),
+    );
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['GIT_CONFIG_COUNT']).toBe('1');
+    expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
+    // An ordinary key next to them still rotates — the freeze is key-scoped.
+    // The fixture value must actually change between reloads, or this check
+    // passes even when reload freezes every key.
+    expect(process.env['RUNTIME_DOTENV']).toBe('rotated');
+
+    // Removal is frozen too (symmetric with GIT_CONFIG_COUNT, documented in
+    // the settings.md upgrade note): a home `.env` deletion does not
+    // propagate on reload.
+    fs.writeFileSync(homeEnvPath, ['RUNTIME_DOTENV=allowed', ''].join('\n'));
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['GIT_CONFIG_COUNT']).toBe('1');
+    expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
   });
 
   // The daemon reaches per-workspace .env files only through

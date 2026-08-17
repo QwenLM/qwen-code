@@ -77,6 +77,22 @@ describe('ContextUsageMessage', () => {
     expect(container.querySelector('[aria-hidden="true"]')).not.toBeNull();
   });
 
+  it('escalates the progress-bar color at the shared thresholds', () => {
+    // The panel and the composer ring consume the same threshold helper;
+    // this pins the panel half of that contract (the ring half lives in
+    // ChatEditor.test.tsx). Both thresholds are strict `>`.
+    const filledClass = (container: HTMLElement) =>
+      container
+        .querySelector('[aria-hidden="true"]')!
+        .querySelector('span')!
+        .getAttribute('class') ?? '';
+
+    expect(filledClass(render(makeStatus(60, false)))).toContain('accent');
+    expect(filledClass(render(makeStatus(61, false)))).toContain('warning');
+    expect(filledClass(render(makeStatus(80, false)))).toContain('warning');
+    expect(filledClass(render(makeStatus(81, false)))).toContain('error');
+  });
+
   it('uses the pre-conversation view before any token count is available', () => {
     const container = render(makeStatus(0, true));
 

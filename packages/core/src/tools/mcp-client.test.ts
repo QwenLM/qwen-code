@@ -2469,6 +2469,71 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(fetchSpy).toHaveBeenCalledTimes(1);
       });
 
+      it('stops Agent Plugin redirects when headers or authorization are present', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response(null, { status: 204 }));
+        const configuredHeadersFetch = createStreamableHttpCompatibilityFetch(
+          'configured-headers',
+          fetchFn,
+          {
+            httpUrl: 'https://example.com/mcp',
+            headers: { 'X-Tenant': 'portable' },
+            agentPluginV1: true,
+          },
+        );
+        const authorizationFetch = createStreamableHttpCompatibilityFetch(
+          'authorization',
+          fetchFn,
+          {
+            httpUrl: 'https://example.com/mcp',
+            agentPluginV1: true,
+          },
+        );
+        const ordinaryFetch = createStreamableHttpCompatibilityFetch(
+          'ordinary',
+          fetchFn,
+          { httpUrl: 'https://example.com/mcp' },
+        );
+        const requestAuthorizationFetch =
+          createStreamableHttpCompatibilityFetch(
+            'request-authorization',
+            fetchFn,
+            {
+              httpUrl: 'https://example.com/mcp',
+              agentPluginV1: true,
+            },
+          );
+
+        await configuredHeadersFetch('https://example.com/mcp', {
+          method: 'POST',
+        });
+        await authorizationFetch('https://example.com/mcp', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer token' },
+        });
+        await ordinaryFetch('https://example.com/mcp', { method: 'POST' });
+        await requestAuthorizationFetch(
+          new Request('https://example.com/mcp', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer token' },
+          }),
+        );
+
+        expect(fetchFn.mock.calls[0]?.[1]).toMatchObject({
+          method: 'POST',
+          redirect: 'manual',
+        });
+        expect(fetchFn.mock.calls[1]?.[1]).toMatchObject({
+          method: 'POST',
+          redirect: 'manual',
+        });
+        expect(fetchFn.mock.calls[2]?.[1]).toEqual({ method: 'POST' });
+        expect(fetchFn.mock.calls[3]?.[1]).toMatchObject({
+          redirect: 'manual',
+        });
+      });
+
       it('treats 400 from optional GET SSE stream as unsupported', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()

@@ -602,6 +602,15 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(true),
+        getAll: vi.fn().mockReturnValue([
+          {
+            agentId: 'bg_ab12cd34',
+            isBackgrounded: true,
+            status: 'running',
+            description: 'long-running research',
+            startTime: Date.now(),
+          },
+        ]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -615,6 +624,7 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -647,13 +657,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
@@ -667,6 +678,7 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
+        getAll: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -679,12 +691,15 @@ describe('useResumeCommand', () => {
           {
             monitorId: 'mon_123',
             status: 'running',
+            description: 'tail -f /var/log/app.log',
+            startTime: Date.now(),
           },
         ]),
         reset: vi.fn(),
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -717,13 +732,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[mon_123]');
   });
 
   it('rolls core back when persisted Goal state is malformed', async () => {

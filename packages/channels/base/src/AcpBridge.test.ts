@@ -7,7 +7,12 @@ import {
   AcpBridge,
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
-import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
+import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  type ChannelLoopToolHandler,
+} from './ChannelAgentBridge.js';
 
 const child = vi.hoisted(() => {
   class MockEmitter {
@@ -104,6 +109,7 @@ type TestableAcpBridge = AcpBridge & {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
     loadSession?: ReturnType<typeof vi.fn>;
+    unstable_resumeSession?: ReturnType<typeof vi.fn>;
     prompt?: ReturnType<typeof vi.fn>;
   };
   knownSessionIds: Set<string>;
@@ -163,6 +169,27 @@ describe('AcpBridge', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('performs the private-parent capability handshake with the spawned child', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+
+    const spawnOptions = child.spawn.mock.calls[0]![2] as {
+      env?: Record<string, string | undefined>;
+    };
+    const capability = spawnOptions.env?.[ACP_PRIVATE_PARENT_CAPABILITY_ENV];
+    expect(typeof capability).toBe('string');
+    expect(capability!.length).toBeGreaterThan(0);
+    const initializeParams = child.connections[0]!.initialize.mock
+      .calls[0]![0] as { _meta?: Record<string, unknown> };
+    expect(
+      initializeParams._meta?.[ACP_PRIVATE_PARENT_CAPABILITY_META_KEY],
+    ).toBe(capability);
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {
@@ -392,6 +419,34 @@ describe('AcpBridge', () => {
     expect(extMethod).toHaveBeenCalledOnce();
   });
 
+  it('restores channel sessions through resume without replaying history', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const resumeSession = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      unstable_resumeSession: resumeSession,
+    } as TestableAcpBridge['connection'];
+    const bindingToken = {};
+
+    await expect(
+      bridge.loadSession('restored-session', '/tmp', undefined, bindingToken),
+    ).resolves.toBe('restored-session');
+
+    expect(resumeSession).toHaveBeenCalledWith({
+      sessionId: 'restored-session',
+      cwd: '/tmp',
+      mcpServers: [],
+    });
+    expect(bridge.knownSessionIds.has('restored-session')).toBe(true);
+    expect(bridge.sessionBindingTokens.get('restored-session')).toBe(
+      bindingToken,
+    );
+  });
+
   it('returns only the final turn text after tool calls', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
@@ -430,6 +485,34 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
     );
+    expect(bridge.connection.prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'question' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('forwards the user-facing prompt projection to the daemon', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'hidden context\n\nhello', {
+      displayText: 'hello',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'hidden context\n\nhello' }],
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        'qwen.daemon.promptDisplayText': 'hello',
+      },
+    });
   });
 
   it('excludes nested subagent text from the final response', async () => {

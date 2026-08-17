@@ -665,6 +665,11 @@ describe('capability advertisement', () => {
       expect(res.body.features).toContain('workspace_file_read');
       expect(res.body.features).toContain('workspace_file_bytes');
       expect(res.body.features).toContain('workspace_file_write');
+      expect(res.body.features).toContain('workspace_file_upload');
+      // The upload byte cap is advertised alongside the feature.
+      expect(res.body.limits?.maxWorkspaceFileUploadBytes).toBe(
+        50 * 1024 * 1024,
+      );
     } finally {
       await teardown(h);
     }

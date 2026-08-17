@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.21.8",
+  "version": "0.21.11",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -26,7 +26,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.8"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.11"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -155,7 +155,7 @@
     "prettier": "^3.5.3",
     "react-devtools-core": "^6.1.5",
     "semver": "^7.7.2",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.0",
     "strip-ansi": "^7.1.2",
     "tsx": "^4.20.3",
     "typescript-eslint": "^8.30.1",

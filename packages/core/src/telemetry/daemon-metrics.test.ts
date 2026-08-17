@@ -267,6 +267,21 @@ describe('Daemon Metrics', () => {
       });
     });
 
+    it.each(['SessionRestoreTimeoutError', 'BridgeChannelQuarantinedError'])(
+      'keeps %s a distinct label rather than "unknown"',
+      (name) => {
+        // These are the restore-timeout 504 and cleanup-quarantine 503 classes.
+        // Dropping either from the known set silently collapses them into
+        // `unknown`, which is exactly the signal the restore work adds them for.
+        initializeDaemonMetrics();
+        mockCounterAddFn.mockClear();
+        const err = new Error('restore lifecycle');
+        err.name = name;
+        recordDaemonBridgeError(err);
+        expect(mockCounterAddFn).toHaveBeenCalledWith(1, { error_type: name });
+      },
+    );
+
     it('normalizes unknown error types to "unknown"', () => {
       initializeDaemonMetrics();
       mockCounterAddFn.mockClear();

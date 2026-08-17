@@ -81,6 +81,24 @@ export function sanitizePromptText(text: string): string {
 }
 
 /**
+ * Neutralize attacker-controlled text that is surfaced VERBATIM to users
+ * (session-bus display projections, transcripts, session-list previews):
+ * strip the Unicode line/bidi/zero-width controls that can reorder or hide
+ * rendered text, plus C0/DEL controls EXCEPT newline — multi-line user text
+ * keeps its line structure in the transcript. Capped by CODE POINT so a cap
+ * landing mid-surrogate-pair cannot leave a lone surrogate. Unlike
+ * sanitizePromptText it preserves newlines and brackets: display text is
+ * rendered to a human, not parsed as prompt structure.
+ */
+export function sanitizeDisplayText(text: string, maxLen: number): string {
+  const cleaned = text
+    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ');
+  return truncateCodePoints(cleaned, maxLen);
+}
+
+/**
  * Neutralize an attacker-influenced filesystem path before rendering it on
  * its own line in a prompt (`... saved to: <path>`). Unlike
  * sanitizeQuotedText, this PRESERVES `[`, `]`, `"`, and spaces: those are
