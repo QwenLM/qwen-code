@@ -290,6 +290,76 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('imports legacy rules case-insensitively for a batch declaration', async () => {
+    const store = makeStore();
+    const identity = { id: 'c0'.repeat(32), name: 'declared' };
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({
+        Declared: { overrides: ['!/legacy/*'] },
+      }),
+    );
+
+    const snapshot = await store.setDefaultActivations([identity], 'disabled');
+
+    expect(snapshot.extensions[identity.id]).toMatchObject({
+      name: identity.name,
+      declarationOnly: true,
+      defaultActivation: 'disabled',
+      legacyPathRules: ['!/legacy/*'],
+    });
+    expect(snapshot.legacyProjectionRemainder).toBeUndefined();
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      [identity.name]: { overrides: ['!/*', '!/legacy/*'] },
+    });
+  });
+
+  it.each([{ demo: {} }, { demo: { overrides: '!/legacy/*' } }, null])(
+    'rejects a malformed live V1 projection %#',
+    async (projection) => {
+      const store = makeStore();
+      const original = JSON.stringify(projection);
+      await fsp.writeFile(enablementPath, original);
+
+      await expect(
+        store.setDefaultActivations(
+          [{ id: 'cf'.repeat(32), name: 'demo' }],
+          'disabled',
+        ),
+      ).rejects.toMatchObject({ code: 'extension_store_corrupt' });
+
+      await expect(
+        fsp.stat(path.join(storeDir, 'state.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fsp.readFile(enablementPath, 'utf8')).resolves.toBe(
+        original,
+      );
+    },
+  );
+
+  it('keeps a newer V1 removal from resurrecting a persisted remainder', async () => {
+    const store = makeStore();
+    const identity = { id: 'ce'.repeat(32), name: 'declared' };
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ unrelated: { overrides: ['!/unrelated/*'] } }),
+    );
+    const declared = await store.setDefaultActivations([identity], 'enabled');
+    expect(declared.legacyProjectionRemainder).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+    });
+    await fsp.writeFile(enablementPath, '{}');
+    const stateStat = await fsp.stat(path.join(storeDir, 'state.json'));
+    const newer = new Date(stateStat.mtimeMs + 10_000);
+    await fsp.utimes(enablementPath, newer, newer);
+
+    const reconciled = await store.ensureInitialized([]);
+
+    expect(reconciled.generation).toBe(declared.generation + 1);
+    expect(reconciled.legacyProjectionRemainder).toBeUndefined();
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({});
+  });
+
   it('imports a persisted legacy remainder while repairing an older projection', async () => {
     const store = makeStore();
     const trigger = { id: 'c1'.repeat(32), name: 'trigger' };
@@ -297,7 +367,7 @@ describe('ExtensionStore', () => {
     await fsp.writeFile(
       enablementPath,
       JSON.stringify({
-        [discovered.name]: { overrides: ['!/future/*'] },
+        Future: { overrides: ['!/future/*'] },
         unrelated: { overrides: ['!/unrelated/*'] },
       }),
     );

@@ -1625,7 +1625,10 @@ describe('extension tests', () => {
         userExtensionsDir,
         'extension-enablement.json',
       );
-      fs.writeFileSync(enablementFile, JSON.stringify({ touched: true }));
+      fs.writeFileSync(
+        enablementFile,
+        JSON.stringify({ touched: { overrides: [] } }),
+      );
       const older = new Date(Date.now() - 1_000);
       fs.utimesSync(enablementFile, older, older);
       expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);

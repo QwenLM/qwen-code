@@ -149,6 +149,38 @@ function projectionHash(projection: AllExtensionsEnablementConfig): string {
     .digest('hex');
 }
 
+function validLegacyProjection(
+  projection: unknown,
+): projection is AllExtensionsEnablementConfig {
+  return (
+    !!projection &&
+    !Array.isArray(projection) &&
+    typeof projection === 'object' &&
+    Object.values(projection).every(
+      (config) =>
+        !!config &&
+        !Array.isArray(config) &&
+        typeof config === 'object' &&
+        Array.isArray((config as { overrides?: unknown }).overrides) &&
+        (config as { overrides: unknown[] }).overrides.every(
+          (rule) => typeof rule === 'string',
+        ),
+    )
+  );
+}
+
+function findLegacyRules(
+  projection: AllExtensionsEnablementConfig,
+  name: string,
+): readonly string[] {
+  const normalizedName = name.toLowerCase();
+  return (
+    Object.entries(projection).find(
+      ([candidate]) => candidate.toLowerCase() === normalizedName,
+    )?.[1].overrides ?? []
+  );
+}
+
 function assertIdentity(identity: ExtensionIdentity): void {
   if (!/^[a-f0-9]{64}$/.test(identity.id)) {
     throw new Error(`Invalid extension id "${identity.id}".`);
@@ -222,22 +254,6 @@ function parseState(
     );
   }
   const candidate = value as Partial<ExtensionStoreSnapshot> | null;
-  const validLegacyProjection = (
-    projection: unknown,
-  ): projection is AllExtensionsEnablementConfig =>
-    !!projection &&
-    !Array.isArray(projection) &&
-    typeof projection === 'object' &&
-    Object.values(projection).every(
-      (config) =>
-        !!config &&
-        !Array.isArray(config) &&
-        typeof config === 'object' &&
-        Array.isArray((config as { overrides?: unknown }).overrides) &&
-        (config as { overrides: unknown[] }).overrides.every(
-          (rule) => typeof rule === 'string',
-        ),
-    );
   const validPolicy = (extensionId: string, policy: unknown): boolean => {
     if (
       !/^[a-f0-9]{64}$/.test(extensionId) ||
@@ -347,6 +363,7 @@ export class ExtensionStore {
       let changed = false;
       const importUnmappedLegacy =
         existing.legacyProjectionHash === projectionHash(legacy);
+      let legacyProjectionIsNewer = false;
       // An id-formula change (e.g. #7568 added the plugin name to the hash)
       // leaves installed extensions pointing at ids the store has never
       // seen. Without this re-key, the blocks below would mint a fresh
@@ -391,7 +408,8 @@ export class ExtensionStore {
         }
       }
       if (existing.legacyProjectionHash !== projectionHash(legacy)) {
-        if (!(await this.legacyProjectionIsNewerThanState())) {
+        legacyProjectionIsNewer = await this.legacyProjectionIsNewerThanState();
+        if (!legacyProjectionIsNewer) {
           try {
             await this.writeLegacyProjectionUnlocked(existing);
           } catch {
@@ -400,9 +418,10 @@ export class ExtensionStore {
           for (const identity of extensions) {
             assertIdentity(identity);
             if (existing.extensions[identity.id]) continue;
-            const rules =
-              existing.legacyProjectionRemainder?.[identity.name]?.overrides ??
-              [];
+            const rules = findLegacyRules(
+              existing.legacyProjectionRemainder ?? {},
+              identity.name,
+            );
             existing.extensions[identity.id] = {
               name: identity.name,
               defaultActivation: 'enabled',
@@ -424,7 +443,7 @@ export class ExtensionStore {
             assertIdentity(identity);
             const existingPolicy = existing.extensions[identity.id];
             const { rules, activationChanged } = this.importLegacyProjection(
-              legacy[identity.name]?.overrides ?? [],
+              findLegacyRules(legacy, identity.name),
               existingPolicy,
             );
             if (existingPolicy) {
@@ -464,7 +483,7 @@ export class ExtensionStore {
         for (const identity of extensions) {
           assertIdentity(identity);
           if (existing.extensions[identity.id]) continue;
-          const rules = legacy[identity.name]?.overrides ?? [];
+          const rules = findLegacyRules(legacy, identity.name);
           existing.extensions[identity.id] = {
             name: identity.name,
             defaultActivation: 'enabled',
@@ -477,9 +496,11 @@ export class ExtensionStore {
       changed =
         this.updateLegacyProjectionRemainder(
           existing,
-          importUnmappedLegacy
-            ? legacy
-            : (existing.legacyProjectionRemainder ?? {}),
+          legacyProjectionIsNewer
+            ? this.reconcileLegacyProjectionRemainder(existing, legacy)
+            : importUnmappedLegacy
+              ? legacy
+              : (existing.legacyProjectionRemainder ?? {}),
         ) || changed;
       if (changed) {
         existing.generation += 1;
@@ -490,7 +511,7 @@ export class ExtensionStore {
     const policies: Record<string, ExtensionPolicy> = {};
     for (const identity of extensions) {
       assertIdentity(identity);
-      const rules = legacy[identity.name]?.overrides ?? [];
+      const rules = findLegacyRules(legacy, identity.name);
       policies[identity.id] = {
         name: identity.name,
         defaultActivation: 'enabled',
@@ -920,7 +941,7 @@ export class ExtensionStore {
               `Extension name "${identity.name}" conflicts with an existing policy.`,
             );
           }
-          const rules = legacy[identity.name]?.overrides ?? [];
+          const rules = findLegacyRules(legacy, identity.name);
           policy = {
             name: identity.name,
             declarationOnly: true,
@@ -967,9 +988,15 @@ export class ExtensionStore {
 
   private async readLegacyProjection(): Promise<AllExtensionsEnablementConfig> {
     try {
-      return JSON.parse(
+      const projection: unknown = JSON.parse(
         await fsp.readFile(this.enablementPath, 'utf8'),
-      ) as AllExtensionsEnablementConfig;
+      );
+      if (!validLegacyProjection(projection)) {
+        throw new ExtensionStoreCorruptError(
+          `Extension enablement projection has an invalid schema at ${this.enablementPath}.`,
+        );
+      }
+      return projection;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
       if (error instanceof SyntaxError) {
@@ -1039,6 +1066,20 @@ export class ExtensionStore {
       delete snapshot.legacyProjectionRemainder;
     }
     return projectionHash(previous) !== projectionHash(remainder);
+  }
+
+  private reconcileLegacyProjectionRemainder(
+    snapshot: ExtensionStoreSnapshot,
+    legacy: AllExtensionsEnablementConfig,
+  ): AllExtensionsEnablementConfig {
+    const remainder = Object.create(null) as AllExtensionsEnablementConfig;
+    for (const name of Object.keys(snapshot.legacyProjectionRemainder ?? {})) {
+      const entry = Object.entries(legacy).find(
+        ([candidate]) => candidate.toLowerCase() === name.toLowerCase(),
+      );
+      if (entry) remainder[entry[0]] = { overrides: [...entry[1].overrides] };
+    }
+    return remainder;
   }
 
   private importLegacyProjection(
