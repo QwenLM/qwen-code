@@ -103,12 +103,20 @@ describe('TaskUpdateTool', () => {
     // Existence must be answered before the assignment gates: with a
     // missing task the blocked-by set built from this same call's
     // addBlockedBy (and the owner validation) would otherwise produce a
-    // wrong reason that sends the caller down a dead end.
+    // wrong reason that sends the caller down a dead end. The referenced
+    // blocker must exist so the up-front referenced-ids check passes and
+    // only the primary-task existence check can answer; a missing
+    // referenced id would satisfy the same assertions on its own and
+    // leave this pin blind to the fix it guards.
+    const blocker = await createTask(TEAM, {
+      subject: 'Blocker',
+      description: 'Referenced by the missing task',
+    });
     const invocation = tool.build({
       taskId: '999',
       status: 'in_progress',
       owner: 'alice',
-      addBlockedBy: ['1'],
+      addBlockedBy: [blocker.id],
     });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeDefined();
