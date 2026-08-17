@@ -23,7 +23,15 @@ export function resolveBoundWorkspaceRoot(targetDir: string): string {
   if (!match) {
     return resolved;
   }
-  return match[1] || path.parse(resolved).root;
+  const base = match[1];
+  if (!base) {
+    return path.parse(resolved).root;
+  }
+  // `C:\.qwen\worktrees\x` captures `C:`, which is drive-relative, not `C:\`.
+  if (/^[A-Za-z]:$/.test(base)) {
+    return `${base}${path.sep}`;
+  }
+  return base;
 }
 
 /**

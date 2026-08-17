@@ -32,9 +32,13 @@ describe('resolveBoundWorkspaceRoot', () => {
   });
 
   it('treats a worktree whose bound workspace is the filesystem root', () => {
-    expect(resolveBoundWorkspaceRoot('/.qwen/worktrees/feature')).toBe(
-      path.parse(path.resolve('/.qwen/worktrees/feature')).root,
+    const worktree = path.join(
+      path.parse(process.cwd()).root,
+      '.qwen',
+      'worktrees',
+      'feature',
     );
+    expect(resolveBoundWorkspaceRoot(worktree)).toBe(path.parse(worktree).root);
   });
 });
 

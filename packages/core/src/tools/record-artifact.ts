@@ -697,7 +697,7 @@ async function inspectWorkspaceCandidate(
       error,
       candidate,
       rawPath,
-      `Failed to record artifact: file not found at "${candidate}".`,
+      `Failed to record artifact: could not inspect "${candidate}" (${error instanceof Error ? error.message : String(error)}).`,
     );
   }
 
@@ -761,7 +761,12 @@ async function inspectWorkspaceCandidate(
     true,
   );
   if (canonicalError) {
-    return locatorFailure(ToolErrorType.INVALID_TOOL_PARAMS, canonicalError);
+    return locatorFailure(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+      canonicalError.includes('exceeds')
+        ? `Failed to record artifact: the stored workspace-root-relative path "${workspacePath}" exceeds ${ARTIFACT_WORKSPACE_PATH_MAX_LENGTH} characters.`
+        : canonicalError,
+    );
   }
 
   return {

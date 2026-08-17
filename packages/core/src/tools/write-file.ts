@@ -692,11 +692,11 @@ export function buildWorkspaceArtifactMetadata(
   filePath: string,
   sizeBytes?: number,
 ): WorkspaceToolArtifact | null {
-  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
-  if (!workspacePath) {
+  const recorded = resolveRecordedWorkspaceFile(config, filePath);
+  if (!recorded) {
     return null;
   }
-  const title = path.basename(filePath);
+  const title = path.basename(recorded.filePath);
   // The daemon store rejects titles and paths that are too long, carry control
   // characters, or contain markup; skip the artifact rather than tell the model
   // it was recorded when it will be dropped.
@@ -704,9 +704,9 @@ export function buildWorkspaceArtifactMetadata(
     title.length > ARTIFACT_TITLE_MAX_LENGTH ||
     hasControlCharacter(title) ||
     hasUnsafeDisplayPayload(title) ||
-    workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
-    hasControlCharacter(workspacePath) ||
-    hasUnsafeDisplayPayload(workspacePath)
+    recorded.workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
+    hasControlCharacter(recorded.workspacePath) ||
+    hasUnsafeDisplayPayload(recorded.workspacePath)
   ) {
     debugLogger.debug('workspace artifact skipped (safety checks)', {
       path: filePath,
@@ -715,36 +715,46 @@ export function buildWorkspaceArtifactMetadata(
   }
   return {
     title,
-    kind: inferWorkspaceArtifactKind(filePath),
+    kind: inferWorkspaceArtifactKind(recorded.filePath),
     storage: 'workspace',
-    workspacePath,
+    workspacePath: recorded.workspacePath,
     mimeType:
-      getSpecificMimeType(filePath) ??
-      (filePath.toLowerCase().endsWith('.ipynb')
+      getSpecificMimeType(recorded.filePath) ??
+      (recorded.filePath.toLowerCase().endsWith('.ipynb')
         ? 'application/x-ipynb+json'
         : undefined),
     sizeBytes,
   };
 }
 
-function getRecordArtifactWorkspacePath(
+function resolveRecordedWorkspaceFile(
   config: Config,
   filePath: string,
-): string | null {
+): { filePath: string; workspacePath: string } | null {
   if (!config.isRecordArtifactEnabled()) {
     return null;
   }
-  if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
+  let resolvedFile = filePath;
+  let resolvedRoot = config.getTargetDir();
+  try {
+    resolvedFile = fs.realpathSync(filePath);
+    resolvedRoot = fs.realpathSync(resolvedRoot);
+  } catch {
+    // Keep the lexical path when the file or root cannot be realpath'd yet.
+  }
+  if (
+    !ARTIFACT_KIND_BY_EXTENSION.has(path.extname(resolvedFile).toLowerCase())
+  ) {
     return null;
   }
-  try {
-    return toCanonicalWorkspaceArtifactPath(
-      fs.realpathSync(filePath),
-      fs.realpathSync(config.getTargetDir()),
-    );
-  } catch {
-    return toCanonicalWorkspaceArtifactPath(filePath, config.getTargetDir());
+  const workspacePath = toCanonicalWorkspaceArtifactPath(
+    resolvedFile,
+    resolvedRoot,
+  );
+  if (!workspacePath) {
+    return null;
   }
+  return { filePath: resolvedFile, workspacePath };
 }
 
 function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {

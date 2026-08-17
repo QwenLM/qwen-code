@@ -322,7 +322,7 @@ describe('RecordArtifactTool', () => {
 
   it('rejects a canonical workspacePath that fails display safety checks', async () => {
     const ws = await workspace();
-    const nasty = path.join(ws.cwd, 'reports', 'actual\nforged.csv');
+    const nasty = path.join(ws.cwd, 'reports', 'actual\u202eforged.csv');
     await mkdir(path.dirname(nasty), { recursive: true });
     await writeFile(nasty, 'x');
     await symlink(nasty, path.join(ws.cwd, 'safe.csv'));

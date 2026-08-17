@@ -1663,20 +1663,19 @@ function mergeBatchArtifact(
     delete merged.workspacePath;
     return merged;
   }
+  const refreshDisplay =
+    existing.storage === 'workspace' &&
+    next.storage === 'workspace' &&
+    shouldRefreshWorkspaceDisplay(next, existing);
   return {
     ...existing,
-    title:
-      existing.storage === 'workspace' &&
-      next.storage === 'workspace' &&
-      shouldRefreshWorkspaceDisplay(next, existing)
-        ? next.title
-        : existing.title,
-    description:
-      existing.storage === 'workspace' &&
-      next.storage === 'workspace' &&
-      shouldRefreshWorkspaceDisplay(next, existing)
-        ? (next.description ?? existing.description)
-        : existing.description,
+    title: refreshDisplay ? next.title : existing.title,
+    description: refreshDisplay
+      ? (next.description ?? existing.description)
+      : existing.description,
+    toolName: refreshDisplay ? next.toolName : existing.toolName,
+    source: refreshDisplay ? next.source : existing.source,
+    hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
     metadata: mergeMetadata(existing, next),
@@ -1775,6 +1774,9 @@ function mergeArtifact(
     // name; write_file/hook auto-records must not clobber it.
     next.title = incoming.title;
     next.description = incoming.description ?? existing.description;
+    next.toolName = incoming.toolName;
+    next.source = incoming.source;
+    next.hookEventName = incoming.hookEventName;
   }
 
   const changed = !publicArtifactsEqual(
@@ -1801,13 +1803,20 @@ function shouldRecordEphemeralUnpin(
 }
 
 function shouldRefreshWorkspaceDisplay(
-  incoming: Pick<NormalizedArtifact, 'toolName'>,
-  existing: Pick<NormalizedArtifact, 'toolName'>,
+  incoming: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
+  existing: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
 ): boolean {
-  if (!incoming.toolName || incoming.toolName === 'record_artifact') {
+  if (incoming.toolName === 'record_artifact') {
     return true;
   }
-  return incoming.toolName === existing.toolName;
+  if (!incoming.toolName) {
+    return true;
+  }
+  return (
+    incoming.toolName === existing.toolName &&
+    incoming.source === existing.source &&
+    incoming.hookEventName === existing.hookEventName
+  );
 }
 
 export function publicArtifactsEqual(
