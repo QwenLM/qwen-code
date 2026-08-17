@@ -354,7 +354,19 @@ run_check_no_ab 'cross-package contract verification failed' \
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-  # No new commit. That is only legitimate as a deliberate no-action.
+  # No new commit. A handoff with no failure.md is the deliberate kind: the
+  # agent stopped under instruction (the growth-brake BLOCKED stop) and
+  # deferred this item to a human. Name it — "produced nothing" is what a
+  # crash looks like, and the report must tell the two apart. (When
+  # failure.md coexists, the round came through a failure path — harness
+  # death or a pre-verdict crash — and keeps the failed classification.)
+  if [[ -s "${WORKDIR}/handoff.md" && ! -s "${WORKDIR}/failure.md" ]]; then
+    echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
+    cat "${WORKDIR}/handoff.md"
+    echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
+    exit 0
+  fi
+  # Otherwise no commit is only legitimate as a deliberate no-action.
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
     cat "${WORKDIR}/no-action.md"

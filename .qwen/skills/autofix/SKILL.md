@@ -359,8 +359,14 @@ silently overriding or silently complying.
   handoff that names the decision and lays out the options — split the PR (land
   the core, track the remaining findings as follow-up issues), redesign, or
   accept the current state with the tail deferred — plus your recommendation.
-  Continuing to patch, or deciding the split yourself, is exactly the wrong
-  move; the call is the maintainer's.
+  Write that handoff to `<workdir>/handoff.md` — English-only, no details
+  block — naming the decision, the options, your recommendation, and what was
+  tried; then stop without writing anything else: no commit, no
+  `address-summary.md`, no `no-action.md`, no `failure.md`. The harness
+  recognizes a handoff with no fix verdict as a deliberate deferral: the round
+  ends cleanly, the note is posted to the PR, and the item waits for the
+  maintainer instead of being re-run. Continuing to patch, or deciding the
+  split yourself, is exactly the wrong move; the call is the maintainer's.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
@@ -506,5 +512,7 @@ Finish with exactly one outcome:
   answered when you escalated. Each body is bilingual per GitHub Actions Rules.
   Omit the file when every inline finding was resolved.
 - No change: write `<workdir>/no-action.md` (bilingual per GitHub Actions Rules).
+- Stopped by the growth brake: write `<workdir>/handoff.md` per the
+  not-converging rule (English-only, no details block) — and commit nothing.
 - The GitHub Actions Rules' objective stop condition applies: write
   `<workdir>/failure.md` and do not commit.

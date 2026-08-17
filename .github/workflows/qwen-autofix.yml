@@ -5768,7 +5768,14 @@ jobs:
             echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
-            fixed|noop) ;;
+            # handoff is a deliberate verdict, not a failure: the agent
+            # stopped under instruction (the growth-brake BLOCKED stop) and
+            # deferred the item to a human. Failing the job here would leave
+            # a red review-address check, which the next scan counts as NEW
+            # feedback — turning one deliberate stop into a self-feeding
+            # loop. The 'Report dry-run / failure' step still posts the
+            # handoff comment and the eval marker for this outcome.
+            fixed|noop|handoff) ;;
             *) exit 1 ;;
           esac
 
@@ -6472,7 +6479,7 @@ jobs:
 
       - name: 'Report dry-run / failure'
         if: |-
-          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
+          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled() || steps.final_verify.outputs.outcome == 'handoff') }}
         env:
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           COMMITTED: '${{ steps.final_verify.outputs.committed }}'
@@ -6561,7 +6568,11 @@ jobs:
           # consumes a round.
           POST_HANDOFF=false
           if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" && "${OUTCOME:-unknown}" != "fixed" && "${OUTCOME:-unknown}" != "noop" ]]; then
-            if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" != "success" ]]; then
+            # handoff rounds end with a SUCCESS job status (a deliberate
+            # verdict), so they must trigger on the outcome itself — without
+            # this clause nothing would post and the loop would go silent on
+            # exactly the rounds that most need a visible human handoff.
+            if [[ "${OUTCOME:-unknown}" == "failed" || "${OUTCOME:-unknown}" == "handoff" || "${JOB_STATUS:-}" != "success" ]]; then
               POST_HANDOFF=true
             fi
           fi
@@ -6735,6 +6746,15 @@ jobs:
                   MARK_ROUND="${MAX_ROUNDS}"
                 fi
               else
+                if [[ "${OUTCOME:-}" == 'handoff' ]]; then
+                  # A deliberate stop, not a failed fix: the agent stopped
+                  # under instruction and deferred the item to a human. No
+                  # stale-base retry (there is no fix to re-attempt) and the
+                  # headline says what actually happened — the old
+                  # "could not produce a passing fix" wording reported the
+                  # brake's decision as a failure and buried the handoff.
+                  HEADLINE="🤖 AutoFix stopped this item under instruction and deferred it to a human (round ${MARK_ROUND}/${MAX_ROUNDS}) — the agent's handoff note below names the decision and the options. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                else
                 # The gate ran and rejected the agent's fix (a build/test
                 # failure). Before handing to a human, check whether the PR is
                 # merely BEHIND main: a build that fails on something main
@@ -6803,6 +6823,7 @@ jobs:
                     fi
                   fi
                   HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                fi
                 fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
@@ -6906,7 +6927,7 @@ jobs:
               done <<< "${PRIOR_HEADS}"
               if [[ "${CONSEC_FAIL}" -ge "${CONSECUTIVE_FAILURE_CAP}" ]]; then
                 MARK_ROUND="${MAX_ROUNDS}"
-                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that failed to push anything (timeouts and/or gate rejections). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that pushed nothing (failed rounds, timeouts, gate rejections, or stops under instruction). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
               fi
               # CUMULATIVE timeout breaker — the sibling of the consecutive
               # one above, for the failure shape it cannot see: timeouts

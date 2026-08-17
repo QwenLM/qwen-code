@@ -497,7 +497,10 @@ const apiErrorWithoutVerdict =
   result.status === 0 &&
   result.apiError &&
   !hasOutputVerdict &&
-  !existsSync(file(options.workdir, 'failure.md'));
+  !existsSync(file(options.workdir, 'failure.md')) &&
+  // A handoff is a verdict too: an agent that reached its BLOCKED stop must
+  // not be reclassified as a bare API blip by an error render in the tail.
+  !existsSync(file(options.workdir, 'handoff.md'));
 if (
   result.error ||
   result.signal ||
@@ -583,6 +586,20 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
     'The agent wrote failure.md; a human should take over this feedback batch.',
   );
   console.error(`Autofix agent wrote failure.md:\n${content}`);
+  process.exit(0);
+}
+
+// A handoff the AGENT itself wrote — the growth-brake BLOCKED stop: the
+// feedback told it to defer to a human, so the round ends without a fix
+// verdict. Same standing as failure.md: a real, human-facing outcome, NOT
+// the missing-output failure class (which once reported a deliberate stop as
+// "finished without required output file(s)" and buried the brake's decision
+// under a generic failure.md). Honored only when no spec output exists: a
+// round that also wrote address-summary.md or no-action.md published a
+// result, and that verdict outranks the handoff.
+if (!hasOutputVerdict && existsSync(file(options.workdir, 'handoff.md'))) {
+  const content = readFileSync(file(options.workdir, 'handoff.md'), 'utf8');
+  console.error(`Autofix agent wrote handoff.md:\n${content}`);
   process.exit(0);
 }
 
