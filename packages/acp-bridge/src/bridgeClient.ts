@@ -1266,6 +1266,7 @@ export class BridgeClient implements Client {
     // several queued messages reference is read and base64-encoded once
     // instead of once per message.
     const mediaMemo = new Map<string, Promise<ContentBlock>>();
+    const serializedMediaIds = new Set<string>();
     const items: Array<{
       messageId: string;
       displayText: string;
@@ -1274,9 +1275,16 @@ export class BridgeClient implements Client {
     }> = [];
     try {
       for (const item of drained) {
-        const planned: Array<ContentBlock | SessionMediaReference> =
-          item.content ?? [];
         let degraded = 0;
+        const planned = (item.content ?? []).filter((block) => {
+          if (!isSessionMediaReference(block)) return true;
+          if (serializedMediaIds.has(block.mediaId)) {
+            degraded += 1;
+            return false;
+          }
+          serializedMediaIds.add(block.mediaId);
+          return true;
+        });
         let resolvedBlocks: ContentBlock[];
         let mediaReferences: SessionMediaReference[];
         try {

@@ -3323,7 +3323,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('resolves a shared mediaId once across all drained messages', async () => {
+  it('degrades a mediaId reused across drained messages after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionMediaStore();
     try {
@@ -3357,26 +3357,32 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           },
           {
             content: [
-              { type: 'text', text: 'b' },
-              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+              {
+                type: 'text',
+                text: 'b\n[Attached media is no longer available]',
+              },
             ],
           },
           {
             content: [
-              { type: 'text', text: 'c' },
-              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+              {
+                type: 'text',
+                text: 'c\n[Attached media is no longer available]',
+              },
             ],
           },
           {
             content: [
-              { type: 'text', text: 'd' },
-              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+              {
+                type: 'text',
+                text: 'd\n[Attached media is no longer available]',
+              },
             ],
           },
         ],
       });
-      // Every message resolves the block, but the shared blob is read from
-      // disk exactly once for the whole drain.
+      // Cross-message reuse is unsupported: only the first occurrence is
+      // serialized, so one stored blob cannot amplify the drain response.
       expect(read).toHaveBeenCalledTimes(1);
     } finally {
       await media.close();
