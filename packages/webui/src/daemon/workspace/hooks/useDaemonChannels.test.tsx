@@ -10,28 +10,50 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { actions, context } = vi.hoisted(() => ({
-  actions: {
-    loadChannels: vi.fn(),
-    upsertChannel: vi.fn(),
-    removeChannel: vi.fn(),
-    setChannelStartup: vi.fn(),
-    startChannel: vi.fn(),
-    stopChannel: vi.fn(),
-    restartChannel: vi.fn(),
-    channelPairing: {
-      list: vi.fn(),
-      approve: vi.fn(),
-      approvals: vi.fn(),
-      revoke: vi.fn(),
+const { actions, client, context, qualifiedWorkspace } = vi.hoisted(() => {
+  const qualifiedWorkspace = {
+    workspaceChannelTypes: vi.fn(),
+    workspaceChannels: vi.fn(),
+    upsertWorkspaceChannel: vi.fn(),
+    deleteWorkspaceChannel: vi.fn(),
+    setWorkspaceChannelStartup: vi.fn(),
+    startWorkspaceChannel: vi.fn(),
+    stopWorkspaceChannel: vi.fn(),
+    restartWorkspaceChannel: vi.fn(),
+    workspaceChannelPairingRequests: vi.fn(),
+    approveWorkspaceChannelPairing: vi.fn(),
+    workspaceChannelPairingApprovals: vi.fn(),
+    revokeWorkspaceChannelPairingApproval: vi.fn(),
+  };
+  const client = {
+    workspaceByCwd: vi.fn(() => qualifiedWorkspace),
+  };
+  return {
+    actions: {
+      loadChannels: vi.fn(),
+      upsertChannel: vi.fn(),
+      removeChannel: vi.fn(),
+      setChannelStartup: vi.fn(),
+      startChannel: vi.fn(),
+      stopChannel: vi.fn(),
+      restartChannel: vi.fn(),
+      channelPairing: {
+        list: vi.fn(),
+        approve: vi.fn(),
+        approvals: vi.fn(),
+        revoke: vi.fn(),
+      },
     },
-  },
-  context: {
-    current: {
-      workspaceCwd: '/workspace-a' as string | undefined,
+    context: {
+      current: {
+        workspaceCwd: '/workspace-a' as string | undefined,
+        client,
+      },
     },
-  },
-}));
+    client,
+    qualifiedWorkspace,
+  };
+});
 
 vi.mock('../DaemonWorkspaceProvider.js', () => ({
   useDaemonWorkspace: () => ({
@@ -78,7 +100,8 @@ describe('useDaemonChannels', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
-    context.current = { workspaceCwd: '/workspace-a' };
+    context.current = { workspaceCwd: '/workspace-a', client };
+    client.workspaceByCwd.mockClear();
     for (const action of [
       actions.loadChannels,
       actions.upsertChannel,
@@ -91,6 +114,18 @@ describe('useDaemonChannels', () => {
       actions.channelPairing.approve,
       actions.channelPairing.approvals,
       actions.channelPairing.revoke,
+      qualifiedWorkspace.workspaceChannelTypes,
+      qualifiedWorkspace.workspaceChannels,
+      qualifiedWorkspace.upsertWorkspaceChannel,
+      qualifiedWorkspace.deleteWorkspaceChannel,
+      qualifiedWorkspace.setWorkspaceChannelStartup,
+      qualifiedWorkspace.startWorkspaceChannel,
+      qualifiedWorkspace.stopWorkspaceChannel,
+      qualifiedWorkspace.restartWorkspaceChannel,
+      qualifiedWorkspace.workspaceChannelPairingRequests,
+      qualifiedWorkspace.approveWorkspaceChannelPairing,
+      qualifiedWorkspace.workspaceChannelPairingApprovals,
+      qualifiedWorkspace.revokeWorkspaceChannelPairingApproval,
     ]) {
       action.mockReset();
     }
@@ -116,6 +151,45 @@ describe('useDaemonChannels', () => {
     expect(result?.catalog.map((item) => item.type)).toEqual(['dingtalk']);
     expect(Object.keys(result?.channels ?? {})).toEqual(['bot-a']);
     expect(result?.snapshot?.revision).toBe('1');
+  });
+
+  it('loads and mutates an explicitly selected registered workspace', async () => {
+    const data = channelData('bot-b');
+    qualifiedWorkspace.workspaceChannelTypes.mockResolvedValue(data.catalog);
+    qualifiedWorkspace.workspaceChannels.mockResolvedValue(data.snapshot);
+    qualifiedWorkspace.upsertWorkspaceChannel.mockResolvedValue({
+      snapshot: data.snapshot,
+      instance: data.snapshot.instances['bot-b'],
+    });
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({
+        autoLoad: true,
+        workspaceCwd: '/workspace-b',
+      });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+    await act(async () => {
+      await result?.createOrUpdate('bot-b', {
+        expectedRevision: '1',
+        config: { type: 'dingtalk' },
+      });
+    });
+
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/workspace-b');
+    expect(actions.loadChannels).not.toHaveBeenCalled();
+    expect(qualifiedWorkspace.upsertWorkspaceChannel).toHaveBeenCalledWith(
+      'bot-b',
+      {
+        expectedRevision: '1',
+        config: { type: 'dingtalk' },
+      },
+    );
+    expect(qualifiedWorkspace.workspaceChannels).toHaveBeenCalledTimes(2);
+    expect(Object.keys(result?.channels ?? {})).toEqual(['bot-b']);
   });
 
   it('reports errors when loading Channel data fails', async () => {
@@ -237,7 +311,7 @@ describe('useDaemonChannels', () => {
     await act(async () => root.render((<TestComponent />) as ReactNode));
     expect(Object.keys(result?.channels ?? {})).toEqual(['bot-a']);
 
-    context.current = { workspaceCwd: '/workspace-b' };
+    context.current = { workspaceCwd: '/workspace-b', client };
     await act(async () => root.render((<TestComponent />) as ReactNode));
     expect(result?.channels).toEqual({});
 
@@ -263,7 +337,7 @@ describe('useDaemonChannels', () => {
       await result?.reload();
     });
 
-    context.current = { workspaceCwd: '/workspace-b' };
+    context.current = { workspaceCwd: '/workspace-b', client };
     await act(async () => root.render((<TestComponent />) as ReactNode));
 
     expect(actions.loadChannels).toHaveBeenCalledTimes(2);
@@ -288,7 +362,7 @@ describe('useDaemonChannels', () => {
     });
 
     enabled = false;
-    context.current = { workspaceCwd: '/workspace-b' };
+    context.current = { workspaceCwd: '/workspace-b', client };
     await act(async () => root.render((<TestComponent />) as ReactNode));
     enabled = true;
     await act(async () => root.render((<TestComponent />) as ReactNode));

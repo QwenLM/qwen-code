@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
@@ -22,6 +22,7 @@ import {
 } from '../utils/composerTag';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { ReadonlyComposerTag } from './messages/UserMessage';
+import { isSafeImageSrc } from './messages/Markdown';
 import styles from '../App.module.css';
 
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
@@ -122,6 +123,7 @@ export interface QueuedPrompt {
   sessionId?: string;
   text: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
   onAdmitted?: () => void;
@@ -145,6 +147,7 @@ export function QueuedPromptDisplay({
   onEdit,
   onRestoreUnknown,
   onDiscardUnknown,
+  onImagePreview,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
@@ -153,6 +156,7 @@ export function QueuedPromptDisplay({
   onEdit: (id: number) => void;
   onRestoreUnknown?: (id: number) => void;
   onDiscardUnknown?: (id: number) => void;
+  onImagePreview?: (src: string, alt?: string) => void;
 }) {
   const {
     parseUserMessageContent,
@@ -191,7 +195,12 @@ export function QueuedPromptDisplay({
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
         );
-        const imageCount = prompt.images?.length ?? 0;
+        const safeImages = (prompt.images ?? []).flatMap((image, index) => {
+          const src = `data:${image.media_type};base64,${image.data}`;
+          return isSafeImageSrc(src) ? [{ index, src }] : [];
+        });
+        const imageCount = safeImages.length;
+        const fileCount = prompt.files?.length ?? 0;
         const isSubmitting = prompt.serverState === 'submitting';
         const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
@@ -254,13 +263,53 @@ export function QueuedPromptDisplay({
                 ),
               )}
               {preview.truncated ? '...' : null}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
+              {fileCount > 0
+                ? ` ${t('queue.fileCount', { count: fileCount })}`
                 : ''}
               {isAdmissionUnknown && !hasUnknownPayload
                 ? ` ${t('queue.localCopyDiscarded')}`
                 : ''}
             </span>
+            {imageCount > 0 ? (
+              <span
+                className={styles.queuedPromptImages}
+                aria-label={t('queue.imageCount', { count: imageCount })}
+                title={t('queue.imageCount', { count: imageCount })}
+              >
+                {safeImages.map(({ index, src }) => {
+                  const alt = t('user.uploadedImage', { index: index + 1 });
+                  return (
+                    <img
+                      key={index}
+                      className={`${styles.queuedPromptImage}${
+                        onImagePreview
+                          ? ` ${styles.queuedPromptImageInteractive}`
+                          : ''
+                      }`}
+                      src={src}
+                      alt={alt}
+                      role={onImagePreview ? 'button' : undefined}
+                      tabIndex={onImagePreview ? 0 : undefined}
+                      onClick={
+                        onImagePreview
+                          ? () => onImagePreview(src, alt)
+                          : undefined
+                      }
+                      onKeyDown={
+                        onImagePreview
+                          ? (event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ')
+                                return;
+                              event.preventDefault();
+                              onImagePreview(src, alt);
+                            }
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+              </span>
+            ) : null}
             {isSubmitting ||
             isQueued ||
             isMidTurnPending ||

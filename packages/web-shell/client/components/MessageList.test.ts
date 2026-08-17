@@ -1100,6 +1100,7 @@ function collapseItems(
     isResponding: boolean;
     pendingApprovalCallId: string | null;
     backgroundSummaryGraceActive: boolean;
+    waitForUnmatchedAgentCompletions: boolean;
     automaticallyExpandedAgentKeys: ReadonlySet<string>;
     enabled: boolean;
   }> = {},
@@ -1109,6 +1110,8 @@ function collapseItems(
     isResponding: opts.isResponding ?? false,
     pendingApprovalCallId: opts.pendingApprovalCallId ?? null,
     backgroundSummaryGraceActive: opts.backgroundSummaryGraceActive ?? true,
+    waitForUnmatchedAgentCompletions:
+      opts.waitForUnmatchedAgentCompletions ?? true,
     automaticallyExpandedAgentKeys: opts.automaticallyExpandedAgentKeys,
     enabled: opts.enabled ?? true,
   });
@@ -1773,6 +1776,31 @@ describe('applyTurnCollapse', () => {
     expect(currentTurn?.liveStartedAt).toBe(2_000);
   });
 
+  it('collapses the latest turn once the unmatched-completion grace expires', () => {
+    const items = groupParallelAgents([
+      { ...makeUserMessage('u1'), timestamp: 1_000 },
+      makeBackgroundAgentToolGroup('a1', 'completed'),
+      makeBackgroundAgentToolGroup('a2', 'completed'),
+      makeAssistantMessage('launched'),
+      makeBackgroundNotification('notification-a1', 'call-a1'),
+    ]);
+
+    // While the grace window is active the unmatched sibling keeps the turn
+    // open.
+    const held = collapseOf(collapseItems(items), 'u1');
+    expect(held?.collapsed).toBe(false);
+    expect(held?.liveStartedAt).toBe(1_000);
+
+    // Once the grace expires the turn collapses even though the final
+    // narration precedes the notification.
+    const released = collapseOf(
+      collapseItems(items, { waitForUnmatchedAgentCompletions: false }),
+      'u1',
+    );
+    expect(released?.collapsed).toBe(true);
+    expect(released?.liveStartedAt).toBeUndefined();
+  });
+
   it('releases a background summary wait when its grace period expires', () => {
     const items = groupParallelAgents([
       { ...makeUserMessage('u1'), timestamp: 1_000 },
@@ -2012,22 +2040,22 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
   });
 
-  it('hides mid-turn injected debug rows with collapsed tool steps', () => {
+  it('keeps mid-turn injected user messages visible with collapsed tool steps', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       {
         id: 's1',
         role: 'system',
-        content: '已插入消息：hi',
+        content: 'hi',
         variant: 'info',
         source: 'mid_turn_message_injected',
       },
       makeAssistantMessage('a1'),
     ]);
     const out = collapseItems(items);
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
-    expect(collapseOf(out, 0)?.hiddenCount).toBe(2);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 's1', 'a1']);
+    expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
   });
 
   it('does not collapse a turn whose only response is a system row', () => {

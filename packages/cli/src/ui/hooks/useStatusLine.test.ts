@@ -4,19 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeAll,
-  beforeEach,
-  afterEach,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
 import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
+import { useStatusLine } from './useStatusLine.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
@@ -157,14 +150,6 @@ function setStatusLineConfig(
 }
 
 describe('useStatusLine', () => {
-  // Must import dynamically after mocks are set up
-  let useStatusLine: typeof import('./useStatusLine.js').useStatusLine;
-
-  beforeAll(async () => {
-    const mod = await import('./useStatusLine.js');
-    useStatusLine = mod.useStatusLine;
-  }, 20_000);
-
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
