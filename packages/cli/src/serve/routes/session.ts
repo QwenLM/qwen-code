@@ -43,7 +43,13 @@ import {
 } from '../conversations/session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
-import type { Application, Request, RequestHandler, Response } from 'express';
+import express, {
+  type Application,
+  type ErrorRequestHandler,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
@@ -60,6 +66,7 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
+  type BridgePromptContentBlock,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -205,6 +212,78 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+// Media blocks are resolved into inline bytes at dispatch, so an unbounded
+// content array lets one small request fan out into gigabytes of heap (a
+// repeated reference resolves to the same 8 MiB image once per occurrence).
+// 256 matches the session media store's item cap, so a message can still
+// reference every stored item.
+const MEDIA_CONTENT_MAX_BLOCKS = 256;
+
+// SVG can carry scripts; this origin also hosts the daemon API and Web
+// Shell UI, and stored bytes are served back to browsers — raster formats
+// only. Compare the normalized media type: standards-conformant spelling
+// variants (`image/svg+xml;charset=utf-8`, `image/SVG+XML`) must not slip
+// past an exact-string match.
+function isSvgMimeType(mimeType: string | undefined): boolean {
+  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'image/svg+xml';
+}
+
+// Shared per-block validation for the prompt and mid-turn routes. SVG can
+// carry scripts; this origin also hosts the daemon API and Web Shell UI, and
+// stored bytes are served back to browsers — raster formats only, matching
+// the upload route's policy.
+type MediaBlockParseResult =
+  | { valid: true; block: BridgePromptContentBlock }
+  | { valid: false; code: 'not-object' | 'invalid-shape' | 'svg' };
+
+function parseMediaContentBlock(block: unknown): MediaBlockParseResult {
+  if (typeof block !== 'object' || block === null || Array.isArray(block)) {
+    return { valid: false, code: 'not-object' };
+  }
+  const record = block as Record<string, unknown>;
+  const type = record['type'];
+  const data = record['data'];
+  const mediaId = record['mediaId'];
+  const mimeType = record['mimeType'];
+  const size = record['size'];
+  const inline = typeof data === 'string' && data.length > 0;
+  const reference =
+    typeof mediaId === 'string' &&
+    mediaId.length > 0 &&
+    typeof size === 'number' &&
+    Number.isSafeInteger(size) &&
+    size > 0;
+  if (
+    type !== 'image' ||
+    inline === reference ||
+    typeof mimeType !== 'string' ||
+    !mimeType.startsWith(`${type}/`)
+  ) {
+    return { valid: false, code: 'invalid-shape' };
+  }
+  if (isSvgMimeType(mimeType)) {
+    return { valid: false, code: 'svg' };
+  }
+  return {
+    valid: true,
+    block: inline
+      ? ({ type, data, mimeType } as BridgePromptContentBlock)
+      : ({ type, mediaId, mimeType, size } as BridgePromptContentBlock),
+  };
+}
+
+function mediaBlockParseError(
+  code: 'not-object' | 'invalid-shape' | 'svg',
+  entryLabel: string,
+): string {
+  if (code === 'not-object') {
+    return `each ${entryLabel} must be a media content block`;
+  }
+  if (code === 'svg') {
+    return 'SVG images are not supported';
+  }
+  return `each ${entryLabel} must be an image block with either \`data\`, or \`mediaId\` and \`size\`, plus a matching \`mimeType\``;
+}
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
@@ -4184,6 +4263,123 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/media',
+    mutate(),
+    express.raw({ type: 'image/*', limit: '8mb' }),
+    ((error, _req, res, next) => {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        error.status === 413
+      ) {
+        res.status(413).json({ error: 'Request body too large (max 8 MiB)' });
+        return;
+      }
+      next(error);
+    }) satisfies ErrorRequestHandler,
+    withOwnerMutableSession(
+      'POST /session/:id/media',
+      async (req, res, sessionId, runtime) => {
+        const contentType = req.headers['content-type']
+          ?.split(';', 1)[0]
+          ?.trim()
+          .toLowerCase();
+        // SVG can carry scripts; this origin also hosts the daemon API and
+        // Web Shell UI, and the bytes are served back to browsers, so an
+        // inline SVG would run same-origin. Raster formats only.
+        if (isSvgMimeType(contentType)) {
+          res.status(415).json({ error: 'SVG uploads are not supported' });
+          return;
+        }
+        if (
+          !contentType ||
+          !contentType.startsWith('image/') ||
+          !Buffer.isBuffer(req.body) ||
+          req.body.byteLength === 0
+        ) {
+          res.status(400).json({
+            error:
+              'request body must contain image/* bytes with a matching Content-Type',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const reference = await runtime.bridge.storeSessionMedia(
+            sessionId,
+            req.body,
+            contentType,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(201).json(reference);
+        } catch (error) {
+          if (error instanceof RangeError) {
+            res.status(413).json({ error: error.message });
+            return;
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/media/:mediaId',
+    withOwnerReadSession(
+      'GET /session/:id/media/:mediaId',
+      async (req, res, sessionId, runtime) => {
+        const mediaId = req.params['mediaId'];
+        if (!mediaId) {
+          res.status(400).json({ error: '`mediaId` is required' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const media = await runtime.bridge.readSessionMedia(
+          sessionId,
+          mediaId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        if (!media) {
+          res.status(404).json({ error: 'session media not found' });
+          return;
+        }
+        res.setHeader('Content-Type', media.mimeType);
+        res.setHeader('Content-Length', String(media.data.byteLength));
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('Content-Disposition', 'attachment');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.status(200).send(media.data);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/media/:mediaId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/media/:mediaId',
+      async (req, res, sessionId, runtime) => {
+        const mediaId = req.params['mediaId'];
+        if (!mediaId) {
+          res.status(400).json({ error: '`mediaId` is required' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const removed = await runtime.bridge.removeSessionMedia(
+          sessionId,
+          mediaId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ removed });
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/prompt',
     mutate(),
     withOwnerMutableSession(
@@ -4209,6 +4405,31 @@ export function registerSessionRoutes(
             error: 'each `prompt` element must be an object (content block)',
           });
           return;
+        }
+        const mediaBlockCount = prompt.filter(
+          (item: unknown) =>
+            (item as Record<string, unknown>)['type'] !== 'text',
+        ).length;
+        if (mediaBlockCount > MEDIA_CONTENT_MAX_BLOCKS) {
+          res.status(400).json({
+            error: `\`prompt\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
+          });
+          return;
+        }
+        // Same per-block validation as the mid-turn route, scoped to image
+        // blocks: a malformed image admitted here only fails the ACP child's
+        // schema parse later, surfacing an async turn error instead of a
+        // synchronous 400. Other non-text blocks (legacy inline audio,
+        // embedded resources) keep their pre-existing child-side validation.
+        for (const item of prompt) {
+          if ((item as Record<string, unknown>)['type'] !== 'image') continue;
+          const parsed = parseMediaContentBlock(item);
+          if (!parsed.valid) {
+            res.status(400).json({
+              error: mediaBlockParseError(parsed.code, '`prompt` image block'),
+            });
+            return;
+          }
         }
         const rawRequestDeadline = body['deadlineMs'];
         let requestDeadlineMs: number | undefined;
@@ -5738,9 +5959,42 @@ export function registerSessionRoutes(
         // stores the trimmed string, so checking the raw length would reject input
         // whose real content fits but is padded with whitespace.
         const trimmed = typeof message === 'string' ? message.trim() : '';
-        if (trimmed.length === 0) {
+        // Optional image blocks injected mid-turn alongside the
+        // text. Validate strictly here — the ACP child silently drops blocks
+        // that fail its own `isContentBlock` check, so a malformed block would
+        // vanish from the turn without any error. Media size is bounded by the
+        // global request body limit.
+        const rawContent = body['content'];
+        let mediaBlocks: BridgePromptContentBlock[] | undefined;
+        if (rawContent !== undefined) {
+          if (!Array.isArray(rawContent) || rawContent.length === 0) {
+            res.status(400).json({
+              error: '`content` must be a non-empty array of media blocks',
+            });
+            return;
+          }
+          if (rawContent.length > MEDIA_CONTENT_MAX_BLOCKS) {
+            res.status(400).json({
+              error: `\`content\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
+            });
+            return;
+          }
+          mediaBlocks = [];
+          for (const block of rawContent) {
+            const parsed = parseMediaContentBlock(block);
+            if (!parsed.valid) {
+              res.status(400).json({
+                error: mediaBlockParseError(parsed.code, '`content` entry'),
+              });
+              return;
+            }
+            mediaBlocks.push(parsed.block);
+          }
+        }
+        if (trimmed.length === 0 && mediaBlocks === undefined) {
           res.status(400).json({
-            error: '`message` is required and must be a non-empty string',
+            error:
+              '`message` must be a non-empty string, or `content` must carry at least one media block',
           });
           return;
         }
@@ -5773,6 +6027,7 @@ export function registerSessionRoutes(
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
+          mediaBlocks ? { content: mediaBlocks } : undefined,
         );
         res.status(200).json(result);
       },
