@@ -215,6 +215,42 @@ describe('runCleanup', () => {
     );
   });
 
+  it('unlinks a symlink at the three NAMED family paths instead of releasing what it points at', () => {
+    // A LIVE link at any of them used to reach `releaseWorktree`: its
+    // `existsSync` followed the link and `git worktree remove --force`
+    // resolved it — together they deleted whichever registered worktree the
+    // link named, measured against the real function, while reporting the
+    // family path as swept. A DANGLING one was invisible to it and survived
+    // to wedge the next review's `worktree add`. Both shapes are unlinked
+    // the way the scratch family's always were.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => true });
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.rmSync).toHaveBeenCalledWith('/repo/.qwen/tmp/review-pr-123', {
+      force: true,
+    });
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      { force: true },
+    );
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-base',
+      { force: true },
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed probe worktree link'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed base worktree link'),
+    );
+  });
+
   it('does not announce a clean sweep when it could not list the family', () => {
     // A silent skip leaks a full checkout per shard while stdout says
     // "Nothing to clean" and the lease is cleared.

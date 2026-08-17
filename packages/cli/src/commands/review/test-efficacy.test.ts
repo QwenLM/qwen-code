@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
   splitDiffIntoHunks,
@@ -31,7 +31,9 @@ import {
   runControlMutant,
   runOneMutant,
   runOneHunkProbe,
+  committedSymlinkProbes,
 } from './test-efficacy.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -351,6 +353,85 @@ describe('probe write sites refuse a symlinked target', () => {
       expect(readFileSync(join(outside, 'shared.ts'), 'utf8')).toBe(original);
     } finally {
       teardown(dir, outside);
+    }
+  });
+
+  it('refuses a target reached through a SYMLINKED ANCESTOR too — a leaf check cannot see it', () => {
+    // `lstat` resolves every intermediate component, so once a directory of a
+    // REUSED probe tree has been relinked by code that ran in it, a leaf-only
+    // check reports the outside file as ordinary and every later write
+    // follows the link out of the tree. The guard walks every component, the
+    // way `safeRmWithin` does on the delete side.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-probetree-anc-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-probetree-anc-target-'));
+    try {
+      const original = 'line one\nline two\n';
+      mkdirSync(join(outside, 'src'), { recursive: true });
+      writeFileSync(join(outside, 'src', 'lib.ts'), original);
+      symlinkSync(join(outside, 'src'), join(dir, 'src'));
+
+      const m = runOneMutant(
+        dir,
+        { file: 'src/lib.ts', line: 1, statement: 'line one' },
+        [],
+      );
+      expect(m.verdict).toBe('inconclusive');
+      expect(m.detail).toContain('symlink');
+
+      const h = runOneHunkProbe(
+        dir,
+        {
+          file: 'src/lib.ts',
+          index: 0,
+          header: '@@ -1,2 +1,2 @@',
+          startLine: 1,
+          patch: 'irrelevant — the guard fires before git apply',
+        },
+        [],
+      );
+      expect(h.verdict).toBe('inconclusive');
+      expect(h.detail).toContain('symlink');
+
+      expect(runControlMutant(dir, 'src/lib.ts')).toBeNull();
+
+      expect(readFileSync(join(outside, 'src', 'lib.ts'), 'utf8')).toBe(
+        original,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('committedSymlinkProbes', () => {
+  // A test committed as mode 120000 is collected by vitest THROUGH the link —
+  // every verdict it could produce is about code the probe tree never mutated,
+  // and no write guard sees it, because the harness never WRITES probe files.
+  it('names the probes committed as symlinks and nothing else', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'qwen-symlink-mode-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(repo, 'real.test.ts'), 'x\n');
+      writeFileSync(join(repo, 'target.ts'), 'y\n');
+      symlinkSync('target.ts', join(repo, 'linked.test.ts'));
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+
+      const got = committedSymlinkProbes(repo, [
+        'real.test.ts',
+        'linked.test.ts',
+        'absent.test.ts',
+      ]);
+      expect([...got]).toEqual(['linked.test.ts']);
+    } finally {
+      isolation.dispose();
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 });

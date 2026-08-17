@@ -269,6 +269,41 @@ describe('worktreeResidue', () => {
     expect(got).toEqual({ paths: [], total: 0 });
   });
 
+  it('says UNMEASURED for a NON-ASCII gitlink path, which quotepath renders unresolvable', () => {
+    // The blind set is parsed from `ls-files` output: under default
+    // `core.quotepath` git quotes a non-ASCII path into an octal-escape
+    // spelling that never resolves on disk, so a rendered parse drops the
+    // gitlink from the blind set and certifies a contaminated gitlink clean.
+    const sub = join(repo, 'sub-origin-utf');
+    mkdirSync(sub);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: sub });
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: sub });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: sub });
+    writeFileSync(join(sub, 's.txt'), 'x\n');
+    execFileSync('git', ['add', '-A'], { cwd: sub });
+    execFileSync('git', ['commit', '-qm', 'one'], { cwd: sub });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'café-mod',
+      ],
+      { cwd: tree },
+    );
+    git('commit', '-qm', 'add submodule');
+
+    writeFileSync(join(tree, 'café-mod', 'probe-cache.txt'), 'cache\n');
+
+    const got = worktreeResidue(tree);
+    expect(got.unmeasured).toContain('café-mod');
+    expect(got.unmeasured).toContain('cannot see inside');
+  });
+
   it('fails closed for a degraded dir nested in a checkout — discovery walks up', () => {
     // The production shape the tmpdir fixture above cannot pin: review
     // worktrees sit INSIDE the user's checkout, so a directory whose `.git`
@@ -558,6 +593,60 @@ describe('exposeDependencies', () => {
     });
     expect(lstatSync(join(probe, 'node_modules')).isDirectory()).toBe(true);
     expect(existsSync(join(probe, 'node_modules', 'plain-pkg'))).toBe(true);
+  });
+
+  it('rebuild removes node_modules the farm does not recreate — planted or linked', () => {
+    // Node resolves an INTERMEDIATE `packages/node_modules` before the root
+    // farm, and a reused tree sees only this call between runs — so whatever
+    // a previous run left at such a path decides every later verdict unless
+    // the rebuild reaches it. A LINK named node_modules is the same hole one
+    // redirection deeper.
+    const root = tmp('expose-sweep-root-');
+    const probe = tmp('expose-sweep-probe-');
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'node_modules', 'real-dep'), { recursive: true });
+    mkdirSync(join(root, 'packages', 'cli', 'node_modules', 'nested'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(root, 'packages', 'cli', 'package.json'),
+      JSON.stringify({ name: '@x/cli' }),
+    );
+    mkdirSync(join(probe, 'packages', 'cli'), { recursive: true });
+
+    expect(exposeDependencies(probe, root, { rebuild: true })).toMatchObject({
+      linked: 2,
+    });
+
+    mkdirSync(join(probe, 'packages', 'node_modules', 'shim'), {
+      recursive: true,
+    });
+    mkdirSync(join(probe, 'tools', 'node_modules', 'stub'), {
+      recursive: true,
+    });
+    mkdirSync(join(probe, 'linked'), { recursive: true });
+    symlinkSync(
+      join(root, 'node_modules'),
+      join(probe, 'linked', 'node_modules'),
+    );
+
+    expect(exposeDependencies(probe, root, { rebuild: true })).toMatchObject({
+      linked: 2,
+    });
+
+    expect(existsSync(join(probe, 'packages', 'node_modules'))).toBe(false);
+    expect(existsSync(join(probe, 'tools', 'node_modules'))).toBe(false);
+    expect(existsSync(join(probe, 'linked', 'node_modules'))).toBe(false);
+    // The farm-owned paths were re-linked, not swept...
+    expect(existsSync(join(probe, 'node_modules', 'real-dep'))).toBe(true);
+    expect(
+      existsSync(join(probe, 'packages', 'cli', 'node_modules', 'nested')),
+    ).toBe(true);
+    // ...and the link's target was never touched.
+    expect(existsSync(join(root, 'node_modules', 'real-dep'))).toBe(true);
   });
 
   it('skips a stray file under a scope directory, as it does at top level', () => {

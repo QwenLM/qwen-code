@@ -411,8 +411,12 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // uninitialized — an absent or empty directory at the gitlink — which
   // measures clean; anything non-empty — a probe's fixtures or caches, an
   // initialized submodule — is state the status above could not see, and the
-  // answer is unmeasured naming the path rather than clean.
-  const stage = spawnSync('git', ['ls-files', '-s'], {
+  // answer is unmeasured naming the path rather than clean. `-z` here is the
+  // same protection as the status call's: under default `core.quotepath` the
+  // rendered form quotes a non-ASCII gitlink name into a spelling that never
+  // resolves on disk, so the entry drops out of the blind set and a dirty
+  // gitlink is certified clean.
+  const stage = spawnSync('git', ['ls-files', '-s', '-z'], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -425,9 +429,9 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     return { paths: [], total: 0, unmeasured: why };
   }
   const blind = stage.stdout
-    .split('\n')
-    .filter((line) => line.startsWith('160000 '))
-    .map((line) => line.slice(line.indexOf('\t') + 1))
+    .split('\0')
+    .filter((rec) => rec.startsWith('160000 '))
+    .map((rec) => rec.slice(rec.indexOf('\t') + 1))
     .filter((gitlink) => {
       try {
         return readdirSync(join(cwd, gitlink)).length > 0;
@@ -518,6 +522,12 @@ export function exposeDependencies(
   };
   if (probeTree === dependencyRoot) return done;
   farmNodeModules(dependencyRoot, probeTree, done, opts.rebuild === true);
+  // Every `node_modules` this call recreates. Anything else carrying the name
+  // inside the disposable tree — a probe's own install at an intermediate path
+  // Node resolves BEFORE the root farm, a module stub planted there between
+  // two runs — survives the rebuild otherwise, and whatever occupies it
+  // decides module resolution for every later run in that tree.
+  const owned = new Set<string>([join(probeTree, 'node_modules')]);
   let members: string[] = [];
   try {
     const graph = readWorkspacePackages(dependencyRoot);
@@ -554,6 +564,7 @@ export function exposeDependencies(
     // to hang a `node_modules` off it would put a path in the tree that its
     // commit does not have.
     if (!existsSync(target)) continue;
+    owned.add(join(target, 'node_modules'));
     // Per member, not around the loop: one unreadable member used to abort the
     // walk, so every alphabetically later member silently went unfarmed while
     // `failed` stayed 0 and the caller reported success.
@@ -563,7 +574,66 @@ export function exposeDependencies(
       done.failed++;
     }
   }
+  if (opts.rebuild === true) {
+    removeUnownedNodeModules(probeTree, owned);
+  }
   return done;
+}
+
+/**
+ * Wipe every `node_modules` in a disposable tree that the farm does not
+ * recreate, for callers passing `rebuild`.
+ *
+ * The farm owns the tree root's `node_modules` and one per workspace member;
+ * Node's resolution walks UP from the importing file, so a `node_modules` at
+ * ANY other path — `packages/node_modules` in a `workspaces: ["packages/*"]`
+ * repo is the one measured — resolves before the root farm. The tree is
+ * reused across probe runs with only this function between them, so whatever
+ * a previous run left at such a path decides every later verdict; that is
+ * precisely the shape the rebuild discipline exists to catch.
+ *
+ * The walk never follows links — farm entries are symlinks pointing OUT of
+ * the tree — and skips the owned paths entirely: with `rebuild` the farm has
+ * already wiped and re-linked them. `.git` holds nothing that resolves as a
+ * dependency.
+ */
+function removeUnownedNodeModules(tree: string, owned: Set<string>): void {
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.name === 'node_modules') {
+        // The owned set mixes spellings: the root path is held as the caller
+        // spelled the tree, a member path as `containedIn` resolved it — on
+        // macOS those disagree (`/var/...` vs `/private/var/...`), so compare
+        // both the readdir spelling and the resolved one.
+        let real = full;
+        try {
+          real = realpathSync(full);
+        } catch {
+          // It was just read: keep the readdir spelling.
+        }
+        if (!owned.has(full) && !owned.has(real)) {
+          try {
+            rmSync(full, { recursive: true, force: true });
+          } catch {
+            // Same best-effort contract as the farm itself: a wipe that throws
+            // would re-class every probe `inconclusive`.
+          }
+        }
+        continue;
+      }
+      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+      if (entry.name === '.git') continue;
+      walk(full);
+    }
+  };
+  walk(tree);
 }
 
 /**

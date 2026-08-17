@@ -89,6 +89,30 @@ describe('runScratchTree', () => {
     );
   });
 
+  it('refuses while repo-local config defines a content filter — checkouts would execute it', () => {
+    // NO_HOOKS covers hooks only; a checkout still runs a configured
+    // smudge/clean filter, and the common dir the planting surface lives in
+    // is never wiped — so the refusal names the surface instead of running
+    // whatever it holds.
+    const pwned = join(repo, 'PWNED-smudge');
+    git(worktree, 'config', 'filter.evil.smudge', `touch ${pwned}`);
+    writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
+
+    // A repo WITHOUT the filter still gets a tree (the global-config filters
+    // a user's own git-lfs install carries are not this surface).
+    git(worktree, 'config', '--unset', 'filter.evil.smudge');
+    expect(run().available).toBe(true);
+  });
+
   it('places it BESIDE the review worktree, never inside it', () => {
     // Nested, every probe file would land in the tree this command exists to
     // keep clean — and in the PR's own diff with it.

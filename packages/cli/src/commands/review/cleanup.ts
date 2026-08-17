@@ -448,6 +448,38 @@ export function runCleanup(target: string): void {
     // could not remove it leaves a leftover that will wedge the next run's
     // `git worktree add` with nobody told why. Both have been shipped here.
     const report = (label: string, path: string) => {
+      // A symlink at ANY family path must never reach `releaseWorktree`: its
+      // `existsSync` follows a LIVE link, and `git worktree remove --force`
+      // resolves it — together they delete whichever registered worktree the
+      // link points at (the user's own, another review's live tree) while
+      // reporting this path as swept, measured against the real function. A
+      // DANGLING link is invisible to it for the opposite reason (`existsSync`
+      // reports "never existed"), survives, and wedges the next review's
+      // `worktree add` with `already exists`. `lstatSync` sees the link
+      // itself, and `rmSync` unlinks it rather than following it — the same
+      // reasoning `discardWorktree` documents for its own leftovers.
+      let symlink = false;
+      try {
+        symlink = lstatSync(path).isSymbolicLink();
+      } catch {
+        // Absent, or gone between the two calls: `releaseWorktree` answers
+        // both.
+      }
+      if (symlink) {
+        try {
+          rmSync(path, { force: true });
+          writeStdoutLine(`Removed ${label} link: ${path}`);
+          removedAny = true;
+        } catch (err) {
+          // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
+          // family path still wedges the next review's `worktree add`.
+          writeStderrLine(
+            `Failed to remove ${label} link ${path}: ${(err as Error).message}`,
+          );
+          failedAny = true;
+        }
+        return;
+      }
       const { existed, freed, reason } = releaseWorktree(path);
       if (freed) {
         writeStdoutLine(`Removed ${label}: ${path}`);
@@ -486,40 +518,6 @@ export function runCleanup(target: string): void {
     const scratch = scratchWorktreesOf(wt);
     if (scratch.failed) failedAny = true;
     for (const path of scratch.paths) {
-      // A dangling symlink at a family path is invisible to `releaseWorktree`
-      // (its `existsSync` follows the link, so it reports "never existed" and
-      // its `rmSync` never runs) — and it would still block the next review's
-      // `git worktree add` with `already exists`. `lstatSync` sees the link
-      // itself, and `rmSync` unlinks it rather than following it, which is the
-      // same reasoning `discardWorktree` documents for its own leftovers.
-      // ANY symlink here is unlinked rather than released: `git worktree
-      // remove --force <link>` follows it and deletes whichever registered
-      // worktree it points at — the user's own, or another review's live tree —
-      // while reporting the family path as swept. A dangling one is invisible
-      // to `releaseWorktree` for the opposite reason (its `existsSync` follows
-      // the link and reports "never existed"), so both go the same way.
-      let dangling = false;
-      try {
-        dangling = lstatSync(path).isSymbolicLink();
-      } catch {
-        // Not a symlink, or gone between the two calls: fall through to the
-        // ordinary release below.
-      }
-      if (dangling) {
-        try {
-          rmSync(path, { force: true });
-          writeStdoutLine(`Removed scratch worktree link: ${path}`);
-          removedAny = true;
-        } catch (err) {
-          // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
-          // family path still wedges the next review's `worktree add`.
-          writeStderrLine(
-            `Failed to remove scratch worktree link ${path}: ${(err as Error).message}`,
-          );
-          failedAny = true;
-        }
-        continue;
-      }
       report('scratch worktree', path);
     }
     // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
