@@ -116,10 +116,18 @@ describe('SessionDetailsTooltip', () => {
     const menuItem = portalRoot.querySelector('button');
     act(() => {
       row?.dispatchEvent(new Event('pointerover', { bubbles: true }));
-      vi.advanceTimersByTime(200);
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    act(() => {
       action?.dispatchEvent(new Event('pointerdown', { bubbles: true }));
       action?.click();
       vi.advanceTimersByTime(100);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    act(() => {
       menuItem?.dispatchEvent(new Event('pointerover', { bubbles: true }));
       vi.advanceTimersByTime(300);
     });

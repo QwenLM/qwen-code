@@ -2105,6 +2105,11 @@ describe('WebShellSidebar workspace removal', () => {
       false,
     );
     expect(sessionAction('Legacy primary')).toBeDefined();
+    expect(
+      inlineSessionAction('Legacy primary', 'Pin')
+        ?.closest<HTMLElement>('[class*="sessionMetaSlot"]')
+        ?.style.getPropertyValue('--session-actions-width'),
+    ).toBe('130px');
   });
 
   it('fails closed for an explicit primary cwd that disappears from the catalog', async () => {
@@ -4358,7 +4363,7 @@ describe('WebShellSidebar session list notices', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).toContain('No sessions.');
     expect(container.textContent).not.toContain('Loading sessions...');
   });
 
@@ -4381,7 +4386,7 @@ describe('WebShellSidebar session list notices', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).toContain('No sessions.');
     expect(container.textContent).not.toContain('Failed to load sessions');
   });
 

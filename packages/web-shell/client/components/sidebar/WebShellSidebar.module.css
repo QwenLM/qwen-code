@@ -822,7 +822,7 @@
 .sessionDetailsCopied {
   flex: 0 0 auto;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sessionText {
@@ -953,7 +953,7 @@
 .sessionRow:focus-within .sessionMetaSlot,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible),
 .sessionMetaSlot:has([data-state='open']) {
-  min-width: 78px;
+  min-width: var(--session-actions-width, 78px);
 }
 
 .sessionGitIcon {
@@ -1069,6 +1069,7 @@
 .sessionActionButton {
   width: 26px;
   height: 26px;
+  flex: 0 0 26px;
   border-radius: 7px;
 }
 

@@ -3399,7 +3399,14 @@ export function WebShellSidebar({
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
             )}
-            <div className={styles.sessionMetaSlot}>
+            <div
+              className={styles.sessionMetaSlot}
+              style={
+                hasArchivedActions
+                  ? ({ '--session-actions-width': '26px' } as CSSProperties)
+                  : undefined
+              }
+            >
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
@@ -3489,6 +3496,20 @@ export function WebShellSidebar({
       const showExport =
         sessionActionItems.has('export') && Boolean(activeExportScope);
       const showDelete = canShowDeleteSession(session);
+      const inlineActionCount =
+        Number(showPin && inlineActionItems.has('pin')) +
+        Number(showArchive && inlineActionItems.has('archive')) +
+        Number(showRename && inlineActionItems.has('rename')) +
+        Number(showExport && inlineActionItems.has('export')) +
+        Number(showDelete && inlineActionItems.has('delete'));
+      const showMoreActions =
+        (showPin && !inlineActionItems.has('pin')) ||
+        (showArchive && !inlineActionItems.has('archive')) ||
+        (showRename && !inlineActionItems.has('rename')) ||
+        canOrganizeSession(session, 'group') ||
+        (showExport && !inlineActionItems.has('export')) ||
+        (showDelete && !inlineActionItems.has('delete'));
+      const sessionActionCount = inlineActionCount + Number(showMoreActions);
       return withDetails(
         <div
           className={cx(
@@ -3554,7 +3575,16 @@ export function WebShellSidebar({
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
-              <div className={styles.sessionMetaSlot}>
+              <div
+                className={styles.sessionMetaSlot}
+                style={
+                  sessionActionCount > 0
+                    ? ({
+                        '--session-actions-width': `${sessionActionCount * 26}px`,
+                      } as CSSProperties)
+                    : undefined
+                }
+              >
                 {attentionLabel && (
                   <span
                     className={cx(
@@ -3682,12 +3712,7 @@ export function WebShellSidebar({
                           </button>
                         ));
                     })()}
-                    {(showPin && !inlineActionItems.has('pin')) ||
-                    (showArchive && !inlineActionItems.has('archive')) ||
-                    (showRename && !inlineActionItems.has('rename')) ||
-                    canOrganizeSession(session, 'group') ||
-                    (showExport && !inlineActionItems.has('export')) ||
-                    (showDelete && !inlineActionItems.has('delete')) ? (
+                    {showMoreActions ? (
                       <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
                         <DropdownMenuTrigger asChild>
                           <button
@@ -3879,11 +3904,7 @@ export function WebShellSidebar({
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
-      return (
-        <div className={styles.notice}>
-          {t(searchQuery.trim() ? 'sidebar.searchEmpty' : 'sidebar.noSessions')}
-        </div>
-      );
+      return <div className={styles.notice}>{t('sidebar.noSessions')}</div>;
     }
     if (channelSessionSections) {
       return channelSessionSections.map((section) => (
