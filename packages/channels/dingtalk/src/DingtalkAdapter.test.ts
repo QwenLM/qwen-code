@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelOutputSegmentContext,
@@ -2369,6 +2375,293 @@ describe('DingtalkChannel parsed-message logging', () => {
 
     expect(logged).toContain(
       '[DingTalk:test-dingtalk] message msgId=m1 conversationId=cid123 isGroup=true isMentioned=true senderNick=Alice senderStaffId=staff-1 senderId=sender-1',
+    );
+  });
+});
+
+describe('DingtalkChannel quoted media', () => {
+  const tempDirs = new Set<string>();
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.clear();
+    vi.restoreAllMocks();
+  });
+
+  function mockMediaDownload(mimeType: string, bytes: Uint8Array): string[] {
+    const downloadCodes: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, access_token: 'app-token' }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (
+          url === 'https://api.dingtalk.com/v1.0/robot/messageFiles/download'
+        ) {
+          const request = JSON.parse(String(init?.body)) as {
+            downloadCode: string;
+          };
+          downloadCodes.push(request.downloadCode);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ downloadUrl: 'https://example.com/media' }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(bytes, {
+            status: 200,
+            headers: { 'content-type': mimeType },
+          }),
+        );
+      },
+    );
+    return downloadCodes;
+  }
+
+  function replyToMedia(
+    channel: DingtalkChannelInstance,
+    msgType: string,
+    content: Record<string, unknown>,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: `quoted-${msgType}`,
+        conversationType: '2',
+        conversationId: 'cid-quoted-media',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        text: {
+          content: '@DingTalkTest inspect this',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: `media-${msgType}`,
+            msgType,
+            senderId: 'sender-1',
+            content,
+          },
+        },
+      }),
+      headers: { messageId: `quoted-${msgType}` },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
+  it('downloads a replied picture and attaches it to the prompt', async () => {
+    const downloadCodes = mockMediaDownload(
+      'image/png',
+      new Uint8Array([1, 2, 3]),
+    );
+    const channel = createChannel();
+
+    replyToMedia(channel, 'picture', { downloadCode: 'quoted-picture-code' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['quoted-picture-code']);
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[image]',
+        attachments: [
+          {
+            type: 'image',
+            data: Buffer.from([1, 2, 3]).toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      }),
+    );
+  });
+
+  it('downloads a replied file and attaches its local path to the prompt', async () => {
+    const downloadCodes = mockMediaDownload(
+      'application/json',
+      new TextEncoder().encode('{"name":"demo"}'),
+    );
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'quoted-file-code',
+      fileName: 'package.json',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(downloadCodes).toEqual(['quoted-file-code']);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    const filePath = envelope.attachments?.[0]?.filePath;
+    if (filePath) tempDirs.add(dirname(filePath));
+    expect(envelope).toMatchObject({
+      text: 'inspect this',
+      referencedText: '[file: package.json]',
+      attachments: [
+        {
+          type: 'file',
+          mimeType: 'application/json',
+          fileName: 'package.json',
+        },
+      ],
+    });
+    expect(filePath).toBeTruthy();
+    expect(existsSync(filePath!)).toBe(true);
+    expect(readFileSync(filePath!, 'utf8')).toBe('{"name":"demo"}');
+  });
+
+  it.each([
+    ['audio', 'audio/ogg', 'recording.ogg'],
+    ['video', 'video/mp4', 'clip.mp4'],
+  ] as const)(
+    'downloads replied %s media and attaches its local path to the prompt',
+    async (msgType, mimeType, fileName) => {
+      const downloadCodes = mockMediaDownload(
+        mimeType,
+        new Uint8Array([4, 5, 6]),
+      );
+      const channel = createChannel();
+
+      replyToMedia(channel, msgType, {
+        downloadCode: `quoted-${msgType}-code`,
+        fileName,
+      });
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      expect(downloadCodes).toEqual([`quoted-${msgType}-code`]);
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope).toMatchObject({
+        text: 'inspect this',
+        referencedText: `[${msgType}]`,
+        attachments: [{ type: msgType, mimeType, fileName }],
+      });
+      expect(filePath).toBeTruthy();
+      expect(existsSync(filePath!)).toBe(true);
+    },
+  );
+
+  it.each([
+    ['picture', {}, '[image]'],
+    ['file', { fileName: 'missing.pdf' }, '[file: missing.pdf]'],
+  ])(
+    'keeps the quoted %s placeholder without downloading when the code is absent',
+    async (msgType, content, referencedText) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('unexpected download'));
+      const channel = createChannel();
+
+      replyToMedia(channel, msgType, content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(channel.handleInbound).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'inspect this',
+          referencedText,
+        }),
+      );
+      expect(
+        vi.mocked(channel.handleInbound).mock.calls[0]![0],
+      ).not.toHaveProperty('attachments');
+    },
+  );
+
+  it('keeps processing the prompt when a quoted-media download fails', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('offline'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'unavailable-file-code',
+      fileName: 'offline.pdf',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[file: offline.pdf]',
+      }),
+    );
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0],
+    ).not.toHaveProperty('attachments');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] Cannot download media: access token refresh failed.\n',
+    );
+  });
+
+  it('keeps processing the prompt when the media download API fails', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, access_token: 'app-token' }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response('unavailable', { status: 503 }));
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = createChannel();
+
+    replyToMedia(channel, 'file', {
+      downloadCode: 'unavailable-file-code',
+      fileName: 'unavailable.pdf',
+    });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'inspect this',
+        referencedText: '[file: unavailable.pdf]',
+      }),
+    );
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0],
+    ).not.toHaveProperty('attachments');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk] downloadMedia API failed: HTTP 503 unavailable\n',
     );
   });
 });

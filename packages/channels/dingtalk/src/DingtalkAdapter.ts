@@ -1376,6 +1376,11 @@ export class DingtalkChannel extends ChannelBase {
   private extractQuotedContext(data: DingTalkMessageData): {
     referencedText?: string;
     isReplyToBot: boolean;
+    media?: {
+      downloadCode: string;
+      mediaType: 'image' | 'file' | 'audio' | 'video';
+      fileName?: string;
+    };
   } {
     // Newer format: text.repliedMsg
     if (data.text?.isReplyMsg && data.text.repliedMsg) {
@@ -1386,7 +1391,33 @@ export class DingtalkChannel extends ChannelBase {
       // Note: DingTalk doesn't include content for interactiveCard replies
       // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
-      return { referencedText: text || undefined, isReplyToBot };
+      const downloadCode = replied.content?.downloadCode;
+      let mediaType: 'image' | 'file' | 'audio' | 'video' | undefined;
+      switch (replied.msgType) {
+        case 'picture':
+          mediaType = 'image';
+          break;
+        case 'file':
+        case 'audio':
+        case 'video':
+          mediaType = replied.msgType;
+          break;
+        default:
+          break;
+      }
+      return {
+        referencedText: text || undefined,
+        isReplyToBot,
+        ...(downloadCode && mediaType
+          ? {
+              media: {
+                downloadCode,
+                mediaType,
+                fileName: replied.content?.fileName,
+              },
+            }
+          : {}),
+      };
     }
 
     // Legacy format: quoteMessage
@@ -1745,6 +1776,14 @@ export class DingtalkChannel extends ChannelBase {
             content.downloadCodes[0]!,
             content.mediaType,
             content.fileName,
+          );
+        }
+        if (quoted.media) {
+          await this.attachMedia(
+            envelope,
+            quoted.media.downloadCode,
+            quoted.media.mediaType,
+            quoted.media.fileName,
           );
         }
         await this.handleInbound(envelope);
