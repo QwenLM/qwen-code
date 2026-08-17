@@ -4514,14 +4514,17 @@ export function App({
   const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const mutation = workspaceEventSignals?.lastSkillMutation;
-    if (!mutation || handledSkillMutationIdRef.current === mutation.id) return;
-    handledSkillMutationIdRef.current = mutation.id;
     const sessionId = connection.sessionId;
+    const handleKey = mutation
+      ? `${mutation.id}::${sessionId ?? ''}`
+      : undefined;
+    if (!mutation || handledSkillMutationIdRef.current === handleKey) return;
     if (
       sessionId &&
       mutation.activation === 'applied' &&
       mutation.sessionsFailed === 0
     ) {
+      handledSkillMutationIdRef.current = handleKey;
       loadedSkillsFallbackSnapshotRef.current = undefined;
       setLoadedSkillsFallbackSessionId(undefined);
       return;
@@ -4529,17 +4532,23 @@ export function App({
     const sourceSnapshot = connectionSkillSnapshotRef.current;
     let cancelled = false;
     void reloadLoadedSkills(connection.workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded || !sessionId) return;
+      if (cancelled || !loaded) return;
+      if (!sessionId) {
+        handledSkillMutationIdRef.current = handleKey;
+        return;
+      }
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId !== sourceSnapshot.sessionId ||
         currentSnapshot.commands !== sourceSnapshot.commands ||
         currentSnapshot.skills !== sourceSnapshot.skills
       ) {
+        handledSkillMutationIdRef.current = handleKey;
         return;
       }
       loadedSkillsFallbackSnapshotRef.current = sourceSnapshot;
       setLoadedSkillsFallbackSessionId(sessionId);
+      handledSkillMutationIdRef.current = handleKey;
     });
     return () => {
       cancelled = true;

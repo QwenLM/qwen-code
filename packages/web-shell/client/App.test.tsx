@@ -10295,6 +10295,86 @@ describe('App session callbacks', () => {
     expect(onToast).toHaveBeenCalledWith('error', 'Skill snapshot unavailable');
   });
 
+  it('retries a cancelled partial Skill refresh after returning to the session', async () => {
+    mockConnection.commands = [
+      {
+        name: 'web-search',
+        description: 'Search the web',
+        source: 'skill',
+        raw: {
+          name: 'web-search',
+          description: 'Search the web',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ];
+    mockConnection.skills = ['web-search'];
+    const pendingReload = deferred<{
+      skills: Array<{ name: string; description: string; status: string }>;
+    }>();
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'ok',
+          },
+        ],
+      })
+      .mockReturnValue(pendingReload.promise);
+
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'web-search', description: 'Search the web' },
+    ]);
+
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      skillsVersion: 1,
+      lastSkillMutation: {
+        id: 'partial-web-search-mid-switch',
+        kind: 'skill_toggle',
+        skills: [{ name: 'web-search', enabled: false }],
+        activation: 'partial',
+        sessionsRefreshed: 0,
+        sessionsFailed: 1,
+      },
+    };
+    rerender();
+    await flush();
+
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+
+    await act(async () => {
+      pendingReload.resolve({
+        skills: [
+          {
+            name: 'web-search',
+            description: 'Search the web',
+            status: 'disabled',
+          },
+        ],
+      });
+      await pendingReload.promise;
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
+  });
+
   it.each([404, 410])(
     'shows a missing-session empty state with a new-session action for %d',
     async (status) => {
