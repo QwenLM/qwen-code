@@ -145,7 +145,6 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
-  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
