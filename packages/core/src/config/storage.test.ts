@@ -9,7 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
 
-const mockRealpathSync = vi.hoisted(() => vi.fn());
+const mockRealpathSync = vi.hoisted(() =>
+  // Default to the identity so isTempDirPath/realpathNearestExisting
+  // behave normally; individual tests override via mockRealpath().
+  vi.fn((p: unknown) => p?.toString()),
+);
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -38,7 +42,7 @@ function mockRealpath(
   missingPaths = new Set<string>(),
 ): void {
   mockRealpathSync.mockImplementation((pathToResolve) => {
-    const resolvedPath = pathToResolve.toString();
+    const resolvedPath = String(pathToResolve);
     if (missingPaths.has(resolvedPath)) {
       throw createEnoent(resolvedPath);
     }
@@ -199,7 +203,7 @@ describe('Storage – getPlansDir', () => {
 
   beforeEach(() => {
     mockRealpathSync.mockImplementation((pathToResolve) =>
-      actualFs.realpathSync(pathToResolve),
+      actualFs.realpathSync(String(pathToResolve)),
     );
   });
 
@@ -696,6 +700,9 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   let baseDir: string;
   let projectsDir: string;
   let aliveCwd: string;
+  /** A non-temp cwd that never exists (baseDir sits under os.tmpdir(),
+   * which would classify entries as all-temp instead of gone). */
+  let goneCwd: string;
 
   const STALE_AGE_MS = 2 * 24 * 60 * 60 * 1000;
   /** A long-dead pid: kill(pid, 0) fails with ESRCH/EINVAL, not EPERM. */
@@ -710,10 +717,41 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
   };
 
-  /** Ages an entry past the 24 h grace window. */
+  /** Ages an entry — directory and every file under it — past the 24 h
+   * grace window. Files matter because the sweep gates on the newest
+   * file mtime, not the entry dir's own mtime. */
   const ageEntry = (entry: string) => {
     const past = new Date(Date.now() - STALE_AGE_MS);
-    actualFs.utimesSync(path.join(projectsDir, entry), past, past);
+    const root = path.join(projectsDir, entry);
+    const age = (dir: string) => {
+      for (const dirent of actualFs.readdirSync(dir, { withFileTypes: true })) {
+        const child = path.join(dir, dirent.name);
+        if (dirent.isDirectory()) age(child);
+        actualFs.utimesSync(child, past, past);
+      }
+      actualFs.utimesSync(dir, past, past);
+    };
+    age(root);
+  };
+
+  /** Ages a single file past the grace window. */
+  const ageFile = (filePath: string) => {
+    const past = new Date(Date.now() - STALE_AGE_MS);
+    actualFs.utimesSync(filePath, past, past);
+  };
+
+  /**
+   * Runs the full disappearance-grace cycle for a gone non-temp entry:
+   * first sweep writes the marker, then age it and sweep again to reach
+   * the deletion. Returns the second sweep's result.
+   */
+  const sweepPastMarkerGrace = async (
+    entry: string,
+    onBeforeRemove?: (entryPath: string) => Promise<void>,
+  ) => {
+    await Storage.cleanOrphanProjectDirs('current', onBeforeRemove);
+    ageFile(path.join(projectsDir, entry, '.qwen-orphan-since'));
+    return Storage.cleanOrphanProjectDirs('current', onBeforeRemove);
   };
 
   beforeEach(() => {
@@ -721,6 +759,10 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     projectsDir = path.join(baseDir, 'projects');
     actualFs.mkdirSync(projectsDir, { recursive: true });
     aliveCwd = actualFs.mkdtempSync(path.join(os.tmpdir(), 'alive-cwd-'));
+    goneCwd = path.join(
+      process.cwd(),
+      `qwen-orphan-gone-${Math.random().toString(36).slice(2)}`,
+    );
     Storage.setRuntimeBaseDir(baseDir);
   });
 
@@ -730,32 +772,51 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     actualFs.rmSync(aliveCwd, { recursive: true, force: true });
   });
 
-  it('removes stale entries whose recorded cwd no longer exists', () => {
-    writeSession('-tmp-gone-sess', path.join(baseDir, 'no-longer-here'));
+  it('removes stale entries whose recorded cwd no longer exists', async () => {
+    writeSession('-tmp-gone-sess', goneCwd);
     ageEntry('-tmp-gone-sess');
-    Storage.cleanOrphanProjectDirs('current');
+    const result = await sweepPastMarkerGrace('-tmp-gone-sess');
     expect(actualFs.existsSync(path.join(projectsDir, '-tmp-gone-sess'))).toBe(
       false,
     );
+    expect(result.removed).toContain('-tmp-gone-sess');
+    expect(result.errors).toEqual([]);
   });
 
-  it('keeps fresh entries even when their cwd is gone (grace window)', () => {
-    writeSession('-fresh-gone-sess', path.join(baseDir, 'no-longer-here'));
-    Storage.cleanOrphanProjectDirs('current');
+  it('keeps fresh entries even when their cwd is gone (grace window)', async () => {
+    writeSession('-fresh-gone-sess', goneCwd);
+    await Storage.cleanOrphanProjectDirs('current');
     expect(
       actualFs.existsSync(path.join(projectsDir, '-fresh-gone-sess')),
     ).toBe(true);
   });
 
-  it('keeps entries whose recorded cwd still exists', () => {
+  it('keeps fresh gone-cwd entries without any runtime sidecar (R2-1)', async () => {
+    // Headless/ACP/SDK/serve sessions never write a sidecar; a running
+    // one stays protected through its ongoing appends alone.
+    writeSession('-headless-live', goneCwd);
+    ageEntry('-headless-live');
+    // Simulate an in-progress append: the transcript is fresh again.
+    actualFs.utimesSync(
+      path.join(projectsDir, '-headless-live', 'chats', 'session-1.jsonl'),
+      new Date(),
+      new Date(),
+    );
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-headless-live'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps entries whose recorded cwd still exists', async () => {
     writeSession('-alive-proj', aliveCwd);
-    Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-alive-proj'))).toBe(
       true,
     );
   });
 
-  it('keeps stale entries where any recorded cwd still exists', () => {
+  it('keeps stale entries where any recorded cwd still exists', async () => {
     // `/cd` relocation keeps the old cwd on line 1 and appends records
     // under the new one — deletion needs EVERY recorded cwd gone, so a
     // live cwd in the tail line must veto removal.
@@ -763,51 +824,57 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     actualFs.mkdirSync(chats, { recursive: true });
     actualFs.writeFileSync(
       path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: path.join(baseDir, 'gone'), type: 'user' }) +
+      JSON.stringify({ cwd: goneCwd, type: 'user' }) +
         '\n' +
         JSON.stringify({ cwd: process.cwd(), type: 'model' }) +
         '\n',
     );
     ageEntry('-multi-cwd');
-    Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-multi-cwd'))).toBe(
       true,
     );
   });
 
-  it('keeps stale entries owned by a live session (runtime sidecar pid)', () => {
-    writeSession('-live-sess', path.join(baseDir, 'no-longer-here'));
+  it('keeps stale entries owned by a live session (runtime sidecar pid)', async () => {
+    writeSession('-live-sess', goneCwd);
     actualFs.writeFileSync(
       path.join(projectsDir, '-live-sess', 'chats', 'session-1.runtime.json'),
       JSON.stringify({
         pid: process.pid,
-        work_dir: path.join(baseDir, 'no-longer-here'),
+        work_dir: goneCwd,
       }),
     );
     ageEntry('-live-sess');
-    Storage.cleanOrphanProjectDirs('current');
+    // The session is still running: its sidecar was just refreshed.
+    actualFs.utimesSync(
+      path.join(projectsDir, '-live-sess', 'chats', 'session-1.runtime.json'),
+      new Date(),
+      new Date(),
+    );
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-live-sess'))).toBe(
       true,
     );
   });
 
-  it('removes stale entries whose runtime sidecar pid is dead', () => {
-    writeSession('-dead-sess', path.join(baseDir, 'no-longer-here'));
+  it('removes stale entries whose runtime sidecar pid is dead', async () => {
+    writeSession('-dead-sess', goneCwd);
     actualFs.writeFileSync(
       path.join(projectsDir, '-dead-sess', 'chats', 'session-1.runtime.json'),
       JSON.stringify({
         pid: DEAD_PID,
-        work_dir: path.join(baseDir, 'no-longer-here'),
+        work_dir: goneCwd,
       }),
     );
     ageEntry('-dead-sess');
-    Storage.cleanOrphanProjectDirs('current');
+    await sweepPastMarkerGrace('-dead-sess');
     expect(actualFs.existsSync(path.join(projectsDir, '-dead-sess'))).toBe(
       false,
     );
   });
 
-  it('reads cwds from sidecars and archived transcripts', () => {
+  it('reads cwds from sidecars and archived transcripts', async () => {
     // No top-level chat log at all — only sidecar and archive forms. If
     // the sweep ignored those shapes, cwds would be empty and the
     // non-empty entry would survive.
@@ -817,26 +884,22 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     actualFs.mkdirSync(archive, { recursive: true });
     actualFs.writeFileSync(
       path.join(chats, 'session-1.runtime.json'),
-      JSON.stringify({ pid: DEAD_PID, work_dir: path.join(baseDir, 'gone-1') }),
+      JSON.stringify({ pid: DEAD_PID, work_dir: `${goneCwd}-1` }),
     );
     actualFs.writeFileSync(
       path.join(chats, 'session-1.worktree.json'),
-      JSON.stringify({ originalCwd: path.join(baseDir, 'gone-2') }),
+      JSON.stringify({ originalCwd: `${goneCwd}-2` }),
     );
     actualFs.writeFileSync(
       path.join(archive, 'session-0.jsonl'),
-      JSON.stringify({ cwd: path.join(baseDir, 'gone-3') }) + '\n',
+      JSON.stringify({ cwd: `${goneCwd}-3` }) + '\n',
     );
-    actualFs.utimesSync(
-      entry,
-      new Date(Date.now() - STALE_AGE_MS),
-      new Date(Date.now() - STALE_AGE_MS),
-    );
-    Storage.cleanOrphanProjectDirs('current');
+    ageEntry('-sidecar-sess');
+    await sweepPastMarkerGrace('-sidecar-sess');
     expect(actualFs.existsSync(entry)).toBe(false);
   });
 
-  it('keeps stale entries when a sidecar-recorded cwd still exists', () => {
+  it('keeps stale entries when a sidecar-recorded cwd still exists', async () => {
     const entry = path.join(projectsDir, '-sidecar-alive');
     const chats = path.join(entry, 'chats');
     actualFs.mkdirSync(chats, { recursive: true });
@@ -844,78 +907,138 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       path.join(chats, 'session-1.runtime.json'),
       JSON.stringify({ pid: DEAD_PID, work_dir: process.cwd() }),
     );
-    actualFs.utimesSync(
-      entry,
-      new Date(Date.now() - STALE_AGE_MS),
-      new Date(Date.now() - STALE_AGE_MS),
-    );
-    Storage.cleanOrphanProjectDirs('current');
+    ageEntry('-sidecar-alive');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
   });
 
-  it('removes stale entries whose only surviving cwds sit under temp roots', () => {
-    // Crashed temp session whose temp dir survived: the cwd exists, so
-    // the all-gone predicate misses it — but temp roots are disposable.
-    writeSession('-temp-crash', aliveCwd);
+  it('removes stale entries whose only surviving cwds sit under temp roots', async () => {
+    // Crashed temp session whose temp dir survived: the cwd exists, but
+    // temp roots are disposable by definition — no marker grace needed.
+    writeSession('-temp-crash', path.join(os.tmpdir(), 'qwen-gone-temp'));
     ageEntry('-temp-crash');
-    Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-temp-crash'))).toBe(
       false,
     );
   });
 
-  it('recovers cwds from `}{`-glued records (crash mid-append)', () => {
+  it('recovers cwds from `}{`-glued records (crash mid-append)', async () => {
     const chats = path.join(projectsDir, '-glued', 'chats');
     actualFs.mkdirSync(chats, { recursive: true });
     actualFs.writeFileSync(
       path.join(chats, 'session-1.jsonl'),
-      JSON.stringify({ cwd: path.join(baseDir, 'gone-a') }) +
-        JSON.stringify({ cwd: path.join(baseDir, 'gone-b') }) +
+      JSON.stringify({ cwd: `${goneCwd}-a` }) +
+        JSON.stringify({ cwd: `${goneCwd}-b` }) +
         '\n',
     );
     ageEntry('-glued');
-    Storage.cleanOrphanProjectDirs('current');
+    await sweepPastMarkerGrace('-glued');
     expect(actualFs.existsSync(path.join(projectsDir, '-glued'))).toBe(false);
   });
 
-  it('keeps stale entries with files but no readable cwd records', () => {
+  it('marks gone non-temp entries first and removes only once the marker ages (R2-2)', async () => {
+    // A vanished non-temp cwd may be a transiently absent mount, so the
+    // first sweep writes a marker instead of deleting; removal happens
+    // only once the marker itself is past the grace window.
+    writeSession('-marked-gone', goneCwd);
+    ageEntry('-marked-gone');
+    const marker = path.join(projectsDir, '-marked-gone', '.qwen-orphan-since');
+
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
+      true,
+    );
+    expect(actualFs.existsSync(marker)).toBe(true);
+
+    // Second pass: marker is still fresh — still kept.
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
+      true,
+    );
+
+    ageFile(marker);
+    await Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
+      false,
+    );
+  });
+
+  it('runs the salvage hook before removal and reports it (R2-3)', async () => {
+    writeSession('-hooked', goneCwd);
+    ageEntry('-hooked');
+    const seen: string[] = [];
+    const hook = async (entryPath: string) => {
+      seen.push(entryPath);
+    };
+    await sweepPastMarkerGrace('-hooked', hook);
+    expect(seen).toEqual([path.join(projectsDir, '-hooked')]);
+  });
+
+  it('keeps stale entries with files but no readable cwd records', async () => {
     const entry = path.join(projectsDir, '-unparsable');
     actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
     actualFs.writeFileSync(
       path.join(entry, 'chats', 'state.txt'),
       'no cwd record here',
     );
-    const past = new Date(Date.now() - STALE_AGE_MS);
-    actualFs.utimesSync(entry, past, past);
-    Storage.cleanOrphanProjectDirs('current');
+    ageEntry('-unparsable');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
   });
 
-  it('never touches the current project entry', () => {
-    writeSession('current', path.join(baseDir, 'no-longer-here'));
+  it('never touches the current project entry', async () => {
+    writeSession('current', goneCwd);
     ageEntry('current');
-    Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, 'current'))).toBe(true);
   });
 
-  it('removes empty record-less entries older than one day', () => {
+  it('removes empty record-less entries older than one day', async () => {
     const stale = path.join(projectsDir, '-stale-empty');
     actualFs.mkdirSync(stale, { recursive: true });
     const past = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     actualFs.utimesSync(stale, past, past);
-    Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(stale)).toBe(false);
   });
 
-  it('keeps fresh empty record-less entries (concurrent session guard)', () => {
+  it('keeps fresh empty record-less entries (concurrent session guard)', async () => {
     const fresh = path.join(projectsDir, '-fresh-empty');
     actualFs.mkdirSync(path.join(fresh, 'chats'), { recursive: true });
-    Storage.cleanOrphanProjectDirs('current');
+    await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(fresh)).toBe(true);
   });
 
-  it('is a no-op when the projects dir does not exist', () => {
+  it('is a no-op when the projects dir does not exist', async () => {
     actualFs.rmSync(projectsDir, { recursive: true, force: true });
-    expect(() => Storage.cleanOrphanProjectDirs('current')).not.toThrow();
+    await expect(Storage.cleanOrphanProjectDirs('current')).resolves.toEqual({
+      removed: [],
+      errors: [],
+    });
+  });
+});
+
+describe('Storage – listTranscriptPaths', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-transcripts-'));
+  });
+
+  afterEach(() => {
+    actualFs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('lists jsonl transcripts including archived ones, not sidecars', () => {
+    const chats = path.join(dir, 'chats');
+    const archive = path.join(chats, 'archive');
+    actualFs.mkdirSync(archive, { recursive: true });
+    actualFs.writeFileSync(path.join(chats, 's1.jsonl'), '{}\n');
+    actualFs.writeFileSync(path.join(chats, 's1.runtime.json'), '{}');
+    actualFs.writeFileSync(path.join(archive, 's0.jsonl'), '{}\n');
+    expect(Storage.listTranscriptPaths(dir).sort()).toEqual(
+      [path.join(chats, 's1.jsonl'), path.join(archive, 's0.jsonl')].sort(),
+    );
   });
 });

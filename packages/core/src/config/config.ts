@@ -208,6 +208,7 @@ import {
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
+import { persistUsageBeforeTranscriptDeletion } from '../services/usageHistoryService.js';
 import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
@@ -3179,19 +3180,33 @@ export class Config {
     // longer exists (issue #7906). Exit-time cleanup misses crashes and
     // SIGKILL, so startup is the backstop. Unconditional (not gated on
     // bare mode) because temp-dir sessions are common in scripted/bare
-    // usage. Cheap: per-entry cost is a handful of bounded reads.
-    // setImmediate defers actual I/O past the startup hot path; the
-    // sweep itself never throws (per-entry failures are swallowed).
+    // usage. Fresh entries skip after a stat-only walk; only stale
+    // deletion candidates pay a handful of bounded record reads.
+    // setImmediate defers actual I/O past the startup hot path. Removals
+    // and per-entry failures are logged so a missing-history report has
+    // something to grep for; transcripts are usage-salvaged first (#7384).
     setImmediate(() => {
-      try {
-        Storage.cleanOrphanProjectDirs(
-          sanitizeCwd(this.storage.getProjectRoot()),
-        );
-      } catch (error: unknown) {
-        this.debugLogger.warn(
-          `Orphan project sweep failed (non-fatal): ${error}`,
-        );
-      }
+      void Storage.cleanOrphanProjectDirs(
+        sanitizeCwd(this.storage.getProjectRoot()),
+        (entryPath) => this.salvageSessionUsage(entryPath),
+      )
+        .then(({ removed, errors }) => {
+          for (const name of removed) {
+            this.debugLogger.info(
+              `Orphan project snapshot removed by startup sweep: ${name}`,
+            );
+          }
+          for (const { entry, error } of errors) {
+            this.debugLogger.warn(
+              `Orphan project sweep failed for ${entry} (non-fatal): ${error}`,
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          this.debugLogger.warn(
+            `Orphan project sweep failed (non-fatal): ${error}`,
+          );
+        });
     });
   }
 
@@ -4098,6 +4113,18 @@ export class Config {
       .catch(() => {
         // ignored: runtime status must not disrupt session control flow.
       });
+  }
+
+  /**
+   * Salvages usage summaries from an entry's transcripts before its
+   * deletion (#7384): daemon/Web Shell/crashed sessions never persist
+   * usage otherwise, and the usage dashboard replays exactly these
+   * transcripts. `persistUsageBeforeTranscriptDeletion` never throws.
+   */
+  private async salvageSessionUsage(projectDir: string): Promise<void> {
+    for (const transcript of Storage.listTranscriptPaths(projectDir)) {
+      await persistUsageBeforeTranscriptDeletion(transcript);
+    }
   }
 
   private async flushRuntimeStatusWrites(): Promise<void> {
@@ -5287,8 +5314,10 @@ export class Config {
       // that isn't ours: the entry must contain only this session's
       // artifacts (sanitized-cwd collisions and concurrent sessions can
       // share an entry), and every cwd recorded in those artifacts must
-      // be gone or itself temp — otherwise the records were migrated
-      // here via `/cd` from a real, still-resumable project.
+      // itself be temp — records `/cd`-migrated from a real project stay
+      // resumable, and a single exit-time existsSync snapshot must not
+      // decide the fate of a transiently absent mount; that gone-cwd
+      // class is left to the grace-gated startup sweep.
       try {
         if (isTempDirPath(this.storage.getProjectRoot())) {
           const projectDir = this.storage.getProjectDir();
@@ -5296,14 +5325,24 @@ export class Config {
             Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
           ) {
             const recordedCwds = Storage.collectRecordedCwds(projectDir);
-            const disposable = recordedCwds.every(
-              (cwd) => !fs.existsSync(cwd) || isTempDirPath(cwd),
-            );
+            const disposable =
+              recordedCwds.length > 0 &&
+              recordedCwds.every((cwd) => isTempDirPath(cwd));
             if (disposable) {
+              try {
+                await this.salvageSessionUsage(projectDir);
+              } catch {
+                // Salvage failures must never block removal.
+              }
               fs.rmSync(projectDir, {
                 recursive: true,
                 force: true,
               });
+              this.debugLogger.info(
+                `Orphan project snapshot removed at shutdown: ${path.basename(
+                  projectDir,
+                )}`,
+              );
             }
           }
         }

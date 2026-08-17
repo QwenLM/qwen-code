@@ -370,13 +370,29 @@ export class Storage {
   }
 
   /**
-   * Age threshold applied to every sweep deletion. Protects
-   * concurrently starting sessions whose chats dir was just created but
-   * not yet written, and gives transiently absent working directories
-   * (ejected removable media, network mounts not up at boot) a grace
-   * window before their resumable history is reclaimed.
+   * Staleness threshold applied to every sweep gate: the newest-file
+   * freshness check, the orphan marker's grace window, and the
+   * empty-directory age check.
+   *
+   * Freshness protects running sessions, including sidecar-less ones
+   * (headless, ACP, SDK, `qwen serve` — only the interactive TUI writes
+   * runtime sidecars): a live session keeps appending, so the newest
+   * file mtime inside its entry stays fresh.
+   *
+   * The marker gives transiently absent working directories (ejected
+   * removable media, network mounts not up at boot) a grace window
+   * measured from when their absence was FIRST observed — an entry's
+   * own mtime cannot serve here because appends inside `chats/` never
+   * advance it.
    */
-  private static readonly ORPHAN_EMPTY_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  private static readonly ORPHAN_STALE_AGE_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * Marker file recording when an entry's non-temp cwds were first seen
+   * gone. Written once (its mtime is the grace anchor — never rewrite),
+   * deleted only together with the entry itself.
+   */
+  private static readonly ORPHAN_MARKER_FILE = '.qwen-orphan-since';
 
   /** Cap on bytes read from any single record file during the sweep. */
   private static readonly MAX_RECORD_SCAN_BYTES = 1024 * 1024;
@@ -389,13 +405,31 @@ export class Storage {
    * when they all sit under OS temp roots and the entry is stale (a
    * crashed temp session whose temp dir survived). Entries owned by a
    * still-running session (runtime sidecar with a live pid) are never
-   * touched, as is `currentProjectId`. Entries without any readable
-   * records are only removed when completely empty and older than one
-   * day.
+   * touched, as are entries with recent file activity — sidecar-less
+   * sessions (headless, ACP, SDK, `qwen serve`) stay protected that
+   * way — and `currentProjectId`. Entries whose recorded cwds are all
+   * gone but include a non-temp path are marked first and only removed
+   * once the marker has aged past the grace window, so a transiently
+   * absent mount gets its chance to come back. Entries without any
+   * readable records are only removed when completely empty and older
+   * than one day.
    *
-   * Best-effort: per-entry failures are skipped.
+   * `onBeforeRemove` runs before each deletion so callers can salvage
+   * derived state (e.g. usage summaries) from the transcripts; its
+   * failures never block removal. Per-entry failures are collected in
+   * `errors`, removed entry names in `removed`.
    */
-  static cleanOrphanProjectDirs(currentProjectId: string): void {
+  static async cleanOrphanProjectDirs(
+    currentProjectId: string,
+    onBeforeRemove?: (entryPath: string) => Promise<void>,
+  ): Promise<{
+    removed: string[];
+    errors: Array<{ entry: string; error: unknown }>;
+  }> {
+    const result = {
+      removed: [] as string[],
+      errors: [] as Array<{ entry: string; error: unknown }>,
+    };
     const projectsDir = path.join(
       Storage.getRuntimeBaseDir(),
       PROJECT_DIR_NAME,
@@ -404,7 +438,7 @@ export class Storage {
     try {
       entries = fs.readdirSync(projectsDir);
     } catch {
-      return;
+      return result;
     }
     const now = Date.now();
     for (const entry of entries) {
@@ -415,27 +449,38 @@ export class Storage {
         // deleted underneath it (worktree teardown mid-session); its
         // runtime sidecar carries a live pid.
         if (Storage.hasLiveSession(entryPath)) continue;
+        // Sidecars only exist for interactive sessions: a running
+        // sidecar-less session (headless/ACP/SDK/serve) is protected by
+        // its ongoing appends instead.
+        const newest = Storage.newestFileMtimeMs(entryPath);
+        if (newest > 0 && now - newest <= Storage.ORPHAN_STALE_AGE_MS) {
+          Storage.removeOrphanMarker(entryPath);
+          continue;
+        }
         const cwds = Storage.collectRecordedCwds(entryPath);
-        let stale = false;
         if (cwds.length > 0) {
-          stale =
-            now - fs.statSync(entryPath).mtimeMs >
-            Storage.ORPHAN_EMPTY_DIR_MAX_AGE_MS;
-          // A single sampled cwd is not conclusive: `/cd` relocation
-          // moves records between entries without rewriting their
-          // first-line cwd, so require EVERY recorded cwd to be gone.
-          if (cwds.every((cwd) => !fs.existsSync(cwd)) && stale) {
-            fs.rmSync(entryPath, { recursive: true, force: true });
+          // `/cd` relocation keeps the old cwd on line 1 and moves the
+          // file, so a single sampled cwd is not conclusive: a single
+          // existing non-temp cwd vetoes removal.
+          if (cwds.some((cwd) => fs.existsSync(cwd) && !isTempDirPath(cwd))) {
+            Storage.removeOrphanMarker(entryPath);
             continue;
           }
-          // Crashed temp session whose temp dir survived: the gone-cwd
-          // predicate above misses it, and temp roots are disposable by
-          // definition, so age it out instead.
-          if (
-            stale &&
-            cwds.every((cwd) => !fs.existsSync(cwd) || isTempDirPath(cwd))
-          ) {
-            fs.rmSync(entryPath, { recursive: true, force: true });
+          if (cwds.every((cwd) => isTempDirPath(cwd))) {
+            // Crashed temp session whose temp dir survived: temp roots
+            // are disposable by definition, and the freshness gate
+            // above is the only grace this class needs.
+            await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
+            continue;
+          }
+          // All non-temp cwds are gone. The absence may be transient
+          // (ejected media, mount down at boot), so one sweep must not
+          // decide: mark first, remove only once the marker itself is
+          // older than the grace window.
+          if (Storage.orphanMarkerExpired(entryPath, now)) {
+            await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
+          } else {
+            Storage.ensureOrphanMarker(entryPath);
           }
           continue;
         }
@@ -445,14 +490,102 @@ export class Storage {
         const stat = fs.statSync(entryPath);
         if (
           stat.isDirectory() &&
-          now - stat.mtimeMs > Storage.ORPHAN_EMPTY_DIR_MAX_AGE_MS &&
+          now - stat.mtimeMs > Storage.ORPHAN_STALE_AGE_MS &&
           Storage.countFiles(entryPath) === 0
         ) {
-          fs.rmSync(entryPath, { recursive: true, force: true });
+          await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
         }
-      } catch {
-        // Skip unreadable entries.
+      } catch (error) {
+        result.errors.push({ entry, error });
       }
+    }
+    return result;
+  }
+
+  private static async removeEntry(
+    entryPath: string,
+    entry: string,
+    onBeforeRemove: ((entryPath: string) => Promise<void>) | undefined,
+    result: {
+      removed: string[];
+      errors: Array<{ entry: string; error: unknown }>;
+    },
+  ): Promise<void> {
+    if (onBeforeRemove) {
+      try {
+        await onBeforeRemove(entryPath);
+      } catch {
+        // Salvage failures must never block removal.
+      }
+    }
+    fs.rmSync(entryPath, { recursive: true, force: true });
+    result.removed.push(entry);
+  }
+
+  /** Newest mtime among the entry's files (depth ≤ 2); 0 when none. */
+  private static newestFileMtimeMs(dirPath: string, depth = 0): number {
+    if (depth > 2) return 0;
+    let dirents: fs.Dirent[];
+    try {
+      dirents = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    let newest = 0;
+    for (const dirent of dirents) {
+      // The marker is sweep bookkeeping, not session activity — it must
+      // not keep the entry fresh.
+      if (depth === 0 && dirent.name === Storage.ORPHAN_MARKER_FILE) continue;
+      const child = path.join(dirPath, dirent.name);
+      try {
+        newest = Math.max(
+          newest,
+          dirent.isDirectory()
+            ? Storage.newestFileMtimeMs(child, depth + 1)
+            : fs.statSync(child).mtimeMs,
+        );
+      } catch {
+        // Entry vanished mid-sweep.
+      }
+    }
+    return newest;
+  }
+
+  /** True once a previously written marker has aged past the grace. */
+  private static orphanMarkerExpired(entryPath: string, now: number) {
+    try {
+      return (
+        now -
+          fs.statSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE))
+            .mtimeMs >
+        Storage.ORPHAN_STALE_AGE_MS
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Writes the disappearance marker once; rewrites would reset the grace. */
+  private static ensureOrphanMarker(entryPath: string): void {
+    const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
+    try {
+      fs.statSync(markerPath);
+    } catch {
+      try {
+        fs.writeFileSync(markerPath, String(Date.now()));
+      } catch {
+        // Best effort: the next sweep retries.
+      }
+    }
+  }
+
+  private static removeOrphanMarker(entryPath: string): void {
+    try {
+      fs.rmSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE), {
+        force: true,
+      });
+    } catch {
+      // Nothing to clear.
     }
   }
 
@@ -461,9 +594,8 @@ export class Storage {
    * Chat logs contribute the cwd of their first AND last record (`/cd`
    * relocation keeps the old cwd on line 1 and moves the file); runtime
    * sidecars contribute `work_dir`, worktree sidecars `originalCwd`.
-   * Subdirectories (`chats/archive/`, workflow journals) are scanned too.
-   * All reads are bounded so startup cost stays independent of chat
-   * history size.
+   * Subdirectories (`chats/archive/`) are scanned too. All reads are
+   * bounded so startup cost stays independent of chat history size.
    */
   static collectRecordedCwds(entryPath: string): string[] {
     const cwds = new Set<string>();
@@ -543,6 +675,14 @@ export class Storage {
           } catch {
             // Fragment is not valid JSON — skip it.
           }
+          start = -1;
+        } else if (depth < 0) {
+          // Unbalanced close brace (e.g. a stray leading `}` from a torn
+          // write) — reset and keep scanning, mirroring
+          // `_recoverObjectsFromLine` in utils/jsonl-utils.ts (kept local
+          // here because that module's import chain cycles back into
+          // storage.ts).
+          depth = 0;
           start = -1;
         }
       }
@@ -650,10 +790,20 @@ export class Storage {
     }
     for (const dirent of dirents) {
       if (!dirent.name.endsWith('.runtime.json')) continue;
+      const sidecarPath = path.join(entryPath, 'chats', dirent.name);
       try {
-        const parsed = JSON.parse(
-          fs.readFileSync(path.join(entryPath, 'chats', dirent.name), 'utf8'),
-        ) as { pid?: unknown };
+        // Once the kernel has had a full grace window to recycle the
+        // pid, a matching pid is more likely an unrelated reused one
+        // than the original session — stop trusting it.
+        if (
+          Date.now() - fs.statSync(sidecarPath).mtimeMs >
+          Storage.ORPHAN_STALE_AGE_MS
+        ) {
+          continue;
+        }
+        const parsed = JSON.parse(fs.readFileSync(sidecarPath, 'utf8')) as {
+          pid?: unknown;
+        };
         if (
           typeof parsed.pid === 'number' &&
           Number.isInteger(parsed.pid) &&
@@ -669,12 +819,17 @@ export class Storage {
   }
 
   private static isPidAlive(pid: number): boolean {
+    // Corrupted sidecars can carry 0/-1, and on POSIX kill(0,0) targets
+    // the caller's own process group — never treat those as live.
+    if (pid <= 0) return false;
     try {
       process.kill(pid, 0);
       return true;
-    } catch (error) {
-      // EPERM means the process exists but is owned by someone else.
-      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    } catch {
+      // ESRCH/EPERM both mean "not our session": either the pid is gone,
+      // or it belongs to another uid — in this per-user runtime tree
+      // that cannot be the session that wrote the sidecar.
+      return false;
     }
   }
 
@@ -682,7 +837,10 @@ export class Storage {
    * True when the entry contains nothing but this session's own
    * artifacts. Entries are keyed by sanitized cwd, which collisions and
    * concurrent sessions can share, so whole-entry deletion at shutdown
-   * must be gated on exclusive ownership.
+   * must be gated on exclusive ownership. Any subdirectory (including
+   * `chats/archive/`) is treated as foreign by design: the shutdown
+   * path is the fast path, and such entries simply fall back to the
+   * grace-gated startup sweep.
    */
   static containsOnlySessionArtifacts(
     projectDir: string,
@@ -705,6 +863,35 @@ export class Storage {
       return true;
     }
     return files.every((file) => file.startsWith(`${sessionId}.`));
+  }
+
+  /** Every `*.jsonl` transcript under `<projectDir>/chats` (depth ≤ 2). */
+  static listTranscriptPaths(projectDir: string): string[] {
+    const out: string[] = [];
+    Storage.collectTranscriptPaths(path.join(projectDir, 'chats'), out, 0);
+    return out;
+  }
+
+  private static collectTranscriptPaths(
+    dir: string,
+    out: string[],
+    depth: number,
+  ): void {
+    if (depth > 2) return;
+    let dirents: fs.Dirent[];
+    try {
+      dirents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const dirent of dirents) {
+      const child = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        Storage.collectTranscriptPaths(child, out, depth + 1);
+      } else if (dirent.name.endsWith('.jsonl')) {
+        out.push(child);
+      }
+    }
   }
 
   private static countFiles(dirPath: string): number {

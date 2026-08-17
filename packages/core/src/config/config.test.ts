@@ -58,6 +58,7 @@ import { sanitizeCwd } from '../utils/paths.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { persistUsageBeforeTranscriptDeletion } from '../services/usageHistoryService.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -142,6 +143,10 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 // Mock dependencies that might be called during Config construction or createServerConfig
+vi.mock('../services/usageHistoryService.js', () => ({
+  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
@@ -6870,20 +6875,36 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('removes the project dir when the session ran from a temp dir', async () => {
-      const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
-      const config = new Config({
-        ...baseParams,
-        cwd: tmpCwd,
-        targetDir: tmpCwd,
-      });
-      config['initialized'] = true;
+      // Records only ever point at temp roots → disposable at exit; the
+      // transcripts are usage-salvaged first (#7384).
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      const listSpy = vi
+        .spyOn(Storage, 'listTranscriptPaths')
+        .mockReturnValue(['/entry/chats/sess.jsonl']);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
 
-      await config.shutdown();
+        await config.shutdown();
 
-      expect(rmSpy).toHaveBeenCalledWith(config.storage.getProjectDir(), {
-        recursive: true,
-        force: true,
-      });
+        expect(persistUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
+          '/entry/chats/sess.jsonl',
+        );
+        expect(rmSpy).toHaveBeenCalledWith(config.storage.getProjectDir(), {
+          recursive: true,
+          force: true,
+        });
+      } finally {
+        cwdSpy.mockRestore();
+        listSpy.mockRestore();
+      }
     });
 
     it('keeps the project dir for regular project roots', async () => {
@@ -6931,15 +6952,22 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('keeps the project dir when its records point at a live non-temp cwd', async () => {
-      // Records migrated here via `/cd` from a real project are still
-      // resumable — the recorded cwd exists outside temp roots.
+    it('keeps the project dir when its records point at any non-temp cwd', async () => {
+      // Records migrated here via `/cd` from a real project stay
+      // resumable — the exit-time predicate requires EVERY recorded cwd
+      // to be temp, and does not even look at existence: a transiently
+      // absent mount must not be decided by one existsSync snapshot
+      // (that gone-cwd class is left to the grace-gated startup sweep).
+      // Mixed temp + non-temp pins `every` against a `some` mutation.
       const guardSpy = vi
         .spyOn(Storage, 'containsOnlySessionArtifacts')
         .mockReturnValue(true);
       const cwdSpy = vi
         .spyOn(Storage, 'collectRecordedCwds')
-        .mockReturnValue(['/real/project']);
+        .mockReturnValue([
+          '/real/project',
+          path.join(os.tmpdir(), 'qwen-mixed-temp'),
+        ]);
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-migrated-entry');
         const config = new Config({
@@ -6951,8 +6979,36 @@ describe('Server Config (config.ts)', () => {
 
         await config.shutdown();
 
-        // Mocked existsSync reports every path present, so a live
-        // non-temp cwd makes the entry non-disposable.
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when it has no readable cwd records', async () => {
+      // Empty record set is not proof of disposability — the entry is
+      // left to the startup sweep's empty/stale branch.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue([]);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-norecords-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
         expect(rmSpy).not.toHaveBeenCalledWith(
           config.storage.getProjectDir(),
           expect.anything(),
@@ -6967,29 +7023,36 @@ describe('Server Config (config.ts)', () => {
       rmSpy.mockImplementation(() => {
         throw new Error('EACCES');
       });
-      const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
-      const config = new Config({
-        ...baseParams,
-        cwd: tmpCwd,
-        targetDir: tmpCwd,
-      });
-      config['initialized'] = true;
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
 
-      await expect(
-        config.shutdown({ strictResourceCleanup: true }),
-      ).resolves.toBeUndefined();
-      expect(rmSpy).toHaveBeenCalledWith(
-        config.storage.getProjectDir(),
-        expect.anything(),
-      );
+        await expect(
+          config.shutdown({ strictResourceCleanup: true }),
+        ).resolves.toBeUndefined();
+        expect(rmSpy).toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
     });
   });
 
   describe('Config startup orphan-project sweep wiring (issue #7906)', () => {
-    it('schedules cleanOrphanProjectDirs with the current project id', async () => {
+    it('schedules cleanOrphanProjectDirs with the project id and a salvage hook', async () => {
       const sweepSpy = vi
         .spyOn(Storage, 'cleanOrphanProjectDirs')
-        .mockImplementation(() => {});
+        .mockResolvedValue({ removed: [], errors: [] });
       try {
         const config = new Config(baseParams);
         await config.initialize();
@@ -6998,18 +7061,40 @@ describe('Server Config (config.ts)', () => {
         await new Promise((resolve) => setImmediate(resolve));
         expect(sweepSpy).toHaveBeenCalledWith(
           sanitizeCwd(config.storage.getProjectRoot()),
+          expect.any(Function),
         );
       } finally {
         sweepSpy.mockRestore();
       }
     });
 
-    it('initializes successfully even when the sweep throws', async () => {
+    it('salvages usage from an entry’s transcripts via the hook', async () => {
+      const listSpy = vi
+        .spyOn(Storage, 'listTranscriptPaths')
+        .mockReturnValue(['/entry/chats/sess.jsonl']);
       const sweepSpy = vi
         .spyOn(Storage, 'cleanOrphanProjectDirs')
-        .mockImplementation(() => {
-          throw new Error('sweep exploded');
-        });
+        .mockResolvedValue({ removed: [], errors: [] });
+      try {
+        const config = new Config(baseParams);
+        await config.initialize();
+        await new Promise((resolve) => setImmediate(resolve));
+        const hook = sweepSpy.mock.calls[0]?.[1];
+        expect(hook).toBeDefined();
+        await hook?.('/some/entry');
+        expect(persistUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
+          '/entry/chats/sess.jsonl',
+        );
+      } finally {
+        sweepSpy.mockRestore();
+        listSpy.mockRestore();
+      }
+    });
+
+    it('initializes successfully even when the sweep rejects', async () => {
+      const sweepSpy = vi
+        .spyOn(Storage, 'cleanOrphanProjectDirs')
+        .mockRejectedValue(new Error('sweep exploded'));
       try {
         const config = new Config(baseParams);
         await expect(config.initialize()).resolves.not.toThrow();
