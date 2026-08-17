@@ -264,7 +264,10 @@ import {
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
-import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import {
+  getSlashCommandFirstToken,
+  isSlashCommand,
+} from '../../ui/utils/commandUtils.js';
 import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
@@ -4235,6 +4238,12 @@ export class Session implements SessionContext {
                 );
               }
             }
+            const firstTextBlock = modelPromptBlocks.find(
+              (block) => block.type === 'text',
+            );
+            const inputText = firstTextBlock?.text || '';
+            const isSlashInput = !isContinue && isSlashCommand(inputText);
+            const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -4293,8 +4302,13 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
-            } else {
-              // record user message for session management
+            } else if (!isSlashInput || slashCommandName !== 'advisor') {
+              // record user message for session management. Only `/advisor`
+              // defers its record to after command resolution below — a
+              // user-defined command shadowing the name must keep its record
+              // (R18-6) — while every other slash command records here,
+              // BEFORE its action runs: `/clear` swaps in a fresh recorder
+              // inside its action, so its record must land first (R20-9).
               const mediaReferences = readDaemonMediaReferences(
                 promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
               );
@@ -4312,13 +4326,6 @@ export class Session implements SessionContext {
               }
             }
 
-            // Check if the input contains a slash command
-            // Extract text from the first text block if present
-            const firstTextBlock = modelPromptBlocks.find(
-              (block) => block.type === 'text',
-            );
-            const inputText = firstTextBlock?.text || '';
-            const isSlashInput = !isContinue && isSlashCommand(inputText);
             if (!isSlashInput && !isContinue && !isRetry) {
               this.refreshContextFilesOnWrite = false;
             }
@@ -4355,16 +4362,80 @@ export class Session implements SessionContext {
                 },
               );
 
-              parts = await this.#processSlashCommandResult(
-                slashCommandResult,
-                modelPromptBlocks,
-                pendingSend.signal,
-                onFullTurnModel,
+              if (
+                slashCommandName === 'advisor' &&
+                pendingSend.signal.aborted &&
+                slashCommandResult.type === 'message'
+              ) {
+                this.todoStopGuard.suspend();
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                return { stopReason: 'cancelled' };
+              }
+
+              // Classify by the RESOLVED command, not the raw token: a
+              // custom command named `advisor` shadows the built-in and
+              // must keep its transcript records (R18-6). Only `/advisor`
+              // defers its user-message record to here — every other slash
+              // command was already recorded above, before its action ran.
+              const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+              const shouldRecordSlashCommand = !(
+                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                resolvedCommandInfo.name === 'advisor'
               );
+              if (
+                slashCommandName === 'advisor' &&
+                shouldRecordSlashCommand &&
+                goalTurn?.origin !== 'runtime' &&
+                !isRetry
+              ) {
+                const recorder = this.config.getChatRecordingService();
+                if (promptDisplayText !== undefined) {
+                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                    displayText: promptDisplayText,
+                    hookContext: '',
+                  });
+                } else if (goalTurn) {
+                  recorder?.recordUserMessage(promptText, goalTurn.permit);
+                } else {
+                  recorder?.recordUserMessage(promptText);
+                }
+              }
+
+              try {
+                parts = await this.#processSlashCommandResult(
+                  slashCommandResult,
+                  modelPromptBlocks,
+                  pendingSend.signal,
+                  onFullTurnModel,
+                  shouldRecordSlashCommand,
+                );
+              } catch (error) {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                throw error;
+              }
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
               // Return early without sending to the model
               if (parts === null) {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
                 return { stopReason: 'end_turn' };
               }
             } else {
@@ -11029,12 +11100,10 @@ export class Session implements SessionContext {
    *
    * Supported result types in ACP mode:
    * - submit_prompt: Submits content to the model
+   * - message: Emits a single message to the client
    * - stream_messages: Streams multiple messages to the client (ACP-specific)
    * - unsupported: Command cannot be executed in ACP mode
    * - no_command: No command was found, use original prompt
-   *
-   * Note: 'message' type is not supported in ACP mode - commands should use
-   * 'stream_messages' instead for consistent async handling.
    *
    * @param result The result from handleSlashCommand
    * @param originalPrompt The original prompt blocks
@@ -11045,10 +11114,14 @@ export class Session implements SessionContext {
     originalPrompt: ContentBlock[],
     abortSignal: AbortSignal,
     onFullTurnModel: (model: string) => boolean,
+    shouldRecordResult: boolean,
   ): Promise<Part[] | null> {
     this.refreshContextFilesOnWrite =
       result.type === 'submit_prompt' &&
       Boolean(result.refreshContextFilesOnWrite);
+    const recorder = shouldRecordResult
+      ? this.config.getChatRecordingService()
+      : undefined;
 
     switch (result.type) {
       case 'submit_prompt':
@@ -11075,7 +11148,7 @@ export class Session implements SessionContext {
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
-        this.config.getChatRecordingService()?.recordSlashCommand({
+        recorder?.recordSlashCommand({
           phase: 'result',
           rawCommand: originalPrompt
             .filter((b) => b.type === 'text')
@@ -11104,7 +11177,7 @@ export class Session implements SessionContext {
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
         if (chunks.length > 0) {
-          this.config.getChatRecordingService()?.recordSlashCommand({
+          recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')
