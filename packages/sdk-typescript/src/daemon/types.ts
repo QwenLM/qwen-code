@@ -2700,6 +2700,20 @@ export interface DaemonToolToggleResult {
 
 export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
 
+export interface DaemonSkillToggleMutationSkill {
+  name: string;
+  enabled: boolean;
+}
+
+export interface DaemonSkillToggleMutation {
+  id: string;
+  kind: 'skill_toggle';
+  skills: DaemonSkillToggleMutationSkill[];
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
 export interface DaemonSkillToggleResult {
   skillName: string;
   enabled: boolean;

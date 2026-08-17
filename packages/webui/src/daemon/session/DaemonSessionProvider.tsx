@@ -742,6 +742,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     };
   }, []);
 
+  const sessionEffectWorkspaceCwd = restoreWorkspaceCwd ?? workspaceCwd;
+
   useEffect(() => {
     if (!autoConnect) return undefined;
     if (!workspaceClientRef.current && !resolvedBaseUrl) {
@@ -2764,7 +2766,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     autoReconnect,
     resolvedBaseUrl,
     resolvedToken,
-    workspaceCwd,
+    sessionEffectWorkspaceCwd,
     modelServiceId,
     sessionScope,
     maxQueued,

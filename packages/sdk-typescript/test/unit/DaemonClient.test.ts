@@ -7493,6 +7493,54 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('workspace metadata update uses encoded direct REST and client identity', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 'session/1',
+          displayName: 'Renamed',
+        }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'transport route not mapped' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client
+          .workspaceByCwd('/tmp/work space')
+          .updateSessionMetadata(
+            'session/1',
+            { displayName: 'Renamed' },
+            'client-1',
+          ),
+      ).resolves.toEqual({
+        sessionId: 'session/1',
+        displayName: 'Renamed',
+      });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]).toMatchObject({
+        method: 'PATCH',
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session%2F1/metadata',
+        headers: { 'x-qwen-client-id': 'client-1' },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        displayName: 'Renamed',
+      });
+    });
+
     it('workspace transcript paging forces direct REST transport', async () => {
       const body = {
         v: 1 as const,
