@@ -15,6 +15,7 @@ import {
   isTurnResultRecordPayload,
   normalizeTurnResultError,
   TURN_RESULT_ERROR_CODE_MAX_CHARS,
+  TURN_RESULT_IDENTIFIER_MAX_CHARS,
   TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
   type ChatRecord,
   type AtCommandRecordPayload,
@@ -1323,6 +1324,43 @@ describe('ChatRecordingService', () => {
       ).toBe(false);
     });
 
+    it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
+      const oversized = 'x'.repeat(TURN_RESULT_IDENTIFIER_MAX_CHARS + 1);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: oversized,
+          state: 'completed',
+          endedAt: 2_000,
+        }),
+      ).toBe(false);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+          stopReason: oversized,
+        }),
+      ).toBe(false);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+          originatorClientId: oversized,
+        }),
+      ).toBe(false);
+      const bounded = 'y'.repeat(TURN_RESULT_IDENTIFIER_MAX_CHARS);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: bounded,
+          state: 'completed',
+          endedAt: 2_000,
+          stopReason: bounded,
+          originatorClientId: bounded,
+        }),
+      ).toBe(true);
+    });
+
     it('rejects empty error message and code in turn_result payloads', () => {
       expect(
         isTurnResultRecordPayload({
@@ -1370,6 +1408,28 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('turn_result');
       expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('refuses to append payloads the bounded contract rejects', async () => {
+      chatRecordingService.recordTurnResult({
+        promptId: 'prompt-1',
+        state: 'error',
+        endedAt: 2_000,
+      });
+      chatRecordingService.recordTurnResult({
+        promptId: 'prompt-2',
+        state: 'completed',
+        endedAt: 2_000,
+        error: { message: 'stray' },
+      });
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(
+        records.filter((record) => record.subtype === 'turn_result'),
+      ).toHaveLength(0);
     });
 
     it('keeps turn_result records on the active transcript chain', async () => {

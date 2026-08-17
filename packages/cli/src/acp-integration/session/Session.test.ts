@@ -4759,6 +4759,9 @@ describe('Session', () => {
           trustedContext,
         );
 
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({ resultText: 'The final answer is 42.' }),
         );
@@ -5164,6 +5167,17 @@ describe('Session', () => {
           stopReason: 'cancelled',
           promptText: 'first prompt',
         });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          2,
+        );
+        const secondPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls
+            .map((call) => call[0])
+            .find((payload) => payload.promptId === 'second-prompt-id');
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'completed',
+        });
       });
 
       it('records a cancelled turn when cancelled while waiting for the predecessor', async () => {
@@ -5270,6 +5284,7 @@ describe('Session', () => {
         'Invocation context session does not match the active session',
       );
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordTurnResult).not.toHaveBeenCalled();
     });
 
     it('does not create invocation context for standalone ACP prompts', async () => {

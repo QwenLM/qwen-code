@@ -591,6 +591,7 @@ export interface UserTextElementsRecordPayload {
 export const TURN_RESULT_TEXT_MAX_CHARS = 32_768;
 export const TURN_RESULT_ERROR_MESSAGE_MAX_CHARS = 4_096;
 export const TURN_RESULT_ERROR_CODE_MAX_CHARS = 256;
+export const TURN_RESULT_IDENTIFIER_MAX_CHARS = 256;
 
 export const TURN_RESULT_CODE_TEXT_TRUNCATED = 'RESULT_TEXT_TRUNCATED' as const;
 export type TurnResultCode = typeof TURN_RESULT_CODE_TEXT_TRUNCATED;
@@ -702,6 +703,7 @@ export function isTurnResultRecordPayload(
   if (
     typeof payload['promptId'] !== 'string' ||
     payload['promptId'].length === 0 ||
+    payload['promptId'].length > TURN_RESULT_IDENTIFIER_MAX_CHARS ||
     !['completed', 'cancelled', 'error'].includes(payload['state'] as string) ||
     typeof payload['endedAt'] !== 'number' ||
     !Number.isFinite(payload['endedAt'])
@@ -722,13 +724,13 @@ export function isTurnResultRecordPayload(
     payload[field] === undefined ||
     (typeof payload[field] === 'number' && Number.isFinite(payload[field]));
   if (
-    !optionalString('stopReason') ||
+    !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     !optionalTimestamp('startedAt') ||
     !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('promptTextTruncated') ||
     !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('resultTruncated') ||
-    !optionalString('originatorClientId') ||
+    !optionalString('originatorClientId', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     (payload['resultCode'] !== undefined &&
       (payload['resultCode'] !== TURN_RESULT_CODE_TEXT_TRUNCATED ||
         payload['resultTruncated'] !== true))
@@ -2580,6 +2582,13 @@ export class ChatRecordingService {
    * non-strict append path (inactive/failed writers skip silently).
    */
   recordTurnResult(payload: TurnResultRecordPayload): void {
+    if (!isTurnResultRecordPayload(payload)) {
+      debugLogger.error(
+        'Skipping turn result record that violates the bounded contract:',
+        payload,
+      );
+      return;
+    }
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),

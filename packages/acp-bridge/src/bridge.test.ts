@@ -16107,17 +16107,17 @@ describe('createAcpSessionBridge', () => {
         { promptId: 'prompt-enriched' },
       );
 
-      await expect(
-        bridge.getSessionTurnStatus(
-          session.sessionId,
-          undefined,
-          'prompt-enriched',
-        ),
-      ).resolves.toMatchObject({
+      const status = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-enriched',
+      );
+      expect(status).toMatchObject({
         state: 'completed',
         stopReason: 'end_turn',
         resultText: 'final parent answer',
       });
+      expect(status).not.toHaveProperty('error');
       await bridge.shutdown();
     });
 
