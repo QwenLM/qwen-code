@@ -2010,6 +2010,24 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     }
   });
 
+  it('the publisher clears its downloaded results before the download', () => {
+    // publish-verify runs on the persistent pool and downloads into a
+    // workspace-relative dir the runner never cleans: a previous run's
+    // flake-gate.log would otherwise survive and be embedded as this
+    // run's evidence, since the publisher treats presence as proof.
+    const publishJob = doc.jobs['publish-verify'];
+    const clearIdx = publishJob.steps.findIndex(
+      (x) => x.name === 'Clear stale downloaded results',
+    );
+    const downloadIdx = publishJob.steps.findIndex((x) => x.id === 'download');
+    assert.ok(clearIdx !== -1, 'the publisher must clear stale results');
+    assert.ok(
+      downloadIdx !== -1 && clearIdx < downloadIdx,
+      'the clear must precede the download',
+    );
+    assert.match(publishJob.steps[clearIdx].run, /rm -rf verify-results/);
+  });
+
   it('git metadata stays root-owned across the build so the reset cannot be steered', () => {
     // With .git node-owned, a lifecycle script could plant a smudge
     // filter plus info/attributes and have ROOT's per-invocation reset

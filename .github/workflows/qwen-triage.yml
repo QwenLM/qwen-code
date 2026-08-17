@@ -4684,6 +4684,16 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
 
+      # The publish job runs on the persistent ECS pool and downloads into
+      # a WORKSPACE-relative directory, which the runner does not clean
+      # between jobs: without this, a previous run's (possibly a different
+      # PR's) flake-gate.log survives and the publisher — which treats the
+      # file's presence as proof THIS run staged it — embeds it as this
+      # run's evidence. The verify side already applies the same rm-first
+      # rule to its own $RUNNER_TEMP tree.
+      - name: 'Clear stale downloaded results'
+        run: 'rm -rf verify-results'
+
       - name: 'Download verify results'
         id: 'download'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
