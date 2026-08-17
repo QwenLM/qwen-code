@@ -25,11 +25,32 @@ import type {
   ResponsesApiTool,
   ResponsesApiContentPart,
 } from './types.js';
+import { sanitizeMimeForPlaceholder } from '../../services/compactionInputSlimming.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
+
+const SUPPORTED_RESPONSE_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+
+function isSupportedResponseImageMime(
+  mimeType: string | undefined,
+): mimeType is string {
+  return (
+    mimeType !== undefined && SUPPORTED_RESPONSE_IMAGE_MIME_TYPES.has(mimeType)
+  );
+}
+
+function placeholderMimeType(mimeType: string | undefined): string {
+  const sanitized = mimeType ? sanitizeMimeForPlaceholder(mimeType) : '';
+  return sanitized || 'unknown mime type';
+}
 
 /**
  * Known OpenAI Responses API error codes that carry a well-defined HTTP
@@ -579,28 +600,32 @@ export function convertGeminiContentsToResponsesInput(
             const text = (frPart as { text: string }).text;
             output += (output ? '\n' : '') + text;
           } else if (frPart.inlineData) {
-            const mimeType = frPart.inlineData.mimeType ?? 'image/png';
-            if (mimeType.startsWith('image/')) {
+            const mimeType = frPart.inlineData.mimeType;
+            if (isSupportedResponseImageMime(mimeType)) {
               pendingToolMediaParts.push({
                 type: 'input_image',
                 image_url: `data:${mimeType};base64,${frPart.inlineData.data}`,
               });
             } else {
+              const placeholderMime = placeholderMimeType(mimeType);
               debugLogger.warn(
-                `Dropping unsupported tool-result inline media type: ${mimeType}`,
+                `Dropping unsupported tool-result inline media type: ${placeholderMime}`,
               );
               pendingToolMediaParts.push({
                 type: 'input_text',
-                text: `[Unsupported tool-result media type: ${mimeType}]`,
+                text: `[Unsupported tool-result media type: ${placeholderMime}]`,
               });
             }
           } else if (frPart.fileData) {
+            const placeholderMime = placeholderMimeType(
+              frPart.fileData.mimeType,
+            );
             debugLogger.warn(
-              `Dropping unsupported tool-result file reference: ${frPart.fileData.mimeType ?? 'unknown mime type'}`,
+              `Dropping unsupported tool-result file reference: ${placeholderMime}`,
             );
             pendingToolMediaParts.push({
               type: 'input_text',
-              text: `[Unsupported tool-result file reference: ${frPart.fileData.mimeType ?? 'unknown mime type'}]`,
+              text: `[Unsupported tool-result file reference: ${placeholderMime}]`,
             });
           }
         }
@@ -612,8 +637,8 @@ export function convertGeminiContentsToResponsesInput(
       }
 
       if ('inlineData' in part && part.inlineData && role === 'user') {
-        const mimeType = part.inlineData.mimeType ?? 'image/png';
-        if (mimeType.startsWith('image/')) {
+        const mimeType = part.inlineData.mimeType;
+        if (isSupportedResponseImageMime(mimeType)) {
           pendingContentParts.push({
             type: 'input_image',
             image_url: `data:${mimeType};base64,${part.inlineData.data}`,
@@ -627,7 +652,7 @@ export function convertGeminiContentsToResponsesInput(
           // explanation instead of "I don't see a document".
           pendingContentParts.push({
             type: 'input_text',
-            text: `[Unsupported inline media type: ${mimeType}]`,
+            text: `[Unsupported inline media type: ${placeholderMimeType(mimeType)}]`,
           });
         }
       }
@@ -635,7 +660,7 @@ export function convertGeminiContentsToResponsesInput(
       if ('fileData' in part && part.fileData && role === 'user') {
         pendingContentParts.push({
           type: 'input_text',
-          text: `[Unsupported file reference: ${part.fileData.mimeType ?? 'unknown mime type'}]`,
+          text: `[Unsupported file reference: ${placeholderMimeType(part.fileData.mimeType)}]`,
         });
       }
     }
