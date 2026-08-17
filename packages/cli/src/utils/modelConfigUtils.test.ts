@@ -139,6 +139,24 @@ describe('modelConfigUtils', () => {
       ).toBeUndefined();
     });
 
+    it('should not infer keyless Vertex AI without a project', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_MODEL: 'vertex-model' }),
+      ).toBeUndefined();
+    });
+
+    it('should prefer keyless Vertex AI over a complete Anthropic env', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+          ANTHROPIC_API_KEY: 'test-key',
+          ANTHROPIC_MODEL: 'anthropic-model',
+          ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
     it('should return undefined when Google env vars are incomplete', () => {
       process.env['GOOGLE_API_KEY'] = 'test-key';
       // Missing GOOGLE_MODEL
