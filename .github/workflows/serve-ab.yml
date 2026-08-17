@@ -91,7 +91,7 @@ jobs:
           # Canonicalize before matching: the kernel resolves non-canonical
           # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
           # /usr), so a raw string match lets them slip past the case arms.
-          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${WS}"; exit 1; }
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
           # Trailing slashes slip past the exact-match case arms below
           # (`/home/` would pass the guard and reach the rm); realpath strips
           # them too; keep the guard whole if the path reaches this point with
@@ -107,7 +107,7 @@ jobs:
           # every other one (/tmp, /opt, ...): only a directory inside the
           # runner workspace may be wiped.
           RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RWS}"; exit 1; }
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
           # Mirror the WS strip before building the allowlist pattern; "/"
           # stripped empty would match every path instead.
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done

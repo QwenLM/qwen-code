@@ -2582,7 +2582,7 @@ jobs:
           # Canonicalize before matching: the kernel resolves non-canonical
           # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
           # /usr), so a raw string match lets them slip past the case arms.
-          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${WS}"; exit 1; }
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
           # Trailing slashes slip past the exact-match case arms below
           # (`/home/` would pass the guard and reach the rm); realpath strips
           # them too; keep the guard whole if the path reaches this point with
@@ -2601,7 +2601,7 @@ jobs:
           # together with GITHUB_WORKSPACE — to the container path, so the
           # allowlist holds inside this job's container as well.
           RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RWS}"; exit 1; }
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
           # Mirror the WS strip before building the allowlist pattern; "/"
           # stripped empty would match every path instead.
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
@@ -3545,7 +3545,7 @@ jobs:
           # (#9265). See that step's comments for what each layer catches;
           # the suite pins this copy's behavior on its own.
           WS="${GITHUB_WORKSPACE:?}"
-          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${WS}"; exit 1; }
+          WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
             ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': ${WS}"; exit 1 ;;
@@ -3554,7 +3554,7 @@ jobs:
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
           esac
           RWS="${RUNNER_WORKSPACE:?}"
-          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RWS}"; exit 1; }
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
           if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
           case "$RWS" in

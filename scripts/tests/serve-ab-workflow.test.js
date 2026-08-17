@@ -66,24 +66,27 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     expect(wipe.run).not.toContain('|| true');
   });
 
-  it('wipes a legitimate workspace inside the runner workspace', () => {
-    const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ok-'));
-    const ws = join(parent, 'repo');
-    // Leftovers shaped like the real ones: the two checkout subtrees plus
-    // a stale build artifact.
-    mkdirSync(join(ws, 'head'), { recursive: true });
-    mkdirSync(join(ws, 'base'), { recursive: true });
-    writeFileSync(join(ws, 'head', 'package.json'), '{}');
-    writeFileSync(join(ws, 'bundle.tgz'), 'x');
-    try {
-      runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
-      expect(readdirSync(ws)).toEqual([]);
-      // The directory itself survives: the checkouts clone into it next.
-      expect(wipe.run).toContain('-mindepth 1 -maxdepth 1');
-    } finally {
-      rmSync(parent, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(!hasGnuRealpath)(
+    'wipes a legitimate workspace inside the runner workspace',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ok-'));
+      const ws = join(parent, 'repo');
+      // Leftovers shaped like the real ones: the two checkout subtrees plus
+      // a stale build artifact.
+      mkdirSync(join(ws, 'head'), { recursive: true });
+      mkdirSync(join(ws, 'base'), { recursive: true });
+      writeFileSync(join(ws, 'head', 'package.json'), '{}');
+      writeFileSync(join(ws, 'bundle.tgz'), 'x');
+      try {
+        runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        expect(readdirSync(ws)).toEqual([]);
+        // The directory itself survives: the checkouts clone into it next.
+        expect(wipe.run).toContain('-mindepth 1 -maxdepth 1');
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The guard must be exercised with the REAL dangerous paths, so `rm` is
   // stubbed to a recorder on PATH: the destructive primitive cannot fire
