@@ -54,6 +54,11 @@ describe('buildTeammatePromptAddendum', () => {
     // Explicit reporting still arrives sooner; it does not suppress
     // final-answer forwarding.
     expect(prompt).toContain('call send_message(to: "leader"');
+    expect(prompt).toContain('earlier additionally delivers it sooner');
+    expect(prompt).toContain(
+      'Your text output is NOT visible to peer teammates',
+    );
+    expect(prompt).not.toContain('NOT visible to other agents');
     expect(prompt.toLowerCase()).not.toContain('only way');
     expect(prompt).not.toContain('without an explicit report');
   });
@@ -69,6 +74,7 @@ describe('buildTeammatePromptAddendum', () => {
       'the runtime forwards your final answer to the leader automatically',
     );
     expect(prompt).toContain('call send_message(to: "leader"');
+    expect(prompt).toContain('earlier additionally delivers it sooner');
     expect(prompt).not.toContain('without an explicit report');
   });
 
