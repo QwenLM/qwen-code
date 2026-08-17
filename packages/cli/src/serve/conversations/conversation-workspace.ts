@@ -208,9 +208,20 @@ export class ConversationWorkspace {
       root,
       storageSessionId,
     );
+    const identity = await inspectConversationDirectoryIdentity(
+      root,
+      storageSessionId,
+      prepared.identity,
+    );
+    if (!identity) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    // Entries are read after the final identity re-inspection so a same-uid
+    // entry appearing across the inspect cannot slip past the emptiness
+    // verdict on a stale snapshot.
     let entries: string[];
     try {
-      entries = await readdir(prepared.identity.canonicalPath);
+      entries = await readdir(identity.canonicalPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new ConversationDirectoryIdentityError(
@@ -219,14 +230,6 @@ export class ConversationWorkspace {
         );
       }
       throw new ConversationDirectoryIdentityError('child', 'io_error', error);
-    }
-    const identity = await inspectConversationDirectoryIdentity(
-      root,
-      storageSessionId,
-      prepared.identity,
-    );
-    if (!identity) {
-      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
     }
     if (entries.length > 0) {
       throw new ConversationDirectoryIdentityError('child', 'not_empty');
