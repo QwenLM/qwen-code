@@ -12,6 +12,7 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
+import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -1511,6 +1512,7 @@ function normalizeSettingsChanged(
   if (!key) {
     return fallbackDebug(event, base, 'malformed settings_changed payload');
   }
+  const mutation = isSettingsChangedData(event.data) && event.data.mutation;
   return [
     {
       ...base,
@@ -1518,6 +1520,7 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+      ...(mutation ? { mutation } : {}),
     },
   ];
 }
