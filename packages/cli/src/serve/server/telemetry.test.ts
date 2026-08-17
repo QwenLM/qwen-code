@@ -812,7 +812,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 56 unique routes with the audited 49/7 attribution split', () => {
+  it('contains 56 unique routes with the audited 54/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
@@ -822,27 +822,19 @@ describe('legacy session telemetry route catalog', () => {
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(49);
+    ).toHaveLength(54);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
       ),
-    ).toHaveLength(7);
+    ).toHaveLength(2);
     expect(
       legacySessionTelemetryRoutes
         .filter(({ attribution }) => attribution === 'pre_resolved')
         .map(({ method, path }) => `${method} ${path}`)
         .sort(),
     ).toEqual(
-      [
-        'GET /session/:id/export',
-        'PATCH /session/:id/organization',
-        'POST /permission/:requestId',
-        'POST /session/:id/a2ui-action',
-        'POST /sessions/archive',
-        'POST /sessions/delete',
-        'POST /sessions/unarchive',
-      ].sort(),
+      ['POST /permission/:requestId', 'POST /session/:id/a2ui-action'].sort(),
     );
     for (const entry of legacySessionTelemetryRoutes) {
       expect(entry.route).toBe(`${entry.method} ${entry.path}`);

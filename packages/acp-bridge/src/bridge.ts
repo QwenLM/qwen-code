@@ -149,6 +149,7 @@ import {
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   isValidTrustedModelPrompt,
+  sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -2499,17 +2500,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     reason: string,
   ): Promise<void> {
-    if (!entryIsAutoCloseCandidate(entry)) return;
     // Note the asymmetry, preserved from the call sites this replaces: the
     // kill path keys off `attachCount`, the close path off `clientIds`. A
     // spawn owner that asked for a kill gets one once nothing is attached,
-    // even if some client id is still registered.
-    if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+    // even if some client id is still registered. This is a deferred explicit
+    // kill, so incomplete child reporting must not turn it into ordinary
+    // cleanup or leave it pending forever.
+    //
+    // `activeWorkCloseInFlight` must stay excluded (the auto-close candidacy
+    // gate used to cover it): the reaper can be mid-probe on this same entry,
+    // holding the child's close gate for up to `ACTIVE_WORK_CLOSE_TIMEOUT_MS`.
+    // A kill fired in that window reaches `beginClose()` as 'Session close is
+    // already in progress', and `killSession` escalates any close error to a
+    // channel kill — taking down every sibling session with it. The in-flight
+    // probe resolves this entry one way or the other; if it retains, the
+    // tombstone completes on the next settle event.
+    if (
+      byId.get(entry.sessionId) === entry &&
+      !isClosingOrAuthorizingClose(entry) &&
+      entry.spawnOwnerWantedKill &&
+      entry.attachCount === 0
+    ) {
+      writeStderrLine(
+        `qwen serve: completing deferred kill of session ${JSON.stringify(entry.sessionId)} (${reason})`,
+      );
       await bridgeApi.killSession(entry.sessionId).catch(() => {
         /* best-effort; channel.exited will eventually reap anyway */
       });
       return;
     }
+    if (!entryIsAutoCloseCandidate(entry)) return;
     if (entry.clientIds.size > 0) return;
     await closeIfChildUnheld(entry, {
       trigger: reason,
@@ -2610,6 +2630,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
           sessionId: entry.sessionId,
           [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+          ),
         }),
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
         SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -5004,7 +5027,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionClose,
         {
           sessionId: entry.sessionId,
-          drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            opts?.timeoutMs ?? initTimeoutMs,
+          ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
         },
       );
@@ -6287,7 +6312,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 SERVE_CONTROL_EXT_METHODS.sessionClose,
                 {
                   sessionId: req.sessionId,
-                  drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+                  drainTimeoutMs: sessionCloseDrainBudgetMs(initTimeoutMs),
                 },
               ),
               initTimeoutMs,
@@ -8634,6 +8659,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       {
                         sessionId: result.newSessionId,
                         cwd: boundWorkspace,
+                        drainTimeoutMs:
+                          sessionCloseDrainBudgetMs(initTimeoutMs),
                       },
                     ),
                     channelUnavailableReject(
@@ -11181,6 +11208,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           timeoutMs: initTimeoutMs,
         });
       } catch (error) {
+        // A definitive refusal means the child is alive and kept the session:
+        // it already holds its own close gate (a cd or restore in progress —
+        // child-side state the daemon cannot see). Escalating that to a
+        // channel kill would take every sibling session down for a close
+        // that is already proceeding. Leave the kill pending instead; the
+        // deferred tombstone completes it on the next settle event.
+        if (isDefinitiveAcpRequestError(error)) {
+          entry.closing = false;
+          return false;
+        }
         if (ci) {
           await killChannelWithLog(
             ci,

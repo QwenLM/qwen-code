@@ -357,8 +357,13 @@ export interface ComposeReviewInput {
    * toward `C` exactly like anchored Criticals.
    */
   bodyCriticals?: string[];
-  /** Suggestions discarded as unanchorable (offline validation or 422). */
-  suggestionsDiscarded?: number;
+  /**
+   * Suggestions discarded as unanchorable (offline validation or 422). A
+   * count, as the Step 7 prose prescribes; the list form that older skill
+   * revisions wrote — `[]`, or one entry per discarded item — is accepted
+   * and counted by its length.
+   */
+  suggestionsDiscarded?: number | readonly unknown[];
   /**
    * Suggestions this review confirmed but did not re-post because they are
    * already reported on the PR (a prior round, or a concurrent reviewer) —
@@ -719,6 +724,12 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
 // body-Critical-only input into an APPROVE that dropped the only blocker.
 function toCount(value: unknown, field: string): number {
   if (value === undefined || value === null) return 0;
+  // The Step 7 prose prescribes a COUNT for these fields —
+  // `suggestionsDiscarded` above all — but runs following older skill
+  // revisions wrote the LIST of discarded items and used to die at this gate
+  // after hours of analysis. Its length IS the count, so count it rather than
+  // refuse: `[]` is zero, `["a", "b"]` is two.
+  if (Array.isArray(value)) return value.length;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new TypeError(
       `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,
@@ -1040,6 +1051,12 @@ function composeReviewBody(
   // on every gap here would make the soft ceiling hard: any large diff's
   // routine budget stop would forbid an Approve the review otherwise earned.
   const budgetGapNotes: Array<{ agent: string; gaps: string[] }> = [];
+  // Certified agent results recovered from an interrupted earlier attempt
+  // (a resumed run). Informational, NEVER capping: recovered work is counted
+  // AS reviewed, so it must not ride `coverageEntries` — an entry there caps
+  // the verdict and renders under "Not reviewed:", the exact opposite of the
+  // fact. Rendered as its own disclosed-but-not-capping block below.
+  let recoveredFromPriorAttempt = 0;
   // Sibling caps MAX_DIMENSIONS and MAX_NOTES bound their lists for the
   // same reason; this bounds the one budget-gap sentence.
   const MAX_BUDGET_GAP_LINES = 5;
@@ -1244,6 +1261,7 @@ function composeReviewBody(
         );
       }
       budgetGapNotes.push(...cov.budgetGaps);
+      recoveredFromPriorAttempt = cov.recoveredAgents;
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
@@ -2068,6 +2086,19 @@ function composeReviewBody(
       ]
     : [];
 
+  // The resumed-run continuity note: the run reused certified work from an
+  // interrupted earlier attempt. Disclosed on every verdict — Approve
+  // included — and never capping: the recovered agents were re-certified
+  // from the harness records and COUNT as reviewed.
+  const continuityBlock: Bi[] = recoveredFromPriorAttempt
+    ? [
+        {
+          en: `Resumed run (not a gap): ${recoveredFromPriorAttempt} agent result(s) from the interrupted earlier attempt were re-certified from the harness records and counted as reviewed.`,
+          zh: `续跑运行（非缺口）：复用了被中断的前一次尝试的 ${recoveredFromPriorAttempt} 个 agent 结果，均已按 harness 记录重新认证并计入审查。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -2085,6 +2116,7 @@ function composeReviewBody(
       ...repositoryContextBlock,
       ...unlicensedDeferralBlock,
       ...deferredSuggestionsBlock,
+      ...continuityBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -2123,12 +2155,14 @@ function composeReviewBody(
           ...repositoryContextBlock,
           ...unlicensedDeferralBlock,
           ...deferredSuggestionsBlock,
+          ...continuityBlock,
         ],
         notReviewedParts.length ||
           deferredBlock.length ||
           testPlanBlock.length ||
           repositoryContextBlock.length ||
-          deferredSuggestionsBlock.length
+          deferredSuggestionsBlock.length ||
+          continuityBlock.length
           ? '\n\n'
           : ' ',
       ),
@@ -2284,6 +2318,9 @@ function composeReviewBody(
   //     precedes the list (non-capping).
   clauses.push(...unlicensedDeferralBlock);
   clauses.push(...deferredSuggestionsBlock);
+  // 6e. Resumed-run continuity (non-capping) — reused work that COUNTS as
+  //     reviewed, disclosed so the author knows two attempts fed this verdict.
+  clauses.push(...continuityBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers

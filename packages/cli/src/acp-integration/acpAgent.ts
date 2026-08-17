@@ -649,11 +649,17 @@ async function waitForSessionDrain(
   operation: Promise<void>,
   timeoutMs: number,
   kind: 'close' | 'restore',
+  displayTimeoutMs?: number,
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Session ${kind} timed out after ${timeoutMs}ms`)),
+      () =>
+        reject(
+          new Error(
+            `Session ${kind} timed out after ${displayTimeoutMs ?? timeoutMs}ms`,
+          ),
+        ),
       timeoutMs,
     );
     timer.unref();
@@ -3956,6 +3962,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     operation: () => Promise<T>,
     waitTimeoutMs?: number,
+    waitDisplayTimeoutMs?: number,
   ): Promise<T> {
     const previous =
       this.historyMutationTails.get(sessionId) ?? Promise.resolve();
@@ -3969,7 +3976,12 @@ class QwenAgent implements Agent {
       if (waitTimeoutMs === undefined) {
         await previous;
       } else {
-        await waitForSessionDrain(previous, waitTimeoutMs, 'close');
+        await waitForSessionDrain(
+          previous,
+          waitTimeoutMs,
+          'close',
+          waitDisplayTimeoutMs,
+        );
       }
     } catch (error) {
       release();
@@ -4634,6 +4646,9 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    const conditionalDrainDeadline = opts?.onlyIfUnheld
+      ? Date.now() + drainTimeoutMs
+      : undefined;
     // Reject known work before disturbing any active turn. The close gate
     // prevents new turns, but a turn that was already running can still settle
     // into a new hold while the drain below is in progress, so this early read
@@ -4645,13 +4660,28 @@ class QwenAgent implements Agent {
         return { closed: false, holds };
       }
     }
-    for (const [requestId, generation] of this.generationControllers) {
-      if (generation.sessionId !== sessionId) continue;
-      generation.controller.abort();
-      this.generationControllers.delete(requestId);
-    }
     let removedFromStore = false;
     try {
+      if (opts?.onlyIfUnheld) {
+        // Let the turn that already owned the gate settle without cancelling
+        // queues or stopping schedulers. It may create a hold while settling;
+        // a refusal must leave the retained Session untouched.
+        await waitForSessionDrain(
+          session.waitForActiveTurnsToSettle(),
+          drainTimeoutMs,
+          'close',
+        );
+        const holds = session.collectActiveWorkHolds();
+        if (holds.length > 0) {
+          return { closed: false, holds };
+        }
+      }
+
+      for (const [requestId, generation] of this.generationControllers) {
+        if (generation.sessionId !== sessionId) continue;
+        generation.controller.abort();
+        this.generationControllers.delete(requestId);
+      }
       await waitForSessionDrain(
         (async () => {
           try {
@@ -4665,8 +4695,14 @@ class QwenAgent implements Agent {
           }
           await session.waitForActiveTurnsToSettle();
         })(),
-        drainTimeoutMs,
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
         'close',
+        // Report the shared budget, not the phase-2 residue — a residue like
+        // "1ms" hides that the settle phase consumed the budget and sends
+        // oncall grepping for a timeout setting that does not exist.
+        drainTimeoutMs,
       );
 
       const blockedByHolds = await this.runExclusiveHistoryMutation(
@@ -4723,6 +4759,14 @@ class QwenAgent implements Agent {
           removedFromStore = true;
           return undefined;
         },
+        // The mutation wait shares the conditional close's budget too, or
+        // the whole round trip can outlast the daemon's outer wait — the
+        // coupling the drain budget exists to keep. The mutation body
+        // itself stays untimed, so the guarantee remains approximate. The
+        // message reports the shared budget, not the residue.
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
         drainTimeoutMs,
       );
       if (blockedByHolds) return blockedByHolds;
