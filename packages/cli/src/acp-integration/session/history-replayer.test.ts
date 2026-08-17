@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Deliberately NOT mocked: `writeStderrLineSafe` is the thing under test in
@@ -16,6 +19,7 @@ import {
   MISSING_TOOL_RESULT_MESSAGE,
 } from './history-replayer.js';
 import type { SessionContext } from './types.js';
+import { ChatRecordingService } from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ChatRecord,
@@ -880,23 +884,64 @@ describe('HistoryReplayer', () => {
       });
     });
 
-    it('should replay structured artifacts from stored tool results', async () => {
-      const record = createToolResultRecord('read_file', 'File contents here');
+    it('should replay structured artifacts persisted by the recorder', async () => {
+      const projectDir = mkdtempSync(join(tmpdir(), 'qwen-history-replay-'));
+      const sessionId = 'recorded-session';
       const artifacts = [
         {
+          kind: 'link' as const,
           title: 'Replay artifact',
           url: 'https://example.com/replayed',
         },
       ];
-      record.toolCallResult!.artifacts = artifacts;
-
-      await replayer.replay([record]);
-
-      expect(sentUpdates()[0]).toMatchObject({
-        _meta: {
+      try {
+        const recorder = new ChatRecordingService(
+          {
+            getSessionId: () => sessionId,
+            getProjectRoot: () => projectDir,
+            getCliVersion: () => '1.0.0',
+            getResumedSessionData: () => undefined,
+            storage: { getProjectDir: () => projectDir },
+          } as unknown as Config,
+          undefined,
+          false,
+        );
+        const responseParts = [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { result: 'ok' },
+            },
+          },
+        ];
+        recorder.recordToolResult(responseParts, {
+          callId: 'call-123',
+          status: 'success',
+          resultDisplay: 'File contents here',
+          responseParts,
+          persistedOutputFiles: ['/private/tool-result.txt'],
           artifacts,
-        },
-      });
+        });
+        await recorder.flush();
+
+        const jsonl = readFileSync(
+          join(projectDir, 'chats', `${sessionId}.jsonl`),
+          'utf8',
+        );
+        expect(jsonl).not.toContain('/private/tool-result.txt');
+        const storedRecord = JSON.parse(jsonl.trim()) as ChatRecord;
+        expect(storedRecord.toolCallResult?.artifacts).toEqual(artifacts);
+
+        await replayer.replay([storedRecord]);
+
+        expect(sentUpdates()[0]).toMatchObject({
+          _meta: {
+            artifacts,
+          },
+        });
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
     });
 
     it('should emit failed status for tool results with errors', async () => {
