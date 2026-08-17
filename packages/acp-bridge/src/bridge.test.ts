@@ -15383,7 +15383,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('retains uploaded media owned by a deleted queued prompt', async () => {
+    it('removes uploaded media owned by a deleted queued prompt', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -15431,16 +15431,11 @@ describe('createAcpSessionBridge', () => {
           clientId: session.clientId,
         }),
       ).toEqual({ removed: true });
-      // The blob must survive: the store has no reference counting, so a
-      // sibling queued prompt, a completed prompt's replay metadata, or
-      // another client may still hold this mediaId. Deleting it here would
-      // degrade those live references. It is reclaimed at session close /
-      // TTL sweep instead.
       expect(
         await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
           clientId: session.clientId,
         }),
-      ).toBeDefined();
+      ).toBeUndefined();
 
       release();
       await running;
@@ -27686,7 +27681,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('retains uploaded media owned by a deleted mid-turn message', async () => {
+  it('removes uploaded media owned by a deleted mid-turn message', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -27720,72 +27715,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         clientId: session.clientId,
       }),
     ).toEqual({ removed: true });
-    // See the queued-prompt counterpart: no reference counting, so the blob
-    // must outlive any single removed message.
     expect(
       await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
         clientId: session.clientId,
       }),
-    ).toBeDefined();
-
-    release();
-    await prompt;
-    await bridge.shutdown();
-  });
-
-  it('keeps a shared mediaId resolvable for a sibling message after one is removed', async () => {
-    // Regression for the reference-counting gap: the store has no refcounts,
-    // so removing ONE queued message must not delete a blob that another live
-    // reference (here a sibling mid-turn message) still depends on.
-    const { factory, release } = hangingPromptFactory();
-    const bridge = makeBridge({ channelFactory: factory });
-    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const prompt = bridge.sendPrompt(
-      session.sessionId,
-      {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'go' }],
-      },
-      undefined,
-      { clientId: session.clientId },
-    );
-    const reference = await bridge.storeSessionMedia(
-      session.sessionId,
-      Uint8Array.of(1, 2, 3),
-      'image/png',
-      { clientId: session.clientId },
-    );
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'msg A',
-        { clientId: session.clientId },
-        'shared-media-a',
-        { content: [reference] },
-      ),
-    ).toEqual({ accepted: true, messageId: 'shared-media-a' });
-    expect(
-      bridge.enqueueMidTurnMessage(
-        session.sessionId,
-        'msg B',
-        { clientId: session.clientId },
-        'shared-media-b',
-        { content: [reference] },
-      ),
-    ).toEqual({ accepted: true, messageId: 'shared-media-b' });
-
-    expect(
-      bridge.removeMidTurnMessage(session.sessionId, 'shared-media-a', {
-        clientId: session.clientId,
-      }),
-    ).toEqual({ removed: true });
-
-    // Message B still references this mediaId; the blob must remain readable.
-    expect(
-      await bridge.readSessionMedia(session.sessionId, reference.mediaId, {
-        clientId: session.clientId,
-      }),
-    ).toBeDefined();
+    ).toBeUndefined();
 
     release();
     await prompt;
@@ -27829,9 +27763,8 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }),
     ).toEqual({ removed: true });
 
-    // The removal settled the id (the blob itself is retained until session
-    // close); a same-id retry must hit the settled ring and ack, not throw
-    // session_media_gone (410).
+    // The removal settled the id; a same-id retry must hit the settled ring
+    // and ack, not throw session_media_gone (410).
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
