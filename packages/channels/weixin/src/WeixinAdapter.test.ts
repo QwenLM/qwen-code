@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const apiMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   sendTyping: vi.fn(),
@@ -15,6 +15,7 @@ vi.mock('./api.js', async () => {
 });
 
 import { WeixinChannel } from './WeixinAdapter.js';
+import { TypingStatus } from './types.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -76,6 +77,11 @@ describe('WeixinChannel', () => {
   beforeEach(() => {
     apiMocks.getConfig.mockReset();
     apiMocks.sendTyping.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('maps lifecycle start and terminal events to typing state', () => {
@@ -195,5 +201,169 @@ describe('WeixinChannel', () => {
     channel.disconnect();
 
     expect(activeTypingChats.has('user-disconnect')).toBe(false);
+  });
+
+  describe('typing keepalive', () => {
+    const keepaliveEvent = (chatId: string, sessionId: string) =>
+      ({
+        channelName: 'weixin',
+        chatId,
+        sessionId,
+        messageId: `message-${sessionId}`,
+        identity: { id: 'channel:weixin', displayName: 'weixin' },
+        memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
+      }) satisfies LifecycleBase;
+
+    function installSetTypingMock(
+      channel: TestWeixinChannel,
+      impl: ReturnType<typeof vi.fn>,
+    ): void {
+      (channel as unknown as { setTyping: typeof impl }).setTyping = impl;
+    }
+
+    it('refreshes TYPING while the turn is active and stops on the terminal event', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-keepalive', 'session-keepalive');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(1);
+      expect(setTyping).toHaveBeenLastCalledWith('user-keepalive', true);
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(setTyping).toHaveBeenCalledTimes(4);
+      expect(setTyping).toHaveBeenLastCalledWith('user-keepalive', true);
+
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      expect(setTyping).toHaveBeenCalledTimes(5);
+      expect(setTyping).toHaveBeenLastCalledWith('user-keepalive', false);
+
+      await vi.advanceTimersByTimeAsync(16000);
+      expect(setTyping).toHaveBeenCalledTimes(5);
+    });
+
+    it('does not arm the keepalive when the initial TYPING fails', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(false);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-keepalive-fail', 'session-kf');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(20000);
+
+      expect(setTyping).toHaveBeenCalledTimes(1);
+      expect(setTyping).toHaveBeenLastCalledWith('user-keepalive-fail', true);
+    });
+
+    it('does not overlap keepalive requests for the same chat', async () => {
+      const channel = createChannel();
+      let resolveKeepalive!: (value: boolean) => void;
+      const pendingKeepalive = new Promise<boolean>((resolve) => {
+        resolveKeepalive = resolve;
+      });
+      const setTyping = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockReturnValue(pendingKeepalive);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-keepalive-overlap', 'session-ko');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(1);
+
+      // First keepalive tick fires and stays in flight.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+
+      // Further ticks skip while the previous keepalive is in flight.
+      await vi.advanceTimersByTimeAsync(12000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+
+      resolveKeepalive(true);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(3);
+    });
+
+    it('clears the keepalive interval on disconnect', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-keepalive-disconnect', 'session-kd');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+
+      channel.disconnect();
+
+      await vi.advanceTimersByTimeAsync(16000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not arm the keepalive when the turn ends before TYPING confirms', async () => {
+      const channel = createChannel();
+      const start = deferredPromise<boolean>();
+      const setTyping = vi
+        .fn()
+        .mockReturnValueOnce(start.promise)
+        .mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-keepalive-late', 'session-kl');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      start.resolve(true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Initial TYPING, terminal CANCEL, and the late-start CANCEL guard.
+      expect(setTyping).toHaveBeenCalledTimes(3);
+      expect(setTyping).toHaveBeenLastCalledWith('user-keepalive-late', false);
+
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(setTyping).toHaveBeenCalledTimes(3);
+    });
+
+    it('refreshes through the api path with the cached ticket and cancels on completion', async () => {
+      const channel = createChannel();
+      const chatId = 'user-keepalive-api';
+      apiMocks.getConfig.mockResolvedValue({ typing_ticket: 'ticket-ka' });
+      apiMocks.sendTyping.mockResolvedValue({});
+      const base = keepaliveEvent(chatId, 'session-ka');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiMocks.sendTyping).toHaveBeenCalledTimes(1);
+      expect(apiMocks.sendTyping).toHaveBeenLastCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.objectContaining({
+          ilink_user_id: chatId,
+          typing_ticket: 'ticket-ka',
+          status: TypingStatus.TYPING,
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(apiMocks.sendTyping).toHaveBeenCalledTimes(2);
+      // The ticket is cached after the first lookup.
+      expect(apiMocks.getConfig).toHaveBeenCalledTimes(1);
+
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiMocks.sendTyping).toHaveBeenCalledTimes(3);
+      expect(apiMocks.sendTyping).toHaveBeenLastCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.objectContaining({ status: TypingStatus.CANCEL }),
+      );
+
+      await vi.advanceTimersByTimeAsync(16000);
+      expect(apiMocks.sendTyping).toHaveBeenCalledTimes(3);
+    });
   });
 });

@@ -29,6 +29,14 @@ import { TypingStatus } from './types.js';
 /** In-memory typing ticket cache: userId -> typingTicket */
 const typingTickets = new Map<string, string>();
 
+/**
+ * The iLink typing state expires shortly after it is set, so a long turn's
+ * one-shot TYPING indicator dies mid-turn. Re-send TYPING on this cadence
+ * while the turn is active — a sub-expiry refresh, mirroring the Telegram
+ * adapter's 4s repeat against its ~5s expiry.
+ */
+const TYPING_KEEPALIVE_INTERVAL_MS = 4000;
+
 /** Escape special regex characters in a string. */
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -37,6 +45,11 @@ function escapeRegex(s: string): string {
 export class WeixinChannel extends ChannelBase {
   private abortController: AbortController | null = null;
   private activeTypingChats = new Set<string>();
+  private typingKeepaliveIntervals = new Map<
+    string,
+    ReturnType<typeof setInterval>
+  >();
+  private typingKeepaliveInFlight = new Set<string>();
   private baseUrl: string;
   private token: string = '';
 
@@ -292,6 +305,11 @@ export class WeixinChannel extends ChannelBase {
       this.abortController.abort();
       this.abortController = null;
     }
+    for (const interval of this.typingKeepaliveIntervals.values()) {
+      clearInterval(interval);
+    }
+    this.typingKeepaliveIntervals.clear();
+    this.typingKeepaliveInFlight.clear();
     this.activeTypingChats.clear();
   }
 
@@ -311,13 +329,49 @@ export class WeixinChannel extends ChannelBase {
       }
       if (!this.activeTypingChats.has(chatId)) {
         void this.setTyping(chatId, false);
+        return;
       }
+      this.startTypingKeepalive(chatId);
     });
   }
 
   private stopTyping(chatId: string): void {
+    this.stopTypingKeepalive(chatId);
     if (!this.activeTypingChats.delete(chatId)) return;
     void this.setTyping(chatId, false);
+  }
+
+  /**
+   * Refreshes TYPING periodically while the chat stays in
+   * `activeTypingChats`, so the indicator survives long turns. The interval
+   * is only armed after the initial TYPING is confirmed, and each tick skips
+   * (and reaps itself) once the chat is no longer typing, so a missed
+   * terminal event cannot keep it alive indefinitely.
+   */
+  private startTypingKeepalive(chatId: string): void {
+    if (this.typingKeepaliveIntervals.has(chatId)) return;
+    this.typingKeepaliveIntervals.set(
+      chatId,
+      setInterval(() => {
+        if (!this.activeTypingChats.has(chatId)) {
+          this.stopTypingKeepalive(chatId);
+          return;
+        }
+        // Don't overlap keepalive requests for the same chat.
+        if (this.typingKeepaliveInFlight.has(chatId)) return;
+        this.typingKeepaliveInFlight.add(chatId);
+        void this.setTyping(chatId, true).finally(() => {
+          this.typingKeepaliveInFlight.delete(chatId);
+        });
+      }, TYPING_KEEPALIVE_INTERVAL_MS),
+    );
+  }
+
+  private stopTypingKeepalive(chatId: string): void {
+    const interval = this.typingKeepaliveIntervals.get(chatId);
+    if (interval === undefined) return;
+    clearInterval(interval);
+    this.typingKeepaliveIntervals.delete(chatId);
   }
 
   private async setTyping(userId: string, typing: boolean): Promise<boolean> {
