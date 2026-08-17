@@ -8664,7 +8664,6 @@ export function App({
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
           hasSession: Boolean(connectionRef.current.sessionId),
-          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -9800,7 +9799,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -10316,7 +10314,6 @@ export function App({
   const isDisabled =
     sessionWriteBlocked ||
     shouldDisableComposerInput({
-      catchingUp: Boolean(connection.catchingUp),
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
@@ -10344,7 +10341,6 @@ export function App({
       ? latestUserBlock
       : undefined;
   const composerPlaceholderInputState = {
-    catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
     isStreaming: streamingState !== 'idle',
   };
