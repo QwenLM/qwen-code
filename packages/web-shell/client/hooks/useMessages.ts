@@ -126,6 +126,36 @@ export function getPendingBackgroundAgentKey(
   return callIds.join('|');
 }
 
+type DaemonPermissionTranscriptBlock = Extract<
+  DaemonTranscriptBlock,
+  { kind: 'permission' }
+>;
+
+/**
+ * CallIds whose permission request is still unanswered. Such an agent has not
+ * spawned yet, so its subagent session legitimately does not exist and the
+ * reconciliation 404 probe must not count toward the missing-agent grace.
+ */
+function getPendingPermissionCallIds(
+  blocks: readonly DaemonTranscriptBlock[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const block of blocks) {
+    if (block.kind !== 'permission') continue;
+    const perm = block as DaemonPermissionTranscriptBlock;
+    if (perm.resolved) continue;
+    const toolCall = getRecord(perm.toolCall);
+    const callId =
+      typeof toolCall?.['toolCallId'] === 'string'
+        ? toolCall['toolCallId']
+        : typeof toolCall?.['id'] === 'string'
+          ? toolCall['id']
+          : undefined;
+    if (callId) ids.add(callId);
+  }
+  return ids;
+}
+
 export function reconcileBackgroundAgentResolutions(
   messages: Message[],
   resolutions: ReadonlyMap<string, BackgroundAgentResolution>,
@@ -208,6 +238,10 @@ export function useMessagesFromBlocks(
     () => getPendingBackgroundAgentKey(reconciledMessages),
     [reconciledMessages],
   );
+  const pendingPermissionCallIds = useMemo(
+    () => getPendingPermissionCallIds(blocks),
+    [blocks],
+  );
   const backgroundAgentNotificationKey = useMemo(
     () => getBackgroundAgentNotificationKey(blocks),
     [blocks],
@@ -273,7 +307,12 @@ export function useMessagesFromBlocks(
     const requestKey = `${sessionId}:${pendingBackgroundAgentKey}:${backgroundAgentNotificationKey}`;
     const retryScopeKey = `${sessionId}:${pendingBackgroundAgentKey}`;
     const cachedRound = reconciliationRequestRef.current;
-    const callIds = pendingBackgroundAgentKey.split('|');
+    // Agents still under approval have not spawned their subagent session
+    // yet: exclude them so the 404 probe cannot accumulate missing-agent
+    // misses and paint a failure while the dialog is unanswered.
+    const callIds = pendingBackgroundAgentKey
+      .split('|')
+      .filter((callId) => !pendingPermissionCallIds.has(callId));
     for (const callId of [...missingAgentMissesRef.current.keys()]) {
       if (!callIds.includes(callId)) {
         missingAgentMissesRef.current.delete(callId);
@@ -460,6 +499,7 @@ export function useMessagesFromBlocks(
     connection.sessionId,
     connection.status,
     pendingBackgroundAgentKey,
+    pendingPermissionCallIds,
     reconciliationAttempt,
     workspace.client,
   ]);

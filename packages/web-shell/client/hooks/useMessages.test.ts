@@ -604,6 +604,88 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
+  it('does not fail an agent while its launch approval is unanswered', async () => {
+    vi.useFakeTimers();
+    // The agent call is pending with an unresolved permission request for the
+    // same callId; its subagent session cannot exist yet, so the
+    // reconciliation 404 probe must be skipped rather than accumulating
+    // missing-agent misses and painting a failure.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-block-agent-call',
+        kind: 'tool',
+        toolCallId: 'agent-call',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    // The pending-permission agent is excluded from reconciliation, so the
+    // probe never fires and the card cannot be marked failed.
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Even after several retry windows of wall-clock time it stays active.
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Once the launch approval resolves, the reconciliation must resume
+    // probing: the subagent session may now register, and a missing session
+    // crosses the grace into a visible failure exactly like any other
+    // background agent.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // First 404 miss keeps the card pending.
+    expect(container.textContent).toBe('pending');
+    // The retry's second miss crosses the missing-agent grace → failed.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
   it('gives a session-level 404 the same grace as a missing agent', async () => {
     vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
