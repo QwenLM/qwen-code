@@ -533,6 +533,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_media',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -641,6 +642,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_live_state',
+  'workspace_session_metadata',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -700,6 +703,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
+      f !== 'workspace_session_live_state' &&
+      f !== 'workspace_session_metadata' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
   ),
@@ -755,6 +760,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_live_state',
+  'workspace_session_metadata',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -1286,12 +1293,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  let catalogRevision = 0;
+  const catalogGeneration = `server-fake-catalog-gen-${Math.random()
+    .toString(36)
+    .slice(2)}`;
   const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
   const setSessionWorktreeCalls: Array<{
     sessionId: string;
     worktree: { slug: string; path: string; branch: string };
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
+  const sessionMedia = new Map<string, { data: Buffer; mimeType: string }>();
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ??
     (() => ({ accepted: true, messageId: 'mid-default' }));
@@ -2092,6 +2104,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
     },
+    getSessionCatalogVersion() {
+      return { generation: catalogGeneration, revision: catalogRevision };
+    },
+    markSessionCatalogChanged() {
+      catalogRevision += 1;
+    },
     getSessionSummary(sessionId) {
       summaryCalls.push(sessionId);
       return summaryImpl(sessionId);
@@ -2292,12 +2310,29 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    enqueueMidTurnMessage(sessionId, message, context, messageId) {
+    async storeSessionMedia(_sessionId, data, mimeType) {
+      const mediaId = `media-${sessionMedia.size + 1}`;
+      sessionMedia.set(mediaId, { data: Buffer.from(data), mimeType });
+      return {
+        type: 'image',
+        mediaId,
+        mimeType,
+        size: data.byteLength,
+      };
+    },
+    async readSessionMedia(_sessionId, mediaId) {
+      return sessionMedia.get(mediaId);
+    },
+    async removeSessionMedia(_sessionId, mediaId) {
+      return sessionMedia.delete(mediaId);
+    },
+    enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
         sessionId,
         message,
         ...(context ? { context } : {}),
         ...(messageId ? { messageId } : {}),
+        ...(options ? { options } : {}),
       });
       return enqueueMidTurnImpl(sessionId, message, context, messageId);
     },
@@ -9326,6 +9361,134 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('session media', () => {
+    it('uploads and reads session-scoped binary media', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const uploaded = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(bytes);
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'image',
+        mediaId: 'media-1',
+        mimeType: 'image/png',
+        size: bytes.length,
+      });
+
+      const downloaded = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .buffer(true);
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers['content-type']).toBe('image/png');
+      expect(downloaded.body).toEqual(bytes);
+
+      const removed = await request(app)
+        .delete('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(removed.status).toBe(200);
+      expect(removed.body).toEqual({ removed: true });
+
+      const missing = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(missing.status).toBe(404);
+    });
+
+    it('rejects non-image uploads', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'audio/wav')
+        .send(Buffer.from([1]));
+
+      expect(response.status).toBe(400);
+    });
+
+    it('rejects SVG uploads', async () => {
+      // SVG can carry scripts and the bytes are served back to browsers on
+      // the same origin as the daemon API and Web Shell UI.
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/svg+xml')
+        .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+
+      expect(response.status).toBe(415);
+      expect(response.body).toEqual({
+        error: 'SVG uploads are not supported',
+      });
+    });
+
+    it('serves stored media with download-safe headers', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const uploaded = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(bytes);
+      expect(uploaded.status).toBe(201);
+
+      const downloaded = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .buffer(true);
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers['content-disposition']).toBe('attachment');
+      expect(downloaded.headers['x-content-type-options']).toBe('nosniff');
+    });
+
+    it('reports the media route 8 MiB body limit accurately', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(Buffer.alloc(8 * 1024 * 1024 + 1));
+
+      expect(response.status).toBe(413);
+      expect(response.body).toEqual({
+        error: 'Request body too large (max 8 MiB)',
+      });
+    });
+  });
+
   describe('POST /session/:id/mid-turn-message', () => {
     const midTurnPost = (
       app: ReturnType<typeof createServeApp>,
@@ -9428,10 +9591,128 @@ describe('createServeApp', () => {
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
 
+    it('forwards validated media blocks to the bridge', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'see this',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'see this',
+          options: {
+            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+          },
+        },
+      ]);
+    });
+
+    it('admits an empty message when media blocks are present', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: '',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toHaveLength(1);
+    });
+
+    it.each([
+      ['not an array', { message: 'hi', content: 'nope' }],
+      ['empty array', { message: 'hi', content: [] }],
+      ['non-object block', { message: 'hi', content: ['block'] }],
+      [
+        'unknown block type',
+        { message: 'hi', content: [{ type: 'text', text: 'hi' }] },
+      ],
+      [
+        'missing data',
+        { message: 'hi', content: [{ type: 'image', mimeType: 'image/png' }] },
+      ],
+      [
+        'mismatched mimeType',
+        {
+          message: 'hi',
+          content: [{ type: 'image', data: 'aW1n', mimeType: 'audio/mp3' }],
+        },
+      ],
+    ])('400 when `content` is invalid: %s', async (_label, body) => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', body);
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it.each([
+      ['exact', 'image/svg+xml'],
+      ['parameter suffix', 'image/svg+xml;charset=utf-8'],
+      ['uppercase', 'image/SVG+XML'],
+    ])(
+      '400 when `content` carries an SVG block: %s (raster-only policy)',
+      async (_label, mimeType) => {
+        // The upload route rejects SVG after normalizing the media type;
+        // the inline-block gate must reject the same spelling variants — an
+        // exact-string match lets standards-conformant variants through.
+        const bridge = fakeBridge();
+        const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+          message: 'hi',
+          content: [{ type: 'image', data: 'PHN2Zz4=', mimeType }],
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('SVG images are not supported');
+        expect(bridge.enqueueMidTurnCalls).toEqual([]);
+      },
+    );
+
+    it('forwards reference-form media blocks to the bridge verbatim', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'see this',
+        content: [
+          { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+        ],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'see this',
+          options: {
+            content: [
+              {
+                type: 'image',
+                mediaId: 'media-1',
+                mimeType: 'image/png',
+                size: 4,
+              },
+            ],
+          },
+        },
+      ]);
+    });
+
     it('400 when the trimmed message exceeds the 16 KB cap', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
         message: 'x'.repeat(16 * 1024 + 1),
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('400 when `content` carries more than 256 media blocks', async () => {
+      // Media blocks are resolved into inline bytes at dispatch; an unbounded
+      // array amplifies one small request into gigabytes of heap.
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'hi',
+        content: Array.from({ length: 257 }, () => ({
+          type: 'image',
+          data: 'aW1n',
+          mimeType: 'image/png',
+        })),
       });
       expect(res.status).toBe(400);
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
@@ -12885,6 +13166,129 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('400 when the prompt carries more than 256 media blocks', async () => {
+      // Same amplification guard as the mid-turn route: repeated media
+      // references resolve into per-occurrence inline bytes at dispatch.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            ...Array.from({ length: 257 }, () => ({
+              type: 'image',
+              data: 'aW1n',
+              mimeType: 'image/png',
+            })),
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('400 when a non-text prompt block is malformed (validated before admission)', async () => {
+      // Without per-block validation the block is admitted and only fails
+      // the ACP child's schema parse later, surfacing an async turn error
+      // instead of a synchronous 400.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'aW1n' },
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it.each([
+      ['exact', 'image/svg+xml'],
+      ['parameter suffix', 'image/svg+xml;charset=utf-8'],
+      ['uppercase', 'image/SVG+XML'],
+    ])(
+      '400 when a prompt media block is SVG: %s (raster-only policy)',
+      async (_label, mimeType) => {
+        // Same normalizing gate as the mid-turn route and the upload route.
+        const bridge = fakeBridge({
+          promptImpl: async () => ({ stopReason: 'end_turn' }),
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [
+              { type: 'text', text: 'hi' },
+              { type: 'image', data: 'PHN2Zz4=', mimeType },
+            ],
+          });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('SVG images are not supported');
+        expect(bridge.promptCalls).toHaveLength(0);
+      },
+    );
+
+    it('202 still admits legacy inline audio blocks (child-side validation)', async () => {
+      // The per-block validation is scoped to image blocks; legacy audio
+      // prompts keep their pre-existing behavior (the ACP child validates).
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'audio', data: 'YXVk', mimeType: 'audio/wav' },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('202 accepts valid inline and reference media blocks', async () => {
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 4,
+            },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req.prompt).toEqual([
+        { type: 'text', text: 'hi' },
+        { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+        { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+      ]);
     });
 
     it('202 envelope carries eventEpoch alongside lastEventId (DAEMON-001)', async () => {
@@ -17812,6 +18216,64 @@ describe('createServeApp', () => {
       expect(meta['availableSkills']).toEqual(['bugfix']);
       expect(meta).not.toHaveProperty('availableSkillDetails');
       expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+    });
+
+    it('rolls back a non-attached side task (kill, remove, catalog mark) when the generation closes mid-create', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge();
+      bridge.createSideTaskSession = vi.fn(async () => {
+        // The runtime generation closes between create and the post-create
+        // assertion — the route must roll the fresh side task back.
+        generationGuard.close();
+        return {
+          sessionId: 'side-task-rollback',
+          workspaceCwd: WS_BOUND,
+          attached: false,
+          clientId: 'client-side-task',
+          state: {},
+          liveJournal: [],
+        };
+      });
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'side-task-rollback-ws',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+      const revisionBefore = bridge.getSessionCatalogVersion().revision;
+      const removeSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue(true);
+
+      try {
+        const res = await request(app)
+          .post('/session/source-session/side-task')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'follow-up' });
+
+        expect(res.status).toBe(503);
+        expect(res.body.code).toBe('workspace_runtime_unavailable');
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'side-task-rollback',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
+        expect(removeSpy).toHaveBeenCalledWith('side-task-rollback');
+        // Rolling the fresh side task out of the catalog must advance the
+        // catalog clock for version-watching clients.
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBefore + 1,
+        );
+      } finally {
+        removeSpy.mockRestore();
+      }
     });
   });
 
@@ -23363,6 +23825,47 @@ describe('createServeApp', () => {
       req
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
+    const createWorkspaceMetadataApp = (
+      secondaryBridge: FakeBridge,
+      options: {
+        trusted?: boolean;
+        sessionRuntimeBaseDir?: string;
+        primaryBridge?: FakeBridge;
+        generationGuard?: WorkspaceGenerationGuard;
+      } = {},
+    ) => {
+      const primaryBridge = options.primaryBridge ?? fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+          ...(options.trusted !== undefined
+            ? { trusted: options.trusted }
+            : {}),
+          ...(options.sessionRuntimeBaseDir !== undefined
+            ? { sessionRuntimeBaseDir: options.sessionRuntimeBaseDir }
+            : {}),
+          ...(options.generationGuard
+            ? { generationGuard: options.generationGuard }
+            : {}),
+        }),
+      ]);
+      return {
+        app: createServeApp(tokenOpts, undefined, {
+          workspaceRegistry: registry,
+        }),
+        primaryBridge,
+        registry,
+      };
+    };
 
     it('200 on successful metadata update', async () => {
       const bridge = fakeBridge();
@@ -23457,6 +23960,323 @@ describe('createServeApp', () => {
       ).send({ displayName: 'x'.repeat(300) });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
+    });
+
+    it('updates the selected workspace runtime with client identity', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app, primaryBridge } =
+        createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ displayName: 'Secondary session' });
+
+      expect(res.status).toBe(200);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          metadata: { displayName: 'Secondary session' },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+      expect(primaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it('fails closed when the live session owner is unavailable', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app, registry } = createWorkspaceMetadataApp(secondaryBridge);
+      vi.spyOn(registry, 'resolveLiveSessionOwner').mockReturnValue({
+        kind: 'unavailable',
+      });
+
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it('fails closed when the selected workspace generation closes', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (_sessionId, metadata) => {
+          generationGuard.close();
+          return metadata;
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        generationGuard,
+      });
+
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+    });
+
+    it.each([
+      [{}, 'displayName'],
+      [{ displayName: 123 }, 'displayName'],
+      [{ displayName: '' }, 'displayName'],
+      [{ displayName: '   ' }, 'displayName'],
+      [{ displayName: 'bad\nname' }, 'displayName'],
+    ] as const)(
+      'rejects invalid workspace metadata %#',
+      async (body, field) => {
+        const secondaryBridge = fakeBridge();
+        const { app } = createWorkspaceMetadataApp(secondaryBridge);
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/session-A/metadata',
+          ),
+        ).send(body);
+
+        expect(res.status).toBe(400);
+        expect(res.body).toMatchObject({ code: 'invalid_metadata', field });
+        expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+      },
+    );
+
+    it('clamps workspace metadata displayName to 256 characters', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'x'.repeat(300) });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        displayName: 'x'.repeat(256),
+      });
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          metadata: { displayName: 'x'.repeat(256) },
+        },
+      ]);
+    });
+
+    it('rejects metadata updates for an untrusted workspace', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        trusted: false,
+      });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(403);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it.each(['active', 'archived'] as const)(
+      'renames a persisted %s session in the selected workspace',
+      async (state) => {
+        const runtimeBaseDir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-workspace-metadata-'),
+        );
+        const sessionId = `550e8400-e29b-41d4-a716-4466554400${
+          state === 'active' ? '31' : '32'
+        }`;
+        const chatsDir = path.join(
+          new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+          'chats',
+          ...(state === 'archived' ? ['archive'] : []),
+        );
+        const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          filePath,
+          `${JSON.stringify({
+            uuid: 'record-1',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-05-17T12:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'original' }] },
+            cwd: WS_DIFFERENT,
+          })}\n`,
+          'utf8',
+        );
+        const secondaryBridge = fakeBridge({
+          updateMetadataImpl: () => {
+            throw new SessionNotFoundError(sessionId);
+          },
+        });
+        const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+          sessionRuntimeBaseDir: runtimeBaseDir,
+        });
+
+        try {
+          const versionBefore = secondaryBridge.getSessionCatalogVersion();
+          const res = await auth(
+            request(app).patch(
+              `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+            ),
+          ).send({ displayName: 'Persisted rename' });
+          expect(res.status).toBe(200);
+          expect(res.body).toEqual({
+            sessionId,
+            displayName: 'Persisted rename',
+          });
+          expect(await fsp.readFile(filePath, 'utf8')).toContain(
+            'Persisted rename',
+          );
+          // A persisted rename changes what the catalog serves, so it must
+          // advance the same revision the live rename path marks.
+          expect(
+            secondaryBridge.getSessionCatalogVersion().revision,
+          ).toBeGreaterThan(versionBefore.revision);
+        } finally {
+          await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('returns 404 for a missing persisted session and 409 for a store conflict', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-conflict-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440033';
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+      });
+      const patchMetadata = () =>
+        auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({ displayName: 'Rename' });
+
+      try {
+        const versionBefore = secondaryBridge.getSessionCatalogVersion();
+        expect((await patchMetadata()).status).toBe(404);
+
+        const chatsDir = path.join(
+          new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+          'chats',
+        );
+        const record = `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`;
+        await fsp.mkdir(path.join(chatsDir, 'archive'), { recursive: true });
+        await Promise.all([
+          fsp.writeFile(path.join(chatsDir, `${sessionId}.jsonl`), record),
+          fsp.writeFile(
+            path.join(chatsDir, 'archive', `${sessionId}.jsonl`),
+            record,
+          ),
+        ]);
+
+        const conflict = await patchMetadata();
+        expect(conflict.status).toBe(409);
+        expect(conflict.body).toMatchObject({
+          code: 'session_conflict',
+          sessionId,
+        });
+        // Neither the 404 nor the 409 path renames anything, so neither may
+        // advance the catalog revision.
+        expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(
+          versionBefore.revision,
+        );
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects a rename when the session is live in another workspace runtime', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-live-owner-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440034';
+      const chatsDir = path.join(
+        new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`,
+        'utf8',
+      );
+      const primaryBridge = fakeBridge({
+        summaryImpl: (id: string) => ({
+          sessionId: id,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+        primaryBridge,
+      });
+
+      try {
+        const res = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({ displayName: 'Live elsewhere' });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({
+          code: 'session_workspace_conflict',
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          liveWorkspaceCwd: WS_BOUND,
+          liveWorkspaceId: 'ws-primary',
+        });
+        expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+        expect(primaryBridge.updateMetadataCalls).toEqual([]);
+        expect(await fsp.readFile(filePath, 'utf8')).not.toContain(
+          'Live elsewhere',
+        );
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
     });
   });
 
