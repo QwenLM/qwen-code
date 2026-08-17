@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 
 import {
   evaluateTimeBasedTrigger,
+  isClearedMediaPlaceholder,
   microcompactHistory,
   MICROCOMPACT_CLEARED_MESSAGE,
   MICROCOMPACT_CLEARED_IMAGE_PREFIX,
@@ -140,6 +141,30 @@ describe('evaluateTimeBasedTrigger', () => {
   it('should return null for non-finite gap', () => {
     const result = evaluateTimeBasedTrigger(NaN, DEFAULT_SETTINGS);
     expect(result).toBeNull();
+  });
+});
+
+describe('isClearedMediaPlaceholder', () => {
+  it('matches the exact placeholder shape microcompaction emits', () => {
+    expect(
+      isClearedMediaPlaceholder('[Old inline media cleared: image/png]'),
+    ).toBe(true);
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: application/octet-stream]',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not match a user prompt that merely begins with the prefix', () => {
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: image/png] why is this in my history?',
+      ),
+    ).toBe(false);
+    expect(isClearedMediaPlaceholder('[Old inline media cleared:')).toBe(false);
+    expect(isClearedMediaPlaceholder('hello world')).toBe(false);
+    expect(isClearedMediaPlaceholder('')).toBe(false);
   });
 });
 

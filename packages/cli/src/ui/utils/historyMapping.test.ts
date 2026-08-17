@@ -480,9 +480,7 @@ describe('computeApiTruncationIndex', () => {
     function inlineMediaContent(): Content {
       return {
         role: 'user',
-        parts: [
-          { inlineData: { mimeType: 'image/png', data: 'abc' } } as Part,
-        ],
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'abc' } } as Part],
       };
     }
 
@@ -562,6 +560,38 @@ describe('computeApiTruncationIndex', () => {
         userContent('world'),
         modelContent('response world'),
       ];
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('still counts a genuine prompt that merely begins with the placeholder prefix', () => {
+      // Microcompaction never rewrites text parts, so a user prompt that
+      // starts with '[Old inline media cleared:' (e.g. a pasted
+      // placeholder) is genuine. A bare-prefix match would drop it from
+      // the API prompt count: rewinding to a later turn truncated one
+      // prompt LATE (index 4 instead of 3) and rewinding to the prefix
+      // turn itself returned -1 with a spurious "compressed" error.
+      const prefixPromptText =
+        '[Old inline media cleared: image/png] why is this in my history?';
+      const prefixPrompt: Content = {
+        role: 'user',
+        parts: [{ text: prefixPromptText } as Part],
+      };
+      const ui: HistoryItem[] = [
+        userItem(1, prefixPromptText),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        prefixPrompt,
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Prefix turn AS the rewind target lands on its own entry…
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(1);
+      // …and a later rewind target is not shifted one turn late.
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
     });
   });

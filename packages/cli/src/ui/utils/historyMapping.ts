@@ -9,8 +9,8 @@ import type { Content } from '@google/genai';
 import {
   CompressionStatus,
   getStartupContextLength,
+  isClearedMediaPlaceholder,
   isSystemReminderContent,
-  MICROCOMPACT_CLEARED_IMAGE_PREFIX,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
@@ -59,17 +59,25 @@ function isUserTextContent(content: Content): boolean {
 
   // Exclude microcompaction media-clear placeholders. `/compress-fast`'s
   // microcompaction replaces the top-level inlineData/fileData parts of
-  // user entries with text placeholders. A media-only user entry (e.g. an
-  // image-only ACP prompt) never produced a UI user turn, but once cleared
-  // it carries a text part; counting it here desynchronizes the API prompt
-  // count from the UI turn count and makes the walk below truncate one turn
-  // early, silently dropping a turn the UI still shows. An entry that mixes
-  // placeholders with real prompt text still counts (it IS a real turn).
+  // user entries with text placeholders. A media-only user entry never
+  // produced a UI user turn, but once cleared it carries a text part;
+  // counting it here desynchronizes the API prompt count from the UI turn
+  // count and makes the walk below truncate one turn early, silently
+  // dropping a turn the UI still shows. Match the FULL generated
+  // placeholder shape, not just its prefix: microcompaction never rewrites
+  // text parts, so a user prompt that merely begins with the prefix (e.g.
+  // a pasted placeholder) is genuine and must keep counting. An entry that
+  // mixes placeholders with real prompt text still counts (it IS a real
+  // turn).
+  //
+  // The ACP session's private `#isUserTextContent` deliberately keeps the
+  // old prefix check: ACP rewind maps against per-prompt file-history
+  // snapshots, which ARE created for media-only prompts, so cleared
+  // placeholders must stay counted there. Do not mirror this exclusion
+  // into that twin.
   return content.parts.some(
     (part) =>
-      'text' in part &&
-      !!part.text &&
-      !part.text.startsWith(MICROCOMPACT_CLEARED_IMAGE_PREFIX),
+      'text' in part && !!part.text && !isClearedMediaPlaceholder(part.text),
   );
 }
 
