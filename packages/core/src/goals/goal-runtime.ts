@@ -69,6 +69,20 @@ export interface CreateGoalRuntimeOptions {
   evidenceSource?: GoalEvidenceSource;
   verifier?: GoalVerifier;
   checkpointVerifier?: GoalCheckpointVerifier;
+  tokenMeter?: GoalTokenMeter;
+}
+
+/**
+ * A monotonic read of the session's billed tokens.
+ *
+ * The runtime takes the difference across a turn rather than having each host
+ * push a number in: the normal path calls `finishTurn` from three separate
+ * hosts and the interrupted paths call it from core, so a pushed count would
+ * have to be threaded through all four and would go missing wherever it was
+ * forgotten. Pulling it needs one wiring point and cannot be forgotten.
+ */
+export interface GoalTokenMeter {
+  readSessionTokens(): number;
 }
 
 export interface GoalEvidenceSource {
@@ -188,6 +202,7 @@ export function createGoalRuntime(
   let currentPermit: GoalTurnPermit | undefined;
   let currentPermitHost: GoalTurnHost | undefined;
   let currentTurnKey: string | undefined;
+  let currentTurnTokensAtStart: number | undefined;
   let queuedTurnKey: string | undefined;
   let continuationQueued = false;
   let currentProposal:
@@ -255,6 +270,33 @@ export function createGoalRuntime(
         }
       : undefined;
 
+  const readSessionTokens = (): number | undefined => {
+    if (!options.tokenMeter) return undefined;
+    try {
+      const total = options.tokenMeter.readSessionTokens();
+      return Number.isFinite(total) ? total : undefined;
+    } catch {
+      // Goal accounting is bookkeeping. A meter that cannot answer costs the
+      // Goal its spend figure for this turn, not the turn.
+      return undefined;
+    }
+  };
+
+  /**
+   * The tokens the finishing turn billed, consuming the reading it opened with.
+   *
+   * Undefined at either end — no meter, an unreadable meter, or a turn whose
+   * opening reading was never taken — yields zero rather than a guess, so an
+   * unmetered session reports no spend instead of a wrong one.
+   */
+  const takeTurnTokens = (): number => {
+    const opened = currentTurnTokensAtStart;
+    currentTurnTokensAtStart = undefined;
+    const closed = readSessionTokens();
+    if (opened === undefined || closed === undefined) return 0;
+    return Math.max(0, closed - opened);
+  };
+
   const assertAvailable = () => {
     if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
   };
@@ -309,6 +351,7 @@ export function createGoalRuntime(
       turnId: randomUUID(),
     };
     currentPermitHost = scheduledHost;
+    currentTurnTokensAtStart = readSessionTokens();
     currentTurnKey = `goal-runtime:${currentPermit.turnId}`;
     const startedPermit = structuredClone(currentPermit);
     snapshot = { ...snapshot, activity: 'running' };
@@ -318,6 +361,7 @@ export function createGoalRuntime(
         if (isCurrentPermit(startedPermit)) {
           const nextTurnKey = queuedTurnKey;
           currentPermit = undefined;
+          currentTurnTokensAtStart = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;
           currentProposal = undefined;
@@ -333,6 +377,7 @@ export function createGoalRuntime(
               turnId: randomUUID(),
             };
             currentPermitHost = host;
+            currentTurnTokensAtStart = readSessionTokens();
             currentTurnKey = nextTurnKey;
             currentTurnFeedback = nextVerifierFeedback;
             nextVerifierFeedback = undefined;
@@ -476,6 +521,7 @@ export function createGoalRuntime(
       turnId: randomUUID(),
     };
     currentPermitHost = host;
+    currentTurnTokensAtStart = readSessionTokens();
     currentTurnKey = nextTurnKey;
     currentTurnFeedback = nextVerifierFeedback;
     nextVerifierFeedback = undefined;
@@ -1124,6 +1170,7 @@ export function createGoalRuntime(
         turnId: randomUUID(),
       };
       currentPermitHost = host;
+      currentTurnTokensAtStart = readSessionTokens();
       currentTurnKey = turnKey;
       currentTurnFeedback = nextVerifierFeedback;
       nextVerifierFeedback = undefined;
@@ -1144,6 +1191,7 @@ export function createGoalRuntime(
             nextVerifierFeedback ??= currentTurnFeedback;
           }
           currentPermit = undefined;
+          currentTurnTokensAtStart = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;
           currentTurnFeedback = undefined;
@@ -1170,6 +1218,7 @@ export function createGoalRuntime(
               turnId: randomUUID(),
             };
             currentPermitHost = host;
+            currentTurnTokensAtStart = readSessionTokens();
             currentTurnKey = nextTurnKey;
             currentTurnFeedback = nextVerifierFeedback;
             nextVerifierFeedback = undefined;
@@ -1208,6 +1257,7 @@ export function createGoalRuntime(
           const recordUuid = randomUUID();
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
+            tokensUsed: takeTurnTokens(),
           });
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
@@ -1271,6 +1321,7 @@ export function createGoalRuntime(
             activity: verifying ? 'verifying' : 'idle',
           };
           currentPermit = undefined;
+          currentTurnTokensAtStart = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;
           currentTurnFeedback = undefined;
@@ -1284,6 +1335,7 @@ export function createGoalRuntime(
               turnId: randomUUID(),
             };
             currentPermitHost = host;
+            currentTurnTokensAtStart = readSessionTokens();
             currentTurnKey = nextTurnKey;
             currentTurnFeedback = nextVerifierFeedback;
             nextVerifierFeedback = undefined;
@@ -1453,6 +1505,7 @@ export function createGoalRuntime(
         }
         if (invalidatesPermit) {
           currentPermit = undefined;
+          currentTurnTokensAtStart = undefined;
           currentPermitHost = undefined;
           currentTurnKey = undefined;
           queuedTurnKey = undefined;
@@ -1491,6 +1544,7 @@ export function createGoalRuntime(
       disposed = true;
       const invalidatedHost = currentPermitHost ?? host;
       currentPermit = undefined;
+      currentTurnTokensAtStart = undefined;
       currentPermitHost = undefined;
       currentTurnKey = undefined;
       queuedTurnKey = undefined;

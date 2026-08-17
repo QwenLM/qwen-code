@@ -269,6 +269,72 @@ describe('goal runtime', () => {
     });
   });
 
+  it('bills a finished turn the tokens the session spent during it', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let sessionTokens = 10_000;
+    const runtime = createGoalRuntime({
+      journal,
+      tokenMeter: { readSessionTokens: () => sessionTokens },
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    const first = host.started[0]!;
+    sessionTokens = 12_500;
+    await runtime.finishTurn(first);
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      turnCount: 1,
+      tokensUsed: 2_500,
+    });
+
+    const second = host.started[1]!;
+    sessionTokens = 13_000;
+    await runtime.finishTurn(second);
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      turnCount: 2,
+      tokensUsed: 3_000,
+    });
+  });
+
+  it('bills nothing when the session is unmetered', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    await runtime.finishTurn(host.started[0]!);
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      turnCount: 1,
+      tokensUsed: 0,
+    });
+  });
+
+  it('finishes the turn when the token meter throws', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenMeter: {
+        readSessionTokens: () => {
+          throw new Error('metrics are unavailable');
+        },
+      },
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    await expect(runtime.finishTurn(host.started[0]!)).resolves.toBeUndefined();
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      turnCount: 1,
+      tokensUsed: 0,
+    });
+  });
+
   it('persists verifier acceptance before completing a verified proposal', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
@@ -889,6 +955,7 @@ describe('goal runtime', () => {
       expect(runtime.getSnapshot()).toMatchObject({
         goal: {
           activeTimeMs: 4_000,
+          tokensUsed: 0,
           evidenceCheckpoint: { checkpointId: expect.any(String) },
         },
       });
@@ -2494,6 +2561,7 @@ describe('goal runtime', () => {
             evidenceCursor: { recordId: 'limit-record' },
             turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
             activeTimeMs: 1_000,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 2,
           },
@@ -2693,6 +2761,7 @@ describe('goal runtime', () => {
           evidenceCursor: { recordId: 'create-record' },
           turnCount: 2,
           activeTimeMs: 10,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -2718,6 +2787,7 @@ describe('goal runtime', () => {
           evidenceCursor: { recordId: 'create-record' },
           turnCount: 2,
           activeTimeMs: 10,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -2749,6 +2819,7 @@ describe('goal runtime', () => {
         evidenceCursor: { recordId: 'create-record' },
         turnCount: 2,
         activeTimeMs: 10,
+        tokensUsed: 0,
         createdAt: 1,
         updatedAt: 2,
       },
@@ -2974,6 +3045,7 @@ describe('goal runtime', () => {
           evidenceCursor: { recordId: 'create-record' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -3070,6 +3142,7 @@ describe('goal runtime', () => {
           evidenceCursor: { recordId: 'create-record' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -3350,6 +3423,7 @@ describe('goal runtime', () => {
         evidenceCursor: { recordId: 'create-record' },
         turnCount: 3,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: 1,
         updatedAt: 2,
       },
@@ -3594,6 +3668,7 @@ describe('goal runtime', () => {
           evidenceCursor: { recordId: 'create-record' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -3617,6 +3692,7 @@ describe('goal runtime', () => {
           evidenceCursor: { recordId: 'create-record' },
           turnCount: 1,
           activeTimeMs: 1,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -3691,6 +3767,7 @@ describe('goal runtime', () => {
         evidenceCursor: { recordId: 'restore-record' },
         turnCount: 1,
         activeTimeMs: 10,
+        tokensUsed: 0,
         createdAt: 1,
         updatedAt: 2,
       },

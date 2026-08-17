@@ -832,6 +832,7 @@ describe('ChatRecordingService', () => {
           evidenceCursor: { recordId: 'goal-record' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 100,
           updatedAt: 100,
         },

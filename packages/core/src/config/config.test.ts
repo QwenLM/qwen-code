@@ -2375,6 +2375,7 @@ describe('Server Config (config.ts)', () => {
               evidenceCursor: { recordId: 'goal-active' },
               turnCount: 1,
               activeTimeMs: 10,
+              tokensUsed: 0,
               createdAt: 1,
               updatedAt: 2,
             },

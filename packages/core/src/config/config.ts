@@ -139,6 +139,7 @@ import {
   logRipgrepFallback,
   RipgrepFallbackEvent,
   StartSessionEvent,
+  uiTelemetryService,
   type TelemetryTarget,
 } from '../telemetry/index.js';
 import {
@@ -7703,11 +7704,20 @@ export class Config {
       return;
     }
     const recorder = this.chatRecordingService;
+    const sessionId = this.getSessionId();
     const runtime = createGoalRuntime({
       journal: recorder,
       evidenceSource: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
+      tokenMeter: {
+        // The same figure `/stats` reports, so a Goal's spend and the
+        // session's spend are the same number measured once.
+        readSessionTokens: () =>
+          Object.values(
+            uiTelemetryService.getMetricsForSession(sessionId).models,
+          ).reduce((total, model) => total + model.tokens.total, 0),
+      },
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

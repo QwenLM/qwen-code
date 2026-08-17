@@ -104,6 +104,14 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal so far, summed across its turns.
+   *
+   * Measured the way the session already measures itself, so the number a Goal
+   * reports and the number `/stats` reports mean the same thing. Zero on Goals
+   * recovered from a transcript written before the field existed.
+   */
+  tokensUsed: number;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
