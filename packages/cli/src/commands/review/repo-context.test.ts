@@ -829,6 +829,30 @@ describe('repo-context providers and trust boundary', () => {
     expect(readFileSync(planPath, 'utf8')).toBe(before);
   });
 
+  it('rejects an --out whose canonical identity equals an absent --plan', () => {
+    // The hardened absent-side semantics, untested by the alias cases above
+    // (which all compare two EXISTING paths): neither file is on disk yet,
+    // but --out is spelled through a symlinked directory component, so its
+    // canonical identity is the plan's. A revert to the old local sameFile —
+    // false whenever a side is absent — passes green and re-opens the
+    // overwrite this guard closes.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    mkdirSync(join(root, 'real'));
+    symlinkSync(join(root, 'real'), join(root, 'link'));
+    expect(() =>
+      runRepoContext(
+        {
+          plan: join(root, 'real/plan.json'),
+          worktree,
+          out: join(root, 'link/plan.json'),
+        },
+        [{ provide: () => context() }],
+      ),
+    ).toThrow('--out must differ');
+  });
+
   it('rejects invalid provider output', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
