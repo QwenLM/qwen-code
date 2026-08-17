@@ -267,6 +267,9 @@ function applyDaemonTranscriptEvent(
         appendBlock(next, block);
         next.activeUserBlockId = block.id;
       } else {
+        // Measure the retained block BEFORE the write path clones it
+        // (same pattern as upsertToolBlock) so merged images stay counted.
+        const bytesBefore = activeUser ? estimateBlockBytes(activeUser) : 0;
         // Use getWritableBlockById to ensure COW safety when mutating block.images
         const block = getWritableBlockById(next, next.activeUserBlockId) as
           | DaemonTextTranscriptBlock
@@ -278,6 +281,7 @@ function applyDaemonTranscriptEvent(
             ...(block.images ?? []),
             { data: event.data, mimeType: event.mimeType },
           ];
+          next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
         }
       }
       break;
@@ -1019,8 +1023,17 @@ function discardToolBlock(
 ): void {
   const blockId = state.toolBlockByCallId[toolCallId];
   if (!blockId || blockId === TRIMMED_TOOL_BLOCK_ID) return;
+  const droppedIndex = state.blockIndexById[blockId];
+  const dropped =
+    droppedIndex !== undefined ? state.blocks[droppedIndex] : undefined;
   takeBlocksOwnership(state);
   state.blocks = state.blocks.filter((block) => block.id !== blockId);
+  if (dropped) {
+    state.retainedBytes = Math.max(
+      0,
+      state.retainedBytes - estimateBlockBytes(dropped),
+    );
+  }
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
   delete state.toolBlockByCallId[toolCallId];
   delete state.toolProgress[toolCallId];
@@ -1460,26 +1473,27 @@ function trimTranscriptState(
 ): DaemonTranscriptState {
   const overByteBudget = state.retainedBytes > state.maxRetainedBytes;
   if (state.blocks.length <= state.maxBlocks && !overByteBudget) return state;
-  truncationCallbacks.get(state)?.({ kind: 'blocks' });
   // Count-based floor: keep at most the last `maxBlocks` blocks.
   let removeCount = Math.max(0, state.blocks.length - state.maxBlocks);
-  let removedBytes = 0;
+  let bytes = state.retainedBytes;
   for (let i = 0; i < removeCount; i += 1) {
-    removedBytes += estimateBlockBytes(state.blocks[i]!);
+    bytes -= estimateBlockBytes(state.blocks[i]!);
   }
   // Byte budget: keep evicting oldest blocks until the retained estimate is
   // back under the budget. The last block always survives, so the ceiling is
   // budget + one worst-case block rather than strictly the budget.
-  let bytes = state.retainedBytes - removedBytes;
   while (
     removeCount < state.blocks.length - 1 &&
     bytes > state.maxRetainedBytes
   ) {
-    const blockBytes = estimateBlockBytes(state.blocks[removeCount]!);
-    removedBytes += blockBytes;
-    bytes -= blockBytes;
+    bytes -= estimateBlockBytes(state.blocks[removeCount]!);
     removeCount += 1;
   }
+  // Nothing evictable (e.g. one oversized block): skip the callback and
+  // rebuild. Firing `kind: 'blocks'` with zero removals records a false
+  // truncation and churns snapshot identity on every dispatch.
+  if (removeCount === 0) return state;
+  truncationCallbacks.get(state)?.({ kind: 'blocks' });
   state.retainedBytes = Math.max(0, bytes);
   const blocks = state.blocks.slice(removeCount);
   const keptIds = new Set(blocks.map((block) => block.id));
@@ -1618,7 +1632,13 @@ function truncateTranscriptBeforeBlock(
   blockIndex: number,
 ): void {
   takeBlocksOwnership(state);
+  let droppedBytes = 0;
+  for (let index = blockIndex; index < state.blocks.length; index += 1) {
+    const block = state.blocks[index];
+    if (block) droppedBytes += estimateBlockBytes(block);
+  }
   state.blocks = state.blocks.slice(0, blockIndex);
+  state.retainedBytes = Math.max(0, state.retainedBytes - droppedBytes);
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
 }

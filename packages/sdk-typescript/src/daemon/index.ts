@@ -99,6 +99,7 @@ export {
   daemonBlockToPlainText,
   daemonToolPreviewToMarkdown,
   daemonUiEventToTerminalText,
+  estimateDaemonTranscriptBlockBytes,
   extractContentPart,
   extractServerTimestamp,
   formatBlockTimestamp,

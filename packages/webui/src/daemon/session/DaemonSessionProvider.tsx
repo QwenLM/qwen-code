@@ -21,6 +21,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
+  estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
@@ -285,6 +286,10 @@ function materializeTranscriptHistory(
         );
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
+    // Trim-free by intent: a media-heavy page would otherwise cross the
+    // default byte budget mid-build and evict the page's oldest records,
+    // which the exclusive pagination anchor can never re-fetch.
+    maxRetainedBytes: Number.POSITIVE_INFINITY,
     nextOrdinal: current.nextOrdinal,
     retainSubagentBlocks: current.retainSubagentBlocks,
   });
@@ -305,9 +310,14 @@ function applyTranscriptHistory(
   current: DaemonTranscriptState,
   history: TranscriptHistoryMaterialization,
 ): DaemonTranscriptState {
+  let prependedBytes = 0;
+  for (const block of history.blocks) {
+    prependedBytes += estimateDaemonTranscriptBlockBytes(block);
+  }
   return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
+    retainedBytes: current.retainedBytes + prependedBytes,
     nextOrdinal: history.nextOrdinal,
     toolBlockByCallId: {
       ...history.toolBlockByCallId,

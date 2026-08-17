@@ -18,7 +18,10 @@ import type {
   DaemonUiSessionActions,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  estimateDaemonTranscriptBlockBytes,
+} from '@qwen-code/sdk/daemon';
 import {
   DaemonSessionProvider,
   useDaemonActions,
@@ -11863,6 +11866,190 @@ describe('DaemonSessionProvider', () => {
       blocks.map((block) => ('text' in block ? block.text : undefined)),
     ).toEqual(['older prompt', 'recent prompt']);
     expect(history?.hasMore).toBe(false);
+  });
+
+  it('counts prepended history pages against the retention byte estimate', async () => {
+    // Pagination prepends blocks carrying raw tool payloads; the running
+    // retained-bytes estimate must grow with them or later live growth trims
+    // against an undercounted counter and exceeds the retention budget.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+    const toolEvent = (
+      id: number,
+      toolCallId: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId,
+          title: `Tool ${toolCallId}`,
+          status: 'completed',
+          rawInput: { payload: 'P'.repeat(100_000) },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-history-bytes',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(2, 'recent prompt', 'record-2')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [
+        toolEvent(0, 'tool-older-0', 'record-0'),
+        toolEvent(1, 'tool-older-1', 'record-1'),
+      ],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let retainedBytes = 0;
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      retainedBytes = useDaemonTranscriptState().retainedBytes;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    const retainedBefore = retainedBytes;
+    expect(retainedBefore).toBeGreaterThan(0);
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    expect(blocks).toHaveLength(3);
+    const expected = blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(retainedBytes).toBeGreaterThan(retainedBefore);
+    expect(retainedBytes).toBe(expected);
+  });
+
+  it('keeps a media-heavy history page intact while materializing it', async () => {
+    // The pagination scratch store is deliberately trim-free (unlimited block
+    // count). The retention byte budget must not evict the page's oldest
+    // records mid-build there: the pagination anchor is exclusive of the
+    // oldest fetched record, so an evicted record is never re-fetched and
+    // leaves a permanent silent gap in the timeline.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+    // ~10 MB estimated per block; 14 of them cross the default 128 MiB
+    // retention budget so an active budget would evict during materialization.
+    const heavyToolEvent = (id: number, index: number): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: `tool-${index}`,
+          title: `Tool ${index}`,
+          status: 'completed',
+          rawInput: { payload: `page-${index}-` + 'A'.repeat(5_000_000) },
+          _meta: {
+            'qwen.session.recordId': `record-${index}`,
+            qwenTranscript: { sourceRecordIds: [`record-${index}`] },
+          },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-history-heavy-page',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(20, 'recent prompt', 'record-recent')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: Array.from({ length: 14 }, (_, index) =>
+        heavyToolEvent(index + 1, index),
+      ),
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    const toolCallIds = blocks
+      .filter((block) => block.kind === 'tool')
+      .map((block) => (block as { toolCallId?: string }).toolCallId);
+    expect(toolCallIds).toHaveLength(14);
+    expect(toolCallIds).toContain('tool-0');
   });
 
   it('drops fetched transcript events whose records are already displayed', async () => {

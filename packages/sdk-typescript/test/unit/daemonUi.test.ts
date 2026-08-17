@@ -1294,6 +1294,228 @@ describe('daemon UI normalizer and transcript reducer', () => {
     );
   });
 
+  it('applies the default retention budget when none is configured', () => {
+    // The eviction comparison degrades to "never fires" if the creation-time
+    // default is dropped, so pin the exact value for callers that rely on it.
+    expect(createDaemonTranscriptState().maxRetainedBytes).toBe(
+      128 * 1024 * 1024,
+    );
+    expect(createDaemonTranscriptStore().getSnapshot().maxRetainedBytes).toBe(
+      128 * 1024 * 1024,
+    );
+  });
+
+  it('keeps a configured retention budget across store reset', () => {
+    // reset() carries maxBlocks and retainSubagentBlocks forward from the
+    // current state; maxRetainedBytes must behave the same or a custom
+    // budget silently reverts to the default on every replay/session switch.
+    const store = createDaemonTranscriptStore({ maxRetainedBytes: 5_000_000 });
+    expect(store.getSnapshot().maxRetainedBytes).toBe(5_000_000);
+    store.reset();
+    expect(store.getSnapshot().maxRetainedBytes).toBe(5_000_000);
+  });
+
+  it('counts every image merged into a user block against the retention budget', () => {
+    const data = 'I'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 10_000_000,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'user.image.delta',
+          data,
+          mimeType: 'image/png',
+          sourceRecordIds: ['record-1'],
+        },
+        {
+          type: 'user.image.delta',
+          data,
+          mimeType: 'image/png',
+          sourceRecordIds: ['record-1'],
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0]!;
+    expect((block as { images?: unknown[] }).images).toHaveLength(2);
+    expect(state.retainedBytes).toBe(estimateDaemonTranscriptBlockBytes(block));
+  });
+
+  it('releases the retention budget when a rewind drops blocks', () => {
+    const large = 'x'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 1_000_000,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'user.text.delta', text: 'turn zero' }],
+      { now: 2 },
+    );
+    for (let index = 0; index < 3; index += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId: `tool-${index}`,
+            title: `Tool ${index}`,
+            status: 'completed',
+            rawOutput: large,
+          },
+        ],
+        { now: index + 3 },
+      );
+    }
+    expect(state.blocks).toHaveLength(4);
+    expect(state.retainedBytes).toBeGreaterThan(0);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'session.rewound', promptId: 'prompt-1', targetTurnIndex: 0 }],
+      { now: 9 },
+    );
+    expect(state.blocks).toHaveLength(0);
+    expect(state.retainedBytes).toBe(0);
+
+    // Ghost bytes from the dropped blocks must not collapse later growth:
+    // with an inflated counter every dispatch looks over budget and evicts
+    // the freshly appended blocks down to the last survivor.
+    for (let index = 0; index < 3; index += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId: `post-${index}`,
+            title: `Post ${index}`,
+            status: 'completed',
+            rawOutput: large,
+          },
+        ],
+        { now: index + 10 },
+      );
+    }
+    expect(
+      state.blocks.map(
+        (block) => (block as { toolCallId?: string }).toolCallId,
+      ),
+    ).toEqual(['post-0', 'post-1', 'post-2']);
+    const expected = state.blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(state.retainedBytes).toBe(expected);
+  });
+
+  it('releases the retention budget when a subagent tool block is discarded', () => {
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 10_000_000,
+      retainSubagentBlocks: false,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          title: 'Subagent',
+          status: 'running',
+          rawOutput: 'y'.repeat(50_000),
+        },
+      ],
+      { now: 2 },
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.retainedBytes).toBeGreaterThan(0);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          parentToolCallId: 'parent-1',
+          status: 'completed',
+        },
+      ],
+      { now: 3 },
+    );
+    expect(state.blocks).toHaveLength(0);
+    expect(state.retainedBytes).toBe(0);
+  });
+
+  it('accounts streamed assistant text against the retention byte budget', () => {
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 250_000,
+      now: 1,
+    });
+    const chunk = 'A'.repeat(25_000);
+    for (let blockIndex = 0; blockIndex < 2; blockIndex += 1) {
+      for (let chunkIndex = 0; chunkIndex < 4; chunkIndex += 1) {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          [{ type: 'assistant.text.delta', text: chunk }],
+          { now: blockIndex * 10 + chunkIndex + 2 },
+        );
+      }
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [{ type: 'assistant.done', reason: 'end_turn' }],
+        { now: blockIndex * 10 + 8 },
+      );
+    }
+
+    // Each text block caps at 100k chars (~200KB estimated), so the 250KB
+    // budget cannot hold both streamed blocks and the older one is evicted.
+    expect(state.blocks).toHaveLength(1);
+    expect(state.retainedBytes).toBeLessThanOrEqual(250_000);
+    const expected = state.blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(state.retainedBytes).toBe(expected);
+  });
+
+  it('does not signal truncation when the byte budget cannot evict anything', () => {
+    const onTruncation = vi.fn();
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 100,
+      now: 1,
+      onTruncation,
+    });
+    // A single block whose estimate exceeds the budget can never be evicted
+    // (the last block always survives).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'x'.repeat(100) }],
+      { now: 2 },
+    );
+    expect(state.blocks).toHaveLength(1);
+    onTruncation.mockClear();
+    const blocksBefore = state.blocks;
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'session.metadata.changed', sessionId: 'session-1' }],
+      { now: 3 },
+    );
+
+    expect(onTruncation).not.toHaveBeenCalled();
+    expect(state.blocks).toBe(blocksBefore);
+  });
+
   it('keeps active assistant text open when reporting trimmed tool updates', () => {
     let state = createDaemonTranscriptState({ maxBlocks: 2, now: 1 });
 
