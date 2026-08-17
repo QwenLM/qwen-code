@@ -4647,6 +4647,15 @@ export class Session implements SessionContext {
                 // re-adding the stashed names anyway would resurrect the
                 // ghost the strip just removed. Mirrors the TUI twin in
                 // restoreStrippedRetryEntries (client.ts).
+                //
+                // Accepted trade-off: the pre-send tryCompress can also
+                // summarize away the re-pushed body's pairing model-side
+                // functionCall, leaving the body resident-but-untracked at
+                // settle — the next invoke then injects one duplicate body
+                // and self-heals (the documented direction in
+                // unloadSkillsFromEntries). Rebuilding from the stashed ids
+                // would add a second residency-truth path beside the
+                // reconcile; not worth it for a self-healing duplicate.
                 this.#getCurrentChat().reconcileLoadedSkillTracking(
                   'acpContinuationSettle',
                 );
