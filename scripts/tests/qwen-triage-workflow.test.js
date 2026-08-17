@@ -5982,3 +5982,46 @@ describe('triage job budget', () => {
     }
   });
 });
+
+describe('triage skips the autofix bot’s own bookkeeping issues (#9264)', () => {
+  // Every PR that defers findings for the first time opens a tracking issue
+  // upserted by the autofix bot, and `issues: [opened, edited, reopened]`
+  // triaged that bookkeeping issue with a full agent run per deferral. The
+  // guard keys on the same identity qwen-autofix.yml upserts under, so a
+  // rename on one side without the other silently re-opens the waste.
+  const botIdentityCore = "vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot'";
+  const botIdentity = `(${botIdentityCore})`;
+
+  // The parsed expressions keep their YAML line breaks, so whitespace is
+  // normalized before matching — the pin must survive a re-wrap, not test it.
+  const flat = (value) => String(value).replace(/\s+/g, ' ');
+
+  it('conditions the triage job’s issues clause on the creator not being the bot', () => {
+    // Parsed, not raw-text containment: a commented-out guard would still
+    // match a substring pin.
+    const doc = parse(workflow);
+    expect(flat(doc.jobs.triage.if)).toContain(
+      `(github.event_name == 'issues' && github.event.issue.user.login != ${botIdentity}) || (github.event_name == 'workflow_dispatch'`,
+    );
+  });
+
+  it('routes bot-created issues runs to a per-run concurrency group', () => {
+    // GitHub evaluates concurrency BEFORE the job `if`: a bot bookkeeping run
+    // inside the shared per-number group cancels an in-progress triage of the
+    // same issue even though its own job skips.
+    const doc = parse(workflow);
+    expect(flat(doc.jobs.triage.concurrency.group)).toContain(
+      `!startsWith(github.event.comment.body, '@qwen-code /triage'))) || (github.event_name == 'issues' && github.event.issue.user.login == ${botIdentity}) ) && format('{0}-run-{1}', github.workflow, github.run_id)`,
+    );
+  });
+
+  it('keeps the guard identity in sync with the autofix workflow', () => {
+    // qwen-autofix.yml defines AUTOFIX_BOT as the same variable-with-fallback
+    // (inside a bare `${{ }}`, so without the expression's parentheses).
+    expect(botIdentity).toContain(botIdentityCore);
+    const autofixDoc = parse(
+      readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+    );
+    expect(autofixDoc.env.AUTOFIX_BOT).toBe(`\${{ ${botIdentityCore} }}`);
+  });
+});
