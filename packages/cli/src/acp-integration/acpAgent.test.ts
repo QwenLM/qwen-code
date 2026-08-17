@@ -16496,10 +16496,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     async (action) => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440000';
       const storageSessionId = sessionId.toUpperCase();
-      bindRestoreMocks({
+      const innerConfig = bindRestoreMocks({
         sessionExists: true,
         persistedSpelling: storageSessionId,
       });
+      innerConfig.getSessionId.mockReturnValue(storageSessionId);
       const { agent, agentPromise } = await spawnAgent();
 
       try {
@@ -16514,6 +16515,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           | CliArgs
           | undefined;
         expect(argv?.resume).toBe(storageSessionId);
+
+        // The in-memory session map key is normalized, so caller-case
+        // follow-up operations still reach the adopted session.
+        await agent.cancel({ sessionId });
+        expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
