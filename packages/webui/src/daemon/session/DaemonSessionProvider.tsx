@@ -3091,18 +3091,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       });
       let terminalFailure = false;
       try {
-        const page = await activeSession.client.getSessionTranscriptPage(
-          activeSession.sessionId,
-          {
-            ...(history.cursor !== undefined
-              ? { cursor: history.cursor }
-              : history.beforeRecordId !== undefined
-                ? { beforeRecordId: history.beforeRecordId }
-                : {}),
-            limit: historyPageSizeRef.current ?? 100,
-            clientId: activeSession.clientId,
-          },
-        );
+        const page = await activeSession.getTranscriptPage({
+          ...(history.cursor !== undefined
+            ? { cursor: history.cursor }
+            : history.beforeRecordId !== undefined
+              ? { beforeRecordId: history.beforeRecordId }
+              : {}),
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        });
         if (
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
