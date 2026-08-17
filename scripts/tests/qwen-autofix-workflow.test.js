@@ -87,6 +87,10 @@ const pushAndReportStep =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
+const prepareStep =
+  workflow.match(
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
+  )?.[0] ?? '';
 const reportDryRunFailureSteps =
   workflow.match(
     /- name: 'Report dry-run \/ failure'[\s\S]*?(?=\n[ ]{6}- name: '|$)/g,
@@ -2405,13 +2409,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("HEAD_REPO: '${{ matrix.target.head_repo }}'");
     expect(reviewScanJob).toContain('head_repo: $hr');
     expect(workflow).toContain(
-      'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
+      'git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
     expect(workflow).toContain(
-      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
@@ -2420,7 +2424,7 @@ describe('qwen-autofix workflow', () => {
     // `push --no-verify …` match would still satisfy): the host-scoped
     // credential prefix must immediately precede the push.
     expect(workflow).toMatch(
-      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+      /git -c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -5222,20 +5226,29 @@ exit 1
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
     );
     const modeBlock = prepareBranchAndFeedbackStep.match(
-      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+      /(CRITICAL_ONLY='false'\n\s+CRITICAL_ONLY_ROUNDS='false'\n\s+CRITICAL_ONLY_GROWTH='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_ROUNDS='true'\n\s+fi\n\s+if \[\[ "\$\{GROWTH_SRC\}" -gt "\$\{GROWTH_BUDGET_SRC_LINES\}" \|\| "\$\{GROWTH_TEST\}" -gt "\$\{GROWTH_BUDGET_TEST_LINES\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_GROWTH='true'\n\s+fi)/,
     )?.[1];
     expect(modeBlock).toBeTruthy();
-    const modeAt = (round) =>
+    const modeAt = (round, growthSrc = 0, growthTest = 0) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\n${modeBlock}\nprintf '%s %s %s' "$CRITICAL_ONLY" "$CRITICAL_ONLY_ROUNDS" "$CRITICAL_ONLY_GROWTH"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(4)).toBe('false');
-    expect(modeAt(5)).toBe('true');
+    expect(modeAt(4)).toBe('false false false');
+    expect(modeAt(5)).toBe('true true false');
+    // The growth brake trips the SAME mode before the round threshold. AT
+    // budget is within budget (exclusive boundary), either dimension alone
+    // trips, both causes can hold at once, and a shrinking window (negative
+    // growth) never engages.
+    expect(modeAt(0, 400, 400)).toBe('false false false');
+    expect(modeAt(0, 401, 0)).toBe('true false true');
+    expect(modeAt(0, 0, 401)).toBe('true false true');
+    expect(modeAt(5, 401, 0)).toBe('true true true');
+    expect(modeAt(0, -900, -900)).toBe('false false false');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and
@@ -5959,6 +5972,463 @@ exit 1
     expect(skill).toContain('Critical-only mode');
     expect(skill).toContain('do not modify code');
     expect(skill).toContain('Deferred non-Critical feedback');
+  });
+
+  it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
+    // Budgets are repo-variable tunables with a sanitize fallback at the
+    // read site, mirroring the scan budgets.
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'",
+    );
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'",
+    );
+    // The sanitize fallback is REPLAYED, not just pinned: it is the sole
+    // protection against a malformed repo variable reaching the octal-
+    // parsing [[ -gt ]] comparisons, in both failure directions.
+    const sanitizeBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ ! "\$\{GROWTH_BUDGET_SRC_LINES\}"[\s\S]*?GROWTH_BUDGET_TEST_LINES=400\n\s+fi)/,
+    )?.[1];
+    expect(sanitizeBlock).toBeTruthy();
+    // Last line only: the fallback path also emits its ::warning:: lines.
+    const sanitized = (src, test) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BUDGET_SRC_LINES='${src}'\nGROWTH_BUDGET_TEST_LINES='${test}'\n${sanitizeBlock}\nprintf '\\n%s %s' "$GROWTH_BUDGET_SRC_LINES" "$GROWTH_BUDGET_TEST_LINES"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .split('\n')
+        .pop();
+    // Plain counts (zero included) pass through untouched.
+    expect(sanitized('400', '0')).toBe('400 0');
+    // Garbage falls back…
+    expect(sanitized('400abc', 'twelve')).toBe('400 400');
+    // …and so do zero-padded values: bash [[ -gt ]] would read '0400' as
+    // octal 256 and raise on '0900', silently disabling the brake.
+    expect(sanitized('0400', '0900')).toBe('400 400');
+    // The 7-digit cap is load-bearing: past it bash integer literals wrap
+    // at 64 bits and comparisons go silently wrong.
+    expect(sanitized('9999999', '10000000')).toBe('9999999 400');
+
+    // Measurement: replay the real block against a real repo. Test lines are
+    // *.test.* / *.spec.* files, __snapshots__/, __tests__/, test-utils/, and
+    // integration-tests/ (by DIRECTORY, not file naming); binary files count
+    // as zero; deletions subtract; mechanical churn (root and nested
+    // lockfiles, the regenerated settings schema) never burns the budget —
+    // on EITHER side of the src/test split, even under a test directory.
+    const measureBlock = prepareBranchAndFeedbackStep.match(
+      /(# Binary files report[\s\S]*?NET_SRC=\$\(\( NET_TOTAL - NET_TEST \)\))/,
+    )?.[1];
+    expect(measureBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-growth-'));
+    try {
+      const git = (...args) =>
+        execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'test@test');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'src', 'app.ts'), 'a1\na2\na3\n');
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+      git('checkout', '-qb', 'pr');
+      mkdirSync(join(dir, 'src', '__snapshots__'));
+      mkdirSync(join(dir, 'src', 'test-utils'));
+      mkdirSync(join(dir, 'integration-tests'));
+      mkdirSync(join(dir, 'assets'));
+      // src: full rewrite, +7/-3 = net +4
+      writeFileSync(join(dir, 'src', 'app.ts'), 'b1\nb2\nb3\nb4\nb5\nb6\nb7\n');
+      // tests: +3 appended, +5 spec, +4 snapshot, +2 test-utils, +2
+      // integration-tests helper (a non-test filename proves the directory
+      // pathspec) plus +2 __tests__ setup below = net +18
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\nt3\nt4\nt5\n');
+      writeFileSync(join(dir, 'src', 'util.spec.ts'), 's1\ns2\ns3\ns4\ns5\n');
+      writeFileSync(
+        join(dir, 'src', '__snapshots__', 'app.snap'),
+        'n1\nn2\nn3\nn4\n',
+      );
+      writeFileSync(join(dir, 'src', 'test-utils', 'helper.ts'), 'h1\nh2\n');
+      writeFileSync(join(dir, 'integration-tests', 'helper.ts'), 'i1\ni2\n');
+      // __tests__/ helper without a .test./.spec. suffix is test code…
+      mkdirSync(join(dir, 'src', '__tests__'));
+      writeFileSync(join(dir, 'src', '__tests__', 'setup.ts'), 'u1\nu2\n');
+      // …and a lockfile under a test directory is mechanical churn on BOTH
+      // sides of the split, or NET_SRC would be corrupted by the subtraction.
+      writeFileSync(
+        join(dir, 'integration-tests', 'package-lock.json'),
+        'k1\nk2\nk3\nk4\nk5\nk6\n',
+      );
+      writeFileSync(
+        join(dir, 'assets', 'logo.bin'),
+        Buffer.from([0x00, 0x01, 0x02, 0x00]),
+      );
+      // Mechanical churn: a ROOT lockfile (proves '**/' glob-magic matches
+      // at depth zero), a nested one, and the exact generated-schema path —
+      // all excluded, so none of them shift the expected nets below.
+      writeFileSync(join(dir, 'package-lock.json'), 'l1\nl2\nl3\nl4\nl5\n');
+      mkdirSync(join(dir, 'packages', 'vscode-ide-companion', 'schemas'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(dir, 'packages', 'vscode-ide-companion', 'package-lock.json'),
+        'm1\nm2\nm3\n',
+      );
+      writeFileSync(
+        join(
+          dir,
+          'packages',
+          'vscode-ide-companion',
+          'schemas',
+          'settings.schema.json',
+        ),
+        'g1\ng2\ng3\ng4\n',
+      );
+      git('add', '-A');
+      git('commit', '-qm', 'pr');
+      // Advance main PAST the divergence before measuring: with main
+      // unmoved a two-dot regression produces identical numbers, so only a
+      // moved main pins the merge-base (three-dot) semantics.
+      git('checkout', '-q', 'main');
+      writeFileSync(join(dir, 'mainline.ts'), 'm1\nm2\nm3\nm4\nm5\n');
+      git('add', '-A');
+      git('commit', '-qm', 'main-moves');
+      git('checkout', '-q', 'pr');
+      git('update-ref', 'refs/remotes/origin/main', 'main');
+      const measured = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(measured).toBe('22 18 4');
+      // Fail-open: an orphan-history branch has no merge base, the three-dot
+      // diff exits 128, and under the workflow's real shell options the
+      // block must still complete with zero nets (brake skipped) instead of
+      // killing the prepare step every round.
+      git('update-ref', '-d', 'refs/remotes/origin/main');
+      const orphan = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphan).toBe('0 0 0');
+      // Unmeasured is a STATE: no bogus anchor may be written.
+      const orphanFlag = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s' "$NET_MEASURED"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphanFlag).toBe('false');
+      // A fork head literally named 'main' skips measurement out loud.
+      const forkMain = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nBRANCH=main\n${measureBlock}\nprintf '\\n%s %s' "$NET_MEASURED" "$NET_TOTAL"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(forkMain.split('\n').pop()).toBe('false 0');
+      expect(measureBlock).toContain(
+        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // Baseline parse: bot-only, window-keyed, FIRST-wins — a duplicate
+    // marker in the same window cannot move an anchored baseline, a spoofed
+    // marker from another login is ignored, negative nets round-trip, and a
+    // window with no marker yields empty (this round anchors it).
+    const baselineJq = prepareBranchAndFeedbackStep.match(
+      /GROWTH_BASELINE="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg key "\$\{LIVE_REARM_KEY\}" --arg baseupd "\$\{BASE_UPD_AT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+    )?.[1];
+    expect(baselineJq).toBeTruthy();
+    const baselineComments = [
+      {
+        user: { login: 'mallory' },
+        created_at: '2026-01-01T00:00:00Z',
+        body: '<!-- autofix-growth-base src=1 test=1 key=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T01:00:00Z',
+        body: 'report\n\n<!-- autofix-eval ts=2026-01-01T00:59:00Z acted=true round=1 win=WIN0 -->\n<!-- autofix-growth-base src=7 test=8 key=WIN0 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T02:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=50 test=-60 key=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T03:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=100 test=200 key=WIN1 -->',
+      },
+    ];
+    const baselineFor = (key, baseupd = '') =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--arg',
+          'key',
+          key,
+          '--arg',
+          'baseupd',
+          baseupd,
+          baselineJq,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(baselineComments) },
+      ).trimEnd();
+    expect(baselineFor('WIN1')).toBe('50 -60');
+    expect(baselineFor('WIN2')).toBe('');
+    // A base update newer than an anchor invalidates it (the merge base it
+    // was measured against moved); a later anchor survives first-wins.
+    expect(baselineFor('WIN1', '2026-01-01T02:30:00Z')).toBe('100 200');
+    expect(baselineFor('WIN1', '2026-01-01T04:00:00Z')).toBe('');
+
+    // The baseline marker is written into this window's FIRST report only
+    // (pushed and no-op branches), rides the same comment as autofix-eval so
+    // every feedback filter already excludes it, and never touches the
+    // POSITIONAL autofix-eval parsers. Exactly one more occurrence exists:
+    // the prepare-side scan() parse.
+    expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
+    expect(
+      pushAndReportStep.split(
+        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
+      ).length - 1,
+    ).toBe(2);
+    expect(
+      pushAndReportStep.split(`if [[ "\${GROWTH_BASE_NEW}" == 'true' ]]; then`)
+        .length - 1,
+    ).toBe(2);
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'",
+    );
+    // The marker is written under the key the baseline was READ under
+    // (LIVE_REARM_KEY), not the matrix WINDOW: a supersede-exempt conflict
+    // round can report under a stale WINDOW after a re-arm, and a marker
+    // under that dead key would hide the round's pushed growth from every
+    // later read in the live window.
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'",
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_new=${GROWTH_BASE_NEW}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_src=${BASE_SRC}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_test=${BASE_TEST}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_win=${LIVE_REARM_KEY}',
+    );
+
+    // The deferred preamble names the actual cause — a maintainer reading
+    // "after five rounds" on a round-2 PR that tripped the growth budget
+    // would reasonably conclude the brake misfired.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Critical-only mode is active: ${CAUSE_EN}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '已进入仅处理 Critical 的模式：${CAUSE_ZH}',
+    );
+    // The cause construction is REPLAYED across the three engagement shapes,
+    // in both languages: a growth-only trip must never announce the round
+    // threshold, signs render naturally (no '+-120'), and EN/ZH always name
+    // the same cause.
+    const causeBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_CLAUSE_EN="the PR's diff grew[\s\S]*?CAUSE_ZH="\$\{ROUNDS_CLAUSE_ZH\}"\n\s+fi)/,
+    )?.[1];
+    expect(causeBlock).toBeTruthy();
+    const causeFor = (rounds, growth, growthSrc, growthTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const growthOnly = causeFor('false', 'true', -120, 500);
+    expect(growthOnly[0]).toContain('src -120 / test 500');
+    expect(growthOnly[0]).not.toContain('rounds are complete');
+    expect(growthOnly[0]).not.toContain('+-');
+    expect(growthOnly[1]).toContain('源码 -120 / 测试 500');
+    expect(growthOnly[1]).not.toContain('轮次');
+    const roundsOnly = causeFor('true', 'false', 0, 0);
+    expect(roundsOnly[0]).toBe('5 change-producing rounds are complete');
+    expect(roundsOnly[0]).not.toContain('diff grew');
+    expect(roundsOnly[1]).toContain('已完成 5 个产生改动的轮次');
+    const both = causeFor('true', 'true', 900, 20);
+    expect(both[0]).toContain('rounds are complete and');
+    expect(both[0]).toContain('src 900 / test 20');
+    expect(both[1]).toContain('轮次，且');
+
+    // The batch-budget sentence must describe the policy actually in force:
+    // the OVER_BUDGET census only builds spans in round-brake territory, so
+    // a growth-only engagement has no enforceable budget and must say so.
+    const budgetBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ "\$\{CRITICAL_ONLY_ROUNDS\}" == 'true' \]\]; then\n\s+BUDGET_EN=[\s\S]*?BUDGET_ZH="纯增长[\s\S]*?fi)/,
+    )?.[1];
+    expect(budgetBlock).toBeTruthy();
+    const budgetFor = (rounds) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_HUMAN_BATCHES=2\nCRITICAL_ONLY_AFTER_ROUND=5\n${budgetBlock}\nprintf '%s\\n%s' "$BUDGET_EN" "$BUDGET_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const roundsBudget = budgetFor('true');
+    expect(roundsBudget[0]).toContain('used 2 regular feedback batches');
+    expect(roundsBudget[1]).toContain('2 批常规反馈预算');
+    const growthBudget = budgetFor('false');
+    expect(growthBudget[0]).toContain('continues to flow unaffected');
+    expect(growthBudget[0]).not.toContain('named below');
+    expect(growthBudget[1]).toContain('照常流动');
+
+    // Baseline wiring: the BASH_REMATCH split, fresh-anchor fallback, and
+    // growth subtractions — the producer (measurement/jq) and consumer
+    // (mode block) are replayed elsewhere; this replays the middle.
+    const wiringBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_BASE_NEW='false'[\s\S]*?GROWTH_TEST=\$\(\( NET_TEST - BASE_TEST \)\))/,
+    )?.[1];
+    expect(wiringBlock).toBeTruthy();
+    const wire = (baseline, netSrc, netTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BASELINE='${baseline}'\nNET_MEASURED=true\nNET_SRC=${netSrc}\nNET_TEST=${netTest}\n${wiringBlock}\nprintf '%s %s %s %s %s' "$GROWTH_BASE_NEW" "$BASE_SRC" "$BASE_TEST" "$GROWTH_SRC" "$GROWTH_TEST"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    // Parseable baseline: growth = net − base, marker not re-written.
+    expect(wire('50 -60', 120, 40)).toBe('false 50 -60 70 100');
+    // Empty baseline: THIS round anchors — marker written, growth zero.
+    expect(wire('', 120, 40)).toBe('true 120 40 0 0');
+    // Malformed baseline falls to the fresh anchor too.
+    expect(wire('garbage', 120, 40)).toBe('true 120 40 0 0');
+
+    // Writer↔scanner round-trip: render the report step's ACTUAL marker
+    // template (negative src, explicit window key) and require the prepare
+    // step's scan() to parse it back — the two sides are otherwise pinned
+    // only separately, so format drift would ship green while the baseline
+    // never parses in production.
+    const markerTemplate = pushAndReportStep.match(
+      /echo "(<!-- autofix-growth-base src=[^"]+-->)"/,
+    )?.[1];
+    expect(markerTemplate).toBeTruthy();
+    const rendered = execFileSync(
+      'bash',
+      [
+        '-c',
+        `GROWTH_BASE_SRC=-5\nGROWTH_BASE_TEST=0\nGROWTH_BASE_WIN=WINX\necho "${markerTemplate}"`,
+      ],
+      { encoding: 'utf8' },
+    ).trim();
+    const roundTrip = execFileSync(
+      'jq',
+      [
+        '-r',
+        '--arg',
+        'ab',
+        'qwen-code-dev-bot',
+        '--arg',
+        'key',
+        'WINX',
+        '--arg',
+        'baseupd',
+        '',
+        baselineJq,
+      ],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:00:00Z',
+            body: `report\n\n${rendered}`,
+          },
+        ]),
+      },
+    ).trimEnd();
+    expect(roundTrip).toBe('-5 0');
+    // The marker's window field is `key=`, never `win=`: three censuses
+    // attribute comments to windows by the whole-body substring
+    // `win=<key> -->`, and this marker can carry a different window than
+    // its comment's autofix-eval marker.
+    expect(rendered).not.toContain('win=');
+
+    // The report-post retry loop carries the round's entire persisted
+    // state: replay it with a stubbed gh — a success posts exactly once;
+    // a full outage attempts exactly three times, ends with "giving up"
+    // (not a fourth "retrying"), and fails the step.
+    const retryBlock = pushAndReportStep.match(
+      /(REPORT_POSTED='false'[\s\S]*?\[\[ "\$\{REPORT_POSTED\}" == 'true' \]\] \|\| exit 1)/,
+    )?.[1];
+    expect(retryBlock).toBeTruthy();
+    const retry = (ghExit) => {
+      const calls = mkdtempSync(join(tmpdir(), 'autofix-retry-'));
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'PR=1 REPO=o/r WORKDIR=.',
+            'sleep() { :; }',
+            `gh() { echo x >> "$1/calls"; return ${ghExit}; }`.replace(
+              '$1',
+              calls,
+            ),
+            retryBlock,
+            'echo POSTED_OK',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      const count = existsSync(join(calls, 'calls'))
+        ? readFileSync(join(calls, 'calls'), 'utf8').split('\n').filter(Boolean)
+            .length
+        : 0;
+      rmSync(calls, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status: res.status, count };
+    };
+    const posted = retry(0);
+    expect(posted.count).toBe(1);
+    expect(posted.out).toContain('POSTED_OK');
+    const outage = retry(1);
+    expect(outage.count).toBe(3);
+    expect(outage.status).toBe(1);
+    expect(outage.out).toContain('giving up');
+    expect(outage.out.split('retrying').length - 1).toBe(2);
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
@@ -6801,7 +7271,10 @@ exit 1
     const unsetExt = sanitizeStep.indexOf(
       '--unset-all extensions.worktreeConfig',
     );
-    const sweep = sanitizeStep.indexOf('--name-only --list');
+    // Explicitly the LOCAL sweep: the global scrub (asserted in its own
+    // test below) now sits at the top of the step and would otherwise be
+    // the first '--name-only --list' occurrence.
+    const sweep = sanitizeStep.indexOf('git config --local --name-only --list');
     const hooks = sanitizeStep.indexOf('--git-path hooks');
     expect(rmWorktreeCfg).toBeGreaterThan(-1);
     expect(unsetExt).toBeGreaterThan(rmWorktreeCfg);
@@ -6822,6 +7295,579 @@ exit 1
     // Provenance link: the inlined step and qwen-triage's hardened step must
     // be edited together.
     expect(sanitizeStep).toContain('qwen-triage');
+  });
+
+  it('scrubs exec-vector keys from the runner-user GLOBAL git config', () => {
+    // Run 31516789251: a stray `diff.external=global-driver` in the pool
+    // runner's ~/.gitconfig — planted by human-authored code an earlier job
+    // ran as this user — failed four per-hunk probe tests in every later
+    // verification gate on that host. The local sweep above never touches
+    // the global file, so the pollution outlived every job. Ordered BEFORE
+    // the `.git` early-exit — host hygiene owes nothing to the workspace
+    // existing (first run on a host, wiped workspace) — and before the
+    // hooks resolution, so a planted global core.hooksPath is removed, not
+    // merely bypassed while resolving.
+    const globalScrub = sanitizeStep.indexOf(
+      'git config --global --name-only --list',
+    );
+    const earlyExit = sanitizeStep.indexOf('[ ! -e .git ]');
+    const localSweep = sanitizeStep.indexOf(
+      'git config --local --name-only --list',
+    );
+    const hooks = sanitizeStep.indexOf('--git-path hooks');
+    expect(globalScrub).toBeGreaterThan(-1);
+    expect(earlyExit).toBeGreaterThan(globalScrub);
+    expect(localSweep).toBeGreaterThan(earlyExit);
+    expect(hooks).toBeGreaterThan(localSweep);
+    // The PAT-side re-run (resanitize-git-config.sh) duplicates both lists
+    // because the inlined copies cannot call a repo script pre-checkout —
+    // pin them equal so the copies cannot drift apart (a key added to one
+    // denylist but not the other re-opens the class on the stale side).
+    const resanitize = readFileSync(
+      '.github/scripts/resanitize-git-config.sh',
+      'utf8',
+    );
+    const denylistOf = (text) => text.match(/grep -iE '([^']+)'/)?.[1];
+    const allowlistOf = (text) => text.match(/grep -ivE '([^']+)'/)?.[1];
+    expect(denylistOf(sanitizeStep)).toBeTruthy();
+    expect(denylistOf(resanitize)).toBe(denylistOf(sanitizeStep));
+    expect(allowlistOf(resanitize)).toBe(allowlistOf(sanitizeStep));
+    // Belt over the byte-identity pin: the list comparison holds against
+    // EVERY inlined copy, not only the canonical first.
+    for (const step of sanitizeSteps) {
+      expect(denylistOf(step)).toBe(denylistOf(sanitizeStep));
+    }
+    // Functional: the extracted pipeline drops every command-execution key
+    // and keeps the routing/credential keys the pool image may own — the
+    // global file is infra territory, so this must stay a denylist. The
+    // fixture covers every denylist alternation (deleting one lets its
+    // family survive and fails the kept-set assertion) and plants dotted
+    // SUBSECTION names: git subsection names may contain dots, so a
+    // `[^.]+` slot would let `[diff "a.b"] command` slip through — the
+    // incident-class regression the `.+` slots exist to prevent.
+    // The scrub is a for-loop over BOTH files of the global scope —
+    // ~/.gitconfig and the XDG file — because `git config --global`
+    // lists/unsets only the former once both exist (probed: the listing
+    // omits the XDG keys and --unset-all exits 5 with them live).
+    const scrub = sanitizeStep.match(
+      /for global_file in[\s\S]*?\|\| true; done\n\s+done/,
+    )?.[0];
+    expect(scrub).toBeTruthy();
+    const runScrub = (home) => {
+      const env = {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, '.config'),
+      };
+      delete env['GIT_CONFIG_GLOBAL'];
+      return spawnSync('bash', ['-e', '-o', 'pipefail', '-c', scrub], {
+        env,
+        encoding: 'utf8',
+      });
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-global-scrub-'));
+    const cfg = join(dir, '.gitconfig');
+    mkdirSync(join(dir, '.config', 'git'), { recursive: true });
+    const xdgCfg = join(dir, '.config', 'git', 'config');
+    writeFileSync(
+      xdgCfg,
+      '[diff]\n\texternal = xdg-evil\n[user]\n\temail = keep@x\n',
+    );
+    writeFileSync(
+      cfg,
+      [
+        '[safe]',
+        '\tdirectory = /work',
+        '[http]',
+        '\tproxy = http://proxy:3128',
+        '[credential]',
+        '\thelper = store',
+        '[user]',
+        '\tname = runner',
+        '[remote "origin"]',
+        '\turl = https://github.com/o/r',
+        '\tuploadpack = evil',
+        '\treceivepack = evil',
+        '[diff]',
+        '\texternal = global-driver',
+        '[diff "a.b"]',
+        '\tcommand = evil',
+        '\ttextconv = evil',
+        '[core]',
+        '\tfsmonitor = evil',
+        '\thooksPath = /tmp/evil',
+        '\tpager = evil',
+        '\teditor = evil',
+        '\tsshCommand = evil',
+        '\taskpass = evil',
+        '\talternateRefsCommand = evil',
+        '\tgitProxy = evil',
+        '\tautocrlf = false',
+        '[merge "x.y"]',
+        '\tdriver = evil',
+        '[filter "x"]',
+        '\tsmudge = evil',
+        '[alias]',
+        '\tpwn = !evil',
+        '[pager]',
+        '\tdiff = evil',
+        '[difftool "t"]',
+        '\tcmd = evil',
+        '[mergetool "t"]',
+        '\tcmd = evil',
+        '[interactive]',
+        '\tdiffFilter = evil',
+        '[sequence]',
+        '\teditor = evil',
+        '[gpg]',
+        '\tprogram = evil',
+        '[gpg "ssh"]',
+        '\tprogram = evil',
+        '[init]',
+        '\ttemplateDir = /tmp/evil',
+        '[include]',
+        '\tpath = /tmp/no-such-include',
+        '[includeIf "gitdir:/tmp/"]',
+        '\tpath = /tmp/evil.inc',
+        '[protocol]',
+        '\tallow = always',
+        '[protocol "ext"]',
+        '\tallow = always',
+        '[submodule "s.t"]',
+        '\tupdate = !evil',
+        '[url "https://mirror.example/"]',
+        '\tinsteadOf = https://github.com/',
+        '\tpushInsteadOf = https://github.com/',
+        '[http "https://github.com"]',
+        '\tsslVerify = false',
+        '\tsslCAInfo = /tmp/evil-ca',
+        '',
+      ].join('\n'),
+    );
+    expect(runScrub(dir).status).toBe(0);
+    const keysOf = (file) =>
+      execFileSync('git', ['config', '--file', file, '--name-only', '--list'], {
+        encoding: 'utf8',
+      })
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .sort();
+    expect(keysOf(cfg)).toEqual([
+      'core.autocrlf',
+      'credential.helper',
+      'http.proxy',
+      'remote.origin.url',
+      'safe.directory',
+      'user.name',
+    ]);
+    // The XDG leg of the loop scrubbed its exec key and kept its benign one.
+    expect(keysOf(xdgCfg)).toEqual(['user.email']);
+    // The two `|| true` guards are load-bearing under the step's default
+    // `bash -e` + pipefail: a config with NO exec keys (the steady state on
+    // a clean runner) makes grep exit 1, and a corrupt or missing global
+    // file makes git exit non-zero — none may kill the sanitize step.
+    writeFileSync(cfg, '[user]\n\tname = clean\n');
+    rmSync(join(dir, '.config'), { recursive: true, force: true });
+    expect(runScrub(dir).status).toBe(0);
+    writeFileSync(cfg, '[[[ not a git config\n');
+    expect(runScrub(dir).status).toBe(0);
+    rmSync(cfg);
+    expect(runScrub(dir).status).toBe(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('re-sanitizes git config and resets the helper list at every PAT-bearing git step', () => {
+    // The job-start sanitize is pre-checkout hygiene; the gates then run
+    // branch test code on the host and the sandboxed agent has the
+    // workspace mounted — either can plant exec keys in the repo-LOCAL
+    // .git/config (highest precedence, read by the push) or rewrite the
+    // real ~/.gitconfig behind the gates' env redirect (a direct file
+    // write bypasses inherited env — probe-verified in the #8961 review).
+    // So both PAT-bearing git steps re-run the sweeps from a TRUSTED-BASE
+    // staged copy — never the working tree, which holds the branch under
+    // test at call time — before touching credentials.
+    const resanitizeCall = 'bash "${RUNNER_TEMP}/resanitize-git-config.sh"';
+    for (const step of [publishPrStep, pushAndReportStep]) {
+      expect(step).toContain(resanitizeCall);
+      expect(step.indexOf(resanitizeCall)).toBeLessThan(
+        step.indexOf('credential."https://github.com".helper'),
+      );
+      // The staged copy's provenance holds at cp time only — RUNNER_TEMP
+      // is writable by that same branch code — so the invocation must
+      // verify the digest the staging step parked in GITHUB_OUTPUT
+      // (expression context, unreachable from a disk write), and it must
+      // do so BEFORE executing the script.
+      // Pin the WHOLE verify line, not just its presence: `|| true` or a
+      // swapped digest target would turn the tamper gate into a decorative
+      // no-op while presence/order assertions stayed green (both mutants
+      // executed in the round-3 review).
+      const verifyLine =
+        'echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null';
+      expect(step).toContain(verifyLine);
+      expect(step.indexOf(verifyLine)).toBeLessThan(
+        step.indexOf(resanitizeCall),
+      );
+      expect(step).not.toMatch(/sha256sum -c[^\n]*\|\| true/);
+      expect(step).toContain(
+        "RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'",
+      );
+      // Full env-channel closure, not just GIT_CONFIG_COUNT: GITHUB_ENV can
+      // inject any git env knob, and several outrank file config — the step
+      // strips them and redirects the file scopes to a throwaway (as the
+      // gates do), so a concurrent job's ~/.gitconfig rewrite and an
+      // env-planted GIT_SSL_NO_VERIFY/GIT_EXEC_PATH/GIT_DIR all miss.
+      expect(step).toContain('export GIT_CONFIG_COUNT=0');
+      expect(step).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      // Unpredictable throwaway (mktemp), not a fixed literal a same-user
+      // watcher could re-plant into after the seed.
+      expect(step).toContain(
+        'export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"',
+      );
+      // PATH is pinned to the staged trusted value and the preload channels
+      // dropped BEFORE anything runs — else a swapped git/sha256sum/bash
+      // defeats the digest gate itself; the full env-channel closure covers
+      // the file-scope redirects (GLOBAL/SYSTEM), the exec/transport knobs,
+      // and every repo-redirect twin (DIR/WORK_TREE/COMMON_DIR/object dirs).
+      expect(step).toContain('export PATH="${TRUSTED_PATH}"');
+      expect(step).toMatch(/unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH/);
+      for (const v of [
+        'GIT_SSL_NO_VERIFY',
+        'GIT_SSL_CAINFO',
+        'GIT_EXEC_PATH',
+        'GIT_DIR',
+        'GIT_WORK_TREE',
+        'GIT_COMMON_DIR',
+        'GIT_OBJECT_DIRECTORY',
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+        'GIT_SHALLOW_FILE',
+        'GIT_ALLOW_PROTOCOL',
+        'GIT_CONFIG_PARAMETERS',
+        'GIT_PROXY_COMMAND',
+        'GIT_SSH_COMMAND',
+        'GIT_ASKPASS',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+      ]) {
+        expect(step).toMatch(new RegExp(`unset[\\s\\S]*?\\b${v}\\b`));
+      }
+    }
+    // The three PAT hermetic preambles (both pushes AND Prepare) are
+    // identical (only their comment twin-names differ, stripped here): a
+    // hardening applied to one PAT git site but not the others re-opens the
+    // class on the stale side. Anchored from `export PATH` so the whole
+    // preamble — PATH pin, LD/env strip, mktemp redirect — is compared.
+    const patBlockOf = (step) =>
+      step
+        .match(
+          /export PATH="\$\{TRUSTED_PATH\}"\n\s*unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \\[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(patBlockOf(publishPrStep)).toBeTruthy();
+    expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
+    expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
+    // Each PAT step carries the trusted-PATH env wiring.
+    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+      expect(step).toContain(
+        "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+      );
+    }
+    // The staging steps record the trusted PATH before any branch code runs.
+    expect(workflow.match(/trusted_path=\$\{PATH\}/g) ?? []).toHaveLength(2);
+    // gh's own env channels are pinned/stripped BEFORE the first gh call in
+    // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
+    // identity check and a planted GH_TOKEN cannot outrank the inline one.
+    for (const [step, firstGh] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
+      [prepareStep, 'PR_LIVE="$(gh pr view'],
+    ]) {
+      const ghPin = step.indexOf('export GH_HOST=github.com');
+      expect(ghPin).toBeGreaterThan(-1);
+      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
+      // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
+      // back to the attacker-writable ~/.config/gh with http_unix_socket).
+      expect(step).toContain(
+        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+      );
+      expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
+      expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+    }
+    // The fork fetch and salvage fetch cannot recurse into a planted
+    // submodule and execute an ext:: URL with the PAT (env-level
+    // GIT_ALLOW_PROTOCOL is stripped; these pin the config level).
+    expect(pushAndReportStep).toContain(
+      '-c fetch.recurseSubmodules=false -c protocol.ext.allow=never',
+    );
+    // The push refuses a HEAD that is not the gate's verified head — closes a
+    // repo redirect (planted .git/commondir / GIT_DIR) that would push an
+    // attacker tree.
+    expect(pushAndReportStep).toMatch(
+      /HEAD_NOW="\$\(git rev-parse HEAD\)"[\s\S]{0,400}!= "\$\{VERIFIED_HEAD\}"[\s\S]{0,200}refusing to push/,
+    );
+    // And it pushes the exact verified OBJECT, not symbolic HEAD (which the
+    // push would re-resolve, re-opening the check-then-use race): PUSH_SHA
+    // is pinned to VERIFIED_HEAD under the guard and re-pinned to the merge
+    // result after each salvage merge.
+    expect(pushAndReportStep).toContain('PUSH_SHA="${VERIFIED_HEAD}"');
+    expect(pushAndReportStep).toContain(
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
+    );
+    expect(pushAndReportStep).not.toMatch(
+      /git_auth push[^\n]*HEAD:"\$\{BRANCH\}"/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /PUSH_SHA="\$\(git rev-parse HEAD\)"[\s\S]{0,120}PRE_MERGE_HEAD/,
+    );
+    // The gate runner is digest-verified before BOTH gate passes (the branch
+    // runs its own build/test between them), with PATH pinned first.
+    expect(
+      workflow.match(
+        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/verify_runner_sha256=\$\(sha256sum /g) ?? [],
+    ).toHaveLength(1);
+    // resanitize defuses the repo-redirect FILES (.git/commondir/shallow).
+    const resanitizeScript = readFileSync(
+      '.github/scripts/resanitize-git-config.sh',
+      'utf8',
+    );
+    expect(resanitizeScript).toContain(
+      'rm -f "${GIT_DIR_PATH}/commondir" "${GIT_DIR_PATH}/shallow"',
+    );
+    // Both staging steps stage the script and record its digest.
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/resanitize-git-config\.sh "\$\{RUNNER_TEMP\}\/resanitize-git-config\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/resanitize_sha256=\$\(sha256sum /g) ?? [],
+    ).toHaveLength(2);
+    // Every one-shot credential helper leads with an empty-helper reset:
+    // helpers run in config order and the FIRST to answer wins, so without
+    // the reset a helper planted at any earlier scope sees the request
+    // (and the env) before ours answers — probe-verified. http.sslVerify
+    // rides the same chain: a kept http.proxy plus a planted
+    // sslVerify=false would otherwise read the credential off the wire.
+    // Count equality pins a future push site to ship with both or fail.
+    const helperSites =
+      workflow.match(/-c credential\."https:\/\/github\.com"\.helper=/g) ?? [];
+    // Tolerant of the intermediate `-c` transport/protocol flags git_auth
+    // also carries between the sslVerify pin and the helper reset.
+    const resetSites =
+      workflow.match(
+        /-c http\.sslVerify=true (?:-c [^\n]*?)?-c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
+      ) ?? [];
+    expect(helperSites).toHaveLength(3);
+    expect(resetSites).toHaveLength(helperSites.length);
+    // The fork fetch is PAT-bearing too (its step env carries the PAT) and
+    // is anonymous — a public repo's fork heads are public — so it leads
+    // with the helper-list reset + transport pin and never adds the PAT
+    // helper: a planted global extraheader must not 401 into a planted
+    // helper handing over the PAT. The bare fetch was the one network site
+    // the round-2 rollout skipped.
+    expect(prepareStep).toMatch(
+      /git -c http\.sslVerify=true -c credential\.helper= fetch "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+    );
+    expect(prepareStep).not.toMatch(
+      /\n\s*if ! git fetch "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+    );
+    // The push-race salvage merge is signing-proof: a global
+    // commit.gpgsign=true with no key on the runner would exit 128 and be
+    // misread as a content conflict, discarding a verified round.
+    expect(pushAndReportStep).toMatch(
+      /git -c commit\.gpgsign=false[\s\S]*?merge --no-edit FETCH_HEAD/,
+    );
+    // Functional: run the staged script against a fixture repo with exec
+    // keys planted in LOCAL and WORKTREE config (what branch code can do
+    // between the job-start sanitize and the push) plus a polluted global
+    // file — the planted keys go, the allowlisted plumbing stays.
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-resanitize-'));
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[diff]\n\texternal = global-driver\n',
+    );
+    // A LIVE XDG global file too: git reads it for keys ~/.gitconfig does
+    // not define, and it is the file the incident host actually carries.
+    // Without it the script's second loop iteration runs against a
+    // nonexistent path and the XDG leg has no behavioural coverage
+    // (mutation: dropping the XDG file from the loop then stays green).
+    mkdirSync(join(home, '.config', 'git'), { recursive: true });
+    writeFileSync(
+      join(home, '.config', 'git', 'config'),
+      '[core]\n\thooksPath = /tmp/xdg-evil\n',
+    );
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    execFileSync('git', ['init', '-q', repo]);
+    const env = {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    delete env['GIT_CONFIG_GLOBAL'];
+    const lgit = (...args) =>
+      execFileSync('git', ['-C', repo, ...args], { env, encoding: 'utf8' });
+    lgit('config', '--local', 'credential.helper', '!evil');
+    lgit('config', '--local', 'core.fsmonitor', 'evil');
+    lgit('config', '--local', 'remote.origin.url', 'https://github.com/o/r');
+    // The worktree-config branch: extensions.worktreeConfig activates a
+    // second local file that `git config --local` neither lists nor unsets
+    // — the script must delete it, not merely sweep the local scope
+    // (mutation-tested: without this arm, deleting the `rm -f` line kept
+    // the whole suite green).
+    lgit('config', '--local', 'extensions.worktreeConfig', 'true');
+    lgit('config', '--worktree', 'core.fsmonitor', 'evil-wt');
+    const run = spawnSync(
+      'bash',
+      [resolve('.github/scripts/resanitize-git-config.sh')],
+      { cwd: repo, env, encoding: 'utf8' },
+    );
+    expect(run.status).toBe(0);
+    expect(existsSync(join(repo, '.git', 'config.worktree'))).toBe(false);
+    const localKeys = lgit('config', '--local', '--name-only', '--list')
+      .trim()
+      .split('\n');
+    expect(localKeys).not.toContain('credential.helper');
+    expect(localKeys).not.toContain('core.fsmonitor');
+    expect(localKeys).not.toContain('extensions.worktreeconfig');
+    expect(localKeys).toContain('remote.origin.url');
+    // Full-scope resolution: nothing plants back through any surviving file.
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'core.fsmonitor'], {
+        env,
+        encoding: 'utf8',
+      }).status,
+    ).not.toBe(0);
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'diff.external'], {
+        env,
+        encoding: 'utf8',
+      }).status,
+    ).not.toBe(0);
+    // The XDG-planted exec key is gone too — pins the script's two-file loop.
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'core.hooksPath'], {
+        env,
+        encoding: 'utf8',
+      }).stdout,
+    ).not.toContain('xdg-evil');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('runs both verification gates under a throwaway global git config', () => {
+    // Same incident, the gate-side guard: the gates re-run branch tests on
+    // the HOST, so runner ~/.gitconfig pollution failed tests the branch
+    // never caused, the rejection charged the round (package tests are
+    // A/B-exempt), and an 18-minute repair burned on a failure no repair
+    // can reach. Both gates redirect global config to a throwaway file so
+    // every child — vitest fixture repos included — is hermetic to the
+    // host, and a branch-authored `git config --global` dies with the run
+    // instead of poisoning the next one.
+    for (const gate of verificationGateBodies) {
+      const globalRedirect = gate.indexOf(
+        'export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"',
+      );
+      expect(gate).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      expect(globalRedirect).toBeGreaterThan(-1);
+      // Truncated per run: the repair leg must not inherit writes the first
+      // gate run's branch tests made into the throwaway file.
+      expect(gate).toContain(': > "${GIT_CONFIG_GLOBAL}"');
+      // Seeded with the workspace safe.directory the redirect just hid
+      // (actions/checkout wrote it into the real global config).
+      expect(gate.indexOf('safe.directory "$(pwd)"')).toBeGreaterThan(
+        globalRedirect,
+      );
+      // Before the deterministic checks, so they all see the redirect.
+      expect(globalRedirect).toBeLessThan(gate.indexOf('npm run build'));
+      // GITHUB_ENV-injected git env knobs outrank BOTH redirects — each
+      // gate zeroes GIT_CONFIG_COUNT and strips the transport/exec channels.
+      expect(gate).toContain('export GIT_CONFIG_COUNT=0');
+      for (const v of ['GIT_SSL_NO_VERIFY', 'GIT_EXEC_PATH', 'GIT_DIR']) {
+        expect(gate).toMatch(new RegExp(`unset[\\s\\S]*\\b${v}\\b`));
+      }
+    }
+    // The two gate env+redirect blocks are one hardening surface — pin them
+    // equal (whitespace-normalized; the shell copy and the YAML copy differ
+    // only in indentation) so a channel added to one but not the other
+    // cannot ship green, exactly as the three job-start scrub copies are
+    // pinned byte-identical.
+    const gateBlockOf = (body) =>
+      body
+        .match(
+          /unset GIT_CONFIG_PARAMETERS[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(gateBlockOf(reviewVerificationRunner)).toBeTruthy();
+    expect(gateBlockOf(verificationGateSteps[0] ?? '')).toBe(
+      gateBlockOf(reviewVerificationRunner),
+    );
+    // Before the FIRST git command in each gate, not merely before the
+    // checks: the committed-ref probe and dirty-tree asserts must live in
+    // the same config universe as everything after them.
+    expect(
+      reviewVerificationRunner.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('git diff --quiet "origin/${BRANCH}'),
+    );
+    const issueGate = verificationGateSteps[0] ?? '';
+    expect(
+      issueGate.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
+    ).toBeLessThan(issueGate.indexOf('git status --porcelain'));
+    // Functional, not just positional: execute the extracted redirect
+    // block under a hostile HOME (a polluted ~/.gitconfig) AND a hostile
+    // env channel (GIT_CONFIG_COUNT-planted key). After the block, a child
+    // git must see neither, and a `git config --global` write must land in
+    // the throwaway file — the block can no longer be reverted or hollowed
+    // out while a string-presence test stays green.
+    const redirectBlock = reviewVerificationRunner.match(
+      /unset GIT_CONFIG_PARAMETERS[\s\S]*?safe\.directory "\$\(pwd\)"/,
+    )?.[0];
+    expect(redirectBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-gate-redirect-'));
+    const home = join(dir, 'home');
+    const temp = join(dir, 'temp');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(temp, { recursive: true });
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[diff]\n\texternal = global-driver\n',
+    );
+    const env = {
+      ...process.env,
+      HOME: home,
+      RUNNER_TEMP: temp,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.fsmonitor',
+      GIT_CONFIG_VALUE_0: 'evil',
+    };
+    delete env['GIT_CONFIG_GLOBAL'];
+    const probe = spawnSync(
+      'bash',
+      [
+        '-c',
+        `${redirectBlock}\n` +
+          'git config --get diff.external && exit 7\n' +
+          'git config --get core.fsmonitor && exit 8\n' +
+          'git config --global qwen.probe ok\n' +
+          'git config --global --get qwen.probe',
+      ],
+      { cwd: dir, env, encoding: 'utf8' },
+    );
+    expect(probe.status).toBe(0);
+    expect(probe.stdout.trim().endsWith('ok')).toBe(true);
+    // The write above landed in the throwaway file, not the hostile HOME.
+    expect(readFileSync(join(home, '.gitconfig'), 'utf8')).not.toContain(
+      'qwen',
+    );
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('never invokes a local action before checkout', () => {
@@ -7670,7 +8716,7 @@ exit 1
     // git push twice more and the salvage legs execute against a branch
     // that was already pushed.
     expect(pushAndReportStep).toMatch(
-      /if git_auth push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+      /if git_auth push --no-verify "\$\{PUSH_URL\}" "\$\{PUSH_SHA\}:refs\/heads\/\$\{BRANCH\}"; then\n\s+break/,
     );
     // BOTH push-URL constructions stay pinned — the fork one is pinned by
     // the fork-plumbing test, and the same-repo one lost its old
@@ -7696,10 +8742,10 @@ exit 1
     // date") and must NOT tell the reviewer to re-check commits that
     // never existed.
     expect(pushAndReportStep).toMatch(
-      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n\s+if ! git -c user\.name=/,
+      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n[\s\S]{0,600}if ! git -c commit\.gpgsign=false \\\n\s+-c user\.name=/,
     );
     expect(pushAndReportStep).toMatch(
-      /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
+      /PUSH_SHA="\$\(git rev-parse HEAD\)"\n\s+if \[\[ "\$\{PUSH_SHA\}" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
     );
     // Merge, never rebase: the agent's own conflict-resolution rounds create
     // merge commits, and a rebase would flatten them and can silently
@@ -7762,7 +8808,7 @@ exit 1
     // Same anchor as the dry-run: the publish push must carry the
     // host-scoped `git -c credential…` prefix, not a bare `git push`.
     expect(publishPrStep).toMatch(
-      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
+      /git -c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
     );
     // Neither PAT push may expose the token — not persisted to .git/config
     // (a `git remote set-url`) and not in the process argv (a token-bearing
@@ -7785,7 +8831,7 @@ exit 1
       'git config --local credential.helper',
     );
     expect(pushAndReportStep).toContain(
-      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host
@@ -7808,10 +8854,10 @@ exit 1
     // hence the wider windows — the assertions are about order, and one
     // hooksPath site genuinely covers both arms of the if.
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,900}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,1400}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2200}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,3000}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     // The agent step re-points hooks to .husky BEFORE invoking the runner.
     // Assert the ordering directly (not a fixed-width window) so adding a

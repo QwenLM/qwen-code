@@ -263,6 +263,12 @@ export type WebShellComposerTagPlacement = 'top' | 'inline';
 
 export interface WebShellComposerTagOptions {
   placement?: WebShellComposerTagPlacement;
+  /**
+   * Inline placement only: insert at the caret (default, synchronous user
+   * gestures) or append after the document end (asynchronous producers,
+   * which must not interrupt typing or steal focus).
+   */
+  position?: 'caret' | 'end';
 }
 
 export interface WebShellComposerTextOptions {
@@ -496,6 +502,15 @@ export interface WebShellCustomization {
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: setting `false`
+   * force-disables upload even when the daemon advertises the capability,
+   * while `true`/omitted still requires the capability (and the workspace
+   * trust / qualified-route safety checks) to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

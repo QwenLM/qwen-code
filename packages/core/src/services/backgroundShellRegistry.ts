@@ -27,11 +27,11 @@ import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
   stripDisplayControlChars,
+  truncateNotificationLabel,
 } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
-const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 
@@ -110,14 +110,6 @@ function readOutputTail(outputFile: string): OutputTailResult {
 function getReadOutputOpenFlags(): number {
   const constants = fs.constants;
   return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
-}
-
-function truncateCommandForDisplay(command: string): string {
-  const normalized = stripDisplayControlChars(command).replace(/\s+/g, ' ');
-  if (normalized.length <= MAX_NOTIFICATION_COMMAND_LENGTH) {
-    return normalized;
-  }
-  return normalized.slice(0, MAX_NOTIFICATION_COMMAND_LENGTH - 3) + '...';
 }
 
 function truncateCommandForModel(command: string): {
@@ -494,7 +486,7 @@ export class BackgroundShellRegistry {
         : entry.status === 'failed'
           ? 'failed'
           : 'was cancelled';
-    const commandLabel = truncateCommandForDisplay(entry.command);
+    const commandLabel = truncateNotificationLabel(entry.command);
     const commandForModel = truncateCommandForModel(entry.command);
     const displayText = `Background shell "${commandLabel}" ${statusText}.`;
 

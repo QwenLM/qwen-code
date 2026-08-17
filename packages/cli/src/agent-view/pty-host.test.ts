@@ -84,6 +84,15 @@ describe('BoundedOutputRing', () => {
     expect(ring.retainedBytes).toBeLessThanOrEqual(6);
   });
 
+  it('keeps leading continuation bytes when the window never overflowed', () => {
+    const ring = new BoundedOutputRing(23);
+
+    ring.append(Buffer.from('aa35d7e816b5', 'hex'));
+
+    expect(ring.toBuffer().toString('hex')).toBe('aa35d7e816b5');
+    expect(ring.droppedBytes).toBe(0);
+  });
+
   it('copies the retained tail of oversized chunks off the source buffer', () => {
     const ring = new BoundedOutputRing(4);
     const source = Buffer.alloc(1024, 0x61);
@@ -568,8 +577,12 @@ describe('launchAgentViewPtyHost', () => {
 
     handle.dispose();
 
-    expect(pty.process.killedWith).toBeUndefined();
-    expect(pty.process.killCalls).toEqual([undefined]);
+    expect(pty.process.killedWith).toBe(
+      process.platform === 'win32' ? undefined : 'SIGTERM',
+    );
+    expect(pty.process.killCalls).toEqual(
+      process.platform === 'win32' ? [undefined] : ['SIGTERM'],
+    );
     await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
   });
 

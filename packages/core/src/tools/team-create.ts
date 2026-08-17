@@ -202,7 +202,7 @@ When in doubt about whether a task warrants a team, prefer spawning a team.
 
 When spawning teammates via the Agent tool, choose the \`subagent_type\` based on what tools the agent needs for its task. Each agent type has a different set of available tools — match the agent to the work:
 
-- **Read-only agents** (e.g., Explore, Plan) cannot edit or write files. Only assign them research, search, or planning tasks. Never assign them implementation work.
+- **Enforced read-only teammates** use the Agent tool's read_only option. This replaces the selected agent's tool surface with inspection and team-coordination tools, so shell and file writes are unavailable. Use them for research, search, review, or planning tasks.
 - **Full-capability agents** (e.g., general-purpose) have access to all tools including file editing, writing, and bash. Use these for tasks that require making changes.
 - **Custom agents** defined in \`.qwen/agents/\` may have their own tool restrictions. Check their descriptions to understand what they can and cannot do.
 
@@ -225,7 +225,7 @@ This creates:
 
 1. **Create a team** with TeamCreate - this creates both the team and its task list
 2. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they automatically use the team's task list
-3. **Spawn teammates** using the Agent tool with the \`name\` parameter to create teammates that join the active team (max ${config.getAgentsSettings().team?.maxTeammates ?? MAX_TEAMMATES} teammates per team)
+3. **Spawn teammates** using the Agent tool with explicit \`name\` and \`subagent_type\` parameters to create teammates that join the active team (max ${config.getAgentsSettings().team?.maxTeammates ?? MAX_TEAMMATES} teammates per team). Set \`read_only: true\` for investigation workers; pin a single writer to a leader-owned worktree with \`working_dir\` when code changes are required, then shut it down before removing that worktree.
 4. **Assign tasks** using TaskUpdate with \`owner\` to give tasks to idle teammates
 5. **Teammates work on assigned tasks** and mark them completed via TaskUpdate
 6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.

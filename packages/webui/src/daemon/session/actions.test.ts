@@ -1402,6 +1402,147 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('keeps refresh blocked after model context times out until it settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const context = createDeferred<ReturnType<typeof contextStatus>>();
+      session.context.mockReturnValueOnce(context.promise);
+      let sourceBoundOperationCount = 0;
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          currentModel: 'model-a',
+        },
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session,
+        setSourceBoundOperationInFlight,
+      });
+
+      const modelUpdate = actions.setModel('model-b');
+      await vi.waitFor(() => expect(session.context).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(modelUpdate).resolves.toEqual({});
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).rejects.toMatchObject({ name: 'InvalidStateError' });
+
+      context.resolve(contextStatus(session.sessionId));
+      await vi.waitFor(() => expect(sourceBoundOperationCount).toBe(0));
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps refresh blocked after reasoning times out until the request settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const response = createDeferred<{ configOptions: unknown[] }>();
+      session.setConfigOption.mockReturnValueOnce(response.promise);
+      let sourceBoundOperationCount = 0;
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          currentModel: 'qwen3.8-max',
+        },
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session,
+        setSourceBoundOperationInFlight,
+      });
+
+      const reasoningUpdate = actions
+        .setReasoningEffort('medium')
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(reasoningUpdate).resolves.toMatchObject({
+        message: expect.stringContaining('Set reasoning effort timed out'),
+      });
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).rejects.toMatchObject({ name: 'InvalidStateError' });
+
+      response.resolve({ configOptions: [] });
+      await Promise.resolve();
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not apply context captured before a reasoning update', async () => {
+    const session = createMockSession('session-a');
+    const staleContext = createDeferred<ReturnType<typeof contextStatus>>();
+    const currentConfigOptions = reasoningConfigOptions('medium');
+    session.context.mockReturnValueOnce(staleContext.promise);
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: currentConfigOptions,
+    });
+    const sessionConfigGeneration = new WeakMap<DaemonSessionClient, number>();
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        currentModel: 'qwen3.8-max',
+        context: reasoningContext(session.sessionId, 'xhigh'),
+        reasoning: { enabled: true, effort: 'xhigh', efforts: [] },
+      },
+      session,
+      sessionConfigGeneration,
+    });
+
+    const staleRead = actions.getContext();
+    await actions.setReasoningEffort('medium');
+    staleContext.resolve(reasoningContext(session.sessionId, 'xhigh'));
+    await expect(staleRead).resolves.toEqual(
+      reasoningContext(session.sessionId, 'xhigh'),
+    );
+
+    expect(getConnection()).toMatchObject({
+      reasoning: { enabled: true, effort: 'medium' },
+      context: { state: { configOptions: currentConfigOptions } },
+    });
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -1527,6 +1668,7 @@ function createActionsHarness(
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
     setSourceBoundOperationInFlight?: ReturnType<typeof vi.fn>;
+    sessionConfigGeneration?: WeakMap<DaemonSessionClient, number>;
     isSourceBoundOperationInFlight?: () => boolean;
     isCrossSessionTransitionPending?: () => boolean;
     isDifferentLogicalTransitionPending?: () => boolean;
@@ -1589,6 +1731,7 @@ function createActionsHarness(
     isSourceBoundOperationInFlight: opts.isSourceBoundOperationInFlight,
     getTransitionOrigin: opts.getTransitionOrigin,
     setSourceBoundOperationInFlight: opts.setSourceBoundOperationInFlight,
+    sessionConfigGeneration: opts.sessionConfigGeneration,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
@@ -1636,6 +1779,11 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    setConfigOption: vi.fn(
+      async (): Promise<{ configOptions: unknown[] }> => ({
+        configOptions: [],
+      }),
+    ),
     shellCommand: vi.fn(async () => ({})),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
@@ -1686,4 +1834,21 @@ function contextStatus(sessionId: string) {
     workspaceCwd: '/workspace',
     state: {},
   };
+}
+
+function reasoningContext(sessionId: string, effort: string) {
+  return {
+    ...contextStatus(sessionId),
+    state: { configOptions: reasoningConfigOptions(effort) },
+  };
+}
+
+function reasoningConfigOptions(effort: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue: effort,
+      options: ['none', 'low', 'medium', 'xhigh'].map((value) => ({ value })),
+    },
+  ];
 }

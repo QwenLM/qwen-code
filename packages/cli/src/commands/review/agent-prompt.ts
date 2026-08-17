@@ -73,8 +73,10 @@ import {
 import {
   BRIEFS,
   isRepositoryContextRoleId,
+  MODELED_SYSTEM_EXECUTION_LENS,
   type RoleId,
 } from './lib/agent-briefs.js';
+import { MODELED_SYSTEM_DOMAIN } from './lib/audit-layers.js';
 import {
   repositoryContextOf,
   type RepositoryContext,
@@ -545,6 +547,30 @@ export function buildChunkAgentPrompt(
   const repositoryContext = repositoryContextOf(report);
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
+    // On a modeled-executable-system diff the execution-model divergence lens is
+    // Agent 2's on a 3A fan-out, but 3B replaces the dimension agents with these
+    // per-territory ones — so Agent 2's brief never reaches a chunk agent. Attach
+    // the same lens here, scoped to this chunk, so a huge guard/interpreter diff
+    // gets within-territory finder coverage of the class; a divergence whose add
+    // and check both live in this chunk's lines is this agent's. The cross-chunk
+    // contract still falls to the reverse audit's layer receipts and invariant-c.
+    // NOT for an unreachable chunk (as with the tool-budget block below): its one
+    // instruction is to return the exact `Uncoverable:` line and stop.
+    if (
+      !unreachable &&
+      repositoryContext.domains.includes(MODELED_SYSTEM_DOMAIN)
+    ) {
+      parts.push(
+        '',
+        '## Modeled-executable-system lens — your territory',
+        '',
+        'This diff models how an external system executes. Apply this lens to the ' +
+          'modeled-system logic in YOUR chunk (the cross-territory contract is the ' +
+          "reverse audit's):",
+        '',
+        MODELED_SYSTEM_EXECUTION_LENS,
+      );
+    }
   }
 
   // NOT for an unreachable chunk: its instruction is to return the exact

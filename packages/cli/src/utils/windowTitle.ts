@@ -5,6 +5,8 @@
  */
 
 import { sanitizeForOsc } from '../ui/utils/osc8.js';
+import { ICON } from '../ui/constants.js';
+import { StreamingState } from '../ui/types.js';
 
 export const DEFAULT_WINDOW_TITLE = 'qwen';
 
@@ -71,7 +73,9 @@ export function writeTerminalTitle(
 }
 
 /**
- * Formats the terminal window title based on session name and fallback.
+ * Formats the terminal window title based on session name and fallback, with
+ * an optional leading status symbol (mirroring Claude Code's tab status
+ * icons, e.g. ◐ working / ✳︎ awaiting confirmation).
  *
  * Priority:
  *  1. sessionName — from /rename, auto-title, or --resume
@@ -79,13 +83,33 @@ export function writeTerminalTitle(
  *
  * @param sessionName - Current session name, or null if not set.
  * @param folderName - Optional workspace folder name for the fallback chain.
+ * @param statusPrefix - Optional leading status symbol (e.g. "◐ "), sanitized
+ *   with the title. Callers derive it from the streaming state.
  * @returns The formatted title string with control characters removed.
  */
 export function formatSessionWindowTitle(
   sessionName: string | null,
   folderName?: string,
+  statusPrefix = '',
 ): string {
-  return sessionName
+  const base = sessionName
     ? sanitizeWindowTitle(sessionName)
     : computeWindowTitle(folderName);
+  return sanitizeWindowTitle(statusPrefix + base);
+}
+
+/**
+ * Returns the leading status symbol for the window/tab title based on the
+ * streaming state, mirroring Claude Code's tab status icons (◐ working,
+ * ✳︎ awaiting confirmation). Idle gets no prefix.
+ */
+export function titleStatusPrefix(streamingState: StreamingState): string {
+  switch (streamingState) {
+    case StreamingState.Responding:
+      return `${ICON.CIRCLE_LEFT_HALF} `;
+    case StreamingState.WaitingForConfirmation:
+      return `${ICON.SPARKLE} `;
+    default:
+      return '';
+  }
 }

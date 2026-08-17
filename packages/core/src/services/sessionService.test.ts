@@ -465,6 +465,114 @@ describe('SessionService', () => {
       expect(result.items[0].gitBranch).toBe('main');
     });
 
+    it('should use recorded display text for the session list prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions\n\nhello' }],
+          },
+          systemPayload: { displayText: 'hello', hookContext: '' },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('hello');
+    });
+
+    it('should keep an intentionally empty display prompt empty', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('');
+    });
+
+    it('should use a later prompt after an empty display prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
+    });
+
+    it('should skip internal user-subtype records after an empty projection', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'cron',
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: 'internal cron prompt' }] },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
+    });
+
     it('should NOT populate messageCount during listing', async () => {
       // Listing must avoid the full-file readline that counting requires
       // — message counts are now lazy and provided by
@@ -507,6 +615,28 @@ describe('SessionService', () => {
 
       expect(result.items[0].prompt.length).toBe(203); // 200 + '...'
       expect(result.items[0].prompt.endsWith('...')).toBe(true);
+    });
+
+    it('should truncate long prompts on code-point boundaries', async () => {
+      const longPrompt = '😀'.repeat(300);
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: { role: 'user', parts: [{ text: longPrompt }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(Array.from(result.items[0].prompt)).toHaveLength(203);
+      expect(result.items[0].prompt).toBe(`${'😀'.repeat(200)}...`);
     });
 
     it('should paginate with size parameter', async () => {

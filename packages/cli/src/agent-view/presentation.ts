@@ -103,6 +103,7 @@ export function deriveAgentViewPresentation(
     recoverability,
     Boolean(input.rosterEntry?.pinned),
   );
+  const createdAt = toTime(state.createdAt);
 
   return {
     sessionId: state.sessionId,
@@ -115,9 +116,10 @@ export function deriveAgentViewPresentation(
     iconTone: deriveIconTone(taskState),
     title: deriveTitle(input.rosterEntry, input.launch, activity),
     subtitle: deriveSubtitle(activity, taskState),
-    ageLabel: formatDuration(
-      Math.max(0, toTime(now ?? new Date()) - toTime(state.createdAt)),
-    ),
+    // An unparseable createdAt must not surface as a ~56-year duration.
+    ageLabel: Number.isNaN(createdAt)
+      ? ''
+      : formatDuration(Math.max(0, toTime(now ?? new Date()) - createdAt)),
     actions,
   };
 }
@@ -367,8 +369,7 @@ function formatDuration(durationMs: number): string {
 
 function toTime(value: Date | string): number {
   const date = value instanceof Date ? value : new Date(value);
-  const time = date.getTime();
-  return Number.isNaN(time) ? 0 : time;
+  return date.getTime();
 }
 
 function assertNever(value: never): never {

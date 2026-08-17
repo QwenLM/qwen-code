@@ -137,6 +137,34 @@ env:
   # one conscious act (**[Critical]**, a Request changes review, or /retry),
   # which is precisely what separates intent from automation.
   CRITICAL_ONLY_HUMAN_BATCHES: '2'
+  # Net-diff growth budgets per counting window — the SIZE sibling of the
+  # round brake above. CRITICAL_ONLY_AFTER_ROUND counts rounds, but one round
+  # can add hundreds of lines (#8853 grew 315 → 1393 net lines in four bot
+  # rounds, +609 in a single "harden per review feedback" round; #8276 grew
+  # ~2700 net lines under management), so a managed PR can bloat drastically
+  # while still under the round threshold — and every window re-arm reopens
+  # the suggestion valve. The first round of a counting window records the
+  # PR's net size (insertions minus deletions vs the merge base) as that
+  # window's baseline; once live growth beyond the baseline exceeds a budget,
+  # Critical-only mode engages early. Everything Critical-only preserves
+  # still flows — Critical findings, Request changes reviews, in-budget
+  # maintainer feedback, failed checks, conflict resolution — only the
+  # suggestion channel stops. `@qwen-code /retry` (or re-engaging takeover)
+  # opens a fresh window and re-anchors the baseline at the current size.
+  # TWO budgets, not one: measured bloat concentrates in TESTS (#8853's
+  # growth was 86% test lines — every round pins ever-more-marginal behavior;
+  # #8276's was 78%), so a single budget is effectively spent by test growth
+  # and cannot be tightened on tests without also strangling source fixes.
+  # Test lines are *.test.*/*.spec.* files, __snapshots__/, __tests__/,
+  # test-utils/, and
+  # integration-tests/ (the pathspec lives in the prepare step); source is
+  # everything else, minus mechanical churn (lockfiles and the regenerated
+  # settings schema) that is skimmed rather than reviewed. Either budget
+  # tripping engages the brake.
+  # TUNABLE WITHOUT A CODE CHANGE like the scan budgets above; a malformed
+  # value falls back to its default at the read site.
+  GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
+  GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -761,10 +789,55 @@ jobs:
       - name: 'Sanitize workspace git config'
         run: |-
           set -uo pipefail
+          # The runner USER's global config is the same exec surface as the
+          # workspace config below: pool jobs run human-authored code (branch
+          # tests) as this user, and a stray `git config --global` outlives
+          # the job on the persistent pool. Measured: run 31516789251 found
+          # diff.external=global-driver in ~/.gitconfig, failing per-hunk
+          # probe tests in every later verification gate on this host. The
+          # gates read a throwaway global config now, so this scrub is host
+          # hygiene plus protection for THIS job's PAT-bearing git steps,
+          # which do read the real file. It runs BEFORE the .git early-exit:
+          # host hygiene owes nothing to the workspace existing. Denylist
+          # here, not the local allowlist below: the file belongs to the
+          # pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which arms
+          # the command-executing ext:: transport a kept url.insteadOf could
+          # redirect to). Two ROUTING exceptions ride the denylist because
+          # each defeats the PAT steps directly: url.*.insteadOf/
+          # pushInsteadOf (rewrites the push/fetch URL at transport time —
+          # the rest of url.* stays) and http.*.sslVerify/sslCAInfo (turns
+          # a kept http.proxy into a TLS-terminating interceptor; the pool
+          # works on the default CA today, so scrubbing these can only
+          # fail loudly, never silently). Subsection slots are `.+`, never
+          # `[^.]+`: git subsection names may contain dots (`[diff "a.b"]
+          # command` flattens to diff.a.b.command and would slip past
+          # `[^.]+`); overmatching is harmless in a denylist. Guarded
+          # `|| true` twice: no global file and no match are both normal,
+          # and either would kill the step under the default `bash -e` +
+          # pipefail otherwise. The same denylist lives in
+          # resanitize-git-config.sh, which the PAT-bearing steps re-run
+          # AFTER branch code executed on the host; the workflow contract
+          # tests pin every copy byte-identical — edit them together.
+          # The GLOBAL scope spans TWO files — ~/.gitconfig and
+          # ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both
+          # present, `git config --global` lists and unsets ONLY
+          # ~/.gitconfig (probed on git 2.43 and 2.55: the listing omits
+          # the XDG keys and --unset-all exits 5 with them live), so sweep
+          # each file explicitly by pointing GIT_CONFIG_GLOBAL at it — the
+          # env var replaces the whole global scope with exactly that
+          # file, for reads and writes alike.
+          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
+              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+          done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
+            echo "no prior workspace; nothing local to sanitize"
             exit 0
           fi
           # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
@@ -789,7 +862,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -890,10 +963,22 @@ jobs:
       # Same staging as the review-address job: the verify gate always runs the
       # trusted checkout's copy of the schema gate, never a working-tree copy.
       - name: 'Stage trusted schema gate'
+        id: 'stage'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+          cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
+          # The staged copy's trusted-base provenance holds at cp time only:
+          # RUNNER_TEMP is writable by the branch/agent code later steps run
+          # on this host, so record the digest in GITHUB_OUTPUT — expression
+          # context, which a disk write after staging cannot reach — for the
+          # PAT-bearing step to verify at invocation time. The trusted PATH is
+          # recorded the same way and before any branch code runs, so a
+          # $GITHUB_ENV-planted PATH/preload cannot swap the sha256sum/bash/git
+          # the PAT step resolves (that would defeat the digest gate itself).
+          echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Check bot credentials'
         env:
@@ -1402,6 +1487,28 @@ jobs:
         run: |-
           BRANCH="autofix/issue-${ISSUE}"
 
+          # Hermetic git config for the gate and every check it spawns, same
+          # rationale and shape as run-autofix-review-verification.sh (a
+          # leaked global exec knob on the persistent pool must not fail
+          # branch tests, a branch-authored `git config --global` must not
+          # outlive the run, and GITHUB_ENV-injected git env channels outrank
+          # every file layer) — the contract test pins this env+redirect
+          # block equal to the review gate's copy.
+          unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+            GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+          : > "${GIT_CONFIG_GLOBAL}"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+          if [ -s /etc/gitconfig ]; then
+            echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
+          fi
+
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -1524,7 +1631,22 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
+          # drop any planted token BEFORE the identity check below, so a
+          # GH_HOST reroute cannot spoof `gh api user` and a planted GH_TOKEN
+          # cannot outrank the inline GITHUB_TOKEN. (git's channels are
+          # stripped in the hermetic preamble further down.)
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # Point gh at a fresh empty config dir, not the default
+          # ~/.config/gh on the shared attacker-writable HOME — its
+          # config.yml can carry http_unix_socket and other transport
+          # reroutes no sweep here touches. mktemp -d gives an
+          # unpredictable path a watcher cannot pre-seed.
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
@@ -1544,14 +1666,67 @@ jobs:
             exit 1
           fi
           BRANCH="autofix/issue-${ISSUE}"
+          # Take this PAT-bearing step off every mutable host git surface —
+          # both the shared config FILES and git's ENV channels — keep this
+          # block byte-identical to its twin in 'Push and report' (the
+          # contract test pins them equal). File scopes: the pool shares one
+          # HOME across ~27 runner registrations and review-address fans out
+          # max-parallel, so a concurrent job can rewrite ~/.gitconfig inside
+          # this step's sweep->push window (a URL-scoped sslVerify=false there
+          # overrides the -c pin below over real TLS); redirect global/system
+          # to a per-run throwaway (as the gates do) so the push reads neither.
+          # Env channels: branch code in an earlier step of THIS job can inject
+          # env through $GITHUB_ENV, and several channels OUTRANK file config or
+          # bypass it entirely — pin PATH to the staged trusted value and drop
+          # LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH first (else a swapped
+          # git/sha256sum/bash defeats the digest gate below), then strip
+          # GIT_CONFIG_COUNT/_PARAMETERS (command-line-precedence config),
+          # GIT_ALLOW_PROTOCOL (env twin of protocol.allow — arms ext::),
+          # GIT_SSL_NO_VERIFY/GIT_SSL_CAINFO (override the sslVerify pin over
+          # real TLS), GIT_PROXY_COMMAND, GIT_EXEC_PATH (transport-helper
+          # binary), GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR/GIT_OBJECT_DIRECTORY/
+          # GIT_ALTERNATE_OBJECT_DIRECTORIES/GIT_SHALLOW_FILE (repoint the repo
+          # git reads and pushes), GIT_ASKPASS/GIT_SSH/GIT_SSH_COMMAND
+          # (credential/exec hijack). The throwaway global uses an
+          # unpredictable mktemp path so a same-user watcher cannot re-plant
+          # http.proxy/sslCAInfo into a fixed literal after the seed. All
+          # probe-verified in the #8961 review.
+          export PATH="${TRUSTED_PATH}"
+          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
+            GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+            GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+          # Host hygiene + LOCAL .git/config scrub (the throwaway global above
+          # covers only the global scope, not the highest-precedence local
+          # file the branch/agent can plant). The staged copy's trusted-base
+          # provenance holds at cp time only — RUNNER_TEMP is writable by that
+          # same branch code — so verify the digest the staging step recorded
+          # in GITHUB_OUTPUT (unreachable from a disk write) before executing.
+          # Never run the script from the working tree; it holds the branch.
+          echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
+          bash "${RUNNER_TEMP}/resanitize-git-config.sh"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config core.hooksPath /dev/null
           # Authenticate the push with a one-shot, host-scoped credential
           # helper via `git -c`: nothing is written to the reused
           # workspace's .git/config (no error path can strand it there),
           # argv holds only the literal ${GITHUB_TOKEN} reference, and the
-          # host scope means it cannot answer a non-GitHub URL.
-          git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+          # host scope means it cannot answer a non-GitHub URL. The leading
+          # empty credential.helper RESETS the inherited helper list first:
+          # helpers run in config order and the first to answer wins, so a
+          # helper planted at any earlier scope would otherwise see the
+          # request (and the env) before ours answers — probe-verified in
+          # the #8961 review. http.sslVerify pins the transport: a kept
+          # http.proxy plus a planted sslVerify=false would otherwise let
+          # an interceptor read the credential off the wire.
+          git -c http.sslVerify=true -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
             push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
@@ -3171,10 +3346,55 @@ jobs:
       - name: 'Sanitize workspace git config'
         run: |-
           set -uo pipefail
+          # The runner USER's global config is the same exec surface as the
+          # workspace config below: pool jobs run human-authored code (branch
+          # tests) as this user, and a stray `git config --global` outlives
+          # the job on the persistent pool. Measured: run 31516789251 found
+          # diff.external=global-driver in ~/.gitconfig, failing per-hunk
+          # probe tests in every later verification gate on this host. The
+          # gates read a throwaway global config now, so this scrub is host
+          # hygiene plus protection for THIS job's PAT-bearing git steps,
+          # which do read the real file. It runs BEFORE the .git early-exit:
+          # host hygiene owes nothing to the workspace existing. Denylist
+          # here, not the local allowlist below: the file belongs to the
+          # pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which arms
+          # the command-executing ext:: transport a kept url.insteadOf could
+          # redirect to). Two ROUTING exceptions ride the denylist because
+          # each defeats the PAT steps directly: url.*.insteadOf/
+          # pushInsteadOf (rewrites the push/fetch URL at transport time —
+          # the rest of url.* stays) and http.*.sslVerify/sslCAInfo (turns
+          # a kept http.proxy into a TLS-terminating interceptor; the pool
+          # works on the default CA today, so scrubbing these can only
+          # fail loudly, never silently). Subsection slots are `.+`, never
+          # `[^.]+`: git subsection names may contain dots (`[diff "a.b"]
+          # command` flattens to diff.a.b.command and would slip past
+          # `[^.]+`); overmatching is harmless in a denylist. Guarded
+          # `|| true` twice: no global file and no match are both normal,
+          # and either would kill the step under the default `bash -e` +
+          # pipefail otherwise. The same denylist lives in
+          # resanitize-git-config.sh, which the PAT-bearing steps re-run
+          # AFTER branch code executed on the host; the workflow contract
+          # tests pin every copy byte-identical — edit them together.
+          # The GLOBAL scope spans TWO files — ~/.gitconfig and
+          # ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both
+          # present, `git config --global` lists and unsets ONLY
+          # ~/.gitconfig (probed on git 2.43 and 2.55: the listing omits
+          # the XDG keys and --unset-all exits 5 with them live), so sweep
+          # each file explicitly by pointing GIT_CONFIG_GLOBAL at it — the
+          # env var replaces the whole global scope with exactly that
+          # file, for reads and writes alike.
+          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
+              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+          done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
+            echo "no prior workspace; nothing local to sanitize"
             exit 0
           fi
           # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
@@ -3199,7 +3419,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -3462,10 +3682,55 @@ jobs:
       - name: 'Sanitize workspace git config'
         run: |-
           set -uo pipefail
+          # The runner USER's global config is the same exec surface as the
+          # workspace config below: pool jobs run human-authored code (branch
+          # tests) as this user, and a stray `git config --global` outlives
+          # the job on the persistent pool. Measured: run 31516789251 found
+          # diff.external=global-driver in ~/.gitconfig, failing per-hunk
+          # probe tests in every later verification gate on this host. The
+          # gates read a throwaway global config now, so this scrub is host
+          # hygiene plus protection for THIS job's PAT-bearing git steps,
+          # which do read the real file. It runs BEFORE the .git early-exit:
+          # host hygiene owes nothing to the workspace existing. Denylist
+          # here, not the local allowlist below: the file belongs to the
+          # pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which arms
+          # the command-executing ext:: transport a kept url.insteadOf could
+          # redirect to). Two ROUTING exceptions ride the denylist because
+          # each defeats the PAT steps directly: url.*.insteadOf/
+          # pushInsteadOf (rewrites the push/fetch URL at transport time —
+          # the rest of url.* stays) and http.*.sslVerify/sslCAInfo (turns
+          # a kept http.proxy into a TLS-terminating interceptor; the pool
+          # works on the default CA today, so scrubbing these can only
+          # fail loudly, never silently). Subsection slots are `.+`, never
+          # `[^.]+`: git subsection names may contain dots (`[diff "a.b"]
+          # command` flattens to diff.a.b.command and would slip past
+          # `[^.]+`); overmatching is harmless in a denylist. Guarded
+          # `|| true` twice: no global file and no match are both normal,
+          # and either would kill the step under the default `bash -e` +
+          # pipefail otherwise. The same denylist lives in
+          # resanitize-git-config.sh, which the PAT-bearing steps re-run
+          # AFTER branch code executed on the host; the workflow contract
+          # tests pin every copy byte-identical — edit them together.
+          # The GLOBAL scope spans TWO files — ~/.gitconfig and
+          # ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both
+          # present, `git config --global` lists and unsets ONLY
+          # ~/.gitconfig (probed on git 2.43 and 2.55: the listing omits
+          # the XDG keys and --unset-all exits 5 with them live), so sweep
+          # each file explicitly by pointing GIT_CONFIG_GLOBAL at it — the
+          # env var replaces the whole global scope with exactly that
+          # file, for reads and writes alike.
+          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
+              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+          done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
+            echo "no prior workspace; nothing local to sanitize"
             exit 0
           fi
           # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
@@ -3490,7 +3755,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -3580,11 +3845,27 @@ jobs:
       # dies without an outcome), and an in-branch copy would let branch code
       # define its own gate.
       - name: 'Stage trusted schema gate and agent runner'
+        id: 'stage'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
+          # The staged copies' trusted-base provenance holds at cp time only:
+          # RUNNER_TEMP is writable by the branch/agent code later steps run
+          # on this host, so record each digest in GITHUB_OUTPUT — expression
+          # context, which a disk write after staging cannot reach — for the
+          # invoking step to verify before execution. The gate runner is
+          # pinned too: it runs the branch's own build/test between the two
+          # gate passes, so an unverified copy would let the branch define
+          # its own verdict. The trusted PATH is recorded before any branch
+          # code runs, so a $GITHUB_ENV-planted PATH/preload cannot swap the
+          # sha256sum/bash/git the steps resolve (that would defeat the digest
+          # gate itself).
+          echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -3730,8 +4011,42 @@ jobs:
         id: 'prepare'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
+          # drop any planted token BEFORE the gh calls below, so a GH_HOST
+          # reroute cannot spoof the eligibility re-check and a planted
+          # GH_TOKEN cannot outrank the inline GITHUB_TOKEN.
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # Point gh at a fresh empty config dir, not the default
+          # ~/.config/gh on the shared attacker-writable HOME — its
+          # config.yml can carry http_unix_socket and other transport
+          # reroutes no sweep here touches. mktemp -d gives an
+          # unpredictable path a watcher cannot pre-seed.
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+          # This PAT-bearing step runs git (status/restore/fetch/checkout and a
+          # push preflight) on the shared host BEFORE the agent/gate, so it
+          # takes the same hermetic preamble the push steps do — the contract
+          # test pins the executable lines equal across all three. Pin PATH and
+          # drop the preload channels, strip git's env knobs, redirect the file
+          # scopes to an unpredictable per-run throwaway (a concurrent job's
+          # ~/.gitconfig rewrite during this step's long window — staging, node
+          # setup, npm ci, artifact download all sit before it — cannot steer
+          # its git, and a fsmonitor/askpass/gpg.program plant cannot fire).
+          export PATH="${TRUSTED_PATH}"
+          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
+            GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+            GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
 
           # ---- address-time eligibility recheck ---------------------------
           # Fan-out can hold this job queued for hours behind max-parallel,
@@ -3809,8 +4124,14 @@ jobs:
           git config core.hooksPath /dev/null
           if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
             # Maintainer-fork target: the branch does not exist on origin —
-            # fetch it (data only; hooks are severed) from the fork.
-            if ! git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"; then
+            # fetch it (data only; hooks are severed) from the fork. A public
+            # repo's fork heads are always public, so this fetch is anonymous:
+            # `-c credential.helper=` resets the inherited helper list (a
+            # planted global extraheader could 401 and hand a planted helper
+            # this step's PAT — the same class the push sites reset against)
+            # and `http.sslVerify=true` pins the transport. Fail closed on a
+            # 401 rather than authenticate.
+            if ! git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"; then
               echo "🫥 fork fetch failed for ${HEAD_REPO} (${BRANCH}) — discarding without action or marker"
               {
                 echo "stale=true"
@@ -3829,7 +4150,11 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            if ! git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+            # One-shot host-scoped helper like the push steps: the leading
+            # empty credential.helper resets the inherited helper list (a
+            # planted helper must never answer first) and http.sslVerify
+            # pins the transport — see 'Publish PR' for the full rationale.
+            if ! git -c http.sslVerify=true -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
               push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
@@ -4012,9 +4337,145 @@ jobs:
             STALE='true'
             echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
           fi
+          # Growth brake: measure the PR's net size (insertions minus
+          # deletions vs the merge base), split into test lines and source
+          # lines, and compare against the sizes recorded when this counting
+          # window opened. The baseline rides in the window's first pushed or
+          # no-op report comment as its OWN marker (the autofix-redcheck
+          # pattern — the positional autofix-eval parsers never change), so a
+          # /retry or takeover re-engage re-anchors it with the window.
+          # First-wins on read: a duplicate marker in one window cannot move
+          # an anchored baseline. A handoff round writes no baseline; nothing
+          # was pushed, so the next round re-measures the same size.
+          # Growth-triggered Critical-only reuses the round brake's entire
+          # deferral machinery below; the human batch budget stays
+          # round-scoped, so maintainer feedback flows exactly as today.
+          # Leading zeros are rejected, not just non-digits: bash [[ -gt ]]
+          # reads a zero-padded operand as OCTAL, so '0400' would compare as
+          # 256 (the brake fires early) and '0900' raises "value too great
+          # for base" inside [[ ]], which under an if-condition silently
+          # evaluates false — the brake never engages. Both violate the
+          # documented fallback promise, so pad-shaped values fall back too.
+          if [[ ! "${GROWTH_BUDGET_SRC_LINES}" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+            echo "::warning::GROWTH_BUDGET_SRC_LINES='${GROWTH_BUDGET_SRC_LINES}' is not a plain line count; using 400"
+            GROWTH_BUDGET_SRC_LINES=400
+          fi
+          if [[ ! "${GROWTH_BUDGET_TEST_LINES}" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+            echo "::warning::GROWTH_BUDGET_TEST_LINES='${GROWTH_BUDGET_TEST_LINES}' is not a plain line count; using 400"
+            GROWTH_BUDGET_TEST_LINES=400
+          fi
+          # Binary files report "-" in numstat; count them as 0 lines.
+          sum_numstat() { awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }'; }
+          # __tests__/ is part of the repo's existing test-file definition
+          # (AGENTS.md's triage line-counting rule, repo-hygiene's
+          # PROD_EXCLUDE): helpers under it without a .test./.spec. suffix
+          # are still test code, not source.
+          TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
+          # Mechanical churn must not burn the budget: one dependency bump
+          # rewrites hundreds of package-lock.json lines and one
+          # `generate:settings-schema` run regenerates the committed schema —
+          # skimmed, not reviewed, so they measure no review burden. Keep the
+          # list tight and name generated artifacts EXACTLY; a broad glob
+          # would silently exempt hand-written files from the budget. Applied
+          # to BOTH measurements: a lockfile can live under a test directory
+          # (integration-tests/package-lock.json), and excluding it from one
+          # side only would corrupt the NET_SRC subtraction.
+          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
+          # An orphan-history branch (fork takeover / adoption admits one —
+          # nothing on this job's fetch requires a common ancestor) has no
+          # merge base: the three-dot diff exits 128. Fail OPEN to zero like
+          # the merge-tree conflict probe above — an unmeasurable PR skips
+          # the brake rather than dying red at measurement every round.
+          # A managed fork PR whose head branch is literally named 'main'
+          # makes prepare's fork update-ref re-point refs/remotes/origin/main
+          # at the fork head — the measurement would compare the branch
+          # against itself (0/0 forever). Unmeasurable: skip the brake
+          # (fail open), like the no-merge-base case.
+          # Unmeasurable is a STATE, not a zero: substituting 0 nets would
+          # anchor a bogus 0/0 baseline (or, against an existing anchor,
+          # manufacture phantom growth). NET_MEASURED gates the whole brake:
+          # no anchor, no marker, no engagement.
+          NET_MEASURED='true'
+          NET_TOTAL=0
+          NET_TEST=0
+          if [[ "${BRANCH}" == 'main' || "${BRANCH}" == 'origin/main' ]]; then
+            # 'origin/main' as a LOCAL branch name shadows the remote ref in
+            # rev disambiguation — the diff would silently self-compare.
+            echo "📏 growth measurement skipped: head branch name '${BRANCH}' shadows the measurement base"
+            NET_MEASURED='false'
+          else
+            NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_MEASURED='false'
+            NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_MEASURED='false'
+          fi
+          NET_SRC=$(( NET_TOTAL - NET_TEST ))
+          [[ "${NET_MEASURED}" != 'true' ]] &&
+            echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
+          # The marker's window field is spelled `key=`, NOT `win=`, on
+          # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
+          # the breaker PRIOR_HEADS) attribute comments to windows by the
+          # WHOLE-BODY substring `win=<key> -->`, and this marker can
+          # legitimately carry a different window key than its comment's
+          # autofix-eval marker (a supersede-exempt conflict round reporting
+          # after a re-arm). Any token embedding "win=" would double-attribute
+          # that comment to both windows.
+          # A stale-base auto-update merges current main into the branch,
+          # moving the merge base the nets are measured against: overlap
+          # resolutions then shift the measurement with no agent push. An
+          # anchor recorded before the latest base update is not comparable
+          # any more — ignore it, so the next round re-anchors at the
+          # post-update size. (A conflict round's own merge of main is the
+          # narrower residual; its delta is bounded by the overlap.)
+          BASE_UPD_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- autofix-base-updated"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
+              | {src: (.[0] | tonumber), test: (.[1] | tonumber), win: .[2], at: ($c.created_at // "")} ]
+            | map(select(.win == $key))
+            | map(select($baseupd == "" or (.at > $baseupd))) | sort_by(.at)
+            | .[0] // empty | "\(.src) \(.test)"' "${WORKDIR}/ic.json")"
+          GROWTH_BASE_NEW='false'
+          if [[ "${NET_MEASURED}" != 'true' ]]; then
+            BASE_SRC=0
+            BASE_TEST=0
+          elif [[ "${GROWTH_BASELINE}" =~ ^(-?[0-9]+)\ (-?[0-9]+)$ ]]; then
+            BASE_SRC="${BASH_REMATCH[1]}"
+            BASE_TEST="${BASH_REMATCH[2]}"
+          else
+            BASE_SRC="${NET_SRC}"
+            BASE_TEST="${NET_TEST}"
+            GROWTH_BASE_NEW='true'
+          fi
+          GROWTH_SRC=$(( NET_SRC - BASE_SRC ))
+          GROWTH_TEST=$(( NET_TEST - BASE_TEST ))
+          [[ "${NET_MEASURED}" != 'true' ]] && { GROWTH_SRC=0; GROWTH_TEST=0; }
+          {
+            echo "growth_base_new=${GROWTH_BASE_NEW}"
+            echo "growth_base_src=${BASE_SRC}"
+            echo "growth_base_test=${BASE_TEST}"
+            # The key the baseline was READ under. The report must write the
+            # marker under this same key, not the matrix WINDOW: a conflict
+            # round is exempt from the supersede discard, so it can run with
+            # a stale WINDOW after a re-arm — a marker written under that
+            # dead key would be invisible to every later read and the
+            # round's pushed growth would escape the budget for the rest of
+            # the live window.
+            echo "growth_base_win=${LIVE_REARM_KEY}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "📏 net diff src ${NET_SRC} / test ${NET_TEST} lines (window baseline ${BASE_SRC}/${BASE_TEST}, growth ${GROWTH_SRC}/${GROWTH_TEST}, budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
+
           CRITICAL_ONLY='false'
+          CRITICAL_ONLY_ROUNDS='false'
+          CRITICAL_ONLY_GROWTH='false'
           if [[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]; then
             CRITICAL_ONLY='true'
+            CRITICAL_ONLY_ROUNDS='true'
+          fi
+          if [[ "${GROWTH_SRC}" -gt "${GROWTH_BUDGET_SRC_LINES}" || "${GROWTH_TEST}" -gt "${GROWTH_BUDGET_TEST_LINES}" ]]; then
+            CRITICAL_ONLY='true'
+            CRITICAL_ONLY_GROWTH='true'
           fi
           # Which trusted humans have exhausted their per-window regular
           # feedback budget (see CRITICAL_ONLY_HUMAN_BATCHES). A batch is
@@ -4087,10 +4548,43 @@ jobs:
           rm -f "${WORKDIR}/deferred-feedback.md"
           if [[ "${CRITICAL_ONLY}" == "true" ]]; then
             PR_URL="https://github.com/${REPO}/pull/${PR}"
+            # Name the cause(s) precisely: a maintainer reading "after five
+            # rounds" on a round-2 PR that tripped the GROWTH budget would
+            # reasonably conclude the brake misfired.
+            # No literal '+' prefix: the values are signed (either dimension
+            # can shrink while the other trips the brake), and '+-120' in
+            # the cause line reads like a misfire to exactly its audience.
+            GROWTH_CLAUSE_EN="the PR's diff grew src ${GROWTH_SRC} / test ${GROWTH_TEST} net lines beyond this counting window's baseline (budgets: ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
+            GROWTH_CLAUSE_ZH="本计数窗口内 diff 净增长已达 源码 ${GROWTH_SRC} / 测试 ${GROWTH_TEST} 行（预算 ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}）"
+            ROUNDS_CLAUSE_EN="${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds are complete"
+            ROUNDS_CLAUSE_ZH="已完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次"
+            if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' && "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
+              CAUSE_EN="${ROUNDS_CLAUSE_EN} and ${GROWTH_CLAUSE_EN}"
+              CAUSE_ZH="${ROUNDS_CLAUSE_ZH}，且${GROWTH_CLAUSE_ZH}"
+            elif [[ "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
+              CAUSE_EN="${GROWTH_CLAUSE_EN}"
+              CAUSE_ZH="${GROWTH_CLAUSE_ZH}"
+            else
+              CAUSE_EN="${ROUNDS_CLAUSE_EN}"
+              CAUSE_ZH="${ROUNDS_CLAUSE_ZH}"
+            fi
+            # The maintainer batch budget is enforced by the OVER_BUDGET
+            # census, whose spans exist only in round-brake territory
+            # (rounds past CRITICAL_ONLY_AFTER_ROUND). A growth-only
+            # engagement below the threshold has no enforceable budget, and
+            # the audit record must describe the policy actually in force —
+            # not promise accounting the census cannot produce.
+            if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' ]]; then
+              BUDGET_EN="Maintainer feedback is deferred only after its author has used ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches in this window's Critical-only tail; authors at that budget, if any, are named below."
+              BUDGET_ZH="维护者反馈仅在其本人于本窗口 Critical-only 阶段已使用 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈预算后才会延后；达到预算的作者（如有）在下方点名。"
+            else
+              BUDGET_EN="Maintainer feedback continues to flow unaffected during a growth-only engagement (the per-author batch budget applies only after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds)."
+              BUDGET_ZH="纯增长触发期间维护者反馈照常流动（按作者的批次预算仅在完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后生效）。"
+            fi
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. The workflow excluded the non-Critical feedback below from this round's actionable sections; the items remain open for human follow-up. Maintainer feedback is deferred only after its author has used ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches in this window's Critical-only tail; authors at that budget, if any, are named below. (\`@qwen-code /retry\` starts a fresh counting window.)"
+              echo "Critical-only mode is active: ${CAUSE_EN}. The workflow excluded the non-Critical feedback below from this round's actionable sections; the items remain open for human follow-up. ${BUDGET_EN} (\`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
@@ -4146,7 +4640,7 @@ jobs:
               echo '<details>'
               echo '<summary>中文说明</summary>'
               echo
-              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式。本轮可执行区域已排除下方非 Critical 反馈；这些条目保持开放，留待人工跟进。维护者反馈仅在其本人于本窗口 Critical-only 阶段已使用 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈预算后才会延后；达到预算的作者（如有）在下方点名。（评论 \`@qwen-code /retry\` 可开启新的计数窗口。）"
+              echo "已进入仅处理 Critical 的模式：${CAUSE_ZH}。本轮可执行区域已排除下方非 Critical 反馈；这些条目保持开放，留待人工跟进。${BUDGET_ZH}（评论 \`@qwen-code /retry\` 可开启新的计数窗口。）"
               echo
               echo '</details>'
             } > "${WORKDIR}/deferred-feedback.md"
@@ -4520,7 +5014,19 @@ jobs:
         # alive, 'Finalize verification' sees an empty outcome, falls through
         # its case to exit 1, and the always() report step posts.
         timeout-minutes: 60
+        env:
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
         run: |-
+          # The gate decides whether the PAT push runs, and the first pass
+          # executes the branch's own build/test on the host before the
+          # second — so pin PATH to the staged trusted value, drop the
+          # preload channels, and verify the staged runner's digest (recorded
+          # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
+          # or a mid-run overwrite lets the branch define its own verdict.
+          export PATH="${TRUSTED_PATH}"
+          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
           bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Repair deterministic rejection'
@@ -4627,7 +5133,19 @@ jobs:
         continue-on-error: true
         # Same bound as the first pass, for the same reason.
         timeout-minutes: 60
+        env:
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
         run: |-
+          # The gate decides whether the PAT push runs, and the first pass
+          # executes the branch's own build/test on the host before the
+          # second — so pin PATH to the staged trusted value, drop the
+          # preload channels, and verify the staged runner's digest (recorded
+          # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
+          # or a mid-run overwrite lets the branch define its own verdict.
+          export PATH="${TRUSTED_PATH}"
+          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
           bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Finalize verification'
@@ -4720,7 +5238,33 @@ jobs:
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
+          RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          # Growth-brake baseline: written into this window's FIRST report
+          # comment only (growth_base_new), so later rounds' first-wins parse
+          # keeps the anchor. Empty when prepare exited early — no marker.
+          GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'
+          GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'
+          GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'
+          # The window key prepare READ the baseline under (LIVE_REARM_KEY),
+          # not the matrix WINDOW: conflict rounds are supersede-exempt and
+          # can report under a stale WINDOW after a re-arm; the marker must
+          # land under the key later reads will use.
+          GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
         run: |-
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
+          # drop any planted token BEFORE the identity check below, so a
+          # GH_HOST reroute cannot spoof `gh api user` and a planted GH_TOKEN
+          # cannot outrank the inline GITHUB_TOKEN. (git's channels are
+          # stripped in the hermetic preamble further down.)
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # Point gh at a fresh empty config dir, not the default
+          # ~/.config/gh on the shared attacker-writable HOME — its
+          # config.yml can carry http_unix_socket and other transport
+          # reroutes no sweep here touches. mktemp -d gives an
+          # unpredictable path a watcher cannot pre-seed.
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -4748,8 +5292,74 @@ jobs:
             exit 1
           fi
 
+          # Take this PAT-bearing step off every mutable host git surface —
+          # both the shared config FILES and git's ENV channels — keep this
+          # block byte-identical to its twin in 'Publish PR' (the contract
+          # test pins them equal). File scopes: the pool shares one HOME
+          # across ~27 runner registrations and review-address fans out
+          # max-parallel, so a concurrent job can rewrite ~/.gitconfig inside
+          # this step's sweep->push window (a URL-scoped sslVerify=false there
+          # overrides the -c pin below over real TLS); redirect global/system
+          # to a per-run throwaway (as the gates do) so the push reads neither.
+          # Env channels: branch code in an earlier step of THIS job can inject
+          # env through $GITHUB_ENV, and several channels OUTRANK file config or
+          # bypass it entirely — pin PATH to the staged trusted value and drop
+          # LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH first (else a swapped
+          # git/sha256sum/bash defeats the digest gate below), then strip
+          # GIT_CONFIG_COUNT/_PARAMETERS (command-line-precedence config),
+          # GIT_ALLOW_PROTOCOL (env twin of protocol.allow — arms ext::),
+          # GIT_SSL_NO_VERIFY/GIT_SSL_CAINFO (override the sslVerify pin over
+          # real TLS), GIT_PROXY_COMMAND, GIT_EXEC_PATH (transport-helper
+          # binary), GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR/GIT_OBJECT_DIRECTORY/
+          # GIT_ALTERNATE_OBJECT_DIRECTORIES/GIT_SHALLOW_FILE (repoint the repo
+          # git reads and pushes), GIT_ASKPASS/GIT_SSH/GIT_SSH_COMMAND
+          # (credential/exec hijack). The throwaway global uses an
+          # unpredictable mktemp path so a same-user watcher cannot re-plant
+          # http.proxy/sslCAInfo into a fixed literal after the seed. All
+          # probe-verified in the #8961 review.
+          export PATH="${TRUSTED_PATH}"
+          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
+            GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+            GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+          # Host hygiene + LOCAL .git/config scrub (the throwaway global above
+          # covers only the global scope, not the highest-precedence local
+          # file the branch/agent can plant). The staged copy's trusted-base
+          # provenance holds at cp time only — RUNNER_TEMP is writable by that
+          # same branch code — so verify the digest the staging step recorded
+          # in GITHUB_OUTPUT (unreachable from a disk write) before executing.
+          # Never run the script from the working tree; it holds the branch.
+          echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
+          bash "${RUNNER_TEMP}/resanitize-git-config.sh"
+
           if [[ "${OUTCOME}" == "fixed" ]]; then
             NEXT_ROUND="$(( ROUND + 1 ))"
+            # The tree the gate verified is what gets pushed: assert HEAD is
+            # the gate's verified_head before touching credentials. A repo
+            # redirect (a planted .git/commondir/GIT_DIR — the first defused
+            # by resanitize, the second by the env strip) would otherwise let
+            # `git rev-parse HEAD` and the push read an attacker repo whose
+            # HEAD differs; this compares against the value the gate recorded
+            # in GITHUB_OUTPUT (unreachable from a disk write). Empty
+            # verified_head only on a noop, which does not reach this push.
+            HEAD_NOW="$(git rev-parse HEAD)"
+            if [[ -z "${VERIFIED_HEAD}" || "${HEAD_NOW}" != "${VERIFIED_HEAD}" ]]; then
+              echo "::error::HEAD ${HEAD_NOW} is not the gate's verified head ${VERIFIED_HEAD:-<empty>} — refusing to push"
+              exit 1
+            fi
+            # Push the exact verified COMMIT OBJECT, never the symbolic
+            # HEAD: `HEAD:branch` would re-resolve at push time, re-opening
+            # the check-then-use race the guard above just closed (a watcher
+            # moving HEAD between the check and the push). PUSH_SHA is
+            # re-pinned to the concrete object after each salvage merge below.
+            PUSH_SHA="${VERIFIED_HEAD}"
             git config --local --unset-all http.https://github.com/.extraheader || true
             # This step carries the PAT; the branch carries PR-controlled
             # .husky hooks (hooksPath was pointed there so the AGENT's
@@ -4758,8 +5368,17 @@ jobs:
             git config core.hooksPath /dev/null
             # Authenticate push/fetch with a one-shot, host-scoped credential
             # helper via a git_auth wrapper (see Publish PR) — nothing lands
-            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
-            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
+            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference,
+            # the leading empty credential.helper resets the inherited
+            # helper list so a planted helper never answers first, and
+            # http.sslVerify pins the transport against a planted
+            # sslVerify=false + proxy interceptor.
+            # fetch.recurseSubmodules=false + protocol.ext.allow=never: the
+            # salvage fetch must not walk a branch-planted submodule whose
+            # .git/modules config was rewritten to an ext:: URL (resanitize
+            # sweeps neither the kept fetch.* allowlist entry nor .git/modules)
+            # and execute it with the PAT in env.
+            git_auth() { git -c http.sslVerify=true -c fetch.recurseSubmodules=false -c protocol.ext.allow=never -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
@@ -4785,7 +5404,7 @@ jobs:
             # through to the existing failure path — same as today.
             PUSH_RACE_MERGED='false'
             for push_attempt in 1 2 3; do
-              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+              if git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"; then
                 break
               fi
               if [[ "${push_attempt}" == 3 ]]; then
@@ -4803,14 +5422,25 @@ jobs:
               # flagging that would tell the reviewer to re-check mid-run
               # commits that never existed.
               PRE_MERGE_HEAD="$(git rev-parse HEAD)"
-              if ! git -c user.name="${AUTOFIX_BOT}" \
+              # commit.gpgsign=false: this real merge commit would otherwise
+              # read the signing knob from config and, with no key on the
+              # runner, exit 128 ("gpg: signing failed") — misread below as a
+              # content conflict, discarding a verified round. The throwaway
+              # global above already hides a polluted ~/.gitconfig; this makes
+              # the merge independent of it regardless.
+              if ! git -c commit.gpgsign=false \
+                -c user.name="${AUTOFIX_BOT}" \
                 -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
                 merge --no-edit FETCH_HEAD; then
                 git merge --abort || true
                 echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
                 exit 1
               fi
-              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
+              # Re-pin the exact object the next attempt pushes to the
+              # merge result, captured here under control — not a symbolic
+              # HEAD the push would re-resolve.
+              PUSH_SHA="$(git rev-parse HEAD)"
+              if [[ "${PUSH_SHA}" != "${PRE_MERGE_HEAD}" ]]; then
                 PUSH_RACE_MERGED='true'
               fi
             done
@@ -4987,6 +5617,9 @@ jobs:
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
               echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
+                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              fi
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -5008,11 +5641,36 @@ jobs:
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
               echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
+                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              fi
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
 
-          gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
+          # Bounded retry on the report post: this one comment carries the
+          # round's ENTIRE persisted state (autofix-eval watermark/round,
+          # redcheck head, growth baseline). The push has already landed, so
+          # a transient API failure here loses the marker while keeping the
+          # growth — the retry scan would re-anchor the baseline at the
+          # post-push size and re-evaluate feedback it already addressed.
+          # Three attempts bound that to genuine outages; the final failure
+          # keeps today's semantics (step fails, no marker, next scan
+          # retries the round).
+          REPORT_POSTED='false'
+          for attempt in 1 2 3; do
+            if gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; then
+              REPORT_POSTED='true'
+              break
+            fi
+            if [[ "${attempt}" == 3 ]]; then
+              echo "::error::report post failed ${attempt} times for PR #${PR}; giving up"
+            else
+              echo "::warning::report post attempt ${attempt} failed for PR #${PR}; retrying"
+              sleep 10
+            fi
+          done
+          [[ "${REPORT_POSTED}" == 'true' ]] || exit 1
 
           # Takeover milestone digest — roughly every 10 rounds. The takeover
           # cap (100) bounds runaway but says nothing about when a human

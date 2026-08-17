@@ -9,7 +9,10 @@ import {
   type DaemonChannelLoopMcpHost,
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
-import { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 
 class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   private events: DaemonChannelEvent[] = [];
@@ -132,6 +135,73 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('deletes an internal session through its owning workspace', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.deleteSessionData?.('session-1');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1');
+    expect(bridge.listSessions()).toEqual([]);
+    events.close();
+    bridge.stop();
+  });
+
+  it('deletes session data after the live binding has already died', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    events.push({
+      v: 1,
+      type: 'session_died',
+      data: { sessionId: 'session-1', reason: 'child_exit' },
+    });
+    await waitFor(() => expect(bridge.listSessions()).toEqual([]));
+
+    await bridge.deleteSessionData?.('session-1');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1');
+    events.close();
+    bridge.stop();
+  });
+
+  it('keeps the live binding when permanent deletion fails', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockRejectedValue(new Error('locked'));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.deleteSessionData?.('session-1')).rejects.toThrow(
+      'locked',
+    );
+
+    expect(bridge.listSessions()).toHaveLength(1);
+    events.close();
+    bridge.stop();
+  });
+
   it('registers the loop MCP server for the exact daemon session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -1864,6 +1934,44 @@ describe('DaemonChannelBridge', () => {
     });
     await expect(promptPromise).rejects.toThrow('aborted');
 
+    events.close();
+    bridge.stop();
+  });
+
+  it('forwards a distinct user-facing prompt text in daemon metadata', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      promptAuthorization: 'worker-token',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt(
+      'session-1',
+      'internal context\n\nhello',
+      {
+        displayText: 'hello',
+      },
+    );
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'internal context\n\nhello' }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+          'qwen.daemon.promptDisplayText': 'hello',
+        },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.push(turnCompleteEvent());
+    await promptPromise;
     events.close();
     bridge.stop();
   });

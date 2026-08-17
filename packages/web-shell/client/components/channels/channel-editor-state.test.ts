@@ -35,6 +35,19 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       envResolvable: true,
     },
     {
+      key: 'sessionScope',
+      label: 'Session scope',
+      kind: 'enum',
+      required: true,
+      default: 'user',
+      options: [
+        { value: 'user', label: 'Per user and chat' },
+        { value: 'thread', label: 'Per thread' },
+        { value: 'chat_thread', label: 'Per chat and thread' },
+        { value: 'single', label: 'One shared session' },
+      ],
+    },
+    {
       key: 'interactiveCards',
       label: 'Interactive Cards',
       kind: 'object',
@@ -80,6 +93,7 @@ describe('Channel editor state', () => {
       config: {
         type: 'dingtalk',
         clientId: 'ding-client-id',
+        sessionScope: 'user',
         senderPolicy: 'pairing',
       },
       secrets: {
@@ -115,6 +129,15 @@ describe('Channel editor state', () => {
         clientSecret: { operation: 'preserve' },
       },
     });
+  });
+
+  it('shows the effective scope default for a legacy instance', () => {
+    const instance = configuredInstance();
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(DINGTALK, instance);
+
+    expect(draft.values.sessionScope).toBe('user');
   });
 
   it('supports explicitly clearing a stored secret', () => {

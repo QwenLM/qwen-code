@@ -144,7 +144,7 @@ function assertSharedField(key: string, value: unknown): boolean {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
-    sessionScope: new Set(['user', 'thread', 'single']),
+    sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
     blockStreaming: new Set(['on', 'off']),
   };

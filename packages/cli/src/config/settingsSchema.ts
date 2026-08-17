@@ -708,6 +708,53 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  review: {
+    type: 'object',
+    label: 'Review',
+    category: 'General',
+    requiresRestart: false,
+    default: {},
+    description: 'Settings for the /review skill.',
+    showInDialog: false,
+    properties: {
+      attribution: {
+        type: 'boolean',
+        label: 'Attribution: review',
+        category: 'General',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without AI attribution. Note: with the footer off, presubmit duplicate detection still recognizes earlier posts by the same GitHub account, but footer-less posts from other accounts escape it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+      },
+      effort: {
+        type: 'enum',
+        label: 'Default effort: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 'auto',
+        description:
+          'Default effort for /review when --effort is not given. "auto" keeps the built-in rule (high for PRs, medium for local changes). An explicit --effort still wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+        options: [
+          { value: 'auto', label: 'Auto (high for PRs, medium for local)' },
+          { value: 'low', label: 'Low' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'high', label: 'High' },
+        ],
+      },
+      comment: {
+        type: 'boolean',
+        label: 'Comment by default: review',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag. The post still binds to the PR named in the invocation. Enable only if you always want reviews published. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+      },
+    },
+  },
   output: {
     type: 'object',
     label: 'Output',

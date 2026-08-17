@@ -66,6 +66,16 @@ function goalStateRecord(
   });
 }
 
+function goalCardRecord(
+  uuid: string,
+  ...items: ReadonlyArray<Record<string, unknown>>
+): TranscriptRecordInput {
+  return record(uuid, 'system', {
+    subtype: 'slash_command',
+    systemPayload: { phase: 'result', outputHistoryItems: items },
+  });
+}
+
 describe('createTranscriptReplayMachine', () => {
   it('does not replay internal Goal runtime prompts as user messages', () => {
     expect(
@@ -109,6 +119,41 @@ describe('createTranscriptReplayMachine', () => {
       goalState: { v: 2, goal: null, activity: 'idle' },
       goalStatus: { kind: 'cleared', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-clear',
+    });
+  });
+
+  it('replays a legacy paused goal card instead of leaving the set card newest', () => {
+    const machine = createTranscriptReplayMachine();
+    expect(
+      updates(
+        machine,
+        goalCardRecord('goal-set', {
+          type: 'goal_status',
+          kind: 'set',
+          condition: GOAL.objective,
+        }),
+      ),
+    ).toHaveLength(1);
+
+    const projected = updates(
+      machine,
+      goalCardRecord('goal-paused', {
+        type: 'goal_status',
+        kind: 'paused',
+        condition: GOAL.objective,
+        iterations: 4,
+        lastReason: 'paused by the user',
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?._meta).toMatchObject({
+      goalStatus: {
+        kind: 'paused',
+        condition: GOAL.objective,
+        iterations: 4,
+        lastReason: 'paused by the user',
+      },
     });
   });
 

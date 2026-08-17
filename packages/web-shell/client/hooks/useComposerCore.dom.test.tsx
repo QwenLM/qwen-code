@@ -33,6 +33,7 @@ function Harness({
   atWorkspaceCwd,
   commands,
   onImageIngestionNotice,
+  workspaceUploadBusy,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -48,6 +49,7 @@ function Harness({
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -62,6 +64,7 @@ function Harness({
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
+    workspaceUploadBusy,
   });
   latest = composer;
 
@@ -83,6 +86,7 @@ async function mount({
   atWorkspaceCwd,
   commands,
   onImageIngestionNotice,
+  workspaceUploadBusy,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -98,6 +102,7 @@ async function mount({
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -121,6 +126,7 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             commands={commands}
             onImageIngestionNotice={onImageIngestionNotice}
+            workspaceUploadBusy={workspaceUploadBusy}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -266,6 +272,42 @@ describe('useComposerCore history and drafts', () => {
     mounted.rerender();
 
     expect(getItem).toHaveBeenCalledTimes(readsAfterMount);
+  });
+
+  it('blocks submission while an external ingestion lane is busy', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit, workspaceUploadBusy: true });
+
+    act(() => {
+      latest!.setText('review the upload');
+      latest!.submitText();
+    });
+
+    expect(latest!.canSubmit).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('blocks history retry and search-match submit while an upload is busy', async () => {
+    const workspaceCwd = '/workspace/upload-busy';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['previous prompt']),
+    );
+    const onSubmit = vi.fn();
+    await mount({
+      onSubmit,
+      sessionId: 'session-upload-busy',
+      atWorkspaceCwd: workspaceCwd,
+      workspaceUploadBusy: true,
+    });
+
+    act(() => latest!.retryLast());
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toEqual(['previous prompt']);
+    act(() => latest!.searchState.submitSearchMatch('previous prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('falls back to legacy prompt history until the workspace has its own history', async () => {
@@ -1291,6 +1333,88 @@ describe('useComposerCore tags', () => {
     });
     expect(latest!.handle.hasAttachments()).toBe(false);
     expect(latest!.hasAttachments).toBe(false);
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('');
+    expect(document.body.querySelector('.cm-placeholder')).not.toBeNull();
+  });
+
+  it('preserves surrounding text when an inline tag chip is removed', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('please review ');
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+      latest!.insertText(' now');
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+
+    const text = latest!.viewRef.current!.state.doc.toString();
+    expect(text).toContain('please review');
+    expect(text).toContain('now');
+    // The chip's serialized text must be removed from the doc, not just its
+    // decoration — uncovered text would be submitted as plain prompt text.
+    expect(text).not.toContain('@orders');
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('appends end-placed inline tags without stealing focus', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('draft text');
+    });
+    const view = latest!.viewRef.current!;
+    // Caret sits mid-text; an end-placement insert must still append.
+    act(() => {
+      view.dispatch({ selection: { anchor: 5 } });
+    });
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline', position: 'end' },
+      );
+    });
+
+    const doc = view.state.doc.toString();
+    // A boundary separates the appended reference from the preceding text,
+    // and the caret stays where the user left it (no teleport to doc end).
+    expect(doc).toBe('draft text @orders ');
+    expect(view.state.selection.main.from).toBe(5);
+    expect(document.activeElement).toBe(outside);
+
+    // The end-placed tag must become a real chip decoration: a wrong
+    // effect-range offset would leave the doc text correct but decorate the
+    // wrong span, breaking the remove button and atomic-range behavior.
+    expect(latest!.hasAttachments).toBe(true);
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+    // The remove button deletes the chip's serialized text (separator
+    // spacing aside), restoring the pre-upload content.
+    const removed = view.state.doc.toString();
+    expect(removed).not.toContain('@orders');
+    expect(removed.trim()).toBe('draft text');
+    expect(latest!.hasAttachments).toBe(false);
+    outside.remove();
   });
 
   it('updates inline tag state when a document change removes the last tag', async () => {

@@ -280,14 +280,20 @@ function createSupervisorHandle(
         socketPath,
         'send',
         { sessionId, text },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
       ),
     answer: (sessionId: string, text: string) =>
       callAgentViewSupervisor(
         socketPath,
         'answer',
         { sessionId, text },
-        authOptions,
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
       ),
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),

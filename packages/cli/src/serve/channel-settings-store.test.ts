@@ -189,6 +189,28 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).toBe('$BOT_TOKEN');
   });
 
+  it('accepts chat-and-thread session scope', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionScope: 'chat_thread',
+      },
+    });
+
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot']?.['sessionScope'],
+    ).toBe('chat_thread');
+  });
+
   it('replaces and clears secrets only through explicit operations', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

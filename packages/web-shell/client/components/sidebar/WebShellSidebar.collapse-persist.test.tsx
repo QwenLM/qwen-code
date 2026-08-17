@@ -85,6 +85,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
+  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
   useSessions: (options?: { archiveState?: string; group?: string }) => {
     if (options?.archiveState === 'archived') return archived;
     if (options?.group === 'pinned') return pinned;

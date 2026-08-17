@@ -176,7 +176,9 @@ export class BoundedOutputRing {
   }
 
   private trim(): void {
+    let trimmed = false;
     while (this.retainedBytesValue > this.maxBytes) {
+      trimmed = true;
       const excess = this.retainedBytesValue - this.maxBytes;
       const first = this.chunks[0];
       if (!first) {
@@ -196,7 +198,9 @@ export class BoundedOutputRing {
         this.retainedBytesValue -= first.byteLength - retained.byteLength;
       }
     }
-    this.trimLeadingUtf8ContinuationBytes();
+    // Only a size trim can leave continuation bytes at the window start;
+    // without one, dropping them would discard data with room still free.
+    if (trimmed) this.trimLeadingUtf8ContinuationBytes();
   }
 
   private appendChunk(chunk: Buffer): void {
@@ -407,7 +411,9 @@ export async function launchAgentViewPtyHost(
       inputDecoder = new StringDecoder('utf8');
     },
     dispose(): void {
-      ptyProcess.kill();
+      // Match shutdown(): node-pty's signal-less kill falls back to SIGHUP on
+      // POSIX, which nohup-style workers ignore.
+      ptyProcess.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
       resolveExitOnce({ exitCode: 1 });
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();

@@ -428,7 +428,32 @@ export class GeminiClient {
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
-    if (resumedSessionData) {
+    const restoreRuntime = this.config.getSessionRestoreRuntime?.();
+    if (restoreRuntime) {
+      uiTelemetryService.resetSession(sessionId);
+      for (const event of restoreRuntime.uiTelemetryEvents) {
+        uiTelemetryService.addEvent(event, sessionId);
+      }
+      this.seedRecentCompletedToolNamesFromHistory(restoreRuntime.apiHistory);
+      await this.startChat(
+        restoreRuntime.apiHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+      );
+      const chat = this.getChat();
+      if (restoreRuntime.resumeTokenCounts) {
+        const counts = restoreRuntime.resumeTokenCounts;
+        uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
+        chat.seedResumeTokenCounts(
+          counts.promptTokenCount,
+          counts.outputTokenCount,
+          counts.isEstimated,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+      }
+    } else if (resumedSessionData) {
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),

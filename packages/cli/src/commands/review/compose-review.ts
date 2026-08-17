@@ -56,6 +56,7 @@ import {
   type RosterPlan,
 } from './lib/roster.js';
 import { repositoryContextOf } from './lib/repository-context.js';
+import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
@@ -72,12 +73,12 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
-  FOOTER_MARKER,
-  REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripReviewFooter,
 } from './lib/review-footer.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -455,17 +456,6 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
-function stripReviewFooter(entry: string): string {
-  // Guarded on the marker: the strip regex opens `\s*` under an unanchored
-  // search, which scans quadratically on a long whitespace run in an entry
-  // that carries no footer at all — and these entries are model-written
-  // with no length cap (measured ~20 s at 80k characters). An entry
-  // without the marker has nothing to strip.
-  return entry.includes(FOOTER_MARKER)
-    ? entry.replace(REVIEW_FOOTER_RE, '')
-    : entry;
-}
-
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -483,14 +473,15 @@ function toBool(value: unknown, field: string): boolean {
 export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
+  attribution = true,
 ): ComposeReviewResult {
-  const result = composeReviewBody(input, cliVersion);
+  const result = composeReviewBody(input, cliVersion, attribution);
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input);
+  const marker = ledgerMarkerFor(input, result.cappedBy);
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -499,11 +490,15 @@ export function composeReview(
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
  */
-function ledgerMarkerFor(input: ComposeReviewInput): string | null {
+function ledgerMarkerFor(
+  input: ComposeReviewInput,
+  cappedBy: string[],
+): string | null {
   try {
     if (!input.planPath) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       prNumber?: unknown;
+      fetchedSha?: unknown;
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -526,8 +521,30 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    return serializeLedger(
-      buildLedger(
+    // The anchor rides only when this round's scope was clean, and "clean" is
+    // the verdict this module just computed: `cappedBy` aggregates every
+    // fail-closed state — each named input pushes its own cap entry, plus the
+    // caps with no input channel at all (a chunk nobody read, findings still
+    // `— [unverified]`, the deterministic gates' enrichments). The input
+    // fields alone were measured leaking exactly those channel-less caps: a
+    // round the module stamped "could not certify that any of this diff was
+    // reviewed" still carried the anchor. One raw check stays alongside, for
+    // the sliver the cap list deliberately drops: a whitespace-only
+    // `cannotTellCriticals` entry is filtered out of the rendered caps, but
+    // Step 8's contract is "any entry" — an undecided blocker whose text was
+    // lost is still an undecided blocker. An anchor written past unreviewed
+    // or undecided scope scopes the NEXT round's incremental diff past it,
+    // and no later round ever re-covers the gap. The findings always ride —
+    // a fail-closed round's work list is still a work list; it just cannot
+    // certify a range.
+    const failClosed =
+      (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
+    const sha =
+      !failClosed && typeof plan.fetchedSha === 'string'
+        ? plan.fetchedSha
+        : undefined;
+    return serializeLedger({
+      ...buildLedger(
         prevRound + 1,
         (input.draftedComments ?? []) as Array<{
           path?: unknown;
@@ -538,7 +555,8 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           .map(stripReviewFooter)
           .filter((entry) => entry.trim() !== ''),
       ),
-    );
+      ...(sha ? { sha } : {}),
+    });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
     return null;
@@ -548,6 +566,7 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
+  attribution: boolean,
 ): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -713,6 +732,11 @@ function composeReviewBody(
     gateDisclosed.push(...gate.disclosed);
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
     repositoryContextNotes.push(...repositoryContextGate(input.planPath));
+    // Modeled-executable-system diffs (declared by the manifest domain) owe
+    // per-layer reverse-audit coverage; an unwalked defect layer joins
+    // `unreviewedDimensions` and caps a would-be Approve, exactly like a
+    // dimension nobody reviewed. Inert on every diff the manifest does not mark.
+    unreviewed.push(...layerAuditGate(input.planPath, input.env).unreviewed);
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -1025,17 +1049,21 @@ function composeReviewBody(
     'presubmit.downgradeReasons',
   );
   const modelId: unknown = input.modelId;
-  if (typeof modelId !== 'string' || modelId.trim() === '') {
-    throw new TypeError(
-      'compose-review: modelId is required (the public footer names the reviewing model)',
-    );
-  }
-  if (!isFooterSafeModelId(modelId)) {
-    throw new TypeError(
-      'compose-review: modelId is interpolated into the public footer ' +
-        'verbatim — it must be a single line that does not contain the ' +
-        'footer marker',
-    );
+  let footer = '';
+  if (attribution) {
+    if (typeof modelId !== 'string' || modelId.trim() === '') {
+      throw new TypeError(
+        'compose-review: modelId is required (the public footer names the reviewing model)',
+      );
+    }
+    if (!isFooterSafeModelId(modelId)) {
+      throw new TypeError(
+        'compose-review: modelId is interpolated into the public footer ' +
+          'verbatim — it must be a single line that does not contain the ' +
+          'footer marker',
+      );
+    }
+    footer = reviewFooter(modelId, cliVersion);
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
@@ -1154,7 +1182,6 @@ function composeReviewBody(
     }
   }
 
-  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -1174,7 +1201,7 @@ function composeReviewBody(
       bilingual && zh !== en
         ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
         : en;
-    return `${text}\n\n${footer}`;
+    return footer === '' ? text : `${text}\n\n${footer}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
@@ -2311,6 +2338,7 @@ export const composeReviewCommand: CommandModule = {
       // compose time — a shared runner can rewrite the install mid-session.
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
+      operatorReviewSettings().attribution,
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

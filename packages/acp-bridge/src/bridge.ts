@@ -16,6 +16,8 @@ import type {
   CancelNotification,
   Client,
   PromptRequest,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
   SessionUpdate,
@@ -47,11 +49,15 @@ import {
   type BridgeEvent,
 } from './eventBus.js';
 import {
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
+  normalizeJournalGrowthPoolBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
   TurnBoundaryCompactionEngine,
+  type JournalGrowthSessionLimit,
 } from './compactionEngine.js';
+import { createJournalGrowthPolicy } from './journalGrowthPolicy.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -128,13 +134,15 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
-  MID_TURN_RECONCILIATION_RING_SIZE,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  LOAD_REPLAY_MAX_UPDATES,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -245,7 +253,6 @@ const KNOWN_SESSION_UPDATE_TYPES = new Set([
   'session_info_update',
   'usage_update',
 ]);
-const MAX_BULK_REPLAY_UPDATES = 10_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -271,6 +278,21 @@ function sessionSourceRequestMeta(
         },
       }
     : {};
+}
+
+/**
+ * Only the daemon's authenticated channel-worker path can populate the
+ * user-facing display projection. Every other source echoes its prompt content
+ * verbatim. Single source of truth for the echo, pending-entry text, and child
+ * metadata so their `''`/undefined semantics cannot drift apart.
+ */
+function getChannelPromptDisplayText(
+  entry: Pick<SessionEntry, 'sourceType'>,
+  displayText: string | undefined,
+): string | undefined {
+  return entry.sourceType === 'channel' && typeof displayText === 'string'
+    ? displayText
+    : undefined;
 }
 
 function isDefinitiveAcpRequestError(error: unknown): boolean {
@@ -639,6 +661,7 @@ function describeLoadReplayValue(value: unknown): string {
 function extractLoadReplayResponse(state: BridgeSessionState): {
   state: BridgeSessionState;
   updates: SessionUpdate[];
+  anchorRecordId?: string;
   partial?: true;
   replayError?: string;
   hasMore?: boolean;
@@ -660,10 +683,10 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
         `(version=${LOAD_REPLAY_VERSION}, count=not-array)`,
     );
   }
-  if (rawUpdates.length > MAX_BULK_REPLAY_UPDATES) {
+  if (rawUpdates.length > LOAD_REPLAY_MAX_UPDATES) {
     throw new Error(
       `qwen.session.loadReplay updates exceed limit ` +
-        `(${rawUpdates.length} > ${MAX_BULK_REPLAY_UPDATES})`,
+        `(${rawUpdates.length} > ${LOAD_REPLAY_MAX_UPDATES})`,
     );
   }
   const partial = replay['partial'];
@@ -685,6 +708,13 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     throw new Error(
       `Invalid qwen.session.loadReplay hasMore ` +
         `(version=${LOAD_REPLAY_VERSION}, hasMore=${describeLoadReplayValue(hasMore)})`,
+    );
+  }
+  const anchorRecordId = replay['anchorRecordId'];
+  if (anchorRecordId !== undefined && typeof anchorRecordId !== 'string') {
+    throw new Error(
+      `Invalid qwen.session.loadReplay anchorRecordId ` +
+        `(version=${LOAD_REPLAY_VERSION}, anchorRecordId=${describeLoadReplayValue(anchorRecordId)})`,
     );
   }
   const invalidUpdateIndex = rawUpdates.findIndex(
@@ -713,6 +743,7 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
   return {
     state: cleanState,
     updates: rawUpdates,
+    ...(typeof anchorRecordId === 'string' ? { anchorRecordId } : {}),
     ...(partial === true ? { partial: true as const } : {}),
     ...(typeof replayError === 'string' ? { replayError } : {}),
     ...(hasMore === true ? { hasMore: true } : {}),
@@ -970,11 +1001,10 @@ interface SessionEntry {
   /** Bounded ids promoted into the normal prompt FIFO. */
   promotedMidTurnMessageIds: string[];
   /**
-   * Per-session model-change FIFO. Prevents two concurrent
-   * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
-   * model requests) from racing into `unstable_setSessionModel` and
-   * leaving the agent in non-deterministic state. Always resolves —
-   * failures swallowed at the tail like `promptQueue`.
+   * Per-session model/configuration FIFO. Prevents model changes and
+   * model-dependent configuration changes from racing into the agent and
+   * leaving it in non-deterministic state. Always resolves — failures are
+   * swallowed at the tail like `promptQueue`.
    */
   modelChangeQueue: Promise<void>;
   /**
@@ -1109,6 +1139,7 @@ interface SessionEntry {
   restoreReplayPartial?: true;
   restoreReplayError?: string;
   restoreHistoryHasMore?: true;
+  restoreHistoryAnchorRecordId?: string;
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
@@ -1355,6 +1386,7 @@ function echoPromptToSessionBus(
   req: PromptRequest,
   promptId: string,
   originatorClientId: string | undefined,
+  displayText: string | undefined,
 ): void {
   // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
   // ACP type contract — read it directly so a future SDK bump that
@@ -1366,15 +1398,31 @@ function echoPromptToSessionBus(
   // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
   if (!Array.isArray(prompt) || prompt.length === 0) return;
+  let displayTextPublished = false;
   const serverTimestamp = Date.now();
-  const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
+  const echoPrompt = prompt.slice(0, MAX_ECHO_CONTENT_BLOCKS);
+  if (
+    displayText &&
+    !echoPrompt.some((part) => isRecord(part) && part['type'] === 'text')
+  ) {
+    const textPart = prompt
+      .slice(MAX_ECHO_CONTENT_BLOCKS)
+      .find((part) => isRecord(part) && part['type'] === 'text');
+    if (textPart) echoPrompt[echoPrompt.length - 1] = textPart;
+  }
+  const blockCount = echoPrompt.length;
   for (let i = 0; i < blockCount; i += 1) {
-    const part = prompt[i];
+    const part = echoPrompt[i];
     if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
-    // Every `ContentBlock` variant (text, image, audio, resource) is
-    // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
-    // accepts any `content` shape; rich rendering of non-text blocks is
-    // the consumer's responsibility.
+    let displayPart = part;
+    if (displayText !== undefined && part.type === 'text') {
+      if (displayTextPublished) continue;
+      displayTextPublished = true;
+      if (!displayText) continue;
+      displayPart = { ...part, text: displayText };
+    }
+    // Non-text blocks are published verbatim. Channel text uses the display
+    // projection so hidden model context never reaches transcript consumers.
     try {
       entry.events.publish({
         type: 'session_update',
@@ -1383,7 +1431,7 @@ function echoPromptToSessionBus(
           sessionId: req.sessionId,
           update: {
             sessionUpdate: 'user_message_chunk',
-            content: part,
+            content: displayPart,
             // `_meta` lives inside the `update` object rather than at
             // envelope level. `_meta` is a standard JSON-RPC/MCP extension
             // field permitted alongside spec fields, the SDK normalizer
@@ -1948,6 +1996,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   );
   const maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
   const maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
+  // Adaptive live-journal growth is opt-in via the pool: `runQwenServe`
+  // derives one from the daemon memory budget (and skips it when the
+  // operator pinned the journal flags). No pool → fixed-cap eviction,
+  // exactly the pre-growth behavior.
+  const journalGrowthPoolBytes = normalizeJournalGrowthPoolBytes(
+    opts.journalGrowthPoolBytes,
+  );
+  const journalGrowthPolicy =
+    journalGrowthPoolBytes !== undefined
+      ? createJournalGrowthPolicy({
+          baselineEvents: maxJournalEvents,
+          baselineBytes: maxJournalBytes,
+          poolBytes: journalGrowthPoolBytes,
+          hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+        })
+      : undefined;
+  // Daemon-wired shared-pool accounting (see BridgeOptions): the
+  // aggregator reports every sharing session's current cap, this
+  // bridge's included. Absent on standalone bridges.
+  const journalGrowthSessionLimits = opts.journalGrowthSessionLimits;
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -2989,6 +3057,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // the ACP request returns. Keep a temporary bus so those replay frames land in
   // the ring, then promote the same bus into the registered SessionEntry.
   const pendingRestoreEvents = new Map<string, EventBus>();
+
+  // Current journal byte caps of this bridge's live sessions, including
+  // in-flight restores whose buses are not registered in byId yet, each
+  // with this bridge's baseline cap. Shared with sibling bridges through
+  // the daemon-wide aggregator so ONE pool covers every workspace;
+  // without it the advisor accounts this bridge's sessions only.
+  const journalSessionLimits = (): JournalGrowthSessionLimit[] => {
+    const limits = [...byId.values()].map((entry) => ({
+      limitBytes: entry.events.journalLimitBytes() ?? maxJournalBytes,
+      baselineBytes: maxJournalBytes,
+    }));
+    for (const [restoreId, bus] of pendingRestoreEvents) {
+      if (!byId.has(restoreId)) {
+        limits.push({
+          limitBytes: bus.journalLimitBytes() ?? maxJournalBytes,
+          baselineBytes: maxJournalBytes,
+        });
+      }
+    }
+    return limits;
+  };
+  const unregisterJournalGrowthSessionLimits =
+    journalGrowthPolicy !== undefined &&
+    opts.registerJournalGrowthSessionLimits !== undefined
+      ? opts.registerJournalGrowthSessionLimits(journalSessionLimits)
+      : undefined;
 
   const createClientId = (): string => `client_${randomUUID()}`;
 
@@ -4818,6 +4912,51 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `replay window evicted ${JSON.stringify(eviction)}`,
           );
         },
+        // Adaptive growth: the engine asks before evicting past its caps.
+        // The policy accounts growth across this bridge's live sessions
+        // from every session's CURRENT journal cap (stateless — no ledger
+        // to reconcile when a session is reaped), so granted headroom dies
+        // with its session.
+        ...(journalGrowthPolicy
+          ? {
+              onJournalGrowth: (current: {
+                maxEvents: number;
+                maxBytes: number;
+              }) => {
+                // The daemon-wired aggregator already covers every
+                // sharing bridge's live sessions (this bridge's included);
+                // standalone bridges fall back to their own enumeration.
+                const allSessionLimits = journalGrowthSessionLimits
+                  ? [...journalGrowthSessionLimits()]
+                  : journalSessionLimits();
+                // A requester whose bus lives outside both maps (defensive
+                // — today it is either registered or mid-restore) must
+                // still be charged at its current cap.
+                if (
+                  !byId.has(sessionId) &&
+                  !pendingRestoreEvents.has(sessionId)
+                ) {
+                  allSessionLimits.push({
+                    limitBytes: current.maxBytes,
+                    baselineBytes: maxJournalBytes,
+                  });
+                }
+                const grant = journalGrowthPolicy.grant({
+                  currentMaxEvents: current.maxEvents,
+                  currentMaxBytes: current.maxBytes,
+                  allSessionLimits,
+                });
+                if (grant) {
+                  teeServeDebugLine(
+                    `live journal growth session=${JSON.stringify(sessionId)}: ` +
+                      `${current.maxBytes} -> ${grant.maxBytes} bytes, ` +
+                      `${current.maxEvents} -> ${grant.maxEvents} entries`,
+                  );
+                }
+                return grant;
+              },
+            }
+          : {}),
       }),
       {
         // Fired once, on the FIRST ingest/seed failure (the bus keeps the
@@ -5250,6 +5389,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'restoreReplayPartial'
       | 'restoreReplayError'
       | 'restoreHistoryHasMore'
+      | 'restoreHistoryAnchorRecordId'
       | 'activePromptId'
     >,
     action: 'load' | 'resume',
@@ -5263,6 +5403,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | 'partial'
     | 'replayError'
     | 'historyHasMore'
+    | 'historyAnchorRecordId'
   > => {
     const replayStatus =
       action === 'load' && entry.restoreReplayPartial === true
@@ -5283,6 +5424,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         lastEventId: entry.events.lastEventId,
         eventEpoch,
         ...replayStatus,
+        ...(action === 'load' &&
+        entry.restoreHistoryAnchorRecordId !== undefined
+          ? { historyAnchorRecordId: entry.restoreHistoryAnchorRecordId }
+          : {}),
       };
     }
     if (action === 'load') {
@@ -5307,6 +5452,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(snapshot.degraded ? { replayDegraded: true } : {}),
         ...(entry.restoreHistoryHasMore === true
           ? { historyHasMore: true }
+          : {}),
+        ...(entry.restoreHistoryAnchorRecordId !== undefined
+          ? { historyAnchorRecordId: entry.restoreHistoryAnchorRecordId }
           : {}),
       };
     }
@@ -5979,6 +6127,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       let replayPartial: true | undefined;
       let replayError: string | undefined;
       let replayHasMore: true | undefined;
+      let replayAnchorRecordId: string | undefined;
       try {
         const rawRestore = telemetry.withSpan(
           'session.restore',
@@ -6103,6 +6252,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           replayPartial = extracted.partial;
           replayError = extracted.replayError;
           replayHasMore = extracted.hasMore === true ? true : undefined;
+          replayAnchorRecordId = extracted.anchorRecordId;
         }
       } catch (err) {
         if (err instanceof SessionRestoreTimeoutError) throw err;
@@ -6223,6 +6373,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       if (replayHasMore === true) {
         entry.restoreHistoryHasMore = true;
+      }
+      if (replayAnchorRecordId !== undefined) {
+        entry.restoreHistoryAnchorRecordId = replayAnchorRecordId;
       }
       seedSnapshotCaches(entry, publicState);
       const artifactRestoreWarnings = await entry.artifacts.restore(
@@ -6603,6 +6756,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           compactedReplayMaxBytes,
           maxJournalEvents,
           maxJournalBytes,
+          journalGrowth:
+            journalGrowthPoolBytes !== undefined
+              ? {
+                  poolBytes: journalGrowthPoolBytes,
+                  hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                }
+              : null,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
         },
@@ -6610,28 +6770,33 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         pendingPermissionCount: permissionMediator.pendingCount,
         channelLive: !!liveChannelInfo(),
         permissionPolicy: permissionMediator.policy,
-        sessions: [...byId.values()].map((entry) => ({
-          sessionId: entry.sessionId,
-          workspaceCwd: entry.workspaceCwd,
-          createdAt: entry.createdAt,
-          ...(entry.displayName ? { displayName: entry.displayName } : {}),
-          clientCount: entry.clientIds.size,
-          subscriberCount: entry.events.subscriberCount,
-          attachCount: entry.attachCount,
-          pendingPromptCount: entry.pendingPromptCount,
-          pendingPermissionCount: entry.pendingPermissionIds.size,
-          hasActivePrompt: entry.promptActive,
-          lastEventId: entry.events.lastEventId,
-          ...(entry.sessionLastSeenAt !== undefined
-            ? { lastSeenAt: entry.sessionLastSeenAt }
-            : {}),
-          ...(entry.currentModelId
-            ? { currentModelId: entry.currentModelId }
-            : {}),
-          ...(entry.currentApprovalMode
-            ? { currentApprovalMode: entry.currentApprovalMode }
-            : {}),
-        })),
+        sessions: [...byId.values()].map((entry) => {
+          const journalLimits = entry.events.journalLimits();
+          return {
+            sessionId: entry.sessionId,
+            workspaceCwd: entry.workspaceCwd,
+            createdAt: entry.createdAt,
+            ...(entry.displayName ? { displayName: entry.displayName } : {}),
+            clientCount: entry.clientIds.size,
+            subscriberCount: entry.events.subscriberCount,
+            attachCount: entry.attachCount,
+            pendingPromptCount: entry.pendingPromptCount,
+            pendingPermissionCount: entry.pendingPermissionIds.size,
+            hasActivePrompt: entry.promptActive,
+            lastEventId: entry.events.lastEventId,
+            ...(entry.sessionLastSeenAt !== undefined
+              ? { lastSeenAt: entry.sessionLastSeenAt }
+              : {}),
+            ...(entry.currentModelId
+              ? { currentModelId: entry.currentModelId }
+              : {}),
+            ...(entry.currentApprovalMode
+              ? { currentApprovalMode: entry.currentApprovalMode }
+              : {}),
+            maxJournalEvents: journalLimits?.maxEvents ?? maxJournalEvents,
+            maxJournalBytes: journalLimits?.maxBytes ?? maxJournalBytes,
+          };
+        }),
       };
     },
 
@@ -7166,12 +7331,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
+      const channelDisplayText = getChannelPromptDisplayText(
+        entry,
+        context?.promptDisplayText,
+      );
+      const pendingText =
+        channelDisplayText === undefined
+          ? extractPromptText(req.prompt)
+          : channelDisplayText ||
+            (req.prompt.some(
+              (block) => isRecord(block) && block['type'] === 'image',
+            )
+              ? '[image]'
+              : '');
       const pendingEntry: PendingPromptEntry = {
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
         ...(isPromotedMidTurn ? { promotedMidTurn: true } : {}),
-        text: extractPromptText(req.prompt),
+        text: pendingText,
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
       };
@@ -7369,6 +7547,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
+                  const promptDisplayText = channelDisplayText;
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -7377,6 +7556,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
@@ -7387,6 +7567,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (promptDisplayText !== undefined) {
+                    meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
+                      promptDisplayText;
                   }
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
@@ -7441,6 +7625,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       promptRequest,
                       pendingEntry.promptId,
                       originatorClientId,
+                      channelDisplayText,
                     );
                   }
                 } catch (echoErr) {
@@ -9206,6 +9391,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return response;
     },
 
+    async setSessionConfigOption(sessionId, req) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
+      const transportClosed = getTransportClosedReject(entry);
+      const work = entry.modelChangeQueue.then(() =>
+        Promise.race([
+          withTimeout(
+            entry.connection.setSessionConfigOption(normalized),
+            initTimeoutMs,
+            'setSessionConfigOption',
+          ),
+          transportClosed,
+        ]),
+      );
+      entry.modelChangeQueue = work.then(
+        () => undefined,
+        () => undefined,
+      );
+      return (await work) as SetSessionConfigOptionResponse;
+    },
+
     async setSessionLanguage(sessionId, params, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -10753,6 +10962,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // entered the bridge.shutdown() phase fails fast instead of
         // spawning a child this teardown won't see.
         shuttingDown = true;
+        unregisterJournalGrowthSessionLimits?.();
         cancelIdleTimer();
         stopSessionReaper();
         const entries = Array.from(byId.values());

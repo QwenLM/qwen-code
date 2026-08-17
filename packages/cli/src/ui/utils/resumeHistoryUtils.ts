@@ -328,7 +328,11 @@ function convertToHistoryItems(
           | SlashCommandRecordPayload
           | undefined;
         if (!payload) continue;
-        if (payload.phase === 'invocation' && payload.rawCommand) {
+        if (
+          payload.phase === 'invocation' &&
+          payload.rawCommand &&
+          !payload.hiddenInvocation
+        ) {
           const sentToModel =
             typeof payload.sentToModel === 'boolean'
               ? payload.sentToModel

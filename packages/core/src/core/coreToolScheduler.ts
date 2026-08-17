@@ -37,6 +37,7 @@ import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
+  COMBINED_PASS_TOLERANCE_FACTOR,
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
@@ -5161,7 +5162,7 @@ export class CoreToolScheduler {
             perToolMax !== undefined
               ? Number.POSITIVE_INFINITY
               : this.config.getTruncateToolOutputLines() * 2;
-          if (content.length > baseThreshold * 2) {
+          if (content.length > baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR) {
             try {
               const contentBeforeRecombination = content;
               const recombined = await truncateToolOutput(
@@ -5169,7 +5170,7 @@ export class CoreToolScheduler {
                 toolName,
                 content,
                 {
-                  threshold: baseThreshold * 2,
+                  threshold: baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR,
                   lines: combinedLines,
                   keep: perToolKeep,
                 },

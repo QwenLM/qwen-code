@@ -394,6 +394,15 @@ describe('resumeHistoryUtils', () => {
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
     });
 
+    it('does not fall back to hidden text when displayText is empty', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'internal channel instructions' }] },
+        systemPayload: { displayText: '', hookContext: '' },
+      });
+      expect(items).toEqual([]);
+    });
+
     it('prefers displayText over the tag-strip fallback', () => {
       // Fixture where the two branches disagree: without displayText the
       // tag-strip path would expose the middle "expanded extra" part.
@@ -1050,6 +1059,55 @@ describe('resumeHistoryUtils', () => {
         type: 'gemini',
         text: 'Follow-up',
         timestamp: new Date('2026-01-15T18:00:00.000Z').getTime(),
+      },
+    ]);
+  });
+
+  it('skips hidden slash command invocations but replays their results on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/model',
+            sentToModel: false,
+            hiddenInvocation: true,
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/model',
+            outputHistoryItems: [
+              { type: 'info', text: 'Kept model as qwen3-max' },
+            ],
+          },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([
+      { id: 41, type: 'info', text: 'Kept model as qwen3-max' },
+      {
+        id: 42,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T19:00:00.000Z').getTime(),
       },
     ]);
   });

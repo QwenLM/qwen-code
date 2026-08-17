@@ -35,9 +35,6 @@
       "relatedPaths": [
         "packages/web-shell/client/adapters/**",
         "packages/web-shell/client/completions/**",
-        "packages/web-shell/client/e2e/*",
-        "packages/web-shell/client/e2e/utils/*",
-        "packages/web-shell/client/e2e/visuals/*",
         "packages/web-shell/client/hooks/**"
       ]
     },

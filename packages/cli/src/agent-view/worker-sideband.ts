@@ -148,7 +148,9 @@ export async function reportAgentViewWorkerState(
   const event = {
     type: 'state',
     ...report,
-    cwd: report.cwd ?? process.cwd(),
+    // activeCwd is guaranteed by readAgentViewWorkerSidebandEnv and survives
+    // a deleted cwd, unlike process.cwd(), which throws ENOENT.
+    cwd: report.cwd ?? sideband.activeCwd,
   } as const;
   const key = JSON.stringify(event);
   const sendAndRecord = async () => {

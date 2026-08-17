@@ -134,6 +134,220 @@ describe('SystemMessage — background notification label', () => {
   });
 });
 
+describe('SystemMessage — background notification i18n body', () => {
+  it('renders shell notifications with structured command via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已完成：npm test');
+    expect(container.textContent).not.toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders agent notifications with structured description via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'agent',
+          description: 'worker',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台智能体已完成：worker');
+  });
+
+  it('renders monitor notifications with the event count in English', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Monitor "logs" completed. (5 events)',
+    );
+    expect(container.textContent).not.toContain('raw daemon text');
+  });
+
+  it('renders the dropped-lines clause when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Monitor "logs" completed. (5 events, 2 lines dropped due to throttling)',
+    );
+  });
+
+  it('renders the dropped-lines clause in zh-CN when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器已完成（5 个事件，因限流丢弃 2 行）：logs',
+    );
+  });
+
+  it('renders failed monitor notifications with the event count in zh-CN', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'failed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 42,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器执行失败（42 个事件）：logs',
+    );
+  });
+
+  it('renders cancelled shell notifications via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'cancelled',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已取消：npm test');
+  });
+
+  it('renders failed agent notifications via i18n in English', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{ status: 'failed', kind: 'agent', description: 'worker' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background agent "worker" failed.',
+    );
+  });
+
+  it('falls back to raw content for unknown terminal statuses', () => {
+    const container = render(
+      <SystemMessage
+        content='Monitor "logs" timed out.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'timeout', kind: 'monitor', description: 'logs' }}
+      />,
+    );
+
+    expect(container.textContent).toContain('Monitor "logs" timed out.');
+    expect(container.textContent).not.toContain('notification.monitor.timeout');
+  });
+
+  it('falls back to raw content when structured fields are absent', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'shell' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders the fallback through Markdown so session links stay clickable', () => {
+    const seen: unknown[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener('qwen:open-session', handler);
+    const container = render(
+      <SystemMessage
+        content="Sub-session [🧵 abc12345](qwen-session://abc12345-full) completed."
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'agent' }}
+      />,
+    );
+
+    const link = container.querySelector('a[role="button"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('🧵 abc12345');
+    expect(container.textContent).not.toContain('](');
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(seen).toEqual(['abc12345-full']);
+    window.removeEventListener('qwen:open-session', handler);
+  });
+});
+
 describe('SystemMessage — goal status activation', () => {
   const content = serializeGoalStatusMessage({
     kind: 'set',

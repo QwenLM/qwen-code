@@ -474,6 +474,7 @@ export function createSpawnChannelFactory(
         {
           cwd: workspaceCwd,
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
           env: childEnv,
         },
       );

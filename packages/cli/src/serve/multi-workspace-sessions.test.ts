@@ -474,6 +474,7 @@ function makeBridge(
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
+          journalGrowth: null,
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
         },
@@ -493,6 +494,8 @@ function makeBridge(
           pendingPermissionCount: 0,
           hasActivePrompt: summary.hasActivePrompt,
           lastEventId: 0,
+          maxJournalEvents: 10_000,
+          maxJournalBytes: 8 * 1024 * 1024,
         })),
       };
     },

@@ -32,11 +32,18 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import {
+  isDesktopShell,
+  isExternalOpenUrl,
+  openExternalUrl,
+} from '../../utils/externalOpen';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { requestToast } from '../ToastHost';
 import { DialogShell } from '../dialogs/DialogShell';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
@@ -2336,8 +2343,27 @@ function ArtifactDetail({
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
 }) {
+  const { t } = useI18n();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
+  const isExternalUrl = isExternalOpenUrl(safeUrl);
+  const openExternal = () => {
+    if (!safeUrl || !isExternalUrl) return;
+    openExternalUrl(safeUrl).catch((error: unknown) => {
+      requestToast(
+        'error',
+        t('common.openFailed', { message: extractErrorDetail(error) }),
+      );
+    });
+  };
+  // The desktop webview's implicit `target="_blank"` handling silently drops
+  // failed new-window requests, so route external opens through the shell's
+  // explicit opener there; plain browsers keep native anchor behavior.
+  const handleLocationClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (!isExternalUrl || !isDesktopShell()) return;
+    event.preventDefault();
+    openExternal();
+  };
   const isAutomationSnapshot =
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
   const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
@@ -2430,14 +2456,26 @@ function ArtifactDetail({
         <div className={styles.section}>
           <div className={styles.sectionTitle}>Location</div>
           {safeUrl ? (
-            <a
-              className={styles.link}
-              href={safeUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {safeUrl}
-            </a>
+            <div className={styles.locationRow}>
+              <a
+                className={styles.link}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={handleLocationClick}
+              >
+                {safeUrl}
+              </a>
+              <a
+                className={styles.openButton}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={handleLocationClick}
+              >
+                {t('artifact.openLink')}
+              </a>
+            </div>
           ) : (
             <div className={styles.meta}>{location}</div>
           )}

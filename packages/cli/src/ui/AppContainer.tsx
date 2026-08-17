@@ -156,6 +156,7 @@ import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
+  titleStatusPrefix,
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
@@ -1431,6 +1432,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setThemeError,
     historyManager.addItem,
     initializationResult.themeError,
+    config,
   );
 
   const {
@@ -1490,7 +1492,12 @@ export const AppContainer = (props: AppContainerProps) => {
     openEditorDialog,
     handleEditorSelect,
     exitEditorDialog,
-  } = useEditorSettings(settings, setEditorError, historyManager.addItem);
+  } = useEditorSettings(
+    settings,
+    setEditorError,
+    historyManager.addItem,
+    config,
+  );
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
@@ -4335,7 +4342,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     const folderName = basename(config.getTargetDir());
-    const title = formatSessionWindowTitle(sessionName, folderName);
+    const title = formatSessionWindowTitle(
+      sessionName,
+      folderName,
+      titleStatusPrefix(streamingState),
+    );
 
     // Only update the title if it's different from the last value we set
     if (lastTitleRef.current !== title) {
@@ -4348,6 +4359,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
     sessionName,
+    streamingState,
     settings.merged.ui?.hideWindowTitle,
     settings.merged.ui?.showStatusInTitle,
     config,

@@ -2082,4 +2082,5 @@ export default {
     'セーフモードでは自動スキル管理による変更は無効です。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
+  'Kept model as {{model}}': 'モデルは {{model}} のままです',
 };

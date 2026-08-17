@@ -253,6 +253,8 @@ export {
   type DaemonWorkspaceFileBytes,
   type DaemonWorkspaceFileEditRequest,
   type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileUploadRequest,
+  type DaemonWorkspaceFileUploadResult,
   type DaemonWorkspaceFileWriteRequest,
   type DaemonWorkspaceFileWriteResult,
   type DaemonWorkspaceMemoryDreamOptions,

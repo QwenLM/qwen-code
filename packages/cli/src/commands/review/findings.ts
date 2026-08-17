@@ -83,6 +83,13 @@ export interface Finding {
   shortSummary: string;
   /** The concrete trigger and wrong outcome — the finding's evidence. */
   failureScenario: string;
+  /**
+   * The executed evidence that settled the verdict (a probe's two sides, an
+   * A/B's quoted pair, a sweep count) — or the verifier's
+   * `not run — <reason>` line. Carried as data so the report and the comment
+   * bodies quote one recorded string instead of transcribing it twice more.
+   */
+  witness?: string;
   suggestedFix?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
@@ -351,6 +358,11 @@ export function validateFindings(raw: unknown): Finding[] {
     const shortSummary =
       asString(o, 'shortSummary') ?? asString(o, 'short_summary');
 
+    // `witness` round-trips for the same reason `outcomeNote` does: the Step 4
+    // witness rule attaches it once, and the report and the comment bodies read
+    // it back out of the artifact instead of transcribing the evidence again.
+    const witness = asString(o, 'witness');
+
     return {
       id,
       severity,
@@ -361,6 +373,7 @@ export function validateFindings(raw: unknown): Finding[] {
         ? compressSummary(shortSummary)
         : compressSummary(summary),
       failureScenario,
+      ...(witness ? { witness } : {}),
       ...(asString(o, 'suggestedFix') || asString(o, 'suggested_fix')
         ? {
             suggestedFix: (asString(o, 'suggestedFix') ??
@@ -505,6 +518,45 @@ export function holdCriticalsFailingOnBase(
     };
   });
   return { findings: out, held, readjudicated };
+}
+
+/**
+ * The witness rule's machine half. Step 4 demands that a confirmed Critical
+ * carry its executed evidence — the `witness` field, holding either the
+ * observed output or the verifier's `not run — <reason>` line — and promises
+ * the demotion is mechanical. This is the mechanism, in the same place the
+ * test-delta holdback lives: a high-confidence Critical from the one
+ * non-deterministic source that arrives with no witness is filed at low
+ * confidence — terminal-only, never posted. Only `source: 'review'` is
+ * judged: a `[build]`/`[test]`/`[lint]`/`[probe]` finding IS a run's output,
+ * so its witness is constitutive, not an attachment. Nothing is deleted and
+ * nothing is raised; the appended sentence names the rule that moved it and
+ * the way back (attach the witness, or say why none could run). Idempotent by
+ * construction — a demoted finding re-fed through `--input` is already low
+ * confidence and is not touched again.
+ */
+export function holdUnwitnessedCriticals(findings: readonly Finding[]): {
+  findings: Finding[];
+  unwitnessed: string[];
+} {
+  const unwitnessed: string[] = [];
+  const out = findings.map((f) => {
+    if (
+      f.severity !== 'Critical' ||
+      f.confidence !== 'high' ||
+      f.source !== 'review' ||
+      f.witness !== undefined
+    ) {
+      return f;
+    }
+    unwitnessed.push(f.id);
+    return {
+      ...f,
+      confidence: 'low' as Confidence,
+      failureScenario: `${f.failureScenario}\n\nFiled at low confidence by the witness rule: this confirmed Critical arrived with neither a witness (the executed evidence that settled the verdict) nor a \`not run — <reason>\` line. Attach either and it stands at high confidence again.`,
+    };
+  });
+  return { findings: out, unwitnessed };
 }
 
 const WORKSPACE_IN_COMMAND_RE = /--workspace="([^"]+)"/;
@@ -888,6 +940,8 @@ export const findingsCommand: CommandModule = {
         shared,
       ));
     }
+    const witnessHold = holdUnwitnessedCriticals(findings);
+    findings = witnessHold.findings;
     const report = buildReport(findings);
 
     const target = resolve(out);
@@ -907,6 +961,14 @@ export const findingsCommand: CommandModule = {
     for (const h of held) {
       writeStderrLine(
         `findings: ${h.id} held back from Critical — test-delta measured ${h.file} as failing on the merge base too`,
+      );
+    }
+    // The witness rule's demotions get the same disclosure: a confidence this
+    // command lowered must name the finding and the rule, or the demotion
+    // reads as the reviewer's own judgement.
+    for (const id of witnessHold.unwitnessed) {
+      writeStderrLine(
+        `findings: ${id} filed at low confidence — a confirmed Critical carried neither a witness nor a 'not run' reason (Step 4's witness rule)`,
       );
     }
     // A hold that was weighed and reversed is a decision, and a decision this

@@ -21,12 +21,16 @@ import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   isValidMemoryBudgetMb,
+  JOURNAL_GROWTH_POOL_FRACTION,
+  MAX_JOURNAL_GROWTH_POOL_MB,
   memoryBudgetRangeError,
+  MIN_MEMORY_BUDGET_MB,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
@@ -166,8 +170,8 @@ interface ServeArgs {
   'max-connections': number;
   'event-ring-size': number;
   'compacted-replay-max-bytes': number;
-  'max-journal-events': number;
-  'max-journal-bytes': number;
+  'max-journal-events'?: number;
+  'max-journal-bytes'?: number;
   workspace?: string | string[];
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
@@ -397,21 +401,34 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-journal-events', {
         type: 'number',
-        default: DEFAULT_MAX_JOURNAL_EVENTS,
+        nargs: 1,
         description:
-          'Per-session cap on replay entries retained in the in-flight live ' +
-          'journal (current unfinished turn). Compatible text/thought chunks ' +
-          'share bounded entries. When exceeded, the oldest entries are ' +
-          'dropped. Must be a positive safe integer.',
+          'Per-session baseline cap on replay entries retained in the ' +
+          'in-flight live journal (current unfinished turn). Compatible ' +
+          'text/thought chunks share bounded entries. When exceeded, the ' +
+          'daemon first tries adaptive growth (see --max-journal-bytes); ' +
+          'without granted headroom the oldest entries are dropped. Pinning ' +
+          'this flag (or --max-journal-bytes) disables adaptive growth. ' +
+          'Defaults to ' +
+          DEFAULT_MAX_JOURNAL_EVENTS +
+          ' when unset. Must be a positive safe integer.',
       })
       .option('max-journal-bytes', {
         type: 'number',
-        default: DEFAULT_MAX_JOURNAL_BYTES,
+        nargs: 1,
         description:
-          'Per-session source-event byte cap on the in-flight live journal. ' +
-          'When exceeded, the oldest entries are dropped whole (at least ' +
-          'one is always kept), so the retained tail can be much smaller ' +
-          'than the cap. Must be a positive safe integer.',
+          'Per-session baseline source-event byte cap on the in-flight live ' +
+          'journal. When a turn outgrows it, adaptive growth raises the ' +
+          "session's caps (per-session hard cap " +
+          JOURNAL_GROWTH_HARD_CAP_BYTES / (1024 * 1024) +
+          ' MiB) within a growth ' +
+          'pool derived from the daemon memory budget (see ' +
+          '--memory-budget-mb); without granted headroom the oldest entries ' +
+          'are dropped whole (at least one is always kept), so the retained ' +
+          'tail can be much smaller than the cap. Pinning this flag (or ' +
+          '--max-journal-events) disables adaptive growth. Defaults to ' +
+          DEFAULT_MAX_JOURNAL_BYTES +
+          ' bytes when unset. Must be a positive safe integer.',
       })
       .option('http-bridge', {
         type: 'boolean',
@@ -427,11 +444,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Total memory budget in MB for the daemon process tree. When unset, ' +
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
-          'way. Currently observed and reported under `limits.memory` in daemon ' +
-          'status, and modeled into a per-child partition reported under ' +
-          '`limits.memory.childHeap`. Nothing applies it: no child is sized ' +
-          'from this budget. Must be an integer ' +
-          'in [1024, 1048576].',
+          'way. It does not change how any `qwen --acp` child is sized; the ' +
+          'one consumer today is adaptive live-journal growth: one ' +
+          'daemon-wide pool of ' +
+          JOURNAL_GROWTH_POOL_FRACTION * 100 +
+          '% of the effective budget (capped at ' +
+          MAX_JOURNAL_GROWTH_POOL_MB +
+          ' MB; 0, growth disabled, when the effective budget falls below ' +
+          'the ' +
+          MIN_MEMORY_BUDGET_MB +
+          ' MB minimum; see --max-journal-bytes). Reported under ' +
+          '`limits.memory` in daemon status, alongside a modeled per-child ' +
+          'partition under `limits.memory.childHeap`. Must be an integer in ' +
+          '[1024, 1048576].',
       })
       .option('memory-pressure-mode', {
         choices: ['off', 'observe'] as const,
@@ -796,8 +821,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
-        maxJournalEvents: argv['max-journal-events'],
-        maxJournalBytes: argv['max-journal-bytes'],
+        ...(argv['max-journal-events'] !== undefined
+          ? { maxJournalEvents: argv['max-journal-events'] }
+          : {}),
+        ...(argv['max-journal-bytes'] !== undefined
+          ? { maxJournalBytes: argv['max-journal-bytes'] }
+          : {}),
         workspace: argv.workspace,
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }

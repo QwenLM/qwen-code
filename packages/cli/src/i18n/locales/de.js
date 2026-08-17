@@ -2316,4 +2316,5 @@ export default {
     'Änderungen durch den Auto-Skill-Kurator sind im Sicherheitsmodus deaktiviert.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
+  'Kept model as {{model}}': 'Modell als {{model}} beibehalten',
 };

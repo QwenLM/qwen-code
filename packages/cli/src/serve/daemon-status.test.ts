@@ -38,6 +38,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
+    journalGrowth: null,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -167,6 +168,54 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.limits.memory).toMatchObject({
       enforced: false,
       childHeap: null,
+    });
+  });
+
+  it('reports adaptive journal growth as the budget runtime effect', async () => {
+    // Growth is the one figure under limits.memory with runtime effect;
+    // the daemon status must expose it — pool ownership/size, hard cap,
+    // and the baselines sessions grow from — alongside the modeled
+    // partition that stays unapplied.
+    const poolBytes = 204 * 1024 * 1024;
+    const options = makeOptions({
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        limits: {
+          ...BASE_BRIDGE_SNAPSHOT.limits,
+          journalGrowth: {
+            poolBytes,
+            hardCapBytes: 256 * 1024 * 1024,
+          },
+        },
+      },
+    });
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8_192,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      journalGrowth: {
+        poolBytes,
+        hardCapBytes: 256 * 1024 * 1024,
+        baselineMaxEvents: 10_000,
+        baselineMaxBytes: 8 * 1024 * 1024,
+      },
+    });
+  });
+
+  it('reports disabled journal growth as null rather than omitting it', async () => {
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8_192,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      journalGrowth: null,
     });
   });
 
@@ -1571,6 +1620,8 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: true,
               lastEventId: 10,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
             {
               sessionId: 's2',
@@ -1583,6 +1634,8 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 0,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
           ],
         },
@@ -1616,6 +1669,8 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
           ],
         },
@@ -1644,6 +1699,8 @@ describe('buildDaemonStatusResponse', () => {
           pendingPermissionCount: 0,
           hasActivePrompt: true,
           lastEventId: 1,
+          maxJournalEvents: 10_000,
+          maxJournalBytes: 8 * 1024 * 1024,
         },
       ],
     };
@@ -1662,6 +1719,8 @@ describe('buildDaemonStatusResponse', () => {
           pendingPermissionCount: 0,
           hasActivePrompt: false,
           lastEventId: 1,
+          maxJournalEvents: 10_000,
+          maxJournalBytes: 8 * 1024 * 1024,
         },
       ],
     };
@@ -1728,6 +1787,8 @@ describe('buildDaemonStatusResponse', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: true,
               lastEventId: 1,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
           ],
         },

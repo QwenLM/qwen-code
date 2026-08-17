@@ -2,6 +2,7 @@ import type {
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
   ChannelPlugin,
+  SessionScope,
 } from '@qwen-code/channel-base';
 
 export interface ChannelTypeDescriptor {
@@ -164,6 +165,14 @@ function assertManagementField(
 function assertManagementDescriptor(plugin: ChannelPlugin): void {
   const management = plugin.management;
   if (management === undefined) return;
+  const defaultSessionScope: unknown = plugin.defaultSessionScope ?? 'user';
+  if (
+    !SESSION_SCOPE_OPTIONS.some(
+      (option) => option.value === defaultSessionScope,
+    )
+  ) {
+    throw new Error('Channel defaultSessionScope is invalid.');
+  }
   if (
     management.validateConfig !== undefined &&
     (typeof management.validateConfig !== 'function' ||
@@ -177,7 +186,34 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
     throw new Error('Channel management metadata must declare a fields array.');
   }
   assertManagementFields(management.fields);
+  const sessionScopeField = management.fields.find(
+    (field) => field.key === 'sessionScope',
+  );
+  if (sessionScopeField) {
+    if (sessionScopeField.kind !== 'enum') {
+      throw new Error('Channel field "sessionScope" must be an enum.');
+    }
+    if (
+      !sessionScopeField.options?.some(
+        (option: { value: string }) => option.value === defaultSessionScope,
+      )
+    ) {
+      throw new Error(
+        'Channel field "sessionScope" must include the channel defaultSessionScope.',
+      );
+    }
+  }
 }
+
+const SESSION_SCOPE_OPTIONS: ReadonlyArray<{
+  value: SessionScope;
+  label: string;
+}> = [
+  { value: 'user', label: 'Per user and chat' },
+  { value: 'thread', label: 'Per thread' },
+  { value: 'chat_thread', label: 'Per chat and thread' },
+  { value: 'single', label: 'One shared session' },
+];
 
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
@@ -272,12 +308,35 @@ export async function supportedChannelCatalog(): Promise<
   ChannelTypeDescriptor[]
 > {
   await ensureBuiltins();
-  return [...registry.values()].map(
-    ({ channelType, displayName, management }) => ({
+  return [...registry.values()].map((plugin) => {
+    const { channelType, displayName, management } = plugin;
+    const fields = management?.fields ?? [];
+    const defaultSessionScope = plugin.defaultSessionScope ?? 'user';
+    const normalizedFields = fields.map((field) =>
+      field.key === 'sessionScope' && field.default === undefined
+        ? { ...field, default: defaultSessionScope }
+        : field,
+    );
+    return {
       type: channelType,
       displayName,
       manageable: management !== undefined,
-      fields: management?.fields ?? [],
-    }),
-  );
+      fields:
+        management && !fields.some((field) => field.key === 'sessionScope')
+          ? [
+              ...normalizedFields,
+              {
+                key: 'sessionScope',
+                label: 'Session scope',
+                kind: 'enum',
+                required: true,
+                default: defaultSessionScope,
+                description:
+                  'Controls which incoming conversations share one agent session.',
+                options: SESSION_SCOPE_OPTIONS,
+              },
+            ]
+          : normalizedFields,
+    };
+  });
 }

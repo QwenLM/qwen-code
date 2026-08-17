@@ -30,9 +30,15 @@ import {
 } from './constants.js';
 import { ApiRequestPhase, recordApiRequestBreakdown } from './metrics.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { getCurrentSessionId, setSessionContext } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionIdFromContext,
+  setSessionContext,
+  setSessionIdOnContext,
+} from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
 
@@ -54,6 +60,8 @@ export interface StartLLMRequestSpanOptions {
   operationName?: 'chat' | 'generate_content';
   providerName?: string;
   outputType?: 'text' | 'json' | 'image' | 'speech';
+  sessionId?: string;
+  userId?: string;
 }
 
 export interface LLMRequestMetadata {
@@ -212,8 +220,8 @@ export function isInNativeSubagentSpan(): boolean {
 
 /**
  * Resolve the session.id for a child span (llm_request / tool / tool.execution)
- * from the per-session value carried on the parent span context, falling back
- * to the process-global getCurrentSessionId() only when no parent is present.
+ * from the logical parent, an explicit owner, or the active per-request
+ * contexts. The process-global value is only the final compatibility fallback.
  *
  * A daemon hosts many sessions in one process, but getCurrentSessionId() is a
  * single module-global set at telemetry init — so reading it directly would
@@ -226,22 +234,28 @@ export function isInNativeSubagentSpan(): boolean {
  */
 function resolveSessionId(
   parentCtx: SpanContext | undefined,
+  explicitSessionId?: string,
+  activeContext: Context = otelContext.active(),
 ): string | undefined {
   const fromParent = parentCtx?.attributes?.['session.id'];
-  return typeof fromParent === 'string' && fromParent
-    ? fromParent
-    : getCurrentSessionId();
+  if (typeof fromParent === 'string' && fromParent) return fromParent;
+  if (explicitSessionId) return explicitSessionId;
+  return (
+    getSessionIdFromContext(activeContext) ??
+    (sessionIdContext.getStore() || getCurrentSessionId())
+  );
 }
 
 function resolveGenAiUserId(
   parentCtx: Pick<SpanContext, 'attributes'> | undefined,
   promptId?: string,
+  explicitUserId?: string,
 ): string | undefined {
   const logicalParent =
     parentCtx ??
     (promptId ? interactionIdentityByPromptId.get(promptId) : undefined);
   const value = logicalParent?.attributes['gen_ai.user.id'];
-  return typeof value === 'string' && value ? value : undefined;
+  return typeof value === 'string' && value ? value : explicitUserId;
 }
 
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
@@ -531,9 +545,10 @@ export async function withInteractionSpan<T>(
   ensureCleanupInterval();
   interactionSequence++;
 
+  const sessionId = config.getSessionId();
   const userId = config.getTelemetryUserId();
   const attributes: Attributes = {
-    'session.id': config.getSessionId(),
+    'session.id': sessionId,
     ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'qwen-code.prompt_id': options.promptId,
     'qwen-code.message_type': options.messageType,
@@ -569,7 +584,10 @@ export async function withInteractionSpan<T>(
     interactionIdentityByPromptId.delete(options.promptId);
   }
 
-  const activeContext = trace.setSpan(parentContext, span);
+  const activeContext = trace.setSpan(
+    setSessionIdOnContext(parentContext, sessionId),
+    span,
+  );
   return await otelContext.with(activeContext, async () =>
     interactionContext.run(spanContextObj, async () => {
       let terminalStatus: InteractionStatus = 'ok';
@@ -624,21 +642,44 @@ export function startLLMRequestSpan(
   promptId: string,
   options?: StartLLMRequestSpanOptions,
 ): Span {
+  return startLLMRequestSpanWithContext(model, promptId, options).span;
+}
+
+export function startLLMRequestSpanWithContext(
+  model: string,
+  promptId: string,
+  options?: StartLLMRequestSpanOptions,
+): { span: Span; context: Context } {
   if (!isTelemetrySdkInitialized()) {
-    return NOOP_SPAN;
+    return {
+      span: NOOP_SPAN,
+      context: trace.setSpan(otelContext.active(), NOOP_SPAN),
+    };
   }
 
   // Prefer subagentContext over interactionContext so LLM spans inside a
   // foreground subagent nest under the subagent span instead of escaping
   // back to the outer interaction. wenshao @ #4410.
   const parentCtx = subagentContext.getStore() ?? interactionContext.getStore();
+  const identityParentCtx =
+    subagentContext.getStore() ??
+    toolContext.getStore() ??
+    interactionContext.getStore();
   // resolveParentContext() also re-parents to the active OTel span when
   // present, so a side-query LLM call nested inside a tool span still
   // attaches to the tool span instead of becoming a separate trace root.
   const ctx = resolveParentContext(parentCtx);
 
-  const sessionId = resolveSessionId(parentCtx);
-  const userId = resolveGenAiUserId(parentCtx, promptId);
+  const sessionId = resolveSessionId(
+    identityParentCtx,
+    options?.sessionId,
+    ctx,
+  );
+  const userId = resolveGenAiUserId(
+    identityParentCtx,
+    promptId,
+    options?.userId,
+  );
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),
@@ -662,10 +703,11 @@ export function startLLMRequestSpan(
       : {}),
   };
 
+  const sessionContext = setSessionIdOnContext(ctx, sessionId);
   const span = getTracer().startSpan(
     SPAN_LLM_REQUEST,
     { kind: SpanKind.INTERNAL, attributes },
-    ctx,
+    sessionContext,
   );
 
   const spanId = getSpanId(span);
@@ -678,7 +720,10 @@ export function startLLMRequestSpan(
   activeSpans.set(spanId, new WeakRef(spanContextObj));
   strongSpans.set(spanId, spanContextObj);
 
-  return span;
+  return {
+    span,
+    context: trace.setSpan(sessionContext, span),
+  };
 }
 
 export function endLLMRequestSpan(
@@ -890,12 +935,16 @@ export function startToolSpan(
     // for rationale; wenshao @ #4410).
     const parentCtx =
       subagentContext.getStore() ?? interactionContext.getStore();
+    const identityParentCtx =
+      subagentContext.getStore() ??
+      toolContext.getStore() ??
+      interactionContext.getStore();
     // Same fallback as startLLMRequestSpan: prefer active OTel span for
     // tools-inside-tools cases before becoming a trace root.
     const ctx = resolveParentContext(parentCtx);
 
-    const sessionId = resolveSessionId(parentCtx);
-    const userId = resolveGenAiUserId(parentCtx, promptId);
+    const sessionId = resolveSessionId(identityParentCtx);
+    const userId = resolveGenAiUserId(identityParentCtx, promptId);
     const attributes: Attributes = {
       ...(sessionId ? { 'session.id': sessionId } : {}),
       ...attrs,
@@ -956,7 +1005,11 @@ export function runInToolSpanContext<T>(span: Span, fn: () => T): T {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
   if (!spanCtx) return fn();
-  const otelCtxWithSpan = trace.setSpan(otelContext.active(), span);
+  const sessionId = resolveSessionId(spanCtx);
+  const otelCtxWithSpan = trace.setSpan(
+    setSessionIdOnContext(otelContext.active(), sessionId),
+    span,
+  );
   return toolContext.run(spanCtx, () => otelContext.with(otelCtxWithSpan, fn));
 }
 
@@ -1497,7 +1550,7 @@ export interface StartSubagentSpanOptions {
   depth: number;
   /** Parent's request id (for cross-trace correlation with parent prompt). */
   invokingRequestId?: string;
-  /** Session id used as `gen_ai.conversation.id`. */
+  /** Session identity used by native and GenAI attributes. */
   sessionId: string;
   /** Model override, if this subagent runs on a different model than parent. */
   modelOverride?: string;
@@ -1550,12 +1603,15 @@ export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
     subagentContext.getStore() ??
     toolContext.getStore() ??
     interactionContext.getStore();
+  const sessionId =
+    resolveSessionId(parentCtx, opts.sessionId) ?? opts.sessionId;
   const userId = resolveGenAiUserId(parentCtx);
   const attributes: Attributes = {
     // Spec-aligned (OTel GenAI Agent Spans, Development status).
     'gen_ai.operation.name': 'invoke_agent',
     'gen_ai.agent.name': opts.subagentName,
-    'gen_ai.conversation.id': opts.sessionId,
+    'gen_ai.conversation.id': sessionId,
+    'session.id': sessionId,
     ...(userId ? { 'gen_ai.user.id': userId } : {}),
 
     // Vendor identity and lifecycle. The per-invocation ID stays private;
@@ -1671,7 +1727,11 @@ export function runInSubagentSpanContext<T>(
   // of the subagent. The subagent's own inner tools will re-set
   // toolContext via runInToolSpanContext, so inner-tool parenting stays
   // correct. wenshao @ #4410.
-  const otelCtxWithSpan = trace.setSpan(otelContext.active(), span);
+  const sessionId = resolveSessionId(spanCtx);
+  const otelCtxWithSpan = trace.setSpan(
+    setSessionIdOnContext(otelContext.active(), sessionId),
+    span,
+  );
   return subagentContext.run(spanCtx, () =>
     toolContext.run(undefined, () => otelContext.with(otelCtxWithSpan, fn)),
   );

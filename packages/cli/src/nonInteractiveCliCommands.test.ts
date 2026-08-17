@@ -358,7 +358,7 @@ describe('handleSlashCommand', () => {
     });
   });
 
-  it('should report cleared goal for ACP /goal clear', async () => {
+  it('returns canonical state for ACP /goal clear', async () => {
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
     mockGetCommands.mockReturnValue([goalCommand]);
 
@@ -376,9 +376,12 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write a hello world script',
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      cause: 'clear',
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
   });
 

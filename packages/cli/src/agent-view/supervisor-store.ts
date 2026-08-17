@@ -45,6 +45,8 @@ interface StoreOptions {
 
 const rosterMutationQueues = new Map<string, Promise<void>>();
 const stateMutationQueues = new Map<string, Promise<void>>();
+const activityMutationQueues = new Map<string, Promise<void>>();
+const workerMutationQueues = new Map<string, Promise<void>>();
 
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
@@ -84,7 +86,7 @@ export async function readAgentViewRoster(
   return normalizeRoster(raw);
 }
 
-async function readAgentViewRosterForWrite(
+export async function readAgentViewRosterForWrite(
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
   const raw = await readJsonRecordForWrite(
@@ -224,6 +226,36 @@ export async function patchAgentViewSessionState(
   });
 }
 
+export async function patchAgentViewSessionStateIf(
+  sessionId: string,
+  decidePatch: (
+    existing: AgentViewSessionStateFile,
+  ) => Partial<AgentViewSessionStateFile> | undefined,
+  options: StoreOptions = {},
+): Promise<void> {
+  return mutateAgentViewState(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.statePath);
+    if (existing === undefined) {
+      return;
+    }
+    const normalized = normalizeSessionState(existing, sessionId);
+    if (normalized === undefined) {
+      return;
+    }
+    const patch = decidePatch(normalized);
+    if (patch === undefined) {
+      return;
+    }
+    await writeJsonFile(paths.statePath, {
+      ...existing,
+      ...patch,
+      schemaVersion: 1,
+    });
+    await fs.mkdir(paths.tmpDir, { recursive: true });
+  });
+}
+
 export async function listAgentViewSessionStates(
   options: StoreOptions = {},
 ): Promise<AgentViewSessionStateFile[]> {
@@ -310,13 +342,49 @@ export async function writeAgentViewActivity(
   activity: AgentViewActivityFile,
   options: StoreOptions = {},
 ): Promise<void> {
-  const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecordForWrite(paths.activityPath);
-  await writeJsonFile(paths.activityPath, {
-    ...existing,
-    ...activity,
-    schemaVersion: 1,
+  return mutateAgentViewActivity(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.activityPath);
+    await writeJsonFile(paths.activityPath, {
+      ...existing,
+      ...activity,
+      schemaVersion: 1,
+    });
   });
+}
+
+/**
+ * Applies a patch decided inside the per-session activity mutation queue,
+ * so the decision sees the latest persisted record (e.g. a queued-prompt
+ * marker a concurrent send just wrote) instead of a stale read.
+ */
+export async function patchAgentViewActivityIf(
+  sessionId: string,
+  decidePatch: (
+    existing: AgentViewActivityFile,
+  ) => Partial<AgentViewActivityFile> | undefined,
+  options: StoreOptions = {},
+): Promise<boolean> {
+  let applied = false;
+  await mutateAgentViewActivity(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.activityPath);
+    const normalized = normalizeActivity(existing);
+    if (normalized === undefined) {
+      return;
+    }
+    const patch = decidePatch(normalized);
+    if (patch === undefined) {
+      return;
+    }
+    applied = true;
+    await writeJsonFile(paths.activityPath, {
+      ...existing,
+      ...patch,
+      schemaVersion: 1,
+    });
+  });
+  return applied;
 }
 
 export function digestAgentViewWorkerToken(token: string): string {
@@ -339,11 +407,15 @@ export async function writeAgentViewWorker(
   options: StoreOptions = {},
 ): Promise<void> {
   const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecordForWrite(paths.workerPath);
-  await writeJsonFile(paths.workerPath, {
-    ...existing,
-    ...worker,
-    schemaVersion: 1,
+  // Serialize with the per-path queue: unlocked heartbeat writes would
+  // otherwise merge over a concurrent pid write and drop it.
+  await withMutationQueue(workerMutationQueues, paths.workerPath, async () => {
+    const existing = await readJsonRecordForWrite(paths.workerPath);
+    await writeJsonFile(paths.workerPath, {
+      ...existing,
+      ...worker,
+      schemaVersion: 1,
+    });
   });
 }
 
@@ -369,7 +441,7 @@ export async function writeAgentViewSupervisor(
   });
 }
 
-function sanitizeSessionId(sessionId: string): string {
+export function sanitizeSessionId(sessionId: string): string {
   const safe = path
     .basename(sessionId.replace(/\\/g, '/'))
     .toLowerCase()
@@ -428,27 +500,50 @@ async function readJsonRecordForWrite(
   }
 }
 
-async function mutateAgentViewRoster<T>(
-  options: StoreOptions,
+async function withMutationQueue<T>(
+  queues: Map<string, Promise<void>>,
+  key: string,
   action: () => Promise<T>,
 ): Promise<T> {
-  const rosterPath = getAgentViewStorePaths(options).rosterPath;
-  const previous = rosterMutationQueues.get(rosterPath) ?? Promise.resolve();
+  const previous = queues.get(key) ?? Promise.resolve();
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
   const current = previous.catch(() => {}).then(() => gate);
-  rosterMutationQueues.set(rosterPath, current);
+  queues.set(key, current);
   await previous.catch(() => {});
   try {
     return await action();
   } finally {
     release();
-    if (rosterMutationQueues.get(rosterPath) === current) {
-      rosterMutationQueues.delete(rosterPath);
+    if (queues.get(key) === current) {
+      queues.delete(key);
     }
   }
+}
+
+async function mutateAgentViewRoster<T>(
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  return withMutationQueue(
+    rosterMutationQueues,
+    getAgentViewStorePaths(options).rosterPath,
+    action,
+  );
+}
+
+async function mutateAgentViewActivity<T>(
+  sessionId: string,
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  return withMutationQueue(
+    activityMutationQueues,
+    getAgentViewSessionPaths(sessionId, options).activityPath,
+    action,
+  );
 }
 
 async function mutateAgentViewState<T>(
@@ -456,23 +551,11 @@ async function mutateAgentViewState<T>(
   options: StoreOptions,
   action: () => Promise<T>,
 ): Promise<T> {
-  const statePath = getAgentViewSessionPaths(sessionId, options).statePath;
-  const previous = stateMutationQueues.get(statePath) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const current = previous.catch(() => {}).then(() => gate);
-  stateMutationQueues.set(statePath, current);
-  await previous.catch(() => {});
-  try {
-    return await action();
-  } finally {
-    release();
-    if (stateMutationQueues.get(statePath) === current) {
-      stateMutationQueues.delete(statePath);
-    }
-  }
+  return withMutationQueue(
+    stateMutationQueues,
+    getAgentViewSessionPaths(sessionId, options).statePath,
+    action,
+  );
 }
 
 async function writeJsonFile(

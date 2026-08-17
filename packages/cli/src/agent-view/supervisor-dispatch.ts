@@ -32,6 +32,10 @@ interface DispatchOptions {
   promptInArgv?: boolean;
 }
 
+// activity.json is re-read on every list() poll; keep the summary a
+// display-sized preview, matching the queued-prompt preview cap.
+const MAX_ACTIVITY_SUMMARY_CHARS = 500;
+
 export async function dispatchAgentViewSession(
   prompt: string,
   cwd: string,
@@ -87,7 +91,7 @@ export async function dispatchAgentViewSession(
       sessionId,
       {
         schemaVersion: 1,
-        summary: prompt,
+        summary: prompt.slice(0, MAX_ACTIVITY_SUMMARY_CHARS),
         lastActivityAt: now,
         capabilities: [],
       },

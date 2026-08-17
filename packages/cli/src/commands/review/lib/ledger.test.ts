@@ -107,6 +107,78 @@ describe('ledger marker', () => {
     expect(parseLedger(body)).toEqual(LEDGER);
   });
 
+  it('round-trips the incremental anchor sha', () => {
+    // The sha is the marker's second job: without it a fresh environment (CI,
+    // another clone) recovers the work list but not "last reviewed at", and
+    // the incremental range degrades to the full diff every time.
+    const anchored: Ledger = { ...LEDGER, sha: 'abc1234def567890' };
+    const body = `Reviewed.\n\n${serializeLedger(anchored)}`;
+    expect(parseLedger(body)).toEqual(anchored);
+  });
+
+  it('a truncated ledger loses its anchor — a partial work list must not certify a range', () => {
+    // Dropped entries reference code at or before the anchored head; a next
+    // round scoped to `sha..HEAD` would never re-see it, and Step 6 rules
+    // only on entries that are IN the list — the dropped ones would retire
+    // silently. Both halves hold the line: the serializer withholds the sha
+    // when it drops findings, and the parser strips a hand-edited marker
+    // that carries both.
+    const overflowing: Ledger = {
+      v: 1,
+      round: 2,
+      sha: 'abc1234def567890',
+      findings: Array.from({ length: LEDGER_MAX_FINDINGS + 1 }, (_, i) => ({
+        id: `R2-${i}`,
+        sev: 'C' as const,
+        file: 'src/a.ts',
+        title: 'x',
+      })),
+    };
+    const back = parseLedger(serializeLedger(overflowing));
+    expect(back!.dropped).toBeGreaterThan(0);
+    expect(back!.sha).toBeUndefined();
+    const handEdited = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"dropped":3,"sha":"abc1234"} -->',
+    );
+    expect(handEdited!.sha).toBeUndefined();
+    // The count cap binds on READ too: a hand-edited marker carrying MORE
+    // valid entries than the serializer would ever emit — and no `dropped` —
+    // is truncated by this parser, and the entries it sliced off are dropped
+    // findings. Leaving the anchor on it would certify a range whose work
+    // list this very parse made partial (probe-measured on the shipped code:
+    // 51 entries parsed to 50 and KEPT the sha).
+    const overCount = parseLedger(
+      `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 2,
+        sha: 'abc1234def567890',
+        findings: Array.from({ length: LEDGER_MAX_FINDINGS + 1 }, (_, i) => ({
+          id: `R2-${i}`,
+          sev: 'C',
+          file: 'a.ts',
+          title: 't',
+        })),
+      })} -->`,
+    )!;
+    expect(overCount.findings).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(overCount.dropped).toBe(1);
+    expect(overCount.sha).toBeUndefined();
+  });
+
+  it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {
+    // The body is another account's writable surface. A garbage anchor must
+    // not cost the next round its work list, and must not survive as an
+    // anchor either — Step 1 would hand it to `git`.
+    const forged = `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"$(rm -rf /)"} -->`;
+    const parsed = parseLedger(forged);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.sha).toBeUndefined();
+    // The serializer holds the same line: a non-hex sha never reaches the body.
+    expect(
+      serializeLedger({ v: 1, round: 1, findings: [], sha: 'not a sha' }),
+    ).not.toContain('sha');
+  });
+
   it('is invisible-safe: no `--` survives into the comment payload', () => {
     // `--` inside an HTML comment ends it early and the tail renders as text.
     const s = serializeLedger({

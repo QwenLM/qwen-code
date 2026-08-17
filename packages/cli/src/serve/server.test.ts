@@ -40,6 +40,12 @@ import {
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
+  CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  registerChannelWorkerPromptAuthorization,
+  revokeChannelWorkerPromptAuthorization,
+} from './channel-worker-prompt-authorization.js';
+import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/channel-base';
+import {
   resolveWebShellDir,
   isDocumentNavigation,
 } from './web-shell-static.js';
@@ -462,6 +468,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_bytes',
   'workspace_file_read_cursor',
   'workspace_file_write',
+  // Binary file upload (never overwrites; auto-numbers occupied names).
+  'workspace_file_upload',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
@@ -771,6 +779,7 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setConfigOptionImpl?: AcpSessionBridge['setSessionConfigOption'];
   setLanguageImpl?: (
     sessionId: string,
     params: { language: string; syncOutputLanguage: boolean },
@@ -1051,6 +1060,10 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  setConfigOptionCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
+  }>;
   setLanguageCalls: Array<{
     sessionId: string;
     params: { language: string; syncOutputLanguage: boolean };
@@ -1209,6 +1222,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
   const workspaceMemoryForgetCalls: FakeBridge['workspaceMemoryForgetCalls'] =
@@ -1557,6 +1571,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       hooks: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setConfigOptionImpl =
+    opts.setConfigOptionImpl ?? (async () => ({ configOptions: [] }));
   const setLanguageCalls: FakeBridge['setLanguageCalls'] = [];
   const setLanguageImpl =
     opts.setLanguageImpl ??
@@ -1717,6 +1733,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
         channelIdleTimeoutMs: 0,
         sessionIdleTimeoutMs: 1_800_000,
       },
@@ -1785,6 +1802,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
     shellCalls,
@@ -2078,6 +2096,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async setSessionConfigOption(sessionId, req) {
+      setConfigOptionCalls.push({ sessionId, req });
+      return setConfigOptionImpl(sessionId, req);
     },
     async setSessionLanguage(sessionId, params, context) {
       setLanguageCalls.push({
@@ -12460,6 +12482,55 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
+    it('accepts channel display text only from the workspace worker', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const workspace = realpathSync(process.cwd());
+      const token = 'channel-worker-prompt-token';
+      registerChannelWorkerPromptAuthorization(token, workspace);
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'model text' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: 'forged display',
+            },
+          });
+        const trusted = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'model text' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: 'visible text',
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(trusted.status).toBe(202);
+        expect(
+          bridge.promptCalls[0]?.context?.promptDisplayText,
+        ).toBeUndefined();
+        expect(bridge.promptCalls[1]?.context?.promptDisplayText).toBe(
+          'visible text',
+        );
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+          );
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+          );
+        }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
     it('validates delivery and forwards it only through trusted prompt context', async () => {
       const bridge = fakeBridge();
       const channelDeliveryAuthorizations =
@@ -16324,6 +16395,46 @@ describe('createServeApp', () => {
         .send({ modelId: 'qwen3-coder' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/config-option', () => {
+    it('routes reasoning effort to the session owner and returns its current options', async () => {
+      const configOptions = [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select' as const,
+          currentValue: 'medium',
+          options: [{ value: 'medium', name: 'Medium' }],
+        },
+      ];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({ configOptions }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId: 'spoofed-B',
+          configId: 'reasoning_effort',
+          value: 'medium',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configOptions });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+          },
+        },
+      ]);
     });
   });
 
@@ -23327,6 +23438,7 @@ describe('createServeApp', () => {
             compactedReplayMaxBytes: 4 * 1024 * 1024,
             maxJournalEvents: 10_000,
             maxJournalBytes: 8 * 1024 * 1024,
+            journalGrowth: null,
             channelIdleTimeoutMs: 0,
             sessionIdleTimeoutMs: 1_800_000,
           },
@@ -23346,6 +23458,8 @@ describe('createServeApp', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 4,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
           ],
         }),

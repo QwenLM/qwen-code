@@ -167,6 +167,49 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('--open')['open']).toBe(true);
   });
 
+  it('leaves the journal caps undefined unless the operator pins them', () => {
+    // Adaptive growth is disabled only for PINNED caps: yargs defaults here
+    // would make every unpinned boot look pinned and silently disable it.
+    const parsed = buildParser().parseSync('');
+    expect(parsed['max-journal-events']).toBeUndefined();
+    expect(parsed['max-journal-bytes']).toBeUndefined();
+    expect(
+      buildParser().parseSync('--max-journal-events 5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes 1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
+  it('rejects valueless journal cap flags instead of silently unpinning', () => {
+    // Presence pins the caps and disables adaptive growth; without nargs a
+    // bare flag parses as undefined and the pin never reaches runQwenServe.
+    for (const input of [
+      '--max-journal-events',
+      '--max-journal-bytes',
+      '--no-web --max-journal-events',
+      '--max-journal-events --max-journal-bytes',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: max-journal-(events|bytes)/,
+      );
+    }
+    expect(
+      buildParser().parseSync('--max-journal-events=5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes=1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
   it('parses --local-control and requires its generated token and Web Shell', () => {
     expect(buildParser().parseSync('')['local-control']).toBe(false);
     expect(buildParser().parseSync('--token fixed')['token']).toBe('fixed');
@@ -420,6 +463,71 @@ describe('serve rate limit env parsing', () => {
         rateLimitRead: 121,
         rateLimitWindowMs: 60000,
       }),
+    );
+  });
+
+  it('omits the journal caps for an unpinned boot so adaptive growth stays enabled', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).not.toHaveProperty('maxJournalEvents');
+    expect(options).not.toHaveProperty('maxJournalBytes');
+  });
+
+  it('forwards pinned journal caps to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --max-journal-events 5000 --max-journal-bytes 1048576',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxJournalEvents: 5000,
+        maxJournalBytes: 1048576,
+      }),
+    );
+  });
+
+  it('forwards a single pinned entry cap without the byte cap', async () => {
+    // The two conditional spreads are independent; pinning ONE flag must
+    // forward it alone. Coupling them would silently drop the pinned cap.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-events 5000');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalEvents: 5000 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalBytes',
+    );
+  });
+
+  it('forwards a single pinned byte cap without the entry cap', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-bytes 1048576');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalBytes: 1048576 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalEvents',
     );
   });
 

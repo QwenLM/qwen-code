@@ -39,6 +39,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, ghWithInputRetried, resolveGhHost, setGhHost } from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import {
   ASSET_HEADER_BYTES,
   assetsBranch,
@@ -62,6 +63,8 @@ interface PublishAssetsArgs {
   host: string | undefined;
   userAuthorized: boolean;
   skillArgs: string | undefined;
+  /** The standing `review.comment` setting, for the shared authorisation gate. */
+  defaultComment?: boolean;
 }
 
 /** The Contents-API dance for one file: create, or update when it exists. */
@@ -244,6 +247,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // FOR (the one under review), regardless of which repo hosts the images.
   const auth = reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
+    defaultComment: args.defaultComment,
     skillArgs: args.skillArgs,
     pr: args.pr,
     // Bind the REVIEWED repo when the caller names it, never the assets repo:
@@ -540,6 +544,10 @@ export const publishAssetsCommand: CommandModule = {
       host: argv['host'] as string | undefined,
       userAuthorized: Boolean(argv['user-authorized']),
       skillArgs: argv['skill-args'] as string | undefined,
+      // The same operator-scope resolution as `submit`: the two callers of
+      // the shared gate must agree on what authorises a run, or a run that
+      // posts the review still refuses to publish its evidence images.
+      defaultComment: operatorReviewSettings().comment,
     });
   },
 };
