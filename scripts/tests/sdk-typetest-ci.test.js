@@ -38,9 +38,13 @@ describe('sdk-typescript typetest CI fence', () => {
   it('keeps the tsc typetest fence in typecheck too', () => {
     // The typecheck script is the other consumer a sweep might "align":
     // dropping the typetest project there loses the same guards for
-    // anyone running typecheck locally instead of test:ci.
+    // anyone running typecheck locally instead of test:ci. Since the
+    // upstream/main merge (#9261) typecheck also runs the sibling
+    // tsconfig.test-fence.json project over the same typetest file —
+    // pin the full dual-fence script so neither project can be dropped
+    // silently.
     expect(packageJson.scripts['typecheck']).toBe(
-      'tsc --noEmit && tsc --noEmit -p tsconfig.typetest.json',
+      'tsc --noEmit && tsc --noEmit -p tsconfig.typetest.json && tsc --noEmit -p tsconfig.test-fence.json',
     );
   });
 
