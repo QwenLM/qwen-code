@@ -772,7 +772,11 @@ describe('DwsClient', () => {
       runner,
     );
 
-    await expect(client.listMentionedMessages(1, 2)).resolves.toEqual({
+    const startTime = new Date(2026, 0, 2, 3, 4, 5).getTime();
+    const endTime = new Date(2026, 0, 2, 3, 4, 6).getTime();
+    await expect(
+      client.listMentionedMessages(startTime, endTime),
+    ).resolves.toEqual({
       messages: [
         {
           type: 'user_im_message_receive_at',
@@ -794,9 +798,9 @@ describe('DwsClient', () => {
       'message',
       'list-mentions',
       '--start',
-      '1970-01-01 08:00:00',
+      '2026-01-02 03:04:05',
       '--end',
-      '1970-01-01 08:00:00',
+      '2026-01-02 03:04:06',
       '--limit',
       '50',
       '--cursor',

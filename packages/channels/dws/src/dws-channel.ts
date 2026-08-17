@@ -591,6 +591,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       identity.profile,
     );
     if (this.cursor.selfProfile !== identity.profile) {
+      this.cursor.selfSenderIds = [];
       this.cursor.selfProfile = identity.profile;
       this.cursor.todosInitialized = false;
       this.cursor.todoTasks = [];
@@ -628,12 +629,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         'DWS direct messages require the authenticated identity to expose an openDingTalkId.',
       );
     }
-    if (this.cursor.selfSenderIds.length === 0 && selfSenderIds.length > 0) {
+    const previousSelfSenderIds = this.cursor.selfSenderIds;
+    if (previousSelfSenderIds.length === 0 && selfSenderIds.length > 0) {
       this.cursor.imTargets = this.cursor.imTargets.filter(
         ({ target }) => target.kind !== 'direct',
       );
     }
-    this.cursor.selfSenderIds = selfSenderIds;
+    if (selfSenderIds.length > 0) {
+      const freshSelfSenderIds = new Set(selfSenderIds);
+      this.cursor.selfSenderIds = [
+        ...previousSelfSenderIds.filter((id) => !freshSelfSenderIds.has(id)),
+        ...selfSenderIds,
+      ].slice(-MAX_SELF_SENDER_IDS);
+    }
     this.connected = true;
     try {
       await Promise.all(

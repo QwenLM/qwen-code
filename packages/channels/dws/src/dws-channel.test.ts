@@ -480,6 +480,133 @@ describe('DwsChannel', () => {
     expect(client.streams).toEqual([]);
   });
 
+  it('preserves self sender history across degraded group reconnects', async () => {
+    const config = makeConfig({
+      dmPolicy: 'disabled',
+      groups: { '*': { requireMention: false } },
+    });
+    const name = 'degraded-self-id-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = {
+      profile: 'corp:bot',
+      selfSenderIds: ['open-self-old'],
+    };
+    const first = await readyChannel(firstClient, config, name);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = { profile: 'corp:bot' };
+    const second = await readyChannel(secondClient, config, name);
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'degraded-self-1',
+        'own echo',
+        {
+          senderId: 'open-self-old',
+        },
+      ),
+    );
+    expect(second.inbound).toEqual([]);
+    second.disconnect();
+
+    const thirdClient = new FakeDwsClient();
+    thirdClient.identity = { profile: 'corp:bot' };
+    const third = await readyChannel(thirdClient, config, name);
+    await thirdClient.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'degraded-self-2',
+        'own echo',
+        {
+          senderId: 'open-self-old',
+        },
+      ),
+    );
+    expect(third.inbound).toEqual([]);
+  });
+
+  it('retains rotated self sender IDs within the same profile', async () => {
+    const config = makeConfig({
+      dmPolicy: 'disabled',
+      groups: { '*': { requireMention: false } },
+    });
+    const name = 'rotated-self-id-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = {
+      profile: 'corp:bot',
+      selfSenderIds: ['open-self-a'],
+    };
+    const first = await readyChannel(firstClient, config, name);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = {
+      profile: 'corp:bot',
+      selfSenderIds: ['open-self-b'],
+    };
+    const second = await readyChannel(secondClient, config, name);
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'rotated-self-a',
+        'old echo',
+        {
+          senderId: 'open-self-a',
+        },
+      ),
+    );
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'rotated-self-b',
+        'new echo',
+        {
+          senderId: 'open-self-b',
+        },
+      ),
+    );
+    expect(second.inbound).toEqual([]);
+  });
+
+  it('drops self sender history after a profile switch', async () => {
+    const config = makeConfig({
+      dmPolicy: 'disabled',
+      groups: { '*': { requireMention: false } },
+    });
+    const name = 'profile-self-id-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = {
+      profile: 'corp:one',
+      selfSenderIds: ['open-self-a'],
+    };
+    const first = await readyChannel(firstClient, config, name);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = {
+      profile: 'corp:two',
+      selfSenderIds: ['open-self-b'],
+    };
+    const second = await readyChannel(secondClient, config, name);
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'old-profile-sender',
+        'peer text',
+        {
+          senderId: 'open-self-a',
+        },
+      ),
+    );
+    expect(second.inbound.map((item) => item.text)).toEqual(['peer text']);
+  });
+
   it('drops unverified direct targets after self identity becomes authoritative', async () => {
     const name = 'legacy-direct-target-dws';
     const client = new FakeDwsClient();
