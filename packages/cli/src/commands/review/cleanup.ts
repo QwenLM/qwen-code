@@ -14,13 +14,27 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
+import {
+  clearReviewWorktreeLease,
+  isReviewLeaseFile,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+  reviewLeasePath,
+} from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
+import { readBudgetStopUnfenced } from './lib/deadline.js';
+import { promptRecordDir, runEpochMs } from './lib/prompt-record.js';
 import {
   worktreePath,
   probeWorktreePath,
@@ -379,15 +393,53 @@ export function runCleanup(target: string): void {
   // much still there — the two streams contradicting each other, and the stdout
   // half being the one a script reads.
   let failedAny = false;
+  // The lease guards the worktree and branch, so it releases once THOSE steps
+  // are done: a side file that will not delete (EACCES on a read-only entry,
+  // a Windows file handle) must not keep the lock held — a leftover lease
+  // refuses every later fetch-pr of this PR and skips every later cleanup,
+  // and nothing sweeps a finished session's lease automatically.
+  let failedDestruction = false;
 
   // --- Worktree + branch (only for PR targets) -------------------------
   const prMatch = /^pr-(\d+)$/.exec(target);
   if (prMatch) {
     const prNumber = prMatch[1];
 
+    // The lease is also a lock (#9205). The worktree path, the side files,
+    // and the fetch report carrying the audit window are all fixed per PR
+    // number, so cleaning while ANOTHER session reviews the same PR deletes
+    // its worktree, diff, and plan mid-run — and audits ITS window against
+    // receipts it never wrote. Skip the whole target: worktree, siblings,
+    // branch, side files, audit, and the lease itself all belong to the
+    // holder until its own cleanup releases them.
+    const holder = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holder)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — another review session ` +
+          `(session ${holder.sessionId}) still holds the worktree lease at ` +
+          `${reviewLeasePath(process.cwd(), target)}. Its own cleanup ` +
+          `releases the lease when it finishes; if that session is gone, ` +
+          `delete the lease file and re-run to force cleanup.`,
+      );
+      return;
+    }
+
     // Before the sweep below deletes the fetch report (the audit window's
     // carrier), check the PR for writes that bypassed `qwen review submit`.
     auditPrWrites(target, prNumber);
+
+    // The audit is network-bound (seconds) — a lease can appear during it (a
+    // review that started after the gate above read none). Re-check before
+    // destroying anything and take the same skip path (#9205).
+    const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — a review session ` +
+          `(session ${holderAfterAudit.sessionId}) acquired the lease ` +
+          `during the audit; its own cleanup releases it.`,
+      );
+      return;
+    }
 
     // Report what actually happened, in both directions. Announcing "Removed …"
     // off a path that is still on disk is a lie; saying nothing at all when we
@@ -401,6 +453,7 @@ export function runCleanup(target: string): void {
       } else if (existed) {
         writeStderrLine(`Failed to remove ${label} ${path}: ${reason}`);
         failedAny = true;
+        failedDestruction = true;
       }
     };
 
@@ -447,6 +500,7 @@ export function runCleanup(target: string): void {
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
         failedAny = true;
+        failedDestruction = true;
       }
     }
   }
@@ -462,9 +516,71 @@ export function runCleanup(target: string): void {
     );
   }
 
+  // #9206: a prompt-record directory whose loop STOPPED WITHOUT CONVERGING
+  // is the only certification history there is — the evidence a
+  // never-retiring reverse-audit loop needs to diagnose itself, which the
+  // sweep would otherwise destroy unread. Two signals name such a stop,
+  // and neither implies the other:
+  //
+  // - A stop MARKER on disk, from ANY run. The loop writes one inside the
+  //   record directory when a round is refused (round-cap or budget), and
+  //   a clean convergence clears only its OWN run's marker — so a marker
+  //   that is still there is a stop that never converged. Retention reads
+  //   it WITHOUT the run-epoch fence the verdict consumers read through:
+  //   that fence keeps a previous run's stop from capping THIS run's
+  //   verdict, but here a previous run's marker is exactly the evidence
+  //   to keep — the CI retry re-captures the plan at the same path, and
+  //   fencing the marker out would re-create the loss #9206 reports.
+  // - Records this run cannot have written: a loop KILLED or crashed
+  //   mid-round stops without converging and leaves NO marker (only
+  //   refusals write one), but its records predate the retry's fresh plan
+  //   capture — nothing clears the record dir between runs. A file older
+  //   than the plan's own mtime is a previous run's.
+  // - A record directory whose plan file is GONE — the shape the signals
+  //   above leave behind. A previous cleanup kept the directory and swept
+  //   the plan beside it (retention preserves only the -prompts entry), so
+  //   the mtime comparison can no longer run — an unstatable plan reads
+  //   epoch -Infinity and no record is older than it. A directory that
+  //   survived one cleanup on this evidence must survive the next; the
+  //   Kept line's manual-removal instruction is the exit (#9213 on #9206).
+  //
+  // The decision is made BEFORE the sweep runs: the plan file the epoch
+  // reads is itself one of the swept entries.
+  const preserved = new Set<string>();
   for (const file of tmpEntries) {
+    if (!file.startsWith(prefix) || !file.endsWith('-prompts')) continue;
+    const planCandidate = join(
+      REVIEW_TMP_DIR,
+      `${file.slice(0, -'-prompts'.length)}.json`,
+    );
+    if (
+      readBudgetStopUnfenced(planCandidate) !== null ||
+      hasPreviousRunRecords(planCandidate) ||
+      !existsSync(planCandidate)
+    ) {
+      preserved.add(file);
+    }
+  }
+
+  for (const file of tmpEntries) {
+    // The lease doubles as the review's lock (#9205), so live PR leases must
+    // not be swept. Skip only the real lease shape (…-pr-<n>.json), not the
+    // bare prefix: a file-review target named "lease" flattens to this same
+    // prefix, and its OWN side files still need removal — nothing else removes
+    // them. Lease removal itself belongs to clearReviewWorktreeLease below.
+    if (isReviewLeaseFile(file)) {
+      continue;
+    }
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
+    if (preserved.has(file)) {
+      writeStdoutLine(
+        `Kept ${full}: a review run stopped here without converging — ` +
+          `the record directory is the evidence for diagnosing it; remove ` +
+          `it manually once done.`,
+      );
+      continue;
+    }
     try {
       // Not every side file is a file. `agent-prompt` records what it handed each
       // agent in `<plan>-prompts/`, a directory under this same prefix, and
@@ -479,15 +595,43 @@ export function runCleanup(target: string): void {
     }
   }
 
-  if (!failedAny) {
+  if (!failedDestruction) {
     clearReviewWorktreeLease(process.cwd(), target);
   }
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It
   // is only true when there was nothing there — not when there was and we could
-  // not get rid of it.
-  if (!removedAny && !failedAny) {
+  // not get rid of it, and not when an entry was deliberately kept.
+  if (!removedAny && !failedAny && preserved.size === 0) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
+  }
+}
+
+/**
+ * Whether the plan's record directory holds files older than the plan's
+ * own capture — records a PREVIOUS run wrote. Every run rewrites the plan
+ * at its Step 1 capture and nothing clears the record dir, so a file this
+ * run wrote is always newer than the plan; anything older belongs to a
+ * run that stopped and never cleaned up (#9206). Unreadable directory or
+ * plan → false: the sweep proceeds as it always did. One unreadable
+ * ENTRY is skipped instead: the check is existential — ANY file older
+ * than the plan — and a single unstatable entry (a vanished file, a
+ * broken symlink planted in the record dir) must not veto the older
+ * evidence beside it (#9213).
+ */
+function hasPreviousRunRecords(planPath: string): boolean {
+  try {
+    const epoch = runEpochMs(planPath);
+    const dir = promptRecordDir(planPath);
+    return readdirSync(dir).some((name) => {
+      try {
+        return statSync(join(dir, name)).mtimeMs < epoch;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
   }
 }
 

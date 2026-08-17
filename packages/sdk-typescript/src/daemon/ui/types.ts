@@ -862,6 +862,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   /** Images attached to this user message (base64 data URIs). */
   images?: Array<{ data: string; mimeType: string }>;
+  /**
+   * Text file attachments on this user message (display metadata only —
+   * the content rides the prompt's resource blocks and is never stored
+   * on the block). Local optimistic messages only; daemon replays carry
+   * no attachment metadata.
+   */
+  files?: Array<{ name: string; mimeType: string }>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -1068,6 +1075,7 @@ export interface DaemonTranscriptStore {
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
     meta?: DaemonTextDeltaMeta,
+    files?: Array<{ name: string; mimeType: string }>,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

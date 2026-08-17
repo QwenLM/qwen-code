@@ -195,37 +195,47 @@ function persistEndpointMetadataMigration(
   metadataKey: string,
   baseUrl: string,
   metadata: ProviderMetadata,
-): void {
-  if (!metadata.version) return;
+): boolean {
+  if (!metadata.version) return false;
   const persistScope = getPersistScopeForModelSelection(settings);
-  settings.setValue(
-    persistScope,
-    `${PROVIDER_METADATA_NS}.${metadataKey}.version`,
-    metadata.version,
-  );
-  settings.setValue(
-    persistScope,
-    `${PROVIDER_METADATA_NS}.${metadataKey}.baseUrl`,
-    baseUrl,
-  );
+  const writes: Parameters<LoadedSettings['setValues']>[0] = [
+    {
+      scope: persistScope,
+      key: `${PROVIDER_METADATA_NS}.${metadataKey}.version`,
+      value: metadata.version,
+    },
+    {
+      scope: persistScope,
+      key: `${PROVIDER_METADATA_NS}.${metadataKey}.baseUrl`,
+      value: baseUrl,
+    },
+  ];
   if (metadata.ignoredVersion) {
-    settings.setValue(
-      persistScope,
-      `${PROVIDER_METADATA_NS}.${metadataKey}.ignoredVersion`,
-      metadata.ignoredVersion,
-    );
+    writes.push({
+      scope: persistScope,
+      key: `${PROVIDER_METADATA_NS}.${metadataKey}.ignoredVersion`,
+      value: metadata.ignoredVersion,
+    });
   }
   if (metadata.postponedVersion && typeof metadata.postponedAt === 'number') {
-    settings.setValue(
-      persistScope,
-      `${PROVIDER_METADATA_NS}.${metadataKey}.postponedVersion`,
-      metadata.postponedVersion,
+    writes.push(
+      {
+        scope: persistScope,
+        key: `${PROVIDER_METADATA_NS}.${metadataKey}.postponedVersion`,
+        value: metadata.postponedVersion,
+      },
+      {
+        scope: persistScope,
+        key: `${PROVIDER_METADATA_NS}.${metadataKey}.postponedAt`,
+        value: metadata.postponedAt,
+      },
     );
-    settings.setValue(
-      persistScope,
-      `${PROVIDER_METADATA_NS}.${metadataKey}.postponedAt`,
-      metadata.postponedAt,
-    );
+  }
+  try {
+    settings.setValues(writes);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -289,12 +299,16 @@ function resolveUpdateTargets(
         normalizeBaseUrlForMatching(option.url)
     ) {
       const migratedMetadata = { ...legacyMetadata, ...endpointMetadata };
-      persistEndpointMetadataMigration(
-        settings,
-        metadataKey,
-        option.url,
-        migratedMetadata,
-      );
+      if (
+        !persistEndpointMetadataMigration(
+          settings,
+          metadataKey,
+          option.url,
+          migratedMetadata,
+        )
+      ) {
+        return [];
+      }
       return [
         {
           metadataKey,
@@ -347,12 +361,16 @@ function resolveUpdateTargets(
       ...endpointMetadata,
       version: computeModelListVersion(installedBuiltins),
     };
-    persistEndpointMetadataMigration(
-      settings,
-      metadataKey,
-      option.url,
-      inferredMetadata,
-    );
+    if (
+      !persistEndpointMetadataMigration(
+        settings,
+        metadataKey,
+        option.url,
+        inferredMetadata,
+      )
+    ) {
+      return [];
+    }
     return [{ metadataKey, baseUrl: option.url, metadata: inferredMetadata }];
   });
 }

@@ -1342,6 +1342,42 @@ describe('createDaemonSessionActions', () => {
       currentMode: 'target-mode',
     });
   });
+
+  it('forwards text file attachments as resource blocks and chip metadata', async () => {
+    const session = createMockSession('session-a');
+    const { actions, store } = createActionsHarness({ session });
+
+    const prompt = actions.sendPrompt('check this', {
+      files: [{ name: 'app.log', text: 'line1', media_type: 'text/plain' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            { type: 'text', text: 'check this\n\n@attachment:///app.log' },
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///app.log',
+                mimeType: 'text/plain',
+                text: 'line1',
+              },
+            },
+          ],
+        }),
+        expect.any(AbortSignal),
+      );
+    });
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      'check this',
+      [],
+      undefined,
+      [{ name: 'app.log', text: 'line1', mimeType: 'text/plain' }],
+    );
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
 });
 
 function createActionsHarness(

@@ -65,6 +65,7 @@ import {
   type RawComment,
   type RawReview,
   latestOwnLedger,
+  recoverOwnLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -1057,7 +1058,7 @@ describe('latestOwnLedger', () => {
   });
 
   it('takes the LATEST marker from the reviewing account only', () => {
-    const ledger = latestOwnLedger(
+    const recovered = latestOwnLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', marker(1)),
         review('bot', '2026-01-03T00:00:00Z', marker(3)),
@@ -1067,7 +1068,7 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(3);
+    expect(recovered?.ledger.round).toBe(3);
   });
 
   it('breaks a submitted_at tie on the review id, not on array order', () => {
@@ -1075,14 +1076,14 @@ describe('latestOwnLedger', () => {
     // ordered only by id. Keeping the earlier one hands the next round the
     // older work list — the one failure the whole recovery exists to prevent.
     const at = '2026-01-01T00:00:00Z';
-    const ledger = latestOwnLedger(
+    const recovered = latestOwnLedger(
       [
         { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
         { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(4);
+    expect(recovered?.ledger.round).toBe(4);
   });
 
   it('carries the anchor sha through the recovery seam intact', () => {
@@ -1107,7 +1108,116 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(recovered).toEqual(anchored);
+    expect(recovered?.ledger).toEqual(anchored);
+  });
+
+  it('recovers the winning review’s own commit_id as the age reference', () => {
+    // The reference must come from the SAME review the ledger came from — a
+    // recovery that took the newest ledger but another review's commit_id
+    // would date old code against the wrong head. The fixture must be able
+    // to refute that mutant: the account's NEWEST review is marker-less with
+    // a different commit_id (the bot's follow-up comment posted against a
+    // later head), so "take commitId from the latest review regardless of
+    // ledger" fails here instead of passing by coincidence. An invalid or
+    // missing commit_id yields null, never a truncated or garbage reference.
+    // 64 hex chars: COMMIT_SHA_RE's deliberate {40,64} breadth exists for
+    // SHA-256 heads, and no fixture pinned it (round-8 finding) — narrowing
+    // to {40} would silently drop the age reference on such repos.
+    const head = 'a'.repeat(64);
+    const recovered = latestOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'b'.repeat(40),
+        },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
+          id: 77,
+          commit_id: head,
+        },
+        {
+          ...review('bot', '2026-01-03T00:00:00Z', 'marker-less follow-up'),
+          commit_id: 'c'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.commitId).toBe(head);
+    // The winning review's own id rides along: Step 6's not-reviewed check
+    // must know WHICH body's disclosures bind the age rule.
+    expect(recovered?.reviewId).toBe(77);
+    const invalid = latestOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'abc123',
+        },
+      ],
+      'bot',
+    );
+    expect(invalid?.ledger.round).toBe(1);
+    expect(invalid?.commitId).toBeNull();
+  });
+
+  it('distinguishes "no own review" from "own review without a parseable ledger"', () => {
+    // Round-8 finding (two auditors independently): the deletion arm read
+    // "recovery returned null although reviews were read" as proof of no
+    // prior round, but an own review whose marker fails to parse (edited or
+    // damaged bot body, marker-less follow-up) also yields null — a
+    // persistent state, not absence. Deleting the side file there stamped
+    // the next round "round 1" mid-PR and reset the posture clock.
+    const damaged = recoverOwnLedger(
+      [review('bot', '2026-01-01T00:00:00Z', 'edited body, marker gone')],
+      'bot',
+    );
+    expect(damaged.recovered).toBeNull();
+    expect(damaged.sawOwnReview).toBe(true);
+    const absent = recoverOwnLedger(
+      [review('stranger', '2026-01-01T00:00:00Z', marker(3))],
+      'bot',
+    );
+    expect(absent.recovered).toBeNull();
+    expect(absent.sawOwnReview).toBe(false);
+    // Logins compare case-insensitively (GitHub's rule): a case mismatch
+    // would read "own review exists" as "proven absence" and delete the
+    // counter (self-audit finding).
+    const cased = recoverOwnLedger(
+      [review('Bot', '2026-01-01T00:00:00Z', marker(2))],
+      'bot',
+    );
+    expect(cased.sawOwnReview).toBe(true);
+    expect(cased.recovered?.ledger.round).toBe(2);
+    // A PENDING draft is not "seen" either — it is not a submitted review.
+    const draftOnly = recoverOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          state: 'PENDING',
+        },
+      ],
+      'bot',
+    );
+    expect(draftOnly.sawOwnReview).toBe(false);
+  });
+
+  it('never selects a PENDING draft — an unsubmitted review is not a previous round', () => {
+    // The API serves the caller's own drafts in the reviews list; a run that
+    // crashed between creating and submitting one must not hand the next
+    // round a round number, an age reference and a reviewId from state the
+    // PR never showed anyone.
+    const recovered = latestOwnLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(9)),
+          state: 'PENDING',
+          commit_id: 'd'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(1);
   });
 
   it('yields nothing with no login, no marker, or a malformed one', () => {
@@ -1189,6 +1299,32 @@ describe('renderLedgerSection', () => {
       sha: 'abc1234def56789',
     });
     expect(anchored).toContain('reviewed at `abc1234def56789`');
+    // The routing instruction itself, not just the sha: reverting this tail
+    // to the pre-`--since` wording would render "hand-validate the anchor"
+    // into every ledger-carrying context file — the skippable hand check
+    // the CLI now owns — with no other test red.
+    expect(anchored).toContain('pass it as `--since <sha>`');
+    expect(anchored).toContain('never run git against an anchor yourself');
+    // The tail's other two load-bearing fragments, each deletable while this
+    // file stayed green: the antecedent that says WHAT to pass, and the
+    // statement that the CLI is what validates and scopes it. Without the
+    // first, `pass it as --since <sha>` refers to nothing.
+    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('validates it against the fetched history');
+    // …and the two fragments the block's own comment claims but does not
+    // reach: the command that takes the flag, and what it does with it.
+    // Without the first, the tail names no command and the relative clause
+    // dangles.
+    expect(anchored).toContain('on a `fetch-pr` re-run');
+    expect(anchored).toContain('scopes the diff and plan');
+    // The CONDITION, not just the instruction. Dropping the clause leaves the
+    // tail telling the orchestrator, unconditionally and in imperative tone,
+    // to re-run with a sha that may already have been deterministically
+    // refused — `not-an-ancestor`, `hunks-outside-pr-diff`, `partition-failed`
+    // — which the recovered-anchor flow says must NOT be retried.
+    expect(anchored).toContain(
+      "when Step 1's recovered-anchor check rules a re-run admissible",
+    );
     expect(
       renderLedgerSection({
         v: 1,
@@ -1196,6 +1332,29 @@ describe('renderLedgerSection', () => {
         findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
       }),
     ).not.toContain('reviewed at');
+    // …and the routing tail goes with it: asserting only the space-form
+    // phrase let a mutant hoist the tail out of the ternary, since its own
+    // wording says "reviewed-at sha".
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('--since');
+    // Every sentence of the tail, not just the ones carrying `--since`. The
+    // first one is written "reviewed-at sha" — hyphenated — so it matches
+    // neither the space-form phrase nor `--since`, and could be hoisted out
+    // of the ternary with every assertion above still green: a sha-less
+    // ledger would then render a dangling reference to a reviewed-at sha the
+    // side file deliberately withholds.
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('reviewed-at sha');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {

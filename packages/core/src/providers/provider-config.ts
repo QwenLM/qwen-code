@@ -384,12 +384,23 @@ export function buildInstallPlan(
     : generatedModels;
   const providerOwnsModel = resolveOwnsModel(config);
   const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+  const migratedLegacyModelIds = new Set(
+    inputs.preserveModels
+      ?.filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint,
+      )
+      .map((model) => model.id) ?? [],
+  );
   const ownsModel = config.mergeModelsByIdentity
     ? (Array.isArray(config.baseUrl) || config.baseUrl === undefined) &&
       providerOwnsModel
       ? (model: ProviderModelConfig) =>
           providerOwnsModel(model) &&
-          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
+          (normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint ||
+            (model.baseUrl === undefined &&
+              migratedLegacyModelIds.has(model.id)))
       : undefined
     : providerOwnsModel;
   const firstModel = models[0];

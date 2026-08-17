@@ -266,6 +266,20 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('stores text file attachment metadata on local user messages', () => {
+    const store = createDaemonTranscriptStore();
+
+    store.appendLocalUserMessage('check this', undefined, undefined, [
+      { name: 'app.log', mimeType: 'text/plain' },
+    ]);
+
+    expect(store.getSnapshot().blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'check this',
+      files: [{ name: 'app.log', mimeType: 'text/plain' }],
+    });
+  });
+
   it('stores input annotations from replayed user message chunks', () => {
     const inputAnnotations = [
       {

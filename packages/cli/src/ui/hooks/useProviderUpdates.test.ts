@@ -716,15 +716,23 @@ describe('useProviderUpdates', () => {
     expect(
       result.current.providerUpdateRequest?.entries[0]?.diff.added,
     ).toEqual(['kimi-for-coding-highspeed']);
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--coding-plan.version`,
-      computeModelListVersion(olderCodingTemplate),
+    expect(mockSettings.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--coding-plan.version`,
+          value: computeModelListVersion(olderCodingTemplate),
+        },
+      ]),
     );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--api-international.version`,
-      computeModelListVersion(apiTemplate),
+    expect(mockSettings.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--api-international.version`,
+          value: computeModelListVersion(apiTemplate),
+        },
+      ]),
     );
   });
 
@@ -818,11 +826,48 @@ describe('useProviderUpdates', () => {
     expect(result.current.providerUpdateRequest?.entries[0]?.metadataKey).toBe(
       'kimi--coding-plan',
     );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--coding-plan.version`,
-      expect.any(String),
+    expect(mockSettings.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--coding-plan.version`,
+          value: expect.any(String),
+        },
+      ]),
     );
+  });
+
+  it('skips inferred endpoint updates when metadata persistence fails', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: buildProviderTemplate(
+        kimiProvider,
+        codingUrl,
+      ).slice(0, -1),
+    };
+    mockSettings.merged['env'] = { [KIMI_CODE_ENV_KEY]: 'sk-live' };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+    mockSettings.setValues.mockImplementationOnce(() => {
+      throw new Error('settings file is read-only');
+    });
+
+    let request: unknown = 'not rendered';
+    expect(() => {
+      const { result } = renderHook(() =>
+        useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+      request = result.current.providerUpdateRequest;
+    }).not.toThrow();
+
+    expect(request).toBeUndefined();
   });
 
   it('preserves an ignored version when inferring from base-URL-less legacy metadata', () => {
@@ -848,10 +893,14 @@ describe('useProviderUpdates', () => {
     );
 
     expect(result.current.providerUpdateRequest).toBeUndefined();
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--coding-plan.ignoredVersion`,
-      codingVersion,
+    expect(mockSettings.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--coding-plan.ignoredVersion`,
+          value: codingVersion,
+        },
+      ]),
     );
   });
 
@@ -880,15 +929,19 @@ describe('useProviderUpdates', () => {
     );
 
     expect(result.current.providerUpdateRequest).toBeUndefined();
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--coding-plan.postponedVersion`,
-      codingVersion,
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--coding-plan.postponedAt`,
-      postponedAt,
+    expect(mockSettings.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--coding-plan.postponedVersion`,
+          value: codingVersion,
+        },
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--coding-plan.postponedAt`,
+          value: postponedAt,
+        },
+      ]),
     );
   });
 
@@ -976,15 +1029,19 @@ describe('useProviderUpdates', () => {
     );
 
     expect(firstLaunch.result.current.providerUpdateRequest).toBeUndefined();
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--api-international.postponedVersion`,
-      apiVersion,
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.kimi--api-international.postponedAt`,
-      postponedAt,
+    expect(mockSettings.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--api-international.postponedVersion`,
+          value: apiVersion,
+        },
+        {
+          scope: 'User',
+          key: `${PROVIDER_METADATA_NS}.kimi--api-international.postponedAt`,
+          value: postponedAt,
+        },
+      ]),
     );
     firstLaunch.unmount();
 

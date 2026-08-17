@@ -853,6 +853,55 @@ describe('applyProviderInstallPlan', () => {
     );
   });
 
+  it('migrates a requested base-URL-less custom model without duplicating it', async () => {
+    const baseUrl = 'https://new.example/v1';
+    const siblingBaseUrl = 'https://sibling.example/v1';
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    const siblingEnvKey = generateCustomEnvKey(
+      AuthType.USE_OPENAI,
+      siblingBaseUrl,
+    );
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey,
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const siblingModel = {
+      id: 'legacy-model',
+      name: 'legacy-model sibling',
+      baseUrl: siblingBaseUrl,
+      envKey: siblingEnvKey,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [legacyModel, siblingModel],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['legacy-model'],
+      preserveModels: [{ ...legacyModel, baseUrl }],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[envKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      {
+        ...legacyModel,
+        baseUrl,
+      },
+      siblingModel,
+    ]);
+  });
+
   it('removes omitted custom models only from the selected endpoint', async () => {
     const baseUrl = 'https://custom.example/v1';
     const siblingBaseUrl = 'https://sibling.example/v1';
