@@ -769,6 +769,17 @@ export async function runNonInteractive(
       },
       abortController,
     );
+    const stampBudgetAbort = () => {
+      const exceeded = budgetEnforcer.getExceeded();
+      if (!exceeded) return;
+      endActiveInteraction('error', {
+        errorMessage: exceeded.message,
+        errorType: 'run_budget_exceeded',
+      });
+    };
+    abortController.signal.addEventListener('abort', stampBudgetAbort, {
+      once: true,
+    });
     budgetEnforcer.start();
 
     /**
@@ -2275,7 +2286,14 @@ export async function runNonInteractive(
             toolName: request.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
           })),
+          new Map(
+            orderedResponses.map(({ request }) => [
+              request.callId,
+              request.prompt_id,
+            ]),
+          ),
         );
 
         const chatRecordingService = config.getChatRecordingService?.();
@@ -2290,6 +2308,8 @@ export async function runNonInteractive(
               statusByResponse.get(response) ??
               (response.error ? 'error' : 'success'),
             resultDisplay: response.resultDisplay,
+            persistedOutputFiles: finalized[index].persistedOutputFiles,
+            artifacts: finalized[index].artifacts,
             error: response.error,
             errorType: response.errorType,
             executionStatus: response.executionStatus,
@@ -3078,6 +3098,8 @@ export async function runNonInteractive(
       }
     } catch (error) {
       const budgetExceeded = budgetEnforcer.getExceeded();
+      const failureMessage =
+        error instanceof Error ? error.message : String(error);
       endActiveInteraction(
         budgetExceeded || !abortController.signal.aborted
           ? 'error'
@@ -3132,9 +3154,7 @@ export async function runNonInteractive(
         ? budgetExceeded.message
         : recoverableCancellation
           ? abortController.signal.reason.message
-          : error instanceof Error
-            ? error.message
-            : String(error);
+          : failureMessage;
       const metrics = uiTelemetryService.getMetrics();
       const usage = computeUsageFromMetrics(metrics);
       // Get stats for JSON format output
@@ -3221,6 +3241,7 @@ export async function runNonInteractive(
       // run completes — important for callers (e.g. the `qwen serve`
       // daemon, SDK) that reuse a single process across many runs.
       budgetEnforcer.stop();
+      abortController.signal.removeEventListener('abort', stampBudgetAbort);
 
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);

@@ -753,6 +753,31 @@ const SETTINGS_SCHEMA = {
           'Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag. The post still binds to the PR named in the invocation. Enable only if you always want reviews published. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
       },
+      severityFloor: {
+        type: 'enum',
+        label: 'Posting floor: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 'auto',
+        description:
+          'The lowest severity a PR /review posts when --severity-floor is not given. "auto" keeps the round-adaptive default: Suggestions post through round 5, and from round 6 only Criticals post while otherwise-postable high-confidence Suggestions are recorded and deferred (low-confidence and Nice-to-have findings stay terminal-only as ever); under "auto", rounds 2-5 additionally defer new Suggestions on code unchanged since the previous round — the same discipline that stops review rounds from ballooning a PR. "critical" applies that posture from round 1; "suggestion" keeps Suggestions posting at every round. Non-PR targets have no rounds and ignore this. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+        options: [
+          { value: 'auto', label: 'Auto (Critical-only from round 6)' },
+          { value: 'critical', label: 'Critical-only (every round)' },
+          { value: 'suggestion', label: 'Suggestions and Criticals' },
+        ],
+      },
+      reverseAuditRounds: {
+        type: 'number',
+        label: 'Reverse-audit round ceiling: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 0,
+        description:
+          'Lower the reverse-audit loop\'s round cap for every high-effort review. The cap is normally chosen from the diff topology (10 small / 5 chunked; a huge diff is 3 when the run has a review deadline and 5 when it does not, because that reduction answers a CI ceiling and applies only where one exists) because a round costs one agent on a small diff and ~90 minutes on a huge one; this setting can only LOWER whichever tier applies, never raise it — a value that is not a whole number above zero, or that is out of range (below 3, or above the plan\'s own tier), is ignored and leaves the tier alone — JSON Schema has no integer type here, so a fraction validates in an editor and is then discarded at runtime. Understand what it buys before enabling: the loop ends on two consecutive dry rounds, so cutting the cap does not make reviews converge sooner, it makes them stop before converging more often — and every such stop is disclosed as unreviewed scope and caps the verdict at Comment, so a cheaper review is also one that can no longer Approve. To spend LESS on reviews generally, prefer "effort". Nothing here makes a loop run LONGER: a review deadline bounds a run rather than extending it, and on a huge diff setting one lowers the cap from 5 to 3 rather than raising it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+      },
     },
   },
   output: {
@@ -1395,6 +1420,17 @@ const SETTINGS_SCHEMA = {
     default: '',
     description:
       'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
+    showInDialog: true,
+  },
+
+  advisorModel: {
+    type: 'string',
+    label: 'Advisor Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '' as string,
+    description:
+      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
     showInDialog: true,
   },
 

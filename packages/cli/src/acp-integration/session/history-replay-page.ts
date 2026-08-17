@@ -19,6 +19,7 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { Buffer } from 'node:buffer';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -201,6 +202,13 @@ function replayContext(
           _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
         } as unknown as SessionUpdate;
       })();
+      const deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
+      observeAcpToolResultProjection(
+        update,
+        projectedUpdate,
+        sessionId,
+        deliveredUpdate,
+      );
       if (limits) {
         const updateCount = updates.length + 1;
         if (updateCount > limits.maxUpdates) {
@@ -213,7 +221,7 @@ function replayContext(
         }
         serializedUpdateBytes +=
           (updates.length === 0 ? 0 : 1) +
-          Buffer.byteLength(JSON.stringify(updateWithRecordId), 'utf8');
+          Buffer.byteLength(JSON.stringify(deliveredUpdate), 'utf8');
         if (serializedUpdateBytes > limits.maxBytes) {
           throw new HistoryReplayLimitError(
             sessionId,
@@ -223,7 +231,7 @@ function replayContext(
           );
         }
       }
-      updates.push(updateWithRecordId);
+      updates.push(deliveredUpdate);
     },
     setActiveRecordId: (recordId: string | null) => {
       activeRecordId = recordId;
@@ -273,22 +281,18 @@ export async function collectHistoryReplayUpdates({
       updates.length,
       error,
     );
-    return { updates: liftSessionUpdateTimestamps(updates), replayError };
+    return { updates, replayError };
   }
-  return { updates: liftSessionUpdateTimestamps(updates) };
+  return { updates };
 }
 
-export function liftSessionUpdateTimestamps(
-  updates: SessionUpdate[],
-): SessionUpdate[] {
-  return updates.map((update) => {
-    const record = update as Record<string, unknown>;
-    const meta = record['_meta'];
-    const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
-    return typeof timestamp === 'number' || typeof timestamp === 'string'
-      ? ({ ...record, timestamp } as unknown as SessionUpdate)
-      : update;
-  });
+function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
+  const record = update as Record<string, unknown>;
+  const meta = record['_meta'];
+  const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
+  return typeof timestamp === 'number' || typeof timestamp === 'string'
+    ? ({ ...record, timestamp } as unknown as SessionUpdate)
+    : update;
 }
 
 export interface ReplayedTranscriptPage {
@@ -299,6 +303,23 @@ export interface ReplayedTranscriptPage {
   lastUpdated: string;
   partial?: true;
   replayError?: string;
+}
+
+function readTranscriptSourceRecordIds(
+  update: SessionUpdate,
+): string[] | undefined {
+  const value = update as unknown as Record<string, unknown>;
+  const meta =
+    value['_meta'] && typeof value['_meta'] === 'object'
+      ? (value['_meta'] as Record<string, unknown>)
+      : undefined;
+  const transcript =
+    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const sourceRecordIds = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(sourceRecordIds)) return undefined;
+  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
 }
 
 export async function replayTranscriptRecordPage({
@@ -345,6 +366,51 @@ export async function replayTranscriptRecordPage({
     replayError = 'Replay conversion failed for this page';
   }
 
+  if (page.branchPointsByAssistantUuid) {
+    const branchPoints = page.branchPointsByAssistantUuid;
+    // A checkpoint marks the END of its source record, which can replay as
+    // several chunks (text/thought/text). Only the LAST visible assistant
+    // chunk of the record may expose the branch point: an earlier chunk
+    // would restore the record's later content when branched from, and an
+    // empty-text usage chunk normalizes to `assistant.usage`, which drops
+    // the metadata.
+    const lastChunkIndexByRecordId = new Map<string, number>();
+    updates.forEach((update, index) => {
+      if (update.sessionUpdate !== 'agent_message_chunk') return;
+      const text = (update as { content?: { text?: unknown } }).content?.text;
+      if (typeof text !== 'string' || text.length === 0) return;
+      for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+        // Own-property check: transcript record uuids are untrusted input,
+        // and names like 'toString' would otherwise pass via the prototype
+        // chain.
+        if (Object.hasOwn(branchPoints, recordId)) {
+          lastChunkIndexByRecordId.set(recordId, index);
+        }
+      }
+    });
+    const decoratedIndexes = new Set<number>();
+    for (const [recordId, index] of lastChunkIndexByRecordId) {
+      if (decoratedIndexes.has(index)) continue;
+      decoratedIndexes.add(index);
+      const value = updates[index] as unknown as Record<string, unknown>;
+      const meta =
+        value['_meta'] && typeof value['_meta'] === 'object'
+          ? (value['_meta'] as Record<string, unknown>)
+          : undefined;
+      const transcript =
+        meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      value['_meta'] = {
+        ...meta,
+        qwenTranscript: {
+          ...transcript,
+          branchRecordId: branchPoints[recordId],
+        },
+      };
+    }
+  }
+
   const nextCursor =
     page.nextCursorState && replayError === undefined
       ? encodeCursor({
@@ -354,7 +420,7 @@ export async function replayTranscriptRecordPage({
       : undefined;
 
   return {
-    updates: liftSessionUpdateTimestamps(updates),
+    updates,
     ...(nextCursor ? { nextCursor } : {}),
     hasMore: replayError === undefined && page.hasMore,
     startTime: page.startTime,

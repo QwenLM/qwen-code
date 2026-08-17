@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useContext,
   useEffect,
@@ -12,6 +13,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
+import type { SessionContentGenerator } from './AssistantMessage';
 import {
   hasActiveAgents,
   isBackgroundSubAgentToolCall,
@@ -32,6 +34,7 @@ import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { Markdown } from './Markdown';
+import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
   formatDurationMs,
   formatElapsed,
@@ -71,9 +74,21 @@ import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
+  /**
+   * Thinking aggregated with the tools in this summary (compact mode), in
+   * the original order. Streaming entries drive the "Thinking…" summary;
+   * each entry renders as a click-to-expand row.
+   */
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>;
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   isLocateFlashing?: boolean;
+  /** Powers the translate action on completed thinking rows (zh-CN). */
+  generateContent?: SessionContentGenerator;
 }
 
 function openMonitorDetailsOnce(
@@ -1490,11 +1505,78 @@ export const ToolLine = memo(function ToolLine({
   );
 }, areToolLinePropsEqual);
 
+function ThoughtLine({
+  content,
+  isStreaming,
+  generateContent,
+}: {
+  content: string;
+  isStreaming?: boolean;
+  generateContent?: SessionContentGenerator;
+}) {
+  const { language, t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={styles.chatSummaryThought}>
+      <div
+        className={`${styles.chatSummaryThoughtHeader}${
+          expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
+        }`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        onKeyDown={(event) => {
+          // Only the container itself toggles; keys pressed inside nested
+          // controls (the translate button) keep their own behavior.
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          setExpanded((value) => !value);
+        }}
+      >
+        <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
+          <ThinkingDoneIcon />
+        </span>
+        <span
+          className={`${styles.chatSummaryThoughtLabel}${
+            isStreaming ? ` ${styles.chatSummaryThoughtLabelActive}` : ''
+          }`}
+        >
+          {t(isStreaming ? 'thinking.running' : 'thinking.done')}
+        </span>
+        {language === 'zh-CN' && !isStreaming && generateContent && (
+          <ThinkingTranslateButton
+            content={content}
+            generateContent={generateContent}
+            className={styles.chatSummaryThoughtTranslate}
+          />
+        )}
+        <span
+          className={
+            expanded
+              ? styles.chatSummaryThoughtChevronDown
+              : styles.chatSummaryThoughtChevronRight
+          }
+          aria-hidden="true"
+        />
+      </div>
+      {expanded && (
+        <div className={styles.chatSummaryThoughtContent}>
+          <Markdown content={content} source="thinking" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const ToolGroup = memo(function ToolGroup({
   tools,
+  thoughts,
   pendingApproval,
   workspaceCwd,
   isLocateFlashing = false,
+  generateContent,
 }: ToolGroupProps) {
   const { t } = useI18n();
   const subagentDetails = useSubagentDetails();
@@ -1510,7 +1592,11 @@ export const ToolGroup = memo(function ToolGroup({
       (tool) =>
         isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
     ) ?? (tools.length > 0 ? getActiveTool(tools) : undefined);
+  // Single-tool identity stays available for the compact summary and the
+  // subagent/monitor drawer shortcut even when thoughts are folded in; only
+  // the force-expanded content dump is suppressed for thought groups.
   const singleTool = tools.length === 1 ? tools[0] : undefined;
+  const compactToolLines = !!thoughts?.length;
   const singleSubagent =
     singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
   const singleMonitor =
@@ -1521,7 +1607,11 @@ export const ToolGroup = memo(function ToolGroup({
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
   );
-  const animateSummary = hasRunningTool && hasForegroundActiveTool;
+  const streamingThought = thoughts?.find((thought) => thought.isStreaming);
+  const animateSummary =
+    hasRunningTool && hasForegroundActiveTool
+      ? true
+      : streamingThought !== undefined;
   const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
   const opensMonitorDetails = Boolean(
     singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
@@ -1576,7 +1666,9 @@ export const ToolGroup = memo(function ToolGroup({
           }
         >
           <span className={styles.chatSummaryIcon} aria-hidden="true">
-            {summaryIconTool ? (
+            {streamingThought ? (
+              <ThinkingDoneIcon />
+            ) : summaryIconTool ? (
               <ToolSummaryIcon tool={summaryIconTool} />
             ) : (
               <ToolGroupIcon />
@@ -1589,7 +1681,9 @@ export const ToolGroup = memo(function ToolGroup({
                 : styles.chatSummaryText
             }
           >
-            {singleTool ? (
+            {streamingThought ? (
+              t('thinking.running')
+            ) : singleTool ? (
               <SingleToolSummary
                 tool={singleTool}
                 workspaceCwd={workspaceCwd}
@@ -1615,16 +1709,39 @@ export const ToolGroup = memo(function ToolGroup({
           <div className={styles.chatSummaryContentInner}>
             <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
               {tools.map((tool) => (
-                <ToolLine
-                  key={tool.callId}
-                  tool={tool}
-                  approval={pendingApproval}
-                  workspaceCwd={workspaceCwd}
-                  summaryOnly={!singleTool}
-                  forceExpanded={!!singleTool}
-                  hideHeader={!!singleTool}
-                />
+                <Fragment key={tool.callId}>
+                  {thoughts
+                    ?.filter(
+                      (thought) => thought.beforeToolCallId === tool.callId,
+                    )
+                    .map((thought, index) => (
+                      <ThoughtLine
+                        key={`thought-${tool.callId}-${index}`}
+                        content={thought.content}
+                        isStreaming={thought.isStreaming}
+                        generateContent={generateContent}
+                      />
+                    ))}
+                  <ToolLine
+                    tool={tool}
+                    approval={pendingApproval}
+                    workspaceCwd={workspaceCwd}
+                    summaryOnly={!singleTool || compactToolLines}
+                    forceExpanded={!!singleTool && !compactToolLines}
+                    hideHeader={!!singleTool && !compactToolLines}
+                  />
+                </Fragment>
               ))}
+              {thoughts
+                ?.filter((thought) => thought.beforeToolCallId === undefined)
+                .map((thought, index) => (
+                  <ThoughtLine
+                    key={`thought-trailing-${index}`}
+                    content={thought.content}
+                    isStreaming={thought.isStreaming}
+                    generateContent={generateContent}
+                  />
+                ))}
             </div>
           </div>
         </div>

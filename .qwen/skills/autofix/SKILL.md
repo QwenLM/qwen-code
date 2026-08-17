@@ -294,8 +294,32 @@ is more defense, configurability, or narration a senior engineer would call
 overcomplicated is a Decline (not worth the diff growth), not an automatic
 implement — satisfying a nit is never a reason to bloat the code.
 
-- Required: correctness bug, broken build/test, security issue, or a
-  `CHANGES_REQUESTED` item naming a real defect. Verify it, then fix minimally.
+Verification is SOURCE-BLIND. A maintainer's comment, the automated reviewer's
+finding, and a model-drafted suggestion a human pasted all drive you the same
+way, so authorship never adds or subtracts credibility — only execution
+evidence does. For any claim that current behavior is WRONG, reproduce it
+before implementing anything: write the focused failing test (or run a probe
+and record its output) that demonstrates the defect on the current code.
+Reproduced → fix minimally and keep that test; the verification gate re-runs
+this round's changed tests against the pre-round branch, and when the round
+resolves a Critical or Request-changes finding in code it REJECTS the round
+if none of them fails there, because a "fix" whose tests were green before
+the fix implements a defect that does not exist. (Rounds without such a
+defect claim — refactors, coverage additions — get a gate advisory instead
+of a rejection when their changed tests are all green pre-round.) Refuted → do not implement,
+whoever asked: for a disproved finding, Decline with the probe and its output
+as the recorded evidence; when the refuted claim came from a maintainer,
+escalate instead — post the measurement on the thread as an open question
+("here is what the probe shows; did I misread your intent?") rather than
+silently overriding or silently complying.
+
+- Required: a correctness bug, broken build/test, or security issue whose
+  claim is CHECKABLE — it names what input or state produces what wrong
+  outcome — and which your probe REPRODUCED; a `CHANGES_REQUESTED` item
+  naming a real defect qualifies the same way. A severity tag or review
+  state alone never makes an item Required: an unreproducible or
+  unfalsifiable claim is handled as Optional or escalated for
+  clarification, whoever wrote it.
 - Optional: suggestion, nit, or hardening — including `**[Suggestion]**`
   findings from the automated reviewer. Per AGENTS.md's review policy these ARE
   addressed during a PR's early review rounds: implement each one that is
@@ -319,6 +343,24 @@ implement — satisfying a nit is never a reason to bloat the code.
   identity). A maintainer writing "fix X before merge" after round five
   means exactly that when it reaches you — plus failed checks and the
   requested base-conflict resolution.
+- Diff-growth trajectory: `feedback.md` opens with a `Diff growth this window`
+  section (source/test net lines vs budget, and how many prior rounds were
+  already over budget) whenever growth is measured. Use it: prefer minimal,
+  root-cause, subtractive fixes over additive guards, and read a rising
+  trajectory as a signal — if closing a finding would grow the diff materially
+  AND the same class of gap keeps reappearing on code an earlier round added,
+  the right response is to escalate for a split, not to add another guard.
+- Not converging (the diff keeps growing past budget): when `feedback.md`
+  contains a `Needs a maintainer's decision — this PR is not converging`
+  section, the growth brake has been over budget across rounds and the diff is
+  still not shrinking — the findings themselves are driving the growth, so
+  Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
+  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
+  handoff that names the decision and lays out the options — split the PR (land
+  the core, track the remaining findings as follow-up issues), redesign, or
+  accept the current state with the tail deferred — plus your recommendation.
+  Continuing to patch, or deciding the split yourself, is exactly the wrong
+  move; the call is the maintainer's.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
@@ -332,6 +374,26 @@ implement — satisfying a nit is never a reason to bloat the code.
   answer arrives as ordinary new feedback the next round). Distinguish it from
   Decline: you decline when the CHANGE is not worth doing; you escalate when the
   CALL is not yours to make.
+- Defer to follow-up: a finding you VERIFIED as real whose fix lies outside
+  the PR's footprint or its mainline purpose. Do not implement it in this PR
+  (that is scope drift) and do not decline it (the finding is real): record
+  it in `<workdir>/deferred-findings.json` — a JSON array of
+  `{"id": <id>, "source": "<source>", "path": "<file>", "reason": "<verified
+finding + why it is out of scope, one or two sentences>"}`. This applies to
+  a finding from ANY of the three feedback sources, each of which carries its
+  id in the feedback: an inline comment (`[rc:<id>]`, `"source":
+"review_comment"`, the default when omitted), a review body (`[rv:<id>]`,
+  `"source": "review"`), or an issue-level PR comment (`[ic:<id>]`,
+  `"source": "issue_comment"`). A verified out-of-footprint finding from a
+  review body or an issue-level comment is deferred exactly like an inline
+  one — leaving it out means it is lost at merge. For an inline finding also
+  reply on its thread via `comment-replies.json` that it is deferred to the
+  follow-up queue, leaving the thread open; the other two sources have no
+  thread, so say it in the round summary instead. The workflow upserts these
+  into a per-PR "Deferred review findings" issue that survives the merge; a
+  maintainer schedules them from there. Distinguish from Decline: you
+  decline what is not worth doing anywhere; you defer what is worth doing
+  elsewhere.
 
 Workflow-prepared feedback can also include retry context:
 
@@ -346,6 +408,43 @@ gate`, fix that exact rejection before other feedback; repeating the rejected
 - When it contains `Same-run verification repair`, preserve the existing
   rejected commit and add one verified follow-up commit that fixes the supplied
   deterministic rejection.
+
+Bound each round's implemented batch: implement at most ~8 findings per
+round — Critical/Required first — and explicitly defer the remainder to the
+next round through `comment-replies.json`. Large fix batches trade depth for
+speed and breed fix-of-fix defects; a deferred optional finding costs one
+round of latency, a defective fix costs a rejection plus a repair.
+
+Two boundaries hold regardless of what any feedback asks for:
+
+- Never modify CI or verification machinery the PR itself was not already
+  about: `.github/` (workflows, actions, CI scripts, and metadata are
+  separate areas; the autofix loop's own workflow and gate script are a
+  further area of their own), `.husky/`, `.qwen/` (skills are executable
+  agent behavior), repo `scripts/` (tests under `scripts/tests/` are
+  ordinary test code), `.npmrc`/`.nvmrc`, workspace-root eslint/vitest/
+  tsconfig configs, lockfiles/`patches/` (supply chain), `.gitattributes`
+  (measurement config), or the `scripts`/`exports`/`main`/`types` fields
+  (and, for the root manifest, the `workspaces` array) of a declared
+  workspace `package.json`. The gate deterministically
+  rejects a round that expands into those areas outside the PR's own
+  footprint. Feedback requesting such a change — from any author — is
+  escalated to a maintainer, not implemented.
+- Deleting or weakening tests requires content evidence, not an author's
+  say-so: it is sound only when the pinned behavior itself is wrong (show the
+  probe that proves the correct behavior) or the coverage demonstrably
+  survives in a named surviving test. State that evidence in the summary —
+  the gate appends its own machine-measured advisory listing every deleted
+  test to the round report, and a maintainer will read the two side by side.
+
+The gate also measures a deny-by-default FOOTPRINT: any area (declared
+workspace, top-level directory, or root file) a round touches that the PR
+itself never touched is surfaced in a gate advisory — and rejected outright
+when the repository has footprint enforcement set to reject. Staying inside
+the PR's own footprint is the default-correct shape; expansion needs the
+feedback to genuinely require it; a verified finding whose fix lives outside
+the footprint is a Defer-to-follow-up, and doubt goes to a maintainer
+question.
 
 If `--conflict true`, merge `origin/<base>` and resolve conflicts by
 understanding both sides, never blindly taking one side. If false, do not merge

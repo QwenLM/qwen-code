@@ -51,6 +51,7 @@ import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
+import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
@@ -156,9 +157,91 @@ export function resolveConcurrencyLimit(
  * Bound the resource ceiling for workflow subagents so a single `agent()`
  * call cannot loop the model indefinitely. Values mirror conservative
  * upstream defaults; P5 will refine via `budget` once it exists.
+ *
+ * These are floors on *safety*, not statements about how long real work
+ * takes. A long-running agent — a build-and-test step, an analysis of a
+ * 2 000-line file, anything that pages through large reads — exceeds 50
+ * turns or 10 minutes routinely, and under the GOAL-terminal contract
+ * hitting either shows up as a `null` element in `parallel()`: an agent that
+ * silently went missing rather than one that visibly failed. So both are
+ * operator-tunable via env, on the same env-override pattern as the other
+ * workflow bounds; like `QWEN_CODE_MAX_WORKFLOW_AGENTS` (and unlike
+ * `QWEN_CODE_WORKFLOW_STALL_SECONDS` / `QWEN_CODE_MAX_WORKFLOW_SECONDS`,
+ * which apply valid overrides verbatim), clamped to a hard ceiling.
+ *
+ * Three time bounds act on a dispatch and they are NOT redundant:
+ *  - `stallMs` (60s default) — no *progress* for this long ⇒ abort + retry.
+ *    Held while a tool is in flight, so a slow tool is not a stall.
+ *  - `max_time_minutes` (this) — total wall time for ONE attempt, stalled or
+ *    not. Bounds the case the watchdog cannot see (a model that keeps
+ *    emitting progress forever).
+ *  - `QWEN_CODE_MAX_WORKFLOW_SECONDS` (30min default) — the whole run,
+ *    every dispatch together. Raising the per-agent bound without raising
+ *    this one just moves which limit kills the run.
  */
-const WORKFLOW_SUBAGENT_MAX_TURNS = 50;
-const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
+export const DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS = 50;
+export const DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
+export const WORKFLOW_SUBAGENT_MAX_TURNS_ENV =
+  'QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS';
+export const WORKFLOW_SUBAGENT_MAX_MINUTES_ENV =
+  'QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES';
+/** 10× the defaults — generous for a legitimate long agent, still bounded. */
+export const HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING = 500;
+export const HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING = 100;
+
+/**
+ * Resolve one env-tunable per-subagent bound. Same contract as
+ * {@link resolveMaxAgentsPerRun}: a non-integer / <1 override is rejected
+ * with a debug warning and the default is used; an override above the hard
+ * ceiling is clamped.
+ */
+function resolveSubagentBound(
+  envName: string,
+  defaultValue: number,
+  ceiling: number,
+  env: Record<string, string | undefined>,
+): number {
+  const raw = env[envName];
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed < 1) {
+    debugLogger.warn(
+      `Invalid ${envName}=${JSON.stringify(raw)}, using default (${defaultValue})`,
+    );
+    return defaultValue;
+  }
+  if (parsed > ceiling) {
+    debugLogger.warn(
+      `${envName}=${parsed} exceeds hard ceiling (${ceiling}); clamping.`,
+    );
+    return ceiling;
+  }
+  return parsed;
+}
+
+/** Per-attempt turn ceiling for a workflow subagent. */
+export function resolveSubagentMaxTurns(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return resolveSubagentBound(
+    WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+    DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+    HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING,
+    env,
+  );
+}
+
+/** Per-attempt wall-clock ceiling, in minutes, for a workflow subagent. */
+export function resolveSubagentMaxTimeMinutes(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return resolveSubagentBound(
+    WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+    DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+    HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING,
+    env,
+  );
+}
 
 /**
  * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
@@ -575,11 +658,16 @@ async function runSingleDispatch(
   ctx.set('task_prompt', prompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
+  // The fast path hands `config` to AgentHeadless untouched, so it has no
+  // way to honour a directory rebind — `workingDir` MUST route through the
+  // override path or it would be silently dropped and the agent would run in
+  // the parent working tree.
   if (
     opts.agentType === undefined &&
     opts.model === undefined &&
     opts.isolation === undefined &&
-    opts.schema === undefined
+    opts.schema === undefined &&
+    opts.workingDir === undefined
   ) {
     const subagent = await AgentHeadless.create(
       agentIdentity.name,
@@ -593,8 +681,8 @@ async function runSingleDispatch(
       // and the loop guards never tripped — combined with the cancellation
       // bug below, workflows were effectively unkillable.
       {
-        max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-        max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+        max_turns: resolveSubagentMaxTurns(),
+        max_time_minutes: resolveSubagentMaxTimeMinutes(),
       },
       // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
       // upstream Tg8 — closes the back-channel that would let a subagent
@@ -841,12 +929,52 @@ async function runOverridePath(
   // resolve cwd-related getters via the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
+  // Same contradiction the sandbox gate names, re-checked here: the sandbox
+  // gate reads the raw opts BEFORE the JSON revival, so an enumerable getter
+  // can withhold `isolation` during validation and surface it at stringify
+  // time. The host sees the revived plain object, so this check is the one
+  // that cannot be evaded.
+  if (opts.isolation !== undefined && opts.workingDir !== undefined) {
+    throw new Error(
+      'agent({workingDir, isolation}): incompatible options. workingDir ' +
+        'pins the agent to a worktree you already own; isolation creates ' +
+        'a fresh one and removes it afterwards. Pass one.',
+    );
+  }
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
-    effectiveContext = createWorktreeConfigOverride(
+    effectiveContext = createDirScopedConfigOverride(
       config,
       worktreeIsolation.path,
     );
+  } else if (opts.workingDir !== undefined) {
+    if (
+      typeof opts.workingDir !== 'string' ||
+      opts.workingDir.trim().length === 0
+    ) {
+      throw new Error(
+        'agent({workingDir}): must be a non-empty string naming an existing git worktree of this repository.',
+      );
+    }
+    // Caller-owned worktree: same rebind, no provisioning and no cleanup.
+    // Validated by AgentTool's own `working_dir` resolver so a script-supplied
+    // path cannot move the subagent's workspace boundary somewhere the
+    // equivalent `agent` tool call would have refused — the directory must be
+    // a registered linked worktree of this repository.
+    const resolved = await resolveExternalWorktreeDir(
+      config,
+      opts.workingDir,
+      'workingDir',
+    );
+    if ('error' in resolved) {
+      // JSON.stringify escapes only C0 — sanitize the echo too so DEL / C1
+      // (incl. NEL) in the model-authored path cannot fragment the message,
+      // the same threat the agentType SECURITY note above names.
+      throw new Error(
+        `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
+      );
+    }
+    effectiveContext = createDirScopedConfigOverride(config, resolved.path);
   }
 
   // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
@@ -920,8 +1048,8 @@ async function runOverridePath(
         // own runConfig / maxTurns — these are workflow-level safety bounds,
         // not subagent-level preferences. P5 will refine via budget.
         runConfigOverrides: {
-          max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-          max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+          max_turns: resolveSubagentMaxTurns(),
+          max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
         eventEmitter,
       },
@@ -1210,20 +1338,22 @@ async function provisionWorkflowWorktree(
 }
 
 /**
- * Build a Config wrapper that rebinds every "where am I?" surface to the
- * isolated worktree path. `Object.create(base)` keeps prototype lookups
- * walking back to the parent for everything else (model config, session
- * id, MCP servers), while the own-property overrides shadow the cwd-
- * adjacent fields so the subagent's tools (Edit / Write / Read / Glob /
- * Grep / Ls / Shell) anchor inside the worktree.
+ * Build a Config wrapper that rebinds every "where am I?" surface to a
+ * directory. `Object.create(base)` keeps prototype lookups walking back to
+ * the parent for everything else (model config, session id, MCP servers),
+ * while the own-property overrides shadow the cwd-adjacent fields so the
+ * subagent's tools (Edit / Write / Read / Glob / Grep / Ls / Shell) anchor
+ * inside it.
  *
- * Mirrors the inline rebind block at agent.ts:2008-2024. Sets BOTH the
- * field shape (e.g. `targetDir`) AND the method shape (`getTargetDir`)
- * because JS does not promote a getter assignment to a field shadow —
- * call sites that read `this.targetDir` directly inside Config methods
- * would otherwise still resolve through the prototype to the parent.
+ * Shared by both directory-scoped dispatch modes — `isolation: 'worktree'`,
+ * which provisions the directory, and `workingDir`, which is handed one the
+ * caller already owns. Mirrors the inline rebind block at agent.ts:2008-2024.
+ * Sets BOTH the field shape (e.g. `targetDir`) AND the method shape
+ * (`getTargetDir`) because JS does not promote a getter assignment to a field
+ * shadow — call sites that read `this.targetDir` directly inside Config
+ * methods would otherwise still resolve through the prototype to the parent.
  */
-function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
+function createDirScopedConfigOverride(base: Config, wtPath: string): Config {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ov: any = Object.create(base);
   ov.targetDir = wtPath;
@@ -1232,7 +1362,10 @@ function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
   ov.getCwd = () => wtPath;
   ov.getWorkingDir = () => wtPath;
   ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(wtPath);
+  const wtFileService = new FileDiscoveryService(
+    wtPath,
+    base.getFileFilteringOptions().customIgnoreFiles,
+  );
   ov.fileDiscoveryService = wtFileService;
   ov.getFileService = () => wtFileService;
   const wtWorkspace = new WorkspaceContext(wtPath);
