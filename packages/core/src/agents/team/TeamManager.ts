@@ -450,12 +450,14 @@ export class TeamManager {
           initialTask:
             config.prompt ??
             (config.planModeRequired
-              ? 'You have joined the team in plan mode. Call task_list now to find pending tasks. Claim one with task_update(status: "in_progress"), investigate read-only, then call exit_plan_mode to submit your plan for leader approval before executing.'
+              ? 'You have joined the team in plan mode. Call task_list now to find pending tasks. Claim one with task_update(status: "in_progress"), investigate read-only, then call exit_plan_mode to submit your plan for leader approval before executing. Use send_message only for blockers, questions, and material interim findings; your concise final answer is forwarded to the leader automatically.'
               : 'You have joined the team. Call task_list now to ' +
                 'find pending tasks. Claim one with task_update ' +
-                '(status: "in_progress"), do the work, report ' +
-                'via send_message(to: "leader"), then mark ' +
-                'completed with task_update.'),
+                '(status: "in_progress"), do the work, use ' +
+                'send_message only for blockers, questions, and ' +
+                'material interim findings, mark completed with ' +
+                'task_update, then return a concise final answer ' +
+                'that is forwarded to the leader automatically.'),
           runtimeConfig: {
             promptConfig: {
               systemPrompt,
