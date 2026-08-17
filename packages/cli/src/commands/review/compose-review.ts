@@ -1947,7 +1947,7 @@ function composeReviewBody(
   // An APPROVE is convergence. Telling a converging PR to reconsider itself is
   // the loudest false positive available, and it would contradict the posture
   // that composes a deferrals-only late Approve on purpose.
-  if (event !== 'APPROVE' && prevSrc0 > 0 && input.planPath) {
+  if (baseEvent !== 'APPROVE' && prevSrc0 > 0 && input.planPath) {
     const round = prevRound + 1;
     const rounds =
       operatorReviewSettings().approachRounds ?? APPROACH_ROUNDS_DEFAULT;

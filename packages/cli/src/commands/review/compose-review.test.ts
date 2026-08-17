@@ -6296,6 +6296,26 @@ describe('composeReview — approach signal', () => {
     expect(verdictLine(r)).not.toContain('reconsider the approach');
   });
 
+  it('never fires when an APPROVE is downgraded to COMMENT', () => {
+    const r = composeReview({
+      planPath: ballooned(),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      presubmit: {
+        downgradeApprove: true,
+        downgradeReasons: ['self-PR'],
+      },
+    });
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('⚠️ Round');
+    expect(verdictLine(r)).not.toContain('reconsider the approach');
+  });
+
   // No baseline on record means UNKNOWN growth, which must read as silence.
   // Every PR already in flight when this ships is in exactly that state, so
   // degrading to "no growth" instead would be silent-but-wrong at scale.
