@@ -48,7 +48,7 @@ import {
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
 import {
-  MAX_REGISTERED_WORKSPACES,
+  resolveMaxRegisteredWorkspaces,
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -2618,9 +2618,10 @@ async function runQwenServeImpl(
       }
     }
   }
-  if (workspaceInputs.length > MAX_REGISTERED_WORKSPACES) {
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces();
+  if (workspaceInputs.length > maxRegisteredWorkspaces) {
     throw new Error(
-      `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
+      `At most ${maxRegisteredWorkspaces} --workspace values may be registered.`,
     );
   }
   // Resolve the daemon's memory figures once. Nothing downstream consumes
@@ -2697,7 +2698,11 @@ async function runQwenServeImpl(
     const { WorkspaceRegistrationStore } = await import(
       './workspace-registration-store.js'
     );
-    workspaceRegistrationStore = new WorkspaceRegistrationStore(boundWorkspace);
+    workspaceRegistrationStore = new WorkspaceRegistrationStore(
+      boundWorkspace,
+      undefined,
+      maxRegisteredWorkspaces,
+    );
   }
   if (workspaceRegistrationStore) {
     try {
@@ -2753,7 +2758,7 @@ async function runQwenServeImpl(
           );
           continue;
         }
-        if (workspaceInputs.length >= MAX_REGISTERED_WORKSPACES) {
+        if (workspaceInputs.length >= maxRegisteredWorkspaces) {
           writeStderrLine(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(
               storedWorkspace,
@@ -3902,6 +3907,7 @@ async function runQwenServeImpl(
         ? createChildHeapPolicy({
             budget: opts.daemonMemoryBudget,
             mode: opts.childHeapMode ?? 'observe',
+            maxWorkspaces: maxRegisteredWorkspaces,
           })
         : undefined;
     managedChildHeapPolicy = childHeapPolicy;
@@ -5905,6 +5911,7 @@ async function runQwenServeImpl(
       managedScratchRoot,
       liveConversationWorkspace,
       workspaceRegistrationStore,
+      maxRegisteredWorkspaces,
       workspaceRuntimeRemoval,
       workspaceTrustHotReloadAvailable,
       voiceCoordinator: workspaceVoiceCoordinator,

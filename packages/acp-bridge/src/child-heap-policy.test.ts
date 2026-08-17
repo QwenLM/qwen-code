@@ -126,6 +126,28 @@ describe('createChildHeapPolicy', () => {
     ).toMatchObject({ maxConcurrentChildren: 25, perChildCeilingMb: 614 });
   });
 
+  it('follows a workspace cap override (QWEN_SERVE_MAX_WORKSPACES)', () => {
+    // Same 32 GB host as the pinned test above. A lower override becomes the
+    // binding term and raises the per-child ceiling accordingly...
+    expect(
+      createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 32_768 }),
+        mode: 'observe',
+        maxWorkspaces: 10,
+      }).snapshot(),
+    ).toMatchObject({ maxConcurrentChildren: 10, perChildCeilingMb: 1536 });
+
+    // ...while a higher override hands the bound back to the pool, which fits
+    // 30 children at the 512 MB floor.
+    expect(
+      createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 32_768 }),
+        mode: 'observe',
+        maxWorkspaces: 50,
+      }).snapshot(),
+    ).toMatchObject({ maxConcurrentChildren: 30, perChildCeilingMb: 512 });
+  });
+
   it('counts spawns past the modeled limit', () => {
     const b = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
     const policy = createChildHeapPolicy({ budget: b, mode: 'observe' });
