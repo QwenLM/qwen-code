@@ -423,6 +423,232 @@ describe('narrowToDelta on real-git captures', () => {
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
+  it('carries a post-anchor mode flip whose hunks all miss the full capture', () => {
+    // Round 1 edits lines 5 and 15; round 2 reverts line 5, keeps line 15,
+    // and flips the exec bit. The delta's section then carries BOTH the
+    // mode flip and a revert hunk whose new-side range overlaps no full
+    // hunk. The hunk miss must not drop the header-level change with it:
+    // the exec-bit flip sits in no other review chunk, and the ledger
+    // certifies head, so a dropped section never re-enters any later scope.
+    const base = commit('mode-miss base', {
+      'mm.sh': lines(20, 'M'),
+      'mm-other.ts': lines(8, 'T'),
+    });
+    const anchor = commit('mode-miss round 1', {
+      'mm.sh': lines(20, 'M')
+        .replace('M5\n', 'M5-EDIT\n')
+        .replace('M15\n', 'M15-EDIT\n'),
+      'mm-other.ts': lines(8, 'T'),
+    });
+    commitModeChange('mode-miss round 2', 'mm.sh', true, {
+      'mm.sh': lines(20, 'M').replace('M15\n', 'M15-EDIT\n'),
+      'mm-other.ts': lines(8, 'T').replace('T4\n', 'T4-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: the mode flip rides a section whose only
+    // hunk — the line-5 revert — nets out of the full capture.
+    expect(full).toContain('new mode 100755');
+    expect(deltaBytes.toString('utf8')).toContain('-M5-EDIT');
+    expect(full).not.toContain('M5-EDIT');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('new mode 100755');
+    expect(narrowed).toContain('+T4-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries a post-anchor rename whose hunks all miss the full capture', () => {
+    // Round 1 edits lines 5 and 15; round 2 renames the file and reverts
+    // line 5, keeping line 15. Both captures key the SAME rename, so the
+    // rename guard passes — and the delta's revert hunk then misses every
+    // full hunk exactly as in the mode-flip sibling. The rename — this
+    // round's work — must not drop with the missed hunks.
+    const base = commit('rename-miss base', {
+      'rn-old.ts': lines(20, 'O'),
+      'rn-other.ts': lines(8, 'T'),
+    });
+    const anchor = commit('rename-miss round 1', {
+      'rn-old.ts': lines(20, 'O')
+        .replace('O5\n', 'O5-EDIT\n')
+        .replace('O15\n', 'O15-EDIT\n'),
+      'rn-other.ts': lines(8, 'T'),
+    });
+    git('mv', 'rn-old.ts', 'rn-new.ts');
+    writeFileSync(
+      join(repo, 'rn-new.ts'),
+      lines(20, 'O').replace('O15\n', 'O15-EDIT\n'),
+    );
+    writeFileSync(
+      join(repo, 'rn-other.ts'),
+      lines(8, 'T').replace('T4\n', 'T4-EDIT\n'),
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'rename-miss round 2', '--no-verify');
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: BOTH captures key the move as the same
+    // rename, and the delta's only hunk — the line-5 revert — nets out of
+    // the full capture.
+    expect(deltaBytes.toString('utf8')).toContain('rename from rn-old.ts');
+    expect(full).toContain('rename from rn-old.ts');
+    expect(deltaBytes.toString('utf8')).toContain('-O5-EDIT');
+    expect(full).not.toContain('O5-EDIT');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('rename to rn-new.ts');
+    expect(narrowed).toContain('+T4-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('narrows a plain edit of a file an earlier round renamed', () => {
+    // The rename guard's pass-through arm: the full capture keys the path
+    // as a rename (round 1 moved it), while the delta carries a plain edit
+    // of the new path with no `renameFrom` (round 2 edited it). The guard
+    // must skip the section and narrow — refusing here would answer
+    // nothing-to-narrow on every later round of such a PR, permanently
+    // losing the incremental optimization with no error surface.
+    const base = commit('pass-through base', { 'pt-old.ts': lines(20, 'O') });
+    git('mv', 'pt-old.ts', 'pt-new.ts');
+    git('commit', '-qm', 'pass-through round 1', '--no-verify');
+    const anchor = git('rev-parse', 'HEAD').trim();
+    commit('pass-through round 2', {
+      'pt-new.ts': lines(20, 'O').replace('O10\n', 'O10-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: full keys a rename; the delta is a plain edit.
+    expect(full).toContain('rename to pt-new.ts');
+    expect(deltaBytes.toString('utf8')).not.toContain('rename from');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('+O10-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('emits the rename header and matching hunks when one round does both', () => {
+    // Round 1 edits line 3; round 2 renames the file AND edits line 15.
+    // The delta's section carries the rename AND content hunks — the
+    // emission cell (guard equality passes) × (non-empty ranges → header +
+    // matching hunks), distinct from the hunk-less pass and the
+    // rewrite-rename refusal.
+    const base = commit('rename-edit base', { 're-old.ts': lines(20, 'O') });
+    const anchor = commit('rename-edit round 1', {
+      're-old.ts': lines(20, 'O').replace('O3\n', 'O3-EDIT\n'),
+    });
+    git('mv', 're-old.ts', 're-new.ts');
+    writeFileSync(
+      join(repo, 're-new.ts'),
+      lines(20, 'O')
+        .replace('O3\n', 'O3-EDIT\n')
+        .replace('O15\n', 'O15-EDIT\n'),
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'rename-edit round 2', '--no-verify');
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    expect(deltaBytes.toString('utf8')).toContain('rename to re-new.ts');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('rename to re-new.ts');
+    expect(narrowed).toContain('+O15-EDIT');
+    // The round-1 edit is correctly absent: a non-empty-range section
+    // emits matching hunks only.
+    expect(narrowed).not.toContain('+O3-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('keeps every full hunk a single delta hunk overlaps', () => {
+    // Round 1 edits lines 5 and 25 and replaces lines 9..21; round 2
+    // reverts the replacement. The delta is ONE hunk whose new-side range
+    // overlaps BOTH surviving full hunks — a first-match-per-range emission
+    // would drop the second edit from the published scope while the report
+    // still says the round narrowed.
+    const base = commit('two-overlap base', { 'ov.ts': lines(30, 'F') });
+    const anchor = commit('two-overlap round 1', {
+      'ov.ts': lines(30, 'F')
+        .replace('F5\n', 'F5-EDIT\n')
+        .replace(
+          Array.from({ length: 13 }, (_, i) => `F${9 + i}`).join('\n') + '\n',
+          Array.from({ length: 13 }, (_, i) => `Y${i + 1}`).join('\n') + '\n',
+        )
+        .replace('F25\n', 'F25-EDIT\n'),
+    });
+    commit('two-overlap round 2', {
+      'ov.ts': lines(30, 'F')
+        .replace('F5\n', 'F5-EDIT\n')
+        .replace('F25\n', 'F25-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: full carries both edits and no replacement;
+    // the delta is the single revert hunk.
+    expect(full).toContain('+F5-EDIT');
+    expect(full).toContain('+F25-EDIT');
+    expect(full).not.toContain('Y1');
+    expect(deltaBytes.toString('utf8')).toContain('-Y1');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('+F5-EDIT');
+    expect(narrowed).toContain('+F25-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('drops the netted section of one file while its sibling still scopes', () => {
+    // Round 1 edits f.ts line 10 and inserts X1–X3 after line 25; round 2
+    // reverts the insertion, keeps the edit, and edits g.ts. The f.ts delta
+    // ranges miss ALL of its full hunks while g.ts still overlaps — the
+    // refusal must stay per-section: an all-or-nothing refusal would answer
+    // nothing-to-narrow on every round that mixes an undo with new work,
+    // re-reviewing the whole PR — precisely the cost narrowing exists to
+    // remove.
+    const base = commit('section-drop base', {
+      'sd-f.ts': lines(30, 'F'),
+      'sd-g.ts': lines(10, 'G'),
+    });
+    const anchor = commit('section-drop round 1', {
+      'sd-f.ts': lines(30, 'F')
+        .replace('F10\n', 'F10-EDIT\n')
+        .replace('F25\n', 'F25\nX1\nX2\nX3\n'),
+      'sd-g.ts': lines(10, 'G'),
+    });
+    commit('section-drop round 2', {
+      'sd-f.ts': lines(30, 'F').replace('F10\n', 'F10-EDIT\n'),
+      'sd-g.ts': lines(10, 'G').replace('G5\n', 'G5-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: full carries the f.ts edit but no insertion;
+    // the delta carries the revert.
+    expect(full).toContain('+F10-EDIT');
+    expect(full).not.toContain('X1');
+    expect(deltaBytes.toString('utf8')).toContain('-X1');
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('sd-g.ts');
+    expect(narrowed).toContain('+G5-EDIT');
+    expect(narrowed).not.toContain('sd-f.ts');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
   it('falls back when the delta overlaps no hunk the PR diff still carries', () => {
     // Round 1 inserts X1–X3 and edits U25; round 2 reverts the insertion,
     // keeping the edit. The delta's one hunk — the X deletion — lands in a

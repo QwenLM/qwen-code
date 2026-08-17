@@ -149,6 +149,13 @@ describe('bundled review skill', () => {
     // every round, forever.
     expect(body).toContain('`nothing-to-narrow` re-narrows identically');
     expect(body).toContain('found no common ancestor at all');
+    // The narrowing reason's definition in the enumeration and the retryable
+    // set's membership, pinned outright: the recovery loop reads both, and a
+    // rename of the one or a widening of the other ships green without them.
+    expect(body).toContain(
+      '`nothing-to-narrow` (the narrowing found nothing it could publish',
+    );
+    expect(body).toContain('(`base-untrusted`, `capture-failed`:');
   });
 
   it('records the range the round actually reviewed in provenance', () => {

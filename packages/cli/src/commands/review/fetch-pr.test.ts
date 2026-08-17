@@ -1048,8 +1048,11 @@ describe('fetch-pr report assembly', () => {
       reason: 'capture-failed',
     });
     expect(report.diffPath).toBeNull();
-    // What this pins beyond the reason: the delta did NOT become the scope.
-    expect(writtenDiff()).not.toBe(NARROWED);
+    // What this pins beyond the reason: NOTHING was written. The only
+    // wrongful write a fail-open producer can produce here is the delta it
+    // did receive — a NARROWED cannot exist, because narrowing assembles
+    // from the full capture, which threw.
+    expect(writtenDiff()).toBeNull();
     expect(
       producerMocks.writeStderrLine.mock.calls
         .map((c) => String(c[0]))
@@ -1356,15 +1359,17 @@ describe('fetch-pr report assembly', () => {
   });
 
   it("welds Agent 7's --base to the range the published scope came from", async () => {
-    // The only test that crosses the producer→consumer seam. This file never
-    // mentions `buildRoleBrief` and agent-prompt's own tests hand-build every
-    // report, so an asymmetric rename of `diffBase` — or a consumer guard
-    // that stops matching — ships with both suites green while Agent 7's
-    // test-efficacy probe silently recomputes a different range. The value
-    // itself matters: the published hunks are hunks of `BASE..head`, so
-    // welding the ANCHOR instead would send the probe over a range carrying
-    // hunks the PR's diff does not display — an undo round's reverted lines
-    // — and report survivors no comment can anchor on.
+    // The producer half of the producer→consumer seam, end to end: the REAL
+    // report the handler writes carries `diffBase: BASE` on an effective
+    // round, and the REAL brief builder welds `--base BASE`, never the
+    // ANCHOR — welding the anchor would send the probe over a range carrying
+    // hunks the PR's diff does not display (an undo round's reverted lines)
+    // and report survivors no comment can anchor on. The consumer half —
+    // reading `diffBase` at all, and the guards on it — is pinned where the
+    // two sources are distinguishable: agent-prompt's suite hand-builds a
+    // report whose `diffBase` differs from `mergeBaseSha` and fails a
+    // consumer that stops reading it. This fixture cannot distinguish them,
+    // because the producer writes the two equal by design.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,

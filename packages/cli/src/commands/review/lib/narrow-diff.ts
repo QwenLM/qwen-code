@@ -96,6 +96,14 @@ export function narrowToDelta(
 
   /** path -> the post-image ranges the delta touched. */
   const touched = new Map<string, Array<[number, number]>>();
+  /**
+   * Paths whose delta section carries a header-level change — a rename or a
+   * mode flip. The change lives in the full section's header, so it keeps
+   * its section in the scope even when the section's hunks all miss: the
+   * hunk-less treatment, extended to sections whose hunks netted out.
+   */
+  const headerTouched = new Set<string>();
+  const deltaLines = deltaText.split('\n');
   for (const f of delta.files) {
     const ranges = touched.get(f.path) ?? [];
     // A section with no hunks — a mode change, a pure rename, a binary
@@ -104,6 +112,14 @@ export function narrowToDelta(
     // the full section's header; emit the section whole".
     for (const h of f.hunks) ranges.push([h.newStart, h.newEnd]);
     touched.set(f.path, ranges);
+    if (
+      f.renameFrom !== undefined ||
+      deltaLines
+        .slice(f.diffStart - 1, f.diffEnd)
+        .some((l) => l.startsWith('new mode '))
+    ) {
+      headerTouched.add(f.path);
+    }
   }
 
   // The two captures can key the same change differently whenever git's
@@ -161,7 +177,16 @@ export function narrowToDelta(
     const matching = file.hunks.filter((h) =>
       ranges.some((r) => overlaps([h.newStart, h.newEnd], r)),
     );
-    if (firstHunk !== undefined && matching.length === 0) continue;
+    if (firstHunk !== undefined && matching.length === 0) {
+      if (headerTouched.has(file.path)) {
+        // The hunks netted out, but the header carries a change the delta
+        // performed — a mode flip or a rename the round must still review.
+        // Emit the section whole, the hunk-less treatment: every line of it
+        // is displayed, and over-inclusion is the chosen semantics.
+        selected.push([file.diffStart, file.diffEnd]);
+      }
+      continue;
+    }
 
     const headerEnd =
       firstHunk === undefined ? file.diffEnd : firstHunk.diffStart - 1;
