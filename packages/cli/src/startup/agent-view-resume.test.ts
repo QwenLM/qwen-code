@@ -6,7 +6,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentViewSessionStateFile } from '../agent-view/protocol.js';
+import { createAgentViewWorkerSidebandEnv } from '../agent-view/worker-sideband.js';
 import { routeManagedAgentViewResume } from './agent-view-resume.js';
+import { isAgentViewWorkerResumeCommandBlocked } from './agent-view-resume-guard.js';
 
 const mockReadAgentViewSessionState = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -103,6 +105,28 @@ describe('routeManagedAgentViewResume', () => {
 
     expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();
     expect(mockWriteStderrLine).not.toHaveBeenCalled();
+  });
+});
+
+describe('isAgentViewWorkerResumeCommandBlocked', () => {
+  it('blocks /resume only inside a fully-initialized attached worker', () => {
+    expect(
+      isAgentViewWorkerResumeCommandBlocked(
+        createAgentViewWorkerSidebandEnv({
+          sessionId: 'session-1',
+          sidebandEndpoint: 'unix:/tmp/qwen-agent-view.sock',
+          token: 'token-1',
+          activeCwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not block on a stray worker marker alone', () => {
+    expect(
+      isAgentViewWorkerResumeCommandBlocked({ QWEN_AGENT_VIEW_WORKER: '1' }),
+    ).toBe(false);
+    expect(isAgentViewWorkerResumeCommandBlocked({})).toBe(false);
   });
 });
 

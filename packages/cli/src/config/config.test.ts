@@ -398,10 +398,13 @@ describe('parseArguments', () => {
         throw new Error('process.exit called');
       });
 
-      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      try {
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-      expect(mockExit).toHaveBeenCalledWith(0);
-      mockExit.mockRestore();
+        expect(mockExit).toHaveBeenCalledWith(0);
+      } finally {
+        mockExit.mockRestore();
+      }
     },
   );
 
@@ -618,13 +621,15 @@ describe('parseArguments', () => {
     });
     mockWriteStderrLine.mockClear();
 
-    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining(message),
-    );
-
-    mockExit.mockRestore();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(message),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
   });
 
   it.each(['--bg', '--background'])(

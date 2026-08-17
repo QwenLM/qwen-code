@@ -11,6 +11,7 @@ import {
 import {
   isAgentViewWorkerEnv,
   QWEN_AGENT_VIEW_SESSION_ID,
+  readAgentViewWorkerSidebandEnv,
 } from '../agent-view/worker-sideband.js';
 
 export const MANAGED_AGENT_VIEW_RESUME_MESSAGE =
@@ -78,5 +79,8 @@ export async function releaseExitedManagedSessionForContinue(
 export function isAgentViewWorkerResumeCommandBlocked(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return isAgentViewWorkerEnv(env);
+  // Require the full sideband env, not a lone QWEN_AGENT_VIEW_WORKER=1: a
+  // stray marker (shell-profile export, leftover experiment) must not
+  // disable /resume in an ordinary foreground session.
+  return readAgentViewWorkerSidebandEnv(env) !== undefined;
 }

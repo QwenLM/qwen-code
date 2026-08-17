@@ -73,11 +73,33 @@ export const writeStderrLineSafe = (message: string): void => {
  * `process.exit()` right after writing silently discards buffered output
  * (beyond the ~80KB pipe buffer). Call this before a deliberate early exit
  * that follows user-facing writes (e.g. `qwen agents` subcommands, `--bg`).
+ *
+ * A pipe consumer that exits early (`qwen agents logs <id> | head`) turns
+ * the queued writes into EPIPE errors, and one that holds the pipe open
+ * without reading would block the drain forever — so errors settle the
+ * drain immediately and a timeout caps the wait.
  */
-export const drainStdioBeforeExit = (): Promise<void> =>
+export const drainStdioBeforeExit = (timeoutMs = 5000): Promise<void> =>
   new Promise((resolve) => {
+    let settled = false;
+    const settle = (): void => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const onError = (): void => settle();
+    process.stdout.once('error', onError);
+    process.stderr.once('error', onError);
+    const timer = setTimeout(settle, timeoutMs);
+    timer.unref?.();
     process.stdout.write('', () => {
-      process.stderr.write('', () => resolve());
+      process.stderr.write('', () => {
+        clearTimeout(timer);
+        process.stdout.removeListener('error', onError);
+        process.stderr.removeListener('error', onError);
+        settle();
+      });
     });
   });
 
