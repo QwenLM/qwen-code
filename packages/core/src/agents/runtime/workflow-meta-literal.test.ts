@@ -85,6 +85,24 @@ describe('parseWorkflowMetaLiteral', () => {
       });
     });
 
+    it.each([
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+      ['CR', '\r'],
+      ['line separator', '\u2028'],
+      ['paragraph separator', '\u2029'],
+    ])('ends a line comment at %s', (_label, terminator) => {
+      const src =
+        `{ name: 'w', description: 'd' // note` +
+        terminator +
+        `, whenToUse: 'u' }`;
+      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
+        name: 'w',
+        description: 'd',
+        whenToUse: 'u',
+      });
+    });
+
     it('accepts numbers, booleans and null in non-contract fields', () => {
       const src = `{ name: 'w', description: 'd', n: -1.5e3, b: true, f: false, z: null }`;
       expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
@@ -153,6 +171,31 @@ describe('parseWorkflowMetaLiteral', () => {
       expect(name).toBe('ab');
     });
 
+    it.each([
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+      ['CR', '\r'],
+      ['line separator', '\u2028'],
+      ['paragraph separator', '\u2029'],
+    ])('treats a backslash-%s as a line continuation', (_label, terminator) => {
+      for (const quote of ['"', "'", '`']) {
+        const src =
+          `{ name: ${quote}a\\` + terminator + `b${quote}, description: 'd' }`;
+        const { name } = parseWorkflowMetaLiteral(src) as { name: string };
+        expect(name).toBe('ab');
+      }
+    });
+
+    it.each([
+      ['CR', '\r'],
+      ['CRLF', '\r\n'],
+    ])('cooks raw %s to LF in a template string', (_label, terminator) => {
+      const { name } = parseWorkflowMetaLiteral(
+        '{ name: `a' + terminator + "b`, description: 'd' }",
+      ) as { name: string };
+      expect(name).toBe('a\nb');
+    });
+
     it('preserves non-ASCII text verbatim', () => {
       const { name } = parseWorkflowMetaLiteral(
         `{ name: '工作流 🪜', description: 'd' }`,
@@ -178,6 +221,14 @@ describe('parseWorkflowMetaLiteral', () => {
     it('rejects a newline inside a non-template string', () => {
       expect(() =>
         parseWorkflowMetaLiteral('{ name: "a\nb", description: "d" }'),
+      ).toThrow(/unterminated string/);
+    });
+
+    it.each(['"', "'"])('rejects a raw CR inside a %s string', (quote) => {
+      expect(() =>
+        parseWorkflowMetaLiteral(
+          `{ name: ${quote}a\rb${quote}, description: 'd' }`,
+        ),
       ).toThrow(/unterminated string/);
     });
   });

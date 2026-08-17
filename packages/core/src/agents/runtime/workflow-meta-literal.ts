@@ -102,8 +102,15 @@ class MetaLiteralParser {
         this.index++;
       }
       if (this.src.startsWith('//', this.index)) {
-        const newline = this.src.indexOf('\n', this.index);
-        this.index = newline === -1 ? this.src.length : newline + 1;
+        let end = this.index + 2;
+        while (
+          end < this.src.length &&
+          !'\n\r\u2028\u2029'.includes(this.src[end]!)
+        ) {
+          end++;
+        }
+        if (this.src[end] === '\r' && this.src[end + 1] === '\n') end++;
+        this.index = end < this.src.length ? end + 1 : this.src.length;
         continue;
       }
       if (this.src.startsWith('/*', this.index)) {
@@ -259,7 +266,15 @@ class MetaLiteralParser {
         return out;
       }
       // Only a template literal may span lines.
-      if (c === '\n' && quote !== '`') throw this.fail('unterminated string');
+      if (c === '\n' || c === '\r') {
+        if (quote !== '`') throw this.fail('unterminated string');
+        if (c === '\r') {
+          this.index++;
+          if (this.src[this.index] === '\n') this.index++;
+          out += '\n';
+          continue;
+        }
+      }
       if (quote === '`' && c === '$' && this.src[this.index + 1] === '{') {
         throw this.fail('template substitutions are not allowed in meta');
       }
@@ -327,6 +342,9 @@ class MetaLiteralParser {
       case '\r':
         // CRLF line continuation.
         if (this.src[this.index] === '\n') this.index++;
+        return '';
+      case '\u2028':
+      case '\u2029':
         return '';
       case undefined:
         throw this.fail('unterminated escape sequence');
