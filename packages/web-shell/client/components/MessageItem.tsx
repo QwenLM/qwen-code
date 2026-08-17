@@ -74,6 +74,10 @@ export const MessageItem = memo(function MessageItem({
     [onBranchSession, branchRecordId],
   );
   const compactMode = useContext(CompactModeContext);
+  const isUserStyled =
+    message.role === 'user' ||
+    (message.role === 'system' &&
+      message.source === 'mid_turn_message_injected');
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -138,7 +142,9 @@ export const MessageItem = memo(function MessageItem({
             variant={message.variant}
             source={message.source}
             data={message.data}
+            images={message.images}
             onShowContextDetail={onShowContextDetail}
+            onImagePreview={onImagePreview}
             isLatest={isLatest}
             showRetryHint={showRetryHint && message.retryable === true}
             onRetryClick={onRetryClick}
@@ -190,9 +196,7 @@ export const MessageItem = memo(function MessageItem({
     <ErrorBoundary
       label={`message:${message.role}`}
       resetKeys={[message]}
-      fallback={
-        <MessageRenderError align={message.role === 'user' ? 'end' : 'start'} />
-      }
+      fallback={<MessageRenderError align={isUserStyled ? 'end' : 'start'} />}
     >
       {body}
     </ErrorBoundary>
@@ -239,9 +243,9 @@ export const MessageItem = memo(function MessageItem({
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
-      chatMode={message.role === 'user'}
+      chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
-      copyText={message.role === 'user' ? message.content : undefined}
+      copyText={isUserStyled ? message.content : undefined}
       copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
@@ -351,7 +355,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         prev.variant === next.variant &&
         prev.retryable === next.retryable &&
         prev.source === next.source &&
-        prev.data === next.data
+        prev.data === next.data &&
+        stableImagesEqual(prev.images, next.images)
       );
     case 'user_shell':
       return (

@@ -4396,6 +4396,33 @@ describe('DaemonClient', () => {
       expect(result.accepted).toBe(false);
     });
 
+    it('includes media content blocks in the POST body when provided', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true, messageId: 'mid-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.enqueueMidTurnMessage('s-1', 'see this', {
+        messageId: 'client-mid-1',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'see this',
+        messageId: 'client-mid-1',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+    });
+
+    it('omits the content field when no media blocks are attached', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.enqueueMidTurnMessage('s-1', 'plain', { content: [] });
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'plain',
+      });
+    });
+
     it('URL-encodes the session id, forwards client id, and propagates the abort signal', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { accepted: true }),

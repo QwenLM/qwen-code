@@ -466,6 +466,13 @@ export type ToolArtifactKind =
   | 'notebook'
   | 'other';
 
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
+
 export type ToolArtifactStorage =
   | 'workspace'
   | 'external_url'
@@ -659,6 +666,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }

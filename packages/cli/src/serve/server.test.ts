@@ -533,6 +533,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_media',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -1295,6 +1296,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     worktree: { slug: string; path: string; branch: string };
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
+  const sessionMedia = new Map<string, { data: Buffer; mimeType: string }>();
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ??
     (() => ({ accepted: true, messageId: 'mid-default' }));
@@ -2295,12 +2297,29 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    enqueueMidTurnMessage(sessionId, message, context, messageId) {
+    async storeSessionMedia(_sessionId, data, mimeType) {
+      const mediaId = `media-${sessionMedia.size + 1}`;
+      sessionMedia.set(mediaId, { data: Buffer.from(data), mimeType });
+      return {
+        type: 'image',
+        mediaId,
+        mimeType,
+        size: data.byteLength,
+      };
+    },
+    async readSessionMedia(_sessionId, mediaId) {
+      return sessionMedia.get(mediaId);
+    },
+    async removeSessionMedia(_sessionId, mediaId) {
+      return sessionMedia.delete(mediaId);
+    },
+    enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
         sessionId,
         message,
         ...(context ? { context } : {}),
         ...(messageId ? { messageId } : {}),
+        ...(options ? { options } : {}),
       });
       return enqueueMidTurnImpl(sessionId, message, context, messageId);
     },
@@ -9345,6 +9364,134 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('session media', () => {
+    it('uploads and reads session-scoped binary media', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const uploaded = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(bytes);
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'image',
+        mediaId: 'media-1',
+        mimeType: 'image/png',
+        size: bytes.length,
+      });
+
+      const downloaded = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .buffer(true);
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers['content-type']).toBe('image/png');
+      expect(downloaded.body).toEqual(bytes);
+
+      const removed = await request(app)
+        .delete('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(removed.status).toBe(200);
+      expect(removed.body).toEqual({ removed: true });
+
+      const missing = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(missing.status).toBe(404);
+    });
+
+    it('rejects non-image uploads', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'audio/wav')
+        .send(Buffer.from([1]));
+
+      expect(response.status).toBe(400);
+    });
+
+    it('rejects SVG uploads', async () => {
+      // SVG can carry scripts and the bytes are served back to browsers on
+      // the same origin as the daemon API and Web Shell UI.
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/svg+xml')
+        .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+
+      expect(response.status).toBe(415);
+      expect(response.body).toEqual({
+        error: 'SVG uploads are not supported',
+      });
+    });
+
+    it('serves stored media with download-safe headers', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const uploaded = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(bytes);
+      expect(uploaded.status).toBe(201);
+
+      const downloaded = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .buffer(true);
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers['content-disposition']).toBe('attachment');
+      expect(downloaded.headers['x-content-type-options']).toBe('nosniff');
+    });
+
+    it('reports the media route 8 MiB body limit accurately', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(Buffer.alloc(8 * 1024 * 1024 + 1));
+
+      expect(response.status).toBe(413);
+      expect(response.body).toEqual({
+        error: 'Request body too large (max 8 MiB)',
+      });
+    });
+  });
+
   describe('POST /session/:id/mid-turn-message', () => {
     const midTurnPost = (
       app: ReturnType<typeof createServeApp>,
@@ -9447,10 +9594,128 @@ describe('createServeApp', () => {
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
 
+    it('forwards validated media blocks to the bridge', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'see this',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'see this',
+          options: {
+            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+          },
+        },
+      ]);
+    });
+
+    it('admits an empty message when media blocks are present', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: '',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toHaveLength(1);
+    });
+
+    it.each([
+      ['not an array', { message: 'hi', content: 'nope' }],
+      ['empty array', { message: 'hi', content: [] }],
+      ['non-object block', { message: 'hi', content: ['block'] }],
+      [
+        'unknown block type',
+        { message: 'hi', content: [{ type: 'text', text: 'hi' }] },
+      ],
+      [
+        'missing data',
+        { message: 'hi', content: [{ type: 'image', mimeType: 'image/png' }] },
+      ],
+      [
+        'mismatched mimeType',
+        {
+          message: 'hi',
+          content: [{ type: 'image', data: 'aW1n', mimeType: 'audio/mp3' }],
+        },
+      ],
+    ])('400 when `content` is invalid: %s', async (_label, body) => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', body);
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it.each([
+      ['exact', 'image/svg+xml'],
+      ['parameter suffix', 'image/svg+xml;charset=utf-8'],
+      ['uppercase', 'image/SVG+XML'],
+    ])(
+      '400 when `content` carries an SVG block: %s (raster-only policy)',
+      async (_label, mimeType) => {
+        // The upload route rejects SVG after normalizing the media type;
+        // the inline-block gate must reject the same spelling variants — an
+        // exact-string match lets standards-conformant variants through.
+        const bridge = fakeBridge();
+        const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+          message: 'hi',
+          content: [{ type: 'image', data: 'PHN2Zz4=', mimeType }],
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('SVG images are not supported');
+        expect(bridge.enqueueMidTurnCalls).toEqual([]);
+      },
+    );
+
+    it('forwards reference-form media blocks to the bridge verbatim', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'see this',
+        content: [
+          { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+        ],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'see this',
+          options: {
+            content: [
+              {
+                type: 'image',
+                mediaId: 'media-1',
+                mimeType: 'image/png',
+                size: 4,
+              },
+            ],
+          },
+        },
+      ]);
+    });
+
     it('400 when the trimmed message exceeds the 16 KB cap', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
         message: 'x'.repeat(16 * 1024 + 1),
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('400 when `content` carries more than 256 media blocks', async () => {
+      // Media blocks are resolved into inline bytes at dispatch; an unbounded
+      // array amplifies one small request into gigabytes of heap.
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'hi',
+        content: Array.from({ length: 257 }, () => ({
+          type: 'image',
+          data: 'aW1n',
+          mimeType: 'image/png',
+        })),
       });
       expect(res.status).toBe(400);
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
@@ -12904,6 +13169,129 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('400 when the prompt carries more than 256 media blocks', async () => {
+      // Same amplification guard as the mid-turn route: repeated media
+      // references resolve into per-occurrence inline bytes at dispatch.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            ...Array.from({ length: 257 }, () => ({
+              type: 'image',
+              data: 'aW1n',
+              mimeType: 'image/png',
+            })),
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('400 when a non-text prompt block is malformed (validated before admission)', async () => {
+      // Without per-block validation the block is admitted and only fails
+      // the ACP child's schema parse later, surfacing an async turn error
+      // instead of a synchronous 400.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'aW1n' },
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it.each([
+      ['exact', 'image/svg+xml'],
+      ['parameter suffix', 'image/svg+xml;charset=utf-8'],
+      ['uppercase', 'image/SVG+XML'],
+    ])(
+      '400 when a prompt media block is SVG: %s (raster-only policy)',
+      async (_label, mimeType) => {
+        // Same normalizing gate as the mid-turn route and the upload route.
+        const bridge = fakeBridge({
+          promptImpl: async () => ({ stopReason: 'end_turn' }),
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [
+              { type: 'text', text: 'hi' },
+              { type: 'image', data: 'PHN2Zz4=', mimeType },
+            ],
+          });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('SVG images are not supported');
+        expect(bridge.promptCalls).toHaveLength(0);
+      },
+    );
+
+    it('202 still admits legacy inline audio blocks (child-side validation)', async () => {
+      // The per-block validation is scoped to image blocks; legacy audio
+      // prompts keep their pre-existing behavior (the ACP child validates).
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'audio', data: 'YXVk', mimeType: 'audio/wav' },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('202 accepts valid inline and reference media blocks', async () => {
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 4,
+            },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req.prompt).toEqual([
+        { type: 'text', text: 'hi' },
+        { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+        { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+      ]);
     });
 
     it('202 envelope carries eventEpoch alongside lastEventId (DAEMON-001)', async () => {

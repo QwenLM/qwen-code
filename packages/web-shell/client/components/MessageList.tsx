@@ -700,7 +700,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return isMidTurnInjectedDebugMessage(item.message);
+      return false;
     case 'user':
     case 'user_shell':
     case 'btw':
