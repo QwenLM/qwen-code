@@ -61,7 +61,7 @@
   position: absolute;
   inset: -50px;
   z-index: 0;
-  opacity: calc(var(--dac-glow-on) * (0.66 + var(--dac-glow-pulse) * 0.34));
+  opacity: calc(var(--dac-glow-on) * (0.33 + var(--dac-glow-pulse) * 0.17));
   -webkit-mask: radial-gradient(
     ellipse 56% 64% at center,
     transparent 28%,
@@ -140,7 +140,7 @@
   inset: 0;
   z-index: 1;
   border-radius: inherit;
-  opacity: var(--dac-glow-on);
+  opacity: calc(var(--dac-glow-on) * 0.5);
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--dac-g2) 36%, transparent),
     0 1px 5px color-mix(in srgb, var(--dac-g1) 18%, transparent),
@@ -154,7 +154,7 @@
   border-radius: inherit;
   box-shadow: 0 6px 40px color-mix(in srgb, var(--dac-g1) 14%, transparent);
   content: '';
-  opacity: calc(var(--dac-glow-on) * var(--dac-glow-pulse));
+  opacity: calc(var(--dac-glow-on) * var(--dac-glow-pulse) * 0.5);
   will-change: opacity;
 }
 
