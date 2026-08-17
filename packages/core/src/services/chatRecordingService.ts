@@ -410,6 +410,7 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+  mediaReferences?: UserPromptMediaReference[];
   backgroundTask?: {
     taskId: string;
     status: string;
@@ -431,6 +432,15 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** Daemon-owned media references used to restore prompt previews. */
+  mediaReferences?: UserPromptMediaReference[];
+}
+
+export interface UserPromptMediaReference {
+  type: 'image' | 'audio';
+  mediaId: string;
+  mimeType: string;
+  size: number;
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -1770,8 +1780,9 @@ export class ChatRecordingService {
    */
   recordMidTurnUserMessage(
     message: PartListUnion,
-    displayText?: string,
+    displayText: string,
     goalContext?: GoalTurnPermit,
+    mediaReferences?: UserPromptMediaReference[],
   ): void {
     try {
       const record: ChatRecord = {
@@ -1779,9 +1790,10 @@ export class ChatRecordingService {
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
-        systemPayload: displayText
-          ? ({ displayText } as NotificationRecordPayload)
-          : undefined,
+        systemPayload: {
+          displayText,
+          ...(mediaReferences ? { mediaReferences } : {}),
+        },
       };
       this.appendRecord(record);
     } catch (error) {
@@ -1883,7 +1895,10 @@ export class ChatRecordingService {
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
       message: createUserContent(message),
       systemPayload: displayText
-        ? ({ displayText, backgroundTask } as NotificationRecordPayload)
+        ? {
+            displayText,
+            ...(backgroundTask ? { backgroundTask } : {}),
+          }
         : undefined,
     };
   }

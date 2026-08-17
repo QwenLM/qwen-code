@@ -204,7 +204,10 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'save logs' },
-        _meta: replayMeta(record),
+        _meta: replayMeta(record, {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        }),
       });
     });
   });
