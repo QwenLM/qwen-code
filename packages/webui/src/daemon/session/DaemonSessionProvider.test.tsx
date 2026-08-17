@@ -3998,6 +3998,115 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it('keeps replay-derived pagination state across a same-session reconnect', async () => {
+    // Regression coverage: once consumeReplaySnapshot() releases the
+    // snapshot, a same-session reconnect (stream-end resubscribe) recomputes
+    // the history inputs empty — firstPersistedRecordId degrades to
+    // historyAnchorRecordId and replayHistoryWasTruncated to false. The
+    // history state the original injection initialized (hasMore /
+    // beforeRecordId derived from the replay window) must survive instead of
+    // being clobbered with the degraded recomputation, which would make
+    // older history unloadable until a page reload.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const events = vi.fn(async function* endOnceThenIdle(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 1) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+      yield* [];
+    });
+    const session = createMockSession({
+      sessionId: 'session-pagination-reconnect',
+      // historyHasMore / historyAnchorRecordId stay at their defaults
+      // (false / undefined): pagination state derives solely from the replay
+      // window, so a clobbering recomputation would drop both.
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained replay' },
+                _meta: { 'qwen.session.recordId': 'record-retained' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+
+    // The stream ended once and the provider resubscribed the same session...
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'stream_end',
+    });
+    // ...and the pagination state initialized by the replay injection
+    // survives the reconnect even though the snapshot was consumed.
+    expect(history?.hasMore).toBe(true);
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-retained',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
   it('uses history_truncated marker recordId as pagination anchor when session_updates lack one', async () => {
     // Regression coverage: a live-journal truncation during a single long
     // in-flight turn can leave the retained window with no
