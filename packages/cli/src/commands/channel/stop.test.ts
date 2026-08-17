@@ -436,6 +436,14 @@ describe('stopCommand', () => {
     expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    // Cross-mode state-store isolation triple (R15-31, R16-48): the
+    // daemon-success shape must never persist into the standalone legacy
+    // GLOBAL store — a defensive local write here would make every later
+    // standalone `--channel all` in ANY workspace skip channels never
+    // stopped in standalone mode (the #8975 outage shape).
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
     // Message-before-exit ordering, twin of the changed:true test
     // (R10-19).
@@ -484,6 +492,14 @@ describe('stopCommand', () => {
     expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    // Cross-mode state-store isolation triple (R15-31, R16-48): THIS is
+    // the branch the triple was built to guard — the natural "fix" for a
+    // missing statePersisted is a defensive local persist, which would
+    // land the daemon-mode record in the standalone legacy GLOBAL store
+    // (the #8975 outage shape).
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
     // The no-op exit mock lets execution continue past process.exit, so it
     // cannot pin the ordering the production control flow depends on: the
@@ -544,6 +560,12 @@ describe('stopCommand', () => {
     expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    // Cross-mode state-store isolation triple (R15-31, R16-48): a failed
+    // daemon stop with a lost record must not trigger a defensive local
+    // persist into the standalone legacy GLOBAL store either.
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
     // Order pin as in the success branch: the warning must precede the
     // exit. A throwing exit mock is not usable here (the surrounding
@@ -610,6 +632,14 @@ describe('stopCommand', () => {
     expect(mockClassifyProcessAccess).not.toHaveBeenCalled();
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    // Cross-mode state-store isolation triple (R15-31, R16-48): the
+    // plain-failure shape (no statePersisted on the body) must stay
+    // store-quiet too — the duck-type gate relaxation that would print
+    // the false warning would also be the natural place to smuggle in a
+    // defensive local persist.
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
   });
 
   it('reports remote stop failures without falling through to standalone mode', async () => {
@@ -667,6 +697,13 @@ describe('stopCommand', () => {
 
     await invokeStop({ 'daemon-url': 'http://daemon:9' });
 
+    // The loud sink must be attempted EXACTLY once; degradation rides the
+    // best-effort sink only. A retry of the loud success write inside the
+    // catch consumes the one-shot throw mock and hits the default no-op —
+    // every assertion below still passes — while in production the
+    // persistent disk condition re-throws ENOSPC outside any try and a
+    // successful daemon stop dies with an uncaught error (R16-37).
+    expect(mockWriteStdoutLine).toHaveBeenCalledTimes(1);
     // The successful stop still exits 0 and is never laundered into the
     // failure diagnostic.
     expect(process.exit).toHaveBeenCalledWith(0);
@@ -1039,6 +1076,22 @@ describe('stopCommand', () => {
       2,
       'No channel service is running.',
     );
+    // Before-exit ordering pins for BOTH subcases (R16-31): under the
+    // no-op exit mock, relocating the bare notice below process.exit(0)
+    // ships green while production exits 0 with ZERO output — the only
+    // new terminal message in this file that lacked the R9-23/R10-19/
+    // R12-21 ordering pin. Each notice must precede ITS exit.
+    const noticeCalls = mockWriteStdoutLine.mock.calls
+      .map((args, index) => ({ args, index }))
+      .filter(({ args }) => args[0] === 'No channel service is running.')
+      .map(({ index }) => index);
+    expect(noticeCalls).toHaveLength(2);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[noticeCalls[0]],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[noticeCalls[1]],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[1]!);
   });
 
   it('does not record a crashed zero-channel service as stopped (#8975)', async () => {
@@ -1063,6 +1116,17 @@ describe('stopCommand', () => {
       'No channel service is running.',
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // Before-exit ordering pin (R16-31): twin of the serve-owned/empty
+    // pidfile test — the bare notice must precede the exit, or a
+    // relocated-below-exit write ships green under the no-op exit mock
+    // while production exits silently.
+    const noticeCall = mockWriteStdoutLine.mock.calls.findIndex(
+      (args) => args[0] === 'No channel service is running.',
+    );
+    expect(noticeCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[noticeCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('stops a LIVE zero-channel service normally (#8975)', async () => {
@@ -1086,6 +1150,16 @@ describe('stopCommand', () => {
 
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
+    // The clean stop must ALWAYS clean up the pidfile, zero-channel shape
+    // included (R16-49): gating removeServiceInfo on hadChannels (the
+    // natural follow-up to the message gating in this same block) leaves
+    // a dangling pidfile — the next start can be refused "already
+    // running" under PID reuse, and the next stop is sent down the
+    // crashed-service branch against a normally-exited process (the
+    // regression the sibling clean-stop's R11-35 pin was written to
+    // prevent). The SIGKILL and signal-failure tests carry this pin; this
+    // test was the omission.
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       'No channel service is running.',
     );

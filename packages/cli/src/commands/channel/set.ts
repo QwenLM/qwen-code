@@ -35,6 +35,14 @@ interface ChannelSetResultLike {
       startupFailuresTruncated?: unknown;
     }>;
   };
+  /**
+   * Present (and `false`) only when the names-mode commit succeeded but
+   * failed to clear a committed name's persisted `stopped` record —
+   * mirrors the SDK's `DaemonChannelSetResult` loss signal (#8975, R16-6).
+   */
+  statePersisted?: boolean;
+  /** Present alongside `statePersisted: false` (R14/R16-6). */
+  statePersistFailedWorkspaces?: string[];
 }
 
 interface DaemonClientLike {

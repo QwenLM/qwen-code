@@ -1529,6 +1529,12 @@ describe('runChannelDaemonWorker', () => {
     // configured set is a read-side cleanup, not a state flip, and a
     // refactor skipping prune exactly in this branch would strand stale
     // `stopped` entries for channels removed from settings (#8975).
+    // Count pin, matching the two sibling prune-calling branches
+    // (R15-29, R16-46): a second call on this zero-selection branch
+    // (e.g. a symmetric post-selection prune([])) stays green against
+    // membership alone, and wipes the recorded stops the moment prune
+    // semantics on an empty list change.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
     expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
       'telegram',
       'feishu',

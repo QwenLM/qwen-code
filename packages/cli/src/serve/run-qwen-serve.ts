@@ -18,7 +18,11 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
-import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineBestEffort,
+  writeStdoutLine,
+} from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
   acquireInheritedLoaderEnvScrub,
@@ -7052,7 +7056,30 @@ async function runQwenServeImpl(
         if (opts.channelSelection) {
           closeServerAfterChannelWorkerStartupFailure = true;
           const manager = await ensureChannelWorkerManager!();
-          await manager.startInitial(opts.channelSelection);
+          const initialCommit = await manager.startInitial(
+            opts.channelSelection,
+          );
+          // The clearStoppedRecords closure reports its failed workspaces
+          // on the set result, but pre-R16-26 the boot path discarded the
+          // result: a committed name whose `stopped` record could not be
+          // cleared would be filtered out by a later reload-op resolve and
+          // permanently trimmed from the committed selection with ZERO
+          // diagnostics tying the trim to the failed clear. Surface the
+          // loss loudly — the manager's option contract says a clear
+          // failure "must not be SILENT either" (#8975, R16-26).
+          // Best-effort sink: a warning write must not kill the daemon
+          // boot when stderr is already failing (R11-13).
+          if (initialCommit.statePersisted === false) {
+            const failedWorkspaces =
+              initialCommit.statePersistFailedWorkspaces ?? [];
+            writeStderrLineBestEffort(
+              `[Channel] Warning: could not clear persisted stopped records in workspace(s) ${
+                failedWorkspaces.length > 0
+                  ? failedWorkspaces.join(', ')
+                  : 'unknown'
+              }; the affected channels may be dropped from the committed selection on the next reload.`,
+            );
+          }
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;

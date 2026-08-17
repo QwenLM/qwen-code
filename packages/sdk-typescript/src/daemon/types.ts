@@ -3196,6 +3196,20 @@ export interface DaemonChannelSetResult {
   replaced: boolean;
   partial: boolean;
   state: DaemonChannelControlState;
+  /**
+   * Present (and `false`) only when the names-mode commit succeeded but
+   * failed to clear a committed name's persisted `stopped` record: the
+   * surviving record lets the next reload-op resolve filter the name out
+   * and permanently trim the committed selection, so typed clients must be
+   * able to read the loss and retry. Absent on the happy path (#8975,
+   * R16-6).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the canonical workspaces
+   * whose record clear failed, so a retry can be targeted (R14/R16-6).
+   */
+  statePersistFailedWorkspaces?: string[];
 }
 
 export interface DaemonChannelStopResult {

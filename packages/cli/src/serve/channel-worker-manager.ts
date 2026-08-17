@@ -227,7 +227,16 @@ export interface CreateChannelWorkerManagerOptions {
 }
 
 export interface ChannelWorkerManager {
-  startInitial(selection: ServeChannelSelection): Promise<void>;
+  /**
+   * Returns the initial commit's set result: the boot path must be able to
+   * read the `clearStoppedRecords` loss signal (`statePersisted: false` +
+   * `statePersistFailedWorkspaces`) and surface it — discarding it leaves
+   * the committed names' surviving `stopped` records undiagnosed when a
+   * later reload-op resolve filters and permanently trims them (R16-26).
+   */
+  startInitial(
+    selection: ServeChannelSelection,
+  ): Promise<ChannelWorkerSetResult>;
   setSelection(
     selection: ServeChannelSelection,
     requiredOwner?: ChannelWorkerRequiredOwner,
@@ -920,11 +929,13 @@ export function createChannelWorkerManager(
   };
 
   const manager: ChannelWorkerManager = {
-    async startInitial(selection) {
-      if (draining) throw drainingError();
-      await enqueue(async () => {
-        await applySelection(selection, true);
-      });
+    startInitial(selection) {
+      if (draining) {
+        return Promise.reject(drainingError());
+      }
+      // Return the initial commit's set result so the boot path can
+      // surface the clearStoppedRecords loss signal (R16-26).
+      return enqueue(() => applySelection(selection, true));
     },
     setSelection(selection, requiredOwner) {
       if (draining) {

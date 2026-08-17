@@ -545,16 +545,16 @@ function parseStateFile(raw: string): ParsedStateFile | undefined {
 function filterEpochs(
   epochs: Record<string, unknown> | undefined,
 ): Record<string, number> | undefined {
-  if (
-    typeof epochs !== 'object' ||
-    epochs === null ||
-    Array.isArray(epochs)
-  ) {
+  if (typeof epochs !== 'object' || epochs === null || Array.isArray(epochs)) {
     return undefined;
   }
   const result: Record<string, number> = Object.create(null);
   for (const [name, value] of Object.entries(epochs)) {
-    if (name.length > 0 && typeof value === 'number' && Number.isFinite(value)) {
+    if (
+      name.length > 0 &&
+      typeof value === 'number' &&
+      Number.isFinite(value)
+    ) {
       result[name] = value;
     }
   }
@@ -680,14 +680,11 @@ export class ChannelStateStore {
 
   setMany(names: readonly string[], state: ChannelRuntimeState): void {
     if (names.length === 0) return;
-    this.applyChange(
-      (channels) => {
-        for (const name of names) {
-          channels[name] = state;
-        }
-      },
-      names,
-    );
+    this.applyChange((channels) => {
+      for (const name of names) {
+        channels[name] = state;
+      }
+    }, names);
   }
 
   /**

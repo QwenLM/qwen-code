@@ -366,11 +366,21 @@ function recordChannelActive(name: string, workspaceCwd: string): void {
   const persisted = new ChannelStateStore(
     channelRuntimeStatePath(workspaceCwd),
   ).trySet(name, 'active');
+  // Mirror the stop side's dual-write (recordStoppedChannels): a stop
+  // records `stopped` in BOTH the workspace-scoped store and the legacy
+  // global file, and adoption seeds every other workspace from the legacy
+  // file on its next start. Without the mirrored active write the restart
+  // stays scoped to this workspace — after the service dies, a bare start
+  // from ANOTHER workspace adopts the legacy `stopped` record and skips
+  // the channel the user explicitly restarted (R16-30).
+  const legacyPersisted = workspaceCwd
+    ? new ChannelStateStore(channelRuntimeStatePath()).trySet(name, 'active')
+    : true;
   // The channel IS running, so a failed write is a warning, not an exit —
   // but the stale `stopped` record survives and the next `--channel all`
   // would skip the channel the user explicitly restarted. Surface the loss
   // like the stop direction does (#8975).
-  if (!persisted) {
+  if (!persisted || !legacyPersisted) {
     // Best-effort sink: a warning write must not terminate the process
     // when stdout is already failing (R11-13).
     writeStdoutLineBestEffort(

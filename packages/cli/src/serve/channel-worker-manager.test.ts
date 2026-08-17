@@ -659,6 +659,45 @@ describe('createChannelWorkerManager', () => {
       );
     });
 
+    it('keeps the setChannelEnabled rebuild resolve unfiltered too (R16-35)', async () => {
+      // The "`set` resolves are UNFILTERED" pin above covers setSelection
+      // only; setChannelEnabled's per-channel enable rebuild is the OTHER
+      // `'set'`-operation resolve — the one the service's explicit
+      // by-name start routes through. Routing it through the reload
+      // filter while a committed sibling carries a surviving `stopped`
+      // record silently trims the committed selection (or leaves the
+      // sibling committed-but-ownerless): the two hazard classes the
+      // filter's own option doc cites (#8975, R14). Probe-verified: the
+      // mutation shipped green until this pin existed.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter((name) => name !== 'telegram'),
+            }
+          : selection,
+      );
+      const test = setupWithFilter(filter);
+      await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+      filter.mockClear();
+
+      await test.manager.setChannelEnabled(
+        { name: 'feishu', workspaceCwd: PRIMARY },
+        true,
+      );
+
+      expect(filter).not.toHaveBeenCalled();
+      expect(test.resolveGroups).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['telegram', 'feishu'] },
+        'set',
+      );
+      // The committed selection kept BOTH names: nothing trimmed.
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+    });
+
     it('applies the filter to reloadWorkspace resolves', async () => {
       const filter = vi.fn((selection: ServeChannelSelection) =>
         selection.mode === 'names'
@@ -921,13 +960,14 @@ describe('createChannelWorkerManager', () => {
       clearStoppedRecords: (
         groups: readonly ChannelWorkspaceGroup[],
       ) => readonly string[],
+      group = fakeGroup(),
     ) {
       const resolveGroups = vi.fn(async (selection: ServeChannelSelection) =>
         workspaceGroups(selection),
       );
       const manager = createChannelWorkerManager({
         resolveGroups,
-        createGroup: vi.fn(() => fakeGroup()),
+        createGroup: vi.fn(() => group),
         reserveLease: vi.fn(),
         releaseLease: vi.fn(),
         clearStoppedRecords,
@@ -1000,6 +1040,62 @@ describe('createChannelWorkerManager', () => {
       ]);
     });
 
+    it('clears records on the setChannelEnabled rebuild commit (R16-51)', async () => {
+      // The third production commit entry point: the service routes
+      // per-channel start/stop through setChannelEnabled's rebuild
+      // (channel-management-service's start/stop/remove). Moving
+      // clearRecordsForCommit out of the shared applySelection into the
+      // setSelection/startInitial callers only — or gating it on the
+      // resolve reason — leaves an explicit by-name start committing
+      // WITHOUT clearing the stopped record: the next automatic
+      // reload-op resolve filters the name and commit trims it
+      // permanently (the R15-19 silent undo this describe warns about).
+      const clearStoppedRecords = vi.fn(() => [] as string[]);
+      // The static fake group's snapshots must own BOTH names: the
+      // disable half runs assertCommittedOwner against them (the mock
+      // reconcile does not update snapshots the way production does).
+      const group = fakeGroup({
+        snapshots: vi.fn(() => [
+          workerSnapshot({
+            channels: ['telegram', 'feishu'],
+            requestedChannels: ['telegram', 'feishu'],
+          }),
+        ]),
+      });
+      const test = setupWithClear(clearStoppedRecords, group);
+      await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+      clearStoppedRecords.mockClear();
+
+      await test.manager.setChannelEnabled(
+        { name: 'feishu', workspaceCwd: PRIMARY },
+        true,
+      );
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(1);
+      expect(clearStoppedRecords).toHaveBeenCalledWith([
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['telegram', 'feishu'] },
+        },
+      ]);
+
+      // The non-empty disable rebuild rides the same shared path from
+      // the other direction.
+      clearStoppedRecords.mockClear();
+      await test.manager.setChannelEnabled(
+        { name: 'feishu', workspaceCwd: PRIMARY },
+        false,
+      );
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(1);
+      expect(clearStoppedRecords).toHaveBeenCalledWith([
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ]);
+    });
+
     it('does not clear records on a mode-all commit', async () => {
       // mode-`all` restore honors stopped records by design (#8975);
       // clearing them on an all-mode commit would resurrect exactly the
@@ -1045,6 +1141,33 @@ describe('createChannelWorkerManager', () => {
       expect(test.manager.state().selection).toEqual({
         mode: 'names',
         names: ['telegram'],
+      });
+    });
+
+    it('surfaces reported clear failures on the reconcile-branch result too (R16-52)', async () => {
+      // The R15-19 pin exercises only applySelection's group-creation
+      // branch; the reconcile branch's clearLossFields spread is the
+      // COMMON case — every commit after the first over a running group
+      // takes it. Dropping the spread there reports a clean success on
+      // the shape every PUT /workspace/channel after the first returns,
+      // the client never retries, and the surviving record lets a later
+      // reload-op filter permanently trim the committed selection
+      // (R15-19).
+      const clearStoppedRecords = vi.fn(() => [PRIMARY]);
+      const test = setupWithClear(clearStoppedRecords);
+
+      await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+      const result = await test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      });
+
+      expect(clearStoppedRecords).toHaveBeenCalledTimes(2);
+      expect(result.statePersisted).toBe(false);
+      expect(result.statePersistFailedWorkspaces).toEqual([PRIMARY]);
+      expect(test.manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
       });
     });
 

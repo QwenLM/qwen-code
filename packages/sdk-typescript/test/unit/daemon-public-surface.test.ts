@@ -247,6 +247,22 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
     expectTypeOf<DaemonChannelControlState>().not.toBeNever();
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
+    // #8975 (R16-6): pin the names-mode set result's SHAPE too — the
+    // loss fields ride the 200 body whenever an enable/disable commit
+    // failed to clear a committed name's persisted `stopped` record, and
+    // `not.toBeNever()` stays green if the type degrades to the plain
+    // mutation result and the retry handle disappears from the typed
+    // surface. Twin of the stop-family pins below.
+    expectTypeOf<DaemonChannelSetResult>().toEqualTypeOf<{
+      changed: boolean;
+      replaced: boolean;
+      partial: boolean;
+      state: DaemonChannelControlState;
+      statePersisted?: boolean;
+      // Attribution twin: a targeted retry must be able to aim at the
+      // affected workspaces.
+      statePersistFailedWorkspaces?: string[];
+    }>();
     expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
     // #8975: pin the whole-selection stop result's SHAPE too — like its

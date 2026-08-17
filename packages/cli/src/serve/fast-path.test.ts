@@ -483,15 +483,19 @@ describe('CLI entry import boundary', () => {
     );
 
     // `import ... from` AND `export ... from` (re-exports never begin with
-    // `import`), both non-`type` forms (R15-8).
+    // `import`), both non-`type` forms (R15-8). The lookahead catches BOTH
+    // the subpath files and the sibling dispatcher `../commands/channel.js`
+    // itself — that file value-imports the whole command graph this guard
+    // forbids, so it must not escape via the trailing-slash hole (R16-36).
     expect(filterSource).not.toMatch(
-      /(?:import|export)\s+(?!type\b)[^;]*from\s+['"]\.\.\/commands\/channel\//,
+      /(?:import|export)\s+(?!type\b)[^;]*from\s+['"]\.\.\/commands\/channel(?=[./'"])/,
     );
     // Bare side-effect imports (`import '../commands/channel/...';` — no
     // `from` keyword) are static ESM dependencies esbuild resolves into the
-    // pre-listen bundle too.
+    // pre-listen bundle too. Same sibling-dispatcher lookahead as the
+    // `from` guard above (R16-36).
     expect(filterSource).not.toMatch(
-      /import\s+['"]\.\.\/commands\/channel\//,
+      /import\s+['"]\.\.\/commands\/channel(?=[./'"])/,
     );
     expect(filterSource).toContain(
       "import type { ChannelRuntimeState } from '../commands/channel/channel-state-store.js';",

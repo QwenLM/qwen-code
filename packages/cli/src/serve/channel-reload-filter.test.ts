@@ -172,9 +172,10 @@ describe('createDaemonReloadSelectionFilter (R14-5)', () => {
     // path.resolve both collapse the dot segment back to the canonical
     // string, which would let a mutation dropping canonicalizeWorkspace
     // read the seeded file and ship green (R15-6).
-    expect(
-      filter(selection, [group(`${workspace}/.`, ['telegram'])]),
-    ).toEqual({ mode: 'names', names: [] });
+    expect(filter(selection, [group(`${workspace}/.`, ['telegram'])])).toEqual({
+      mode: 'names',
+      names: [],
+    });
   });
 
   it('re-reads each owning workspace once per resolve (per-invocation cache, R15-1)', () => {

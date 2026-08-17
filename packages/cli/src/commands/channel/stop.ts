@@ -93,17 +93,17 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           argv.timeout !== undefined ? { timeoutMs: argv.timeout } : undefined,
         );
       } catch (error) {
-        writeStderrLine(
-          `Failed to stop daemon-managed channels: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
         // A failed stop can ALSO lose the torn-down record: the DELETE
         // route reports that double failure via statePersisted: false on
         // the DaemonHttpError body. Duck-type it (the SDK is dynamically
         // imported above) and surface the loss like the success path does,
         // or the stopped channels resurrect on the next `--channel all`
-        // with no trace (#8975).
+        // with no trace (#8975). Emit the loss warning BEFORE the loud
+        // stderr write (mirroring the standalone signal-failure branch):
+        // statePersisted: false means the disk is failing, ops redirects
+        // commonly target that same disk, and a throwing writeStderrLine
+        // (ENOSPC) would skip the warning and the exit, rejecting the
+        // handler with a raw fs error instead (R16-50).
         const body: unknown =
           error instanceof Error && typeof error === 'object'
             ? (error as Error & { body?: unknown }).body
@@ -117,6 +117,11 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
             'Warning: could not persist the stopped record; --channel all may restart these channels.',
           );
         }
+        writeStderrLine(
+          `Failed to stop daemon-managed channels: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
         process.exit(1);
         return;
       }
@@ -176,9 +181,21 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           pidfileSnapshot.channels,
         );
         if (recorded) {
-          writeStdoutLine(
-            'No channel service is running. Recorded the crashed service channels as stopped.',
-          );
+          try {
+            writeStdoutLine(
+              'No channel service is running. Recorded the crashed service channels as stopped.',
+            );
+          } catch {
+            // stdout is the failing target; degrade the success notice to
+            // the best-effort sink so a post-record write failure cannot
+            // flip the exit code of a SUCCESSFUL, durably recorded stop
+            // (or kill the process via the async stdout 'error' event) —
+            // the same wrapping the daemon success path carries (R11-13,
+            // R14, R16-25).
+            writeStdoutLineBestEffort(
+              'No channel service is running. Recorded the crashed service channels as stopped.',
+            );
+          }
         } else {
           // Loss notice on the best-effort sink (R11-13).
           writeStdoutLineBestEffort(
@@ -218,9 +235,21 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           info.channels,
         );
         if (recorded) {
-          writeStdoutLine(
-            'No channel service is running. Recorded the crashed service channels as stopped.',
-          );
+          try {
+            writeStdoutLine(
+              'No channel service is running. Recorded the crashed service channels as stopped.',
+            );
+          } catch {
+            // stdout is the failing target; degrade the success notice to
+            // the best-effort sink so a post-record write failure cannot
+            // flip the exit code of a SUCCESSFUL, durably recorded stop
+            // (or kill the process via the async stdout 'error' event) —
+            // the same wrapping the daemon success path carries (R11-13,
+            // R14, R16-25).
+            writeStdoutLineBestEffort(
+              'No channel service is running. Recorded the crashed service channels as stopped.',
+            );
+          }
         } else {
           // Loss notice on the best-effort sink (R11-13).
           writeStdoutLineBestEffort(

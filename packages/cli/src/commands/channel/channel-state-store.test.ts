@@ -15,7 +15,15 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { canonicalizeWorkspacePath } from '@qwen-code/channel-base';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 
 // Unique per-run home (a fixed shared path interleaves concurrent runs of
 // this file on one host); created lazily because the mock factory is hoisted
@@ -52,23 +60,195 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 // R15-49: delegates to the real mkdirSync; individual tests can ARM a
 // single EEXIST at a specific path to simulate the concurrent-creation
 // race between prepareStateDirectory's existsSync and mkdirSync.
+//
+// The factory must NEVER reference the real `node:fs` module itself
+// (R16-3, probe-verified): neither an async `importOriginal` factory
+// nor a sync `require` factory gets applied to the store-under-test's
+// `node:fs` import in this setup (zero wrapper calls during the SUT),
+// which left the race test exercising only the uncontended path and
+// pinning the prepareStateDirectory swallow vacuously. A factory that
+// only returns its own object IS applied — so every export delegates
+// LAZILY through `realNodeFs.current`, populated by the top-level
+// beforeAll via vi.importActual. The race test's `armedAfterSut`
+// assertion fails red if the injection ever stops reaching the SUT.
 const mkdirEexistOnce = vi.hoisted(() => ({ armed: false, target: '' }));
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    mkdirSync: ((p: Parameters<typeof actual.mkdirSync>[0], opts?: unknown) => {
+const realNodeFs = vi.hoisted(() => ({
+  current: undefined as unknown as typeof import('node:fs'),
+}));
+vi.mock('node:fs', () => {
+  const mod: Record<string | symbol, unknown> = {
+    mkdirSync: (
+      p: Parameters<typeof import('node:fs').mkdirSync>[0],
+      opts?: unknown,
+    ) => {
       if (mkdirEexistOnce.armed && String(p) === mkdirEexistOnce.target) {
         mkdirEexistOnce.armed = false;
+        // Simulate the race WINNER too: in the real race the concurrent
+        // creator's mkdir lands between the loser's existsSync and
+        // mkdirSync, so the directory EXISTS when the loser continues —
+        // without creating it here, the post-swallow write fails ENOENT
+        // and the test would pin a failure shape the swallow exists to
+        // prevent (R16-3).
+        realNodeFs.current.mkdirSync(p as string, { recursive: true });
         const error = new Error(
           `EEXIST: file already exists, mkdir '${p}'`,
         ) as NodeJS.ErrnoException;
         error.code = 'EEXIST';
         throw error;
       }
-      return actual.mkdirSync(p as string, opts as never);
-    }) as typeof actual.mkdirSync,
+      return realNodeFs.current.mkdirSync(p as string, opts as never);
+    },
   };
+  // CJS/ESM interop: vitest requires the default export on the mock.
+  mod['default'] = mod;
+  // Every other export delegates lazily to the real module. Consumers
+  // capture their named imports at module-init time (before the
+  // beforeAll populates the slot), so function exports must be stable
+  // callable wrappers from the factory onward — each one forwards to
+  // the slot at CALL time and mirrors the real function's own
+  // properties live: the `vi.spyOn(fs.realpathSync, 'native')` pins
+  // depend on `.native` resolving to the real sub-function (and
+  // canonicalizeWorkspacePath calls `realpathSync.native(...)` through
+  // its own intercepted binding — the wrapper is shared, so an in-place
+  // spy on it is visible there).
+  const realValue = (prop: string | symbol): unknown => {
+    const real = realNodeFs.current as unknown as
+      | Record<string | symbol, unknown>
+      | undefined;
+    return real ? real[prop] : undefined;
+  };
+  // Interop probes must not see a callable: vitest awaits the mock
+  // module and treats a `then` function as a thenable.
+  const INTEROP_BLOCKLIST = new Set(['then']);
+  // vitest materializes the mocked namespace from ownKeys AT REGISTRATION
+  // time (before the beforeAll populates the slot), so the export list
+  // must be static, not derived from the real module. Cover every fs
+  // export this file's graph consumes; extras are inert wrappers unless
+  // called.
+  const FS_EXPORTS = [
+    'accessSync',
+    'appendFileSync',
+    'chmodSync',
+    'chownSync',
+    'closeSync',
+    'constants',
+    'copyFileSync',
+    'cpSync',
+    'createReadStream',
+    'createWriteStream',
+    'Dir',
+    'Dirent',
+    'existsSync',
+    'fchmodSync',
+    'fchownSync',
+    'fdatasyncSync',
+    'FileHandle',
+    'fstatSync',
+    'fsyncSync',
+    'ftruncateSync',
+    'FSWatcher',
+    'futimesSync',
+    'glob',
+    'globSync',
+    'lchmodSync',
+    'lchownSync',
+    'linkSync',
+    'lstatSync',
+    'lutimesSync',
+    'mkdirSync',
+    'mkdtempSync',
+    'openSync',
+    'opendirSync',
+    'promises',
+    'readSync',
+    'readdirSync',
+    'readFileSync',
+    'readlinkSync',
+    'ReadStream',
+    'readvSync',
+    'realpathSync',
+    'renameSync',
+    'rmSync',
+    'rmdirSync',
+    'statSync',
+    'statfsSync',
+    'Stats',
+    'symlinkSync',
+    'truncateSync',
+    'unlinkSync',
+    'unwatchFile',
+    'utimesSync',
+    'watch',
+    'watchFile',
+    'writeSync',
+    'writeFileSync',
+    'WriteStream',
+    'writevSync',
+  ];
+  const lazyFnCache = new Map<string, unknown>();
+  const lazyFn = (prop: string): unknown => {
+    const cached = lazyFnCache.get(prop);
+    if (cached) return cached;
+    const forward = (...args: unknown[]): unknown => {
+      const real = realValue(prop);
+      if (typeof real !== 'function') {
+        throw new Error(
+          `node:fs mock: "${prop}" used before beforeAll populated the real module`,
+        );
+      }
+      return (real as (...a: unknown[]) => unknown)(...args);
+    };
+    const wrapped = new Proxy(forward, {
+      get(inner, p) {
+        const own = Reflect.get(inner, p);
+        if (own !== undefined || typeof p === 'symbol') return own;
+        const real = realValue(prop) as Record<string | symbol, unknown>;
+        return real ? real[p] : undefined;
+      },
+      // vi.spyOn(fs.realpathSync, 'native') probes existence before
+      // replacing; without these traps the sub-property "does not exist".
+      has(inner, p) {
+        const real = realValue(prop) as Record<string | symbol, unknown>;
+        return Reflect.has(inner, p) || (real ? p in real : false);
+      },
+      getOwnPropertyDescriptor(inner, p) {
+        const own = Reflect.getOwnPropertyDescriptor(inner, p);
+        if (own) return own;
+        const real = realValue(prop) as Record<string | symbol, unknown>;
+        if (!real || !(p in real)) return undefined;
+        return {
+          enumerable: true,
+          configurable: true,
+          writable: true,
+          value: real[p],
+        };
+      },
+    });
+    lazyFnCache.set(prop, wrapped);
+    return wrapped;
+  };
+  // Expose every other export as a lazy getter (R16-3): consumers
+  // capture their named imports at module-init time, and vitest may
+  // materialize the mocked namespace via spread OR descriptors OR live
+  // property access depending on the importer — a getter on a plain
+  // object is the one shape that behaves under all three. The getter
+  // returns the stable callable wrapper for functions (slot empty at
+  // init time included) and the real value for non-functions once the
+  // slot is populated.
+  for (const name of FS_EXPORTS) {
+    if (name in mod || INTEROP_BLOCKLIST.has(name)) continue;
+    Object.defineProperty(mod, name, {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        const real = realValue(name);
+        return real !== undefined && typeof real !== 'function'
+          ? real
+          : lazyFn(name);
+      },
+    });
+  }
+  return mod;
 });
 
 import {
@@ -77,6 +257,15 @@ import {
   channelRuntimeStatePath,
   selectActiveChannels,
 } from './channel-state-store.js';
+
+// Populate the lazy delegation slot BEFORE any test touches the mocked
+// fs exports (R16-3): vi.importActual bypasses the mock, and the
+// factory itself must not reference the real module (see the vi.mock
+// block above).
+beforeAll(async () => {
+  realNodeFs.current =
+    await vi.importActual<typeof import('node:fs')>('node:fs');
+});
 
 afterEach(() => {
   for (const dir of testDirs.splice(0)) {
@@ -169,26 +358,27 @@ describe('channelRuntimeStatePath', () => {
   // native filesystem (R15-25): if the swapped spelling does not resolve
   // to the created directory, the volume is case-sensitive and the
   // assertion does not apply there.
-  it.runIf(
-    process.platform === 'win32' || process.platform === 'darwin',
-  )('collapses case-variant spellings of the same directory (R14-23)', () => {
-    const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
-    testDirs.push(root);
-    const realDir = join(root, 'CaseMixedDir');
-    mkdirSync(realDir);
-    const leaf = basename(realDir);
-    const swapped = join(
-      root,
-      leaf === leaf.toLowerCase() ? leaf.toUpperCase() : leaf.toLowerCase(),
-    );
-    // Guard probe: on a case-sensitive volume the swapped spelling is a
-    // NONEXISTENT path, so the assertion would be meaningless — skip.
-    if (!existsSync(swapped)) return;
+  it.runIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'collapses case-variant spellings of the same directory (R14-23)',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
+      testDirs.push(root);
+      const realDir = join(root, 'CaseMixedDir');
+      mkdirSync(realDir);
+      const leaf = basename(realDir);
+      const swapped = join(
+        root,
+        leaf === leaf.toLowerCase() ? leaf.toUpperCase() : leaf.toLowerCase(),
+      );
+      // Guard probe: on a case-sensitive volume the swapped spelling is a
+      // NONEXISTENT path, so the assertion would be meaningless — skip.
+      if (!existsSync(swapped)) return;
 
-    expect(channelRuntimeStatePath(swapped)).toBe(
-      channelRuntimeStatePath(realDir),
-    );
-  });
+      expect(channelRuntimeStatePath(swapped)).toBe(
+        channelRuntimeStatePath(realDir),
+      );
+    },
+  );
 
   it('falls back to the resolved spelling when realpath fails with a non-ENOENT error (R15-48)', () => {
     // canonicalizeWorkspacePath catches ALL realpath errors
@@ -202,13 +392,11 @@ describe('channelRuntimeStatePath', () => {
     // `--channel all` resurrects the channel (#8975).
     const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
     testDirs.push(root);
-    const spy = vi
-      .spyOn(fs.realpathSync, 'native')
-      .mockImplementation(() => {
-        throw Object.assign(new Error('EACCES: permission denied'), {
-          code: 'EACCES',
-        });
+    const spy = vi.spyOn(fs.realpathSync, 'native').mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
       });
+    });
     try {
       expect(() => channelRuntimeStatePath(root)).not.toThrow();
       // The resolved (not realpath) spelling is hashed.
@@ -535,6 +723,92 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
   });
 
+  it('starts recording the epoch baseline when the target has snapshot+generation but none (R16-44)', () => {
+    // Epoch twin of the R11-20 generation-watermark pin: a target holding
+    // a snapshot AND a generation watermark but NO epoch baseline predates
+    // epoch recording. The skip guard must not fire before the one-shot
+    // baseline write that records `adoptedLegacyEntryEpochs`, or
+    // per-entry re-stop detection never arms for this workspace
+    // (epochsUsable stays false forever, R15-15).
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    writeFileSync(
+      workspacePath,
+      JSON.stringify({
+        version: 1,
+        channels: { telegram: 'stopped' },
+        adoptedLegacy: { telegram: 'stopped' },
+        adoptedLegacyGeneration: 0,
+      }),
+      'utf-8',
+    );
+
+    adoptLegacyChannelState(workspace);
+
+    // The baseline write happened and recorded the epoch map — with
+    // nothing merged (content-identical), so the write ran purely to arm
+    // the tier.
+    const recorded = JSON.parse(readFileSync(workspacePath, 'utf-8')) as {
+      channels: Record<string, string>;
+      adoptedLegacyEntryEpochs?: Record<string, number>;
+    };
+    expect(recorded.channels).toEqual({ telegram: 'stopped' });
+    expect(recorded.adoptedLegacyEntryEpochs).toEqual({ telegram: 0 });
+  });
+
+  it('does not let repeated new-entry writes re-stop an explicitly restarted channel (R16-44)', () => {
+    // The false-positive direction the per-entry epoch tier exists to
+    // prevent: the tier-3 generation arithmetic inflates when one NEW
+    // entry is written repeatedly (each write bumps generation by the
+    // entries named), so `delta > added` fires without any re-stop. With
+    // the epoch tier dropped, this shape would flip the explicitly
+    // restarted channel back to `stopped` (the #8975 regression class)
+    // while every existing re-stop test stays green via the arithmetic.
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    // An unrelated workspace stops one NEW entry — twice (two separate
+    // writes). Generation moves by 2, the entry set by 1.
+    new ChannelStateStore(legacyPath).set('feishu', 'stopped');
+    new ChannelStateStore(legacyPath).set('feishu', 'stopped');
+
+    adoptLegacyChannelState(workspace);
+
+    // The new stop merges; the snapshot-identical entry survives because
+    // ITS OWN epoch did not move past the recorded baseline.
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
+      feishu: 'stopped',
+    });
+  });
+
+  it('treats a delete/recreate of the legacy file as a lineage break and re-stops (R16-8)', () => {
+    // The generationRegressed tier: user cleanup or a backup restore
+    // deletes the legacy global file, and a later stop recreates it with
+    // the generation counter RESET. A snapshot-identical entry under a
+    // LOWER generation is a lineage break — re-stop it fail-safe, or an
+    // inverted/deleted comparison resurrects explicitly re-stopped
+    // channels on the next `--channel all` (#8975).
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    // Push the watermark up so the recreated file's reset counter lands
+    // strictly below it.
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    // Delete/recreate: the new file starts its generation over.
+    rmSync(legacyPath, { force: true });
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
+  });
+
   it('does nothing when no legacy file exists', () => {
     // The common case for every user who has never recorded a stop must
     // stay silent on stderr: a dropped early-return would let ENOENT fall
@@ -606,8 +880,10 @@ describe('adoptLegacyChannelState (#8975)', () => {
       .spyOn(process.stderr, 'write')
       .mockImplementation((() => true) as typeof process.stderr.write);
 
+    let armedAfterSut = false;
     try {
       expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+      armedAfterSut = mkdirEexistOnce.armed;
       // The race must not surface as a failed adoption.
       expect(writeSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('could not adopt legacy channel state'),
@@ -617,6 +893,12 @@ describe('adoptLegacyChannelState (#8975)', () => {
       mkdirEexistOnce.armed = false;
       mkdirEexistOnce.target = '';
     }
+    // The armed EEXIST must have been CONSUMED by the store-under-test:
+    // with the injection never reaching the SUT the test exercises only
+    // the uncontended path and pins the EEXIST swallow vacuously. Red
+    // here means the mock registration does not cover the specifier the
+    // store resolves (R16-3).
+    expect(armedAfterSut).toBe(false);
 
     // The target is still seeded from the legacy map.
     expect(existsSync(workspacePath)).toBe(true);
@@ -1298,6 +1580,21 @@ describe('ChannelStateStore', () => {
     expect(new ChannelStateStore(filePath).readAll()).toEqual({
       telegram: 'stopped',
     });
+    // The corrupt-recovery rewrite must keep `adoptedLegacy` ABSENT
+    // (R16-45): the file existed and its read returned `full ===
+    // undefined`, the exact branch whose comment names this case
+    // ("predates snapshot recording (or was reseeded from a corrupt
+    // read)"). Stamping an empty snapshot here would convert the next
+    // adoption from the one-shot baseline branch into the full-merge
+    // branch, where every stale legacy stop merges unconditionally over
+    // explicit restarts recorded after the corruption — the R9-3/#8975
+    // stop-over-restart resurrection. Twin of the R11-27 pin for the
+    // valid-but-snapshot-less branch.
+    const rewritten = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    expect(rewritten).not.toHaveProperty('adoptedLegacy');
   });
 
   it('warns when an existing state file is discarded (#8975)', () => {
@@ -1885,8 +2182,11 @@ describe('ChannelStateStore', () => {
       // Writer-created file: three locally-recorded stops, empty marker.
       store.setMany(['telegram', 'feishu', 'discord'], 'stopped');
       expect(
-        (JSON.parse(readFileSync(filePath, 'utf-8')) as { adoptedLegacy?: unknown })
-          .adoptedLegacy,
+        (
+          JSON.parse(readFileSync(filePath, 'utf-8')) as {
+            adoptedLegacy?: unknown;
+          }
+        ).adoptedLegacy,
       ).toEqual({});
 
       const states = store.prune(['discord'], { preserveAdopted: true });
@@ -1900,8 +2200,11 @@ describe('ChannelStateStore', () => {
       // The empty marker survives the rewrite, keeping the
       // first-ever-legacy-stop merge branch armed (R10-6).
       expect(
-        (JSON.parse(readFileSync(filePath, 'utf-8')) as { adoptedLegacy?: unknown })
-          .adoptedLegacy,
+        (
+          JSON.parse(readFileSync(filePath, 'utf-8')) as {
+            adoptedLegacy?: unknown;
+          }
+        ).adoptedLegacy,
       ).toEqual({});
     });
 

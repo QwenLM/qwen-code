@@ -96,6 +96,23 @@ export interface ChannelStopResult extends ChannelMutationResult {
   statePersistFailedWorkspaces?: string[];
 }
 
+export interface ChannelStartResult extends ChannelMutationResult {
+  /**
+   * Present (and `false`) only when the start succeeded but the commit
+   * failed to clear the channel's persisted `stopped` record: the
+   * surviving record lets the next reload-op resolve filter the channel
+   * out and permanently trim the committed selection, so callers claiming
+   * a durable start must surface the failure. Absent on the happy path
+   * (#8975, R16-2).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the workspaces whose
+   * record clear failed, so a retry can be targeted (R14/R16-2).
+   */
+  statePersistFailedWorkspaces?: string[];
+}
+
 export interface ChannelPairingRequestsSnapshot {
   requests: PairingRequest[];
 }
@@ -134,7 +151,7 @@ export interface ChannelManagementService {
     name: string,
     request: ChannelStartupRequest,
   ): Promise<ChannelMutationResult>;
-  start(name: string): Promise<ChannelMutationResult>;
+  start(name: string): Promise<ChannelStartResult>;
   stop(name: string): Promise<ChannelStopResult>;
   restart(name: string): Promise<ChannelMutationResult>;
   pairingRequests(name: string): Promise<ChannelPairingRequestsSnapshot>;
@@ -188,6 +205,20 @@ export interface ChannelManagementWorkerManager {
      * (#8975) must record from here instead of the single name.
      */
     stoppedChannels?: Array<{ workspaceCwd: string; names: string[] }>;
+    /**
+     * Present (and `false`) only when the commit failed to clear a
+     * committed name's persisted `stopped` record (`clearRecordsForCommit`
+     * → `clearLossFields`): the surviving record lets the next reload-op
+     * resolve filter the name out and permanently trim the committed
+     * selection. Callers must surface the loss — dropping it reports a
+     * durable success that does not hold (R16-2).
+     */
+    statePersisted?: boolean;
+    /**
+     * Present alongside `statePersisted: false`: the canonical workspaces
+     * whose record clear failed, so a retry can be targeted (R14/R16-2).
+     */
+    statePersistFailedWorkspaces?: string[];
   }>;
   reloadWorkspace(
     workspaceCwd: string,
@@ -343,16 +374,18 @@ export function createChannelManagementService(
     // `lastRequestedChannels` (R9-6) — so an empty carry set plus an
     // empty/`['all']`-placeholder channel list identifies the dead
     // mode-`all` worker.
-    return opts.manager.ownershipSnapshots().find(
-      (worker) =>
-        canonicalForGuard(worker.workspaceCwd) === target &&
-        isTerminalFailedWorker(worker) &&
-        !worker.requestedChannels &&
-        !worker.adapters &&
-        (worker.lastRequestedChannels?.length ?? 0) === 0 &&
-        (worker.channels.length === 0 ||
-          worker.channels.some(isAllChannelSelectionName)),
-    );
+    return opts.manager
+      .ownershipSnapshots()
+      .find(
+        (worker) =>
+          canonicalForGuard(worker.workspaceCwd) === target &&
+          isTerminalFailedWorker(worker) &&
+          !worker.requestedChannels &&
+          !worker.adapters &&
+          (worker.lastRequestedChannels?.length ?? 0) === 0 &&
+          (worker.channels.length === 0 ||
+            worker.channels.some(isAllChannelSelectionName)),
+      );
   };
 
   const assertOwnedRuntime = (name: string): void => {
@@ -583,7 +616,9 @@ export function createChannelManagementService(
     return { snapshot, instance };
   };
 
-  const stopChannel = (name: string): Promise<unknown> =>
+  const stopChannel = (
+    name: string,
+  ): ReturnType<ChannelManagementWorkerManager['setChannelEnabled']> =>
     opts.manager.setChannelEnabled(
       { name, workspaceCwd: opts.workspaceCwd },
       false,
@@ -684,7 +719,35 @@ export function createChannelManagementService(
         workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd)
       ) {
         assertOwnedRuntime(name);
-        await stopChannel(name);
+        try {
+          const stopped = await stopChannel(name);
+          // Removing the LAST committed channel empties the selection and
+          // routes through the whole-selection stop, whose result carries
+          // the per-workspace tear-down set. Persist it like stop()'s
+          // success path, both stop() catch branches and the DELETE route
+          // do, or the removed channels resurrect on the next `--channel
+          // all` start (#8975, R16-16).
+          recordStopForName(name, stopped.stoppedChannels);
+        } catch (error) {
+          // A failed stop can still have torn down channels (lease release
+          // can fail after a successful tear-down): the manager carries the
+          // torn-down set on the error — persist it before rethrowing,
+          // mirroring stop()'s catch branch (#8975, R16-16).
+          if (
+            error instanceof ChannelWorkerControlError &&
+            error.stoppedChannels
+          ) {
+            const failedWorkspaces = recordStopForName(
+              name,
+              error.stoppedChannels,
+            );
+            if (failedWorkspaces.length > 0) {
+              error.statePersisted = false;
+              error.statePersistFailedWorkspaces = failedWorkspaces;
+            }
+          }
+          throw error;
+        }
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
@@ -753,12 +816,31 @@ export function createChannelManagementService(
         }
         return resultFor(name, persisted);
       }
-      await opts.manager.setChannelEnabled(
+      const enabled: Awaited<
+        ReturnType<ChannelManagementWorkerManager['setChannelEnabled']>
+      > = await opts.manager.setChannelEnabled(
         { name, workspaceCwd: opts.workspaceCwd },
         true,
       );
       diagnostics.delete(name);
-      return resultFor(name, persisted);
+      return {
+        ...(await resultFor(name, persisted)),
+        // Only on failure: the happy-path response shape stays unchanged,
+        // but when the commit failed to clear the channel's persisted
+        // `stopped` record the loss must reach the client — the surviving
+        // record lets the next reload-op resolve filter the explicitly
+        // started channel out and permanently trim the committed
+        // selection, and the `{changed: false}` early-return on a retried
+        // start can never re-clear it. Mirrors stop()'s ChannelStopResult
+        // shape (#8975, R16-2).
+        ...(enabled.statePersisted === false
+          ? {
+              statePersisted: false,
+              statePersistFailedWorkspaces:
+                enabled.statePersistFailedWorkspaces ?? [],
+            }
+          : {}),
+      };
     },
     async stop(name) {
       assertManageableInstanceName(name);
@@ -843,19 +925,19 @@ export function createChannelManagementService(
               canonicalForGuard(workspaceCwd) ===
               canonicalForGuard(opts.workspaceCwd),
           );
-          if (
-            !restoredHere &&
-            !new ChannelStateStore(
-              daemonChannelRuntimeStatePath(
-                canonicalForGuard(opts.workspaceCwd),
-              ),
-            ).trySet(name, 'stopped')
-          ) {
-            error.statePersisted = false;
-            // Single-name record: the failed workspace is this one (R14).
-            error.statePersistFailedWorkspaces = [
-              canonicalForGuard(opts.workspaceCwd),
-            ];
+          if (!restoredHere) {
+            // Route through the shared single-name persistence helper
+            // (behaviorally identical to the inline write it replaces,
+            // including the failed-workspace attribution): the sibling
+            // catch branch and the success path both use it, and a second
+            // definition of the stop-record write diverges silently when
+            // the helper changes — against this file's "one definition,
+            // three sites" convention (R14, R16-5).
+            const failedWorkspaces = recordStopForName(name, undefined);
+            if (failedWorkspaces.length > 0) {
+              error.statePersisted = false;
+              error.statePersistFailedWorkspaces = failedWorkspaces;
+            }
           }
         }
         throw error;
