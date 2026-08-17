@@ -1174,7 +1174,10 @@ describe('ChatCompressionService', () => {
     });
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
+      // Well-formed snapshot: the clamped budget + local-estimate path gates
+      // acceptance on snapshot well-formedness, so the summary must carry
+      // the closed tag the compression directive requires.
+      text: '<state_snapshot>Summary</state_snapshot>',
       // Some OpenAI-compatible providers (for example MiniMax-2.7) may omit
       // usage on the compression side-query even when they return a summary.
       usage: undefined,
@@ -1214,13 +1217,12 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
-    // Window size is irrelevant here: usage is undefined, so the output
-    // count is a local estimate and the truncation guard's estimated branch
-    // keeps the fixed COMPACT_MAX_OUTPUT_TOKENS threshold — it cannot
-    // preempt the inflation check this test targets at any window size.
+    // Window large enough that the output budget is not clamped: on the
+    // clamped + usage-missing path the well-formedness guard would preempt
+    // the inflation check this test targets (this summary is not XML).
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 6_000,
+      contextWindowSize: 128_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -4741,6 +4743,34 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     // ...yet the complete summary survives the guard.
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.newHistory).not.toBeNull();
+  });
+
+  it('drops a clamped-cap fragment lacking a closed snapshot when usage is missing', async () => {
+    // With a clamped budget and a local estimate the threshold comparison
+    // cannot detect cap-hits: output never exceeds the requested budget and
+    // the estimator tops out at ~1.5x actual tokens, so below ~2/3 of the
+    // ceiling the estimate never reaches the fixed threshold. The
+    // well-formedness gate must drop the unclosed fragment instead of
+    // persisting it as COMPRESSED.
+    // ~55K history clamps the budget to ~8.6K on the 65K window.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(220_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true, { omitUsage: true });
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 55_000,
+    });
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
   });
 
   describe('computeCompactionOutputBudget', () => {

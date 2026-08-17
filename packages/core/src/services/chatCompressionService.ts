@@ -972,6 +972,40 @@ export class ChatCompressionService {
         },
       };
     }
+    // The threshold comparison above cannot detect cap-hits when the budget
+    // was clamped and the count is a local estimate: output never exceeds
+    // the requested budget and the estimator tops out at ~1.5x actual tokens,
+    // so below ~2/3 of the ceiling the estimate can never reach the fixed
+    // threshold. Gate that path on snapshot well-formedness instead — a
+    // summary truncated at the clamped cap lacks the closing
+    // </state_snapshot> tag, while a complete one carries it (the directive
+    // requires the XML, and the cache-sharing path gates on the same check).
+    if (
+      !usedCacheSharing &&
+      !isSummaryEmpty &&
+      outputCountIsEstimated &&
+      coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS &&
+      !hasStateSnapshot(summary)
+    ) {
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] summary lacks a closed <state_snapshot> while ` +
+            `the output budget was clamped (${coldOutputBudget}) and the ` +
+            `output count is a local estimate; dropping ` +
+            `potentially-truncated result. This counts as a compression ` +
+            `failure for the per-chat circuit breaker.`,
+        );
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+        },
+      };
+    }
 
     let newTokenCount = originalTokenCount;
     let extraHistory: Content[] = [];
