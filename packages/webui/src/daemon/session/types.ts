@@ -51,25 +51,14 @@ export type DaemonConnectionStatus =
   | 'disconnected'
   | 'error';
 
-export interface DaemonSessionTransition {
-  phase: 'queued' | 'preparing' | 'failed';
-  operation: 'load' | 'resume';
-  origin: 'action' | 'controlled';
-  targetSessionId: string;
-  targetWorkspaceCwd?: string;
-  targetClientId?: string;
-  error?: {
-    message: string;
-    code?: string;
-    status?: number;
-  };
-}
 export interface DaemonSessionOwnerSnapshot {
   isCurrent(): boolean;
 }
+
 export interface DaemonSessionOwnerGuard {
   capture(): DaemonSessionOwnerSnapshot;
 }
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
@@ -114,7 +103,6 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
-  sessionTransition?: DaemonSessionTransition;
 }
 
 export interface DaemonReasoningControls {
@@ -160,7 +148,11 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Restart the SSE event stream after each accepted prompt. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. A stream that
+   * is already down is always rebuilt immediately on prompt admission,
+   * regardless of this flag.
+   */
   restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
@@ -179,10 +171,6 @@ export interface DaemonSessionProviderProps {
     /** Warning shown when session context metadata cannot be loaded. */
     context?: string;
   };
-  onSessionTransitionCommit?: (target: {
-    sessionId: string;
-    workspaceCwd?: string;
-  }) => void;
   /** React children rendered inside the daemon session contexts. */
   children: ReactNode;
 }
@@ -286,6 +274,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   /**
    * When true, the daemon strips orphaned user entries from the chat
@@ -320,6 +309,14 @@ export interface GetTasksActionOptions {
 
 export interface DaemonPromptImage {
   data: string;
+  mimeType?: string;
+  mediaType?: string;
+  media_type?: string;
+}
+
+export interface DaemonPromptFile {
+  name: string;
+  text: string;
   mimeType?: string;
   mediaType?: string;
   media_type?: string;
@@ -489,7 +486,12 @@ export interface DaemonSessionActions {
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
-  ): Promise<{ sessionId: string; displayName: string }>;
+    atRecordId?: string,
+  ): Promise<{
+    sessionId: string;
+    displayName: string;
+    switchStarted: boolean;
+  }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 

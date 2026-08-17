@@ -207,9 +207,13 @@ export function recommendedChildShareMb(
  * lives in the daemon heap rather than in a child, but the budget is the
  * single figure this module offers and 5% of it keeps the pool a rounding
  * error next to child heaps while still covering several fully-grown
- * sessions (per-session growth hard-caps at 256 MiB). Returns 0 — growth
- * disabled — on a host too small for the minimum budget, and never exceeds
- * the headroom left after the root reserve.
+ * sessions (per-session growth hard-caps at 256 MiB). A session retains
+ * TWO journals (full plus summary projection) under the granted cap, so a
+ * fully-grown session's retained heap can reach ~2x the growth charged
+ * here; sizing from this pool must double the journal term, as the
+ * memory-ceiling note on JOURNAL_GROWTH_HARD_CAP_BYTES documents. Returns
+ * 0 — growth disabled — on a host too small for the minimum budget, and
+ * never exceeds the headroom left after the root reserve.
  */
 export function journalGrowthPoolMb(budget: DaemonMemoryBudget): number {
   if (budget.insufficientMemory) return 0;

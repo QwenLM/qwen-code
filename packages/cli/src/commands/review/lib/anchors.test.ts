@@ -511,6 +511,350 @@ describe('resolveAnchor', () => {
   });
 });
 
+describe('resolveAnchor — the substring fallback (KB-long lines)', () => {
+  // A file whose paragraphs are single multi-KB lines — SKILL.md is one —
+  // defeats every whole-line tier: the quote IS in the diff, inside a line.
+  // The natural anchor there is a mid-line fragment, and containment is what
+  // places it, at the containing line.
+  const PARAGRAPH =
+    'The resolver turns each quoted snippet into a line number, because a ' +
+    'line number the model counted out by hand is not something the pipeline ' +
+    'can trust, and a derived number is strictly better evidence than an ' +
+    'asserted one. A mid-line fragment is the natural anchor shape here.';
+
+  const diff = [
+    'diff --git a/SKILL.md b/SKILL.md',
+    '--- a/SKILL.md',
+    '+++ b/SKILL.md',
+    '@@ -1,0 +1,2 @@',
+    '+# Heading',
+    `+${PARAGRAPH}`,
+    '',
+  ].join('\n');
+  const hay = () => lines(diff, 'SKILL.md');
+
+  it('resolves a mid-line fragment to the containing added line', () => {
+    const r = resolveAnchor(
+      hay(),
+      'a derived number is strictly better evidence than an asserted one',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      startLine: 2,
+      tier: 'substring-added',
+      matchCount: 1,
+      ambiguous: false,
+    });
+  });
+
+  it('reports the containing line when it is a context line', () => {
+    const contextDiff = [
+      'diff --git a/SKILL.md b/SKILL.md',
+      '--- a/SKILL.md',
+      '+++ b/SKILL.md',
+      '@@ -1,2 +1,2 @@',
+      ' # Heading',
+      ` ${PARAGRAPH}`,
+      '',
+    ].join('\n');
+    const r = resolveAnchor(
+      lines(contextDiff, 'SKILL.md'),
+      'the natural anchor shape here',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'substring-context',
+    });
+  });
+
+  it('keeps a whole-line quote exact — the fallback is the LAST tier', () => {
+    const r = resolveAnchor(hay(), PARAGRAPH);
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'exact-added',
+    });
+  });
+
+  it('leaves a short fragment unmatched — too little text to place a line', () => {
+    // Below MIN_SUBSTRING_LENGTH a fragment sits inside half the lines a diff
+    // renders; matching it would be noise with a confident face. The probes
+    // sit on the boundary so the floor's value is the value under test: an
+    // 11-char contained fragment refuses, the 12-char one resolves.
+    expect(resolveAnchor(hay(), 'strictly')).toMatchObject({
+      status: 'unmatched',
+    });
+    expect(resolveAnchor(hay(), 'strictly be')).toMatchObject({
+      status: 'unmatched',
+    });
+    expect(resolveAnchor(hay(), 'strictly bet')).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'substring-added',
+    });
+  });
+
+  it('says a too-short fragment sits inside a hunk line when it does', () => {
+    // The generic absence reason claims the quote appears nowhere — false for
+    // an accurate fragment refused only for its length — and Step 7 keys its
+    // recovery to re-attribution, when the only remedy is a longer quote.
+    const r = resolveAnchor(hay(), 'strictly be');
+    expect(r.status).toBe('unmatched');
+    expect(r.reason).toContain('too short to place a line');
+    expect(r.reason).toContain('longer');
+
+    // A snippet that genuinely appears nowhere keeps the absence reason.
+    const absent = resolveAnchor(hay(), 'quoted from some other file entirely');
+    expect(absent.status).toBe('unmatched');
+    expect(absent.reason).toContain('does not appear in any hunk');
+    // …and names the fragment tier it now covers. The pre-PR wording lacked
+    // this clause, so a revert to it stays green on the assertion above
+    // alone — pin the distinguishing part, or a reason that never mentions
+    // the fragment shape misdirects Step 7's recovery back to re-attribution.
+    expect(absent.reason).toContain('nor as a fragment inside one');
+  });
+
+  it('does not fall back for a multi-line snippet', () => {
+    // A fragment of the paragraph plus the heading cannot sit inside one
+    // line, and the marker readings get no containment guess stacked on them.
+    const r = resolveAnchor(hay(), '# Heading\nThe resolver turns each');
+    expect(r.status).toBe('unmatched');
+  });
+
+  it('refuses a fragment contained in several lines, unless a claim decides', () => {
+    const phrase = 'the same repeated phrase appears in this review twice';
+    const repeatDiff = [
+      'diff --git a/d.md b/d.md',
+      '--- a/d.md',
+      '+++ b/d.md',
+      '@@ -1,0 +1,3 @@',
+      `+first line that carries ${phrase} in it`,
+      '+an unrelated line',
+      `+second line that carries ${phrase} in it`,
+      '',
+    ].join('\n');
+    const hayR = lines(repeatDiff, 'd.md');
+
+    const blind = resolveAnchor(hayR, phrase);
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('more than one hunk line');
+    // The prefix above is shared with the whitespace-collapse refusal; Step 7
+    // string-matches the clause that distinguishes this shape to pick its
+    // recovery, so pin that clause too — a rewording must turn this red.
+    expect(blind.reason).toContain('nothing distinguishes them');
+
+    const claimed = resolveAnchor(hayR, phrase, 3);
+    expect(claimed).toMatchObject({
+      status: 'resolved',
+      line: 3,
+      matchCount: 2,
+      ambiguous: true,
+    });
+  });
+
+  it('counts one line once even when the fragment repeats inside it', () => {
+    // The fragment appears twice in the SAME line; that is one place the
+    // comment can hang, not an ambiguity.
+    const repeatDiff = [
+      'diff --git a/r.md b/r.md',
+      '--- a/r.md',
+      '+++ b/r.md',
+      '@@ -1,0 +1,1 @@',
+      '+review the charge(amt) call; then review the charge(amt) call again',
+      '',
+    ].join('\n');
+    const r = resolveAnchor(
+      lines(repeatDiff, 'r.md'),
+      'review the charge(amt) call',
+    );
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 1,
+      matchCount: 1,
+      ambiguous: false,
+    });
+  });
+
+  it('matches after whitespace collapse, but only when that is the only place', () => {
+    const r = resolveAnchor(hay(), 'a  derived   number is strictly better');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'substring-added',
+    });
+  });
+
+  it('refuses a fragment contained in several lines only after whitespace collapse', () => {
+    // Two-sided mirror of the loose-tier guard: the collapsed reading earns
+    // its place only when it is the ONLY place. The same phrase once with a
+    // double space, once with a triple — realistic inside KB-long Markdown
+    // lines — is two candidates after collapse, and choosing between
+    // whitespace variants would be a guess posted as a normal resolution.
+    const wsDiff = [
+      'diff --git a/w.md b/w.md',
+      '--- a/w.md',
+      '+++ b/w.md',
+      '@@ -1,0 +1,2 @@',
+      '+one  two three four five six',
+      '+one   two three four five six',
+      '',
+    ].join('\n');
+    const hayW = lines(wsDiff, 'w.md');
+
+    const blind = resolveAnchor(hayW, 'one two three four five');
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('whitespace is normalised');
+
+    // A claim landing exactly on one of them does not rescue the guess.
+    const claimed = resolveAnchor(hayW, 'one two three four five', 2);
+    expect(claimed.status).toBe('unmatched');
+    expect(claimed.reason).toContain('whitespace is normalised');
+  });
+
+  it('carries the drift measurement like any other tier', () => {
+    const r = resolveAnchor(
+      hay(),
+      'the natural anchor shape here',
+      9, // the agent miscounted; the fragment is on line 2
+    );
+    expect(r).toMatchObject({ status: 'resolved', line: 2, drift: 7 });
+  });
+
+  it('forgives a copied `+` marker on a mid-line fragment', () => {
+    // The whole-line tiers forgive the marker column ("not a mistake worth
+    // failing over"); the containment tier must too, for the exact shape it
+    // was built for — the opening clause of an added KB-long line quoted as
+    // it renders in the diff, marker included.
+    const r = resolveAnchor(hay(), '+The resolver turns each quoted snippet');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 2,
+      tier: 'substring-added',
+    });
+  });
+
+  it('does not let the marker retry also be an indentation guess', () => {
+    // The retry is mid-line containment only: a marker-stripped fragment
+    // whose containing line equals it modulo surrounding whitespace is an
+    // indentation guess stacked on a marker guess — the stack the whole-line
+    // tiers refuse, and containment of `x` inside ` x` IS containment
+    // functioning as that guess.
+    const indented = [
+      'diff --git a/z2.ts b/z2.ts',
+      '--- a/z2.ts',
+      '+++ b/z2.ts',
+      '@@ -1,0 +1,1 @@',
+      '+    const deep = compute();',
+      '',
+    ].join('\n');
+    const r = resolveAnchor(
+      lines(indented, 'z2.ts'),
+      '+const deep = compute();',
+    );
+    expect(r.status).toBe('unmatched');
+    // The refusal is right; the REASON must be too. The quote IS in the hunk
+    // — refused by policy, not absent — and Step 7 keys its recovery to the
+    // reason: the generic absence one would re-attribute the file when the
+    // remedy is to quote the line verbatim, with its indentation.
+    expect(r.reason).toContain('indentation is normalised');
+    expect(r.reason).toContain('verbatim');
+    expect(r.reason).not.toContain('does not appear in any hunk');
+  });
+
+  it('refuses the marker retry when a policy-dropped equal line coexists with a containment line', () => {
+    // The diff adds a line that EQUALS the marker-stripped fragment modulo
+    // whitespace and an unrelated line that merely CONTAINS it. Before the
+    // refusal, the retry dropped the equal line as a lineGuess and resolved
+    // the fragment to the containment line at `matchCount: 1, ambiguous:
+    // false` — a confidently posted misplacement where the old contract was a
+    // loud unmatched. The equal-line reading stays alive, so refuse.
+    const stacked = [
+      'diff --git a/x.ts b/x.ts',
+      '--- a/x.ts',
+      '+++ b/x.ts',
+      '@@ -1,0 +1,2 @@',
+      '+ const x = 1;',
+      '+review const x = 1; here',
+      '',
+    ].join('\n');
+    const hayX = lines(stacked, 'x.ts');
+    const blind = resolveAnchor(hayX, '+const x = 1;');
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('verbatim');
+    // A claim on the equal line does not rescue the containment reading.
+    const claimed = resolveAnchor(hayX, '+const x = 1;', 1);
+    expect(claimed.status).toBe('unmatched');
+    expect(claimed.reason).toContain('verbatim');
+  });
+
+  it('does not prescribe a longer stretch of a whole line the marker retry guessed at', () => {
+    // `+return x;` for actual ` return x;` — the stacked marker+indentation
+    // guess under 12 characters. The containment check used to report the
+    // fragment as sitting inside a hunk line and prescribe a longer stretch,
+    // but the whole line IS 10 characters: there is no longer stretch, and
+    // quotes that DO place the line exist. The shape must refuse the same
+    // way at every length.
+    const shortDiff = [
+      'diff --git a/s.ts b/s.ts',
+      '--- a/s.ts',
+      '+++ b/s.ts',
+      '@@ -1,0 +1,1 @@',
+      '+ return x;',
+      '',
+    ].join('\n');
+    const hayS = lines(shortDiff, 's.ts');
+    const r = resolveAnchor(hayS, '+return x;');
+    expect(r.status).toBe('unmatched');
+    expect(r.reason).not.toContain('longer stretch');
+    expect(r.reason).toContain('verbatim');
+
+    // The quotes that DO place the line.
+    expect(resolveAnchor(hayS, ' return x;')).toMatchObject({
+      status: 'resolved',
+      tier: 'exact-added',
+    });
+    expect(resolveAnchor(hayS, 'return x;')).toMatchObject({
+      status: 'resolved',
+      tier: 'loose-added',
+    });
+  });
+
+  it('measures the substring floor on the collapsed needle, not its padding', () => {
+    // The collapsed matching pass abstracts away the very whitespace the
+    // floor counts: `a  b  c  d  e` is 13 characters as quoted, but its
+    // collapsed core `a b c d e` is 9 — below the floor the plainly-quoted
+    // core is refused for. The same core must not be noise or a posted
+    // anchor depending only on its internal padding.
+    const paddedDiff = [
+      'diff --git a/p.md b/p.md',
+      '--- a/p.md',
+      '+++ b/p.md',
+      '@@ -1,0 +1,1 @@',
+      '+x a b c d e y',
+      '',
+    ].join('\n');
+    const hayP = lines(paddedDiff, 'p.md');
+    const padded = resolveAnchor(hayP, 'a  b  c  d  e');
+    expect(padded.status).toBe('unmatched');
+    expect(padded.reason).toContain('too short to place a line');
+    expect(resolveAnchor(hayP, 'a b c d e').status).toBe('unmatched');
+  });
+
+  it('does not let an empty marker-stripped reading sit inside every line', () => {
+    // A bare `+` is an added blank line quoted with its marker. The
+    // marker-stripped reading reduces to the empty string, and
+    // `''.includes('')` is true of every line — containment would claim
+    // presence in this file and prescribe a longer stretch of a line the
+    // snippet does not sit in. The honest absence reason — possibly the
+    // wrong file — is the only productive recovery.
+    const r = resolveAnchor(hay(), '+');
+    expect(r.status).toBe('unmatched');
+    expect(r.reason).toContain('does not appear in any hunk');
+  });
+});
+
 it('does not throw on a candidate set past the argument-spread limit', () => {
   // `Math.min(...cands.map(dist))` turns every candidate into a function
   // argument; a diff with enough repeated lines crosses the engine limit and

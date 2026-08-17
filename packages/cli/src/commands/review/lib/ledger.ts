@@ -56,13 +56,19 @@ export interface Ledger {
    * local cache could never do for CI: a fresh environment recovers the
    * previous findings from the posted body but had nowhere to recover "last
    * reviewed at", so its incremental range always degraded to the full diff.
-   * Absent on a fail-closed round ON PURPOSE — a run that left scope
-   * unreviewed must not hand the next round an anchor that scopes past it.
-   * "Fail-closed" here is the net `ledgerMarkerFor` computes (any undecided
-   * blocker, or any cap in the verdict the module itself derived), and Step
-   * 8's cache-skip rule names the same net for `lastCommitSha` — the two
+   * Absent on a fail-closed round ON PURPOSE — a run that could not show it
+   * READ the whole diff must not hand the next round an anchor that scopes
+   * past the part it missed. "Fail-closed" here is the net `ledgerMarkerFor`
+   * computes (any undecided blocker, unproven coverage, or any cap in the
+   * verdict the module derived other than `unreviewed-dimension` — a
+   * dimension nobody could run says nothing about which lines were read), and
+   * Step 8's cache-skip rule names the same net for `lastCommitSha` — the two
    * anchors must not disagree about what a clean round is. The findings
    * still ride; only the anchor is withheld.
+   *
+   * It also never crosses accounts: `pr-context` strips it from a marker
+   * another account posted, so a foreign body can never decide which lines
+   * this pipeline stops looking at.
    */
   sha?: string;
 }
@@ -71,9 +77,16 @@ export interface Ledger {
  * A usable anchor: abbreviated-to-full hex, matching what `git rev-parse`
  * emits. The parser drops a field that fails this rather than the ledger —
  * the findings are still a work list even when the anchor is garbage — and
- * Step 1 additionally verifies the anchor is an ancestor of the fetched head
- * before scoping to it, so a tampered sha costs a full-range review, never a
- * mis-scoped one.
+ * `fetch-pr --since` additionally verifies the anchor is an ancestor of the
+ * fetched head before scoping to it (in the CLI; the orchestrator never runs
+ * git against an anchor), so a tampered sha costs a full-range review, never
+ * a mis-scoped one.
+ *
+ * Exported because `fetch-pr --since` gates on the SAME shape: an anchor the
+ * marker will not carry must not be one the fetch accepts, or a
+ * ledger-blessed anchor and a cache-supplied one would be judged by two
+ * predicates that can drift (a second, case-insensitive copy shipped once).
+ * One answer about the shape, applied at every gate that reads an anchor.
  *
  * Sibling check, deliberately not shared: `repo-context.ts` validates
  * `plan.mergeBaseSha` as a FULL 40/64-char object id and hard-throws — that
@@ -82,7 +95,30 @@ export interface Ledger {
  * body. Two claims, two strictnesses; one shared helper would invite using
  * the loose one where the strict one is meant.
  */
-const SHA_RE = /^[0-9a-f]{7,64}$/;
+export const SHA_RE = /^[0-9a-f]{7,64}$/;
+
+/**
+ * Grammar of a ledger finding id (`R<round>-<n>`). Shared by every site
+ * that reads carried ids — compose-review's re-post prefix parser and
+ * presubmit's carried-id extractor — so the two ends cannot drift: a
+ * divergence makes re-posts read as plain overlaps and get dropped,
+ * silently re-creating #9208.
+ */
+export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
+
+/**
+ * Prefix-anchored readback of a carried id off the claim line: the write side
+ * guarantees the id leads the line right after the severity marker, so the
+ * read sides key on that same position. Shared WHOLESALE — terminator
+ * included — by compose-review's ledger builder and presubmit's re-post
+ * extractor, so the tolerated terminator set cannot drift on one end only
+ * (#9212 review). The earlier `\b`-bounded whole-body scan also matched
+ * cross-references ("see R3-2 for context") and ids embedded in longer
+ * hyphen runs, exempting a re-post under an unrelated thread.
+ */
+export const LEDGER_ID_READBACK = new RegExp(
+  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+);
 
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
@@ -91,6 +127,28 @@ const SHA_RE = /^[0-9a-f]{7,64}$/;
 export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
+/**
+ * The id, capped like every other field it travels with.
+ *
+ * It was the one field with no bound, which was survivable while only this
+ * account's own markers were ever parsed. Recovery now crosses accounts, so
+ * the read path takes text any GitHub user can post: an id is a short label
+ * (`R2-1`), and anything longer is not one.
+ */
+export const LEDGER_MAX_ID = 24;
+/**
+ * The highest round a marker may claim.
+ *
+ * The round is not decoration: `compose-review` stamps this round's findings
+ * `R<round + 1>-<n>`, so the number IS the id space. Recovery now prefers the
+ * highest round it can find — the counter only ever advances, so that is what
+ * keeps ids monotonic across accounts — which means an unbounded round from
+ * any poster wins every recovery from then on. At 2^53 the increment stops
+ * advancing in float64 and every subsequent round re-stamps the same ids
+ * against different findings. Ten thousand rounds is far past any real PR and
+ * far short of where the arithmetic breaks.
+ */
+export const LEDGER_MAX_ROUND = 10_000;
 
 /**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
@@ -126,11 +184,18 @@ const CLOSE = ' -->';
 export function serializeLedger(ledger: Ledger): string {
   const capped = ledger.findings.slice(0, LEDGER_MAX_FINDINGS).map((f) => ({
     ...f,
+    id: f.id.slice(0, LEDGER_MAX_ID),
     title: f.title.slice(0, LEDGER_MAX_TITLE),
     file: f.file.slice(0, LEDGER_MAX_FILE),
   }));
   const render = (findings: LedgerFinding[], dropped: number): string => {
-    const payload: Ledger = { v: 1, round: ledger.round, findings };
+    const payload: Ledger = {
+      v: 1,
+      // Mirrored on the write side like every other cap: a serializer that can
+      // emit what its own parser refuses would round-trip to nothing.
+      round: Math.min(ledger.round, LEDGER_MAX_ROUND),
+      findings,
+    };
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -176,7 +241,12 @@ export function parseLedger(body: string | undefined): Ledger | null {
   if (end < 0) return null;
   try {
     const raw = JSON.parse(body.slice(start + OPEN.length, end)) as Ledger;
-    if (raw?.v !== 1 || !Number.isInteger(raw.round) || raw.round < 1) {
+    if (
+      raw?.v !== 1 ||
+      !Number.isInteger(raw.round) ||
+      raw.round < 1 ||
+      raw.round > LEDGER_MAX_ROUND
+    ) {
       return null;
     }
     if (!Array.isArray(raw.findings)) return null;
@@ -184,6 +254,22 @@ export function parseLedger(body: string | undefined): Ledger | null {
       (f): f is LedgerFinding =>
         !!f &&
         typeof f.id === 'string' &&
+        // An id claiming a FUTURE round is a squat, not a finding. The
+        // pipeline's own ids obey `id round <= marker round` by construction —
+        // a round stamps its new findings `R<round>-<n>` and carries older ids
+        // forward — so a legitimate marker can never violate this. A foreign
+        // one can, and recovery now reads foreign markers: a marker at round N
+        // carrying `R<N+1>-*` ids would pre-claim exactly the prefix the next
+        // compose stamps, splitting one claim across two ids and renumbering
+        // every genuinely new finding past the squatted block. Read-side only,
+        // deliberately: the pipeline's one writer stamps
+        // `min(prevRound + 1, LEDGER_MAX_ROUND)` (compose-review), so its ids
+        // never exceed the round it writes — the coexisting round clamp below
+        // cannot reintroduce the mismatch this filter would then hide.
+        !(() => {
+          const m = /^R(\d+)-/.exec(f.id);
+          return m !== null && Number(m[1]) > raw.round;
+        })() &&
         (f.sev === 'C' || f.sev === 'S') &&
         typeof f.file === 'string' &&
         typeof f.title === 'string' &&
@@ -195,6 +281,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       // hand-edited marker is not bound by it.
       .map((f) => ({
         ...f,
+        id: f.id.slice(0, LEDGER_MAX_ID),
         title: f.title.slice(0, LEDGER_MAX_TITLE),
         file: f.file.slice(0, LEDGER_MAX_FILE),
       }));

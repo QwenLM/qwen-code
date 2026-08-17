@@ -990,6 +990,88 @@ describe('buildDaemonStatusResponse', () => {
     ]);
   });
 
+  it('aggregates an internal runtime without exposing its workspace path', async () => {
+    const internalCwd = '/private/conversations-runtime';
+    const primaryBridge = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      lastActivityAt: null,
+      pendingPromptTotal: 0,
+      activePromptCount: 1,
+    } as unknown as AcpSessionBridge;
+    const internalBridge = {
+      getDaemonStatusSnapshot: () => ({
+        ...BASE_BRIDGE_SNAPSHOT,
+        limits: { ...BASE_BRIDGE_SNAPSHOT.limits, maxSessions: 10 },
+        sessionCount: 8,
+        channelLive: false,
+        sessions: [
+          {
+            sessionId: 'internal-session',
+            workspaceCwd: internalCwd,
+            createdAt: '2026-08-14T00:00:00.000Z',
+            clientCount: 1,
+            subscriberCount: 0,
+            attachCount: 1,
+            pendingPromptCount: 0,
+            pendingPermissionCount: 0,
+            hasActivePrompt: false,
+            lastEventId: 0,
+            maxJournalEvents: 10_000,
+            maxJournalBytes: 8 * 1024 * 1024,
+          },
+        ],
+      }),
+      lastActivityAt: null,
+      pendingPromptTotal: 2,
+      activePromptCount: 3,
+    } as unknown as AcpSessionBridge;
+    const primary = {
+      workspaceId: 'primary',
+      workspaceCwd: BASE_WORKSPACE,
+      primary: true,
+      trusted: true,
+      bridge: primaryBridge,
+    };
+    const internal = {
+      workspaceId: 'internal',
+      workspaceCwd: internalCwd,
+      primary: false,
+      trusted: true,
+      provenance: 'live-conversation' as const,
+      bridge: internalBridge,
+    };
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary,
+      list: () => [primary],
+      listAll: () => [primary, internal],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.sessions.active).toBe(8);
+    expect(response.runtime.activity.activePrompts).toBe(4);
+    expect(response.runtime.activity.queuedPrompts).toBe(2);
+    expect(response.workspaces).toBeUndefined();
+    expect(JSON.stringify(response.issues)).not.toContain(internalCwd);
+    expect(response.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'session_capacity_high',
+          message: expect.stringContaining('internal runtime'),
+        }),
+        expect.objectContaining({
+          code: 'acp_channel_down',
+          message: expect.stringContaining('internal runtime'),
+        }),
+      ]),
+    );
+
+    const full = await buildDaemonStatusResponse('full', options);
+    expect(JSON.stringify(full.full?.sessions)).not.toContain(internalCwd);
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
@@ -1009,6 +1091,12 @@ describe('buildDaemonStatusResponse', () => {
           sseStreams: 1,
           wsStreams: 0,
           pendingClientRequests: 0,
+          bufferedConnectionFrames: 0,
+          bufferedSessionFrames: 0,
+          pendingDeliveryFrames: 0,
+          preAttachOwnedFrames: 0,
+          preAttachOwnedBytes: 0,
+          preAttachGuardFailures: 0,
           connections: [],
         },
         rateLimitHits: { prompt: 1, mutation: 2, read: 3 },
@@ -1043,6 +1131,12 @@ describe('buildDaemonStatusResponse', () => {
       sseStreams: 0,
       wsStreams: 1,
       pendingClientRequests: 0,
+      bufferedConnectionFrames: 0,
+      bufferedSessionFrames: 0,
+      pendingDeliveryFrames: 0,
+      preAttachOwnedFrames: 0,
+      preAttachOwnedBytes: 0,
+      preAttachGuardFailures: 0,
       connections: [primaryDiagnostic],
     };
 
@@ -1057,16 +1151,75 @@ describe('buildDaemonStatusResponse', () => {
           sseStreams: 0,
           wsStreams: 2,
           pendingClientRequests: 0,
-          mounts: [],
+          bufferedConnectionFrames: 0,
+          bufferedSessionFrames: 0,
+          pendingDeliveryFrames: 1,
+          preAttach: {
+            usedFrames: 3,
+            usedBytes: 4096,
+            pendingDeliveryFrames: 1,
+            highWaterFrames: 7,
+            highWaterBytes: 8192,
+            guardFailures: 4,
+          },
+          mounts: [
+            {
+              workspaceId: null,
+              primary: true,
+              connectionCount: 1,
+              wsStreams: 1,
+              preAttachGuardFailures: 1,
+            },
+            {
+              workspaceId: 'secondary-id',
+              primary: false,
+              connectionCount: 1,
+              wsStreams: 1,
+              preAttachGuardFailures: 3,
+            },
+          ],
           connections: [primaryDiagnostic, secondaryDiagnostic],
         },
       }),
     );
 
     expect(response.runtime.transport.acp.connections).toBe(2);
+    expect(response.runtime.transport.acp.preAttach).toEqual({
+      bufferedConnectionFrames: 0,
+      bufferedSessionFrames: 0,
+      pendingDeliveryFrames: 1,
+      usedFrames: 3,
+      usedBytes: 4096,
+      highWaterFrames: 7,
+      highWaterBytes: 8192,
+      guardFailures: 4,
+    });
+    expect(response.limits).toMatchObject({
+      acpPreAttachMaxFramesPerStream: 256,
+      acpPreAttachMaxFramesPerConnection: 1024,
+      acpPreAttachMaxFramesGlobal: 4096,
+      acpPreAttachMaxPayloadBytesPerConnection: 64 * 1024 * 1024,
+      acpPreAttachMaxPayloadBytesGlobal: 256 * 1024 * 1024,
+    });
     expect(response.full?.acpConnections).toEqual([
       primaryDiagnostic,
       secondaryDiagnostic,
+    ]);
+    expect(response.full?.acpMounts).toEqual([
+      {
+        workspaceId: null,
+        primary: true,
+        connectionCount: 1,
+        wsStreams: 1,
+        preAttachGuardFailures: 1,
+      },
+      {
+        workspaceId: 'secondary-id',
+        primary: false,
+        connectionCount: 1,
+        wsStreams: 1,
+        preAttachGuardFailures: 3,
+      },
     ]);
   });
 
@@ -1836,6 +1989,9 @@ function makeAcpDiagnostic(
     wsStreams: 1,
     bufferedConnectionFrames: 0,
     bufferedSessionFrames: 0,
+    pendingDeliveryFrames: 0,
+    preAttachOwnedFrames: 0,
+    preAttachOwnedBytes: 0,
     workspaceId,
     workspaceCwd,
     primary,
@@ -1926,12 +2082,27 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
                 sseStreams: input.acpSnapshot!.sseStreams,
                 wsStreams: input.acpSnapshot!.wsStreams,
                 pendingClientRequests: input.acpSnapshot!.pendingClientRequests,
+                bufferedConnectionFrames:
+                  input.acpSnapshot!.bufferedConnectionFrames,
+                bufferedSessionFrames: input.acpSnapshot!.bufferedSessionFrames,
+                pendingDeliveryFrames: input.acpSnapshot!.pendingDeliveryFrames,
+                preAttach: {
+                  usedFrames: input.acpSnapshot!.preAttachOwnedFrames,
+                  usedBytes: input.acpSnapshot!.preAttachOwnedBytes,
+                  pendingDeliveryFrames:
+                    input.acpSnapshot!.pendingDeliveryFrames,
+                  highWaterFrames: input.acpSnapshot!.preAttachOwnedFrames,
+                  highWaterBytes: input.acpSnapshot!.preAttachOwnedBytes,
+                  guardFailures: input.acpSnapshot!.preAttachGuardFailures,
+                },
                 mounts: [
                   {
                     workspaceId: null,
                     primary: true,
                     connectionCount: input.acpSnapshot!.connectionCount,
                     wsStreams: input.acpSnapshot!.wsStreams,
+                    preAttachGuardFailures:
+                      input.acpSnapshot!.preAttachGuardFailures,
                   },
                 ],
                 connections: [],
