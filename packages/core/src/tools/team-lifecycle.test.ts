@@ -34,6 +34,7 @@ import type { TeamManager } from '../agents/team/TeamManager.js';
 import type { TeamContext } from '../agents/team/types.js';
 import type { FakeBackend } from '../agents/team/test-utils/fake-backend.js';
 import type { FakeAgent } from '../agents/team/test-utils/fake-agent.js';
+import { createTask } from '../agents/team/tasks.js';
 import { formatAgentId } from '../agents/team/teamHelpers.js';
 
 // ─── Mock Storage ──────────────────────────────────────────
@@ -211,8 +212,13 @@ describe('Team lifecycle E2E', () => {
     expect(display.type).toBe('task_list');
     expect(display.tasks).toHaveLength(3);
 
-    // ── Step 4: Update task status and ownership ─────────
+    // ── Step 4: Start the assignment owner, then update ──
     const taskUpdateTool = new TaskUpdateTool(config);
+    const backend = capturedBackend!;
+    const manager = config.getTeamManager()!;
+    const aliceId = formatAgentId('alice', 'lifecycle');
+    backend.setScript(aliceId, {});
+    await manager.spawnTeammate({ name: 'alice', cwd: tmpDir });
 
     const updateResult = await exec(taskUpdateTool, {
       taskId: task1Id,
@@ -239,18 +245,11 @@ describe('Team lifecycle E2E', () => {
     expect(completeResult.error).toBeUndefined();
     expect(completeResult.llmContent).toContain('completed');
 
-    // ── Step 5: Spawn teammates ──────────────────────────
-    const backend = capturedBackend!;
+    // ── Step 5: Spawn the remaining teammate ─────────────
     expect(backend).not.toBeNull();
 
-    const manager = config.getTeamManager()!;
-    const aliceId = formatAgentId('alice', 'lifecycle');
     const bobId = formatAgentId('bob', 'lifecycle');
-
-    backend.setScript(aliceId, {});
     backend.setScript(bobId, {});
-
-    await manager.spawnTeammate({ name: 'alice', cwd: tmpDir });
     await manager.spawnTeammate({ name: 'bob', cwd: tmpDir });
 
     const alice = backend.getAgent(aliceId) as FakeAgent;
@@ -344,6 +343,46 @@ describe('Team lifecycle E2E', () => {
     const noTeamDelete = await exec(deleteTool, {});
     expect(noTeamDelete.error).toBeDefined();
     expect(noTeamDelete.llmContent).toContain('No active team');
+  });
+
+  it('dispatches a task prompt after a leader assigns an idle teammate', async () => {
+    const config = makeConfig();
+    const createTool = new TeamCreateTool(config);
+    await exec(createTool, { team_name: 'manual-assignment' });
+
+    const manager = config.getTeamManager()!;
+    try {
+      const reservedTask = await createTask('manual-assignment', {
+        subject: 'Reserved task',
+        description: 'Deliver this assignment to Alice.',
+        owner: 'reserved',
+      });
+      const taskId = reservedTask.id;
+      const taskUpdateTool = new TaskUpdateTool(config);
+
+      const backend = capturedBackend!;
+      const aliceId = formatAgentId('alice', 'manual-assignment');
+      backend.setScript(aliceId, {});
+      await manager.spawnTeammate({ name: 'alice', cwd: tmpDir });
+
+      const alice = backend.getAgent(aliceId) as FakeAgent;
+      expect(alice.getReceivedMessages()).toHaveLength(0);
+
+      const assignment = await exec(taskUpdateTool, {
+        taskId,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+
+      expect(assignment.error).toBeUndefined();
+      await vi.waitFor(
+        () => expect(alice.getReceivedMessages()).toHaveLength(1),
+        { timeout: 1000 },
+      );
+      expect(alice.getReceivedMessages()[0]).toContain(`task #${taskId}`);
+    } finally {
+      await manager.cleanup();
+    }
   });
 
   it('prevents creating a second team', async () => {
