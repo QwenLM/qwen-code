@@ -1031,8 +1031,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // file-command channel the scrub defends against.
     assert.match(
       recordStep.run,
-      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
-      'the record step must re-exec through env -i with a positional child marker',
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?\/usr\/bin\/bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
+      'the record step must re-exec through env -i with a positional child marker and an absolute-path bash operand',
     );
     assert.doesNotMatch(
       recordStep.run,
@@ -1152,13 +1152,31 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // file-command channel the scrub defends against.
     assert.match(
       flakeStep.run,
-      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
-      'the gate must re-exec through env -i with a positional child marker',
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?\/usr\/bin\/bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
+      'the gate must re-exec through env -i with a positional child marker and an absolute-path bash operand',
     );
     assert.doesNotMatch(
       flakeStep.run,
       /_FLAKE_CLEAN_REEXEC/,
       'the re-exec child marker must never be an env entry — env markers are forgeable via the file-command channel',
+    );
+    // R14-2: the runner writes this script as a node-owned file inside
+    // the uid-1000-writable $RUNNER_TEMP and the re-exec RE-READS it
+    // from disk — a detached install/build survivor still alive at the
+    // re-exec overwrites the file in place and the wrapper executes
+    // attacker content in its full environment, every in-script defence
+    // living in the overwritten body. The kill must precede the
+    // re-exec, absolute-pathed (no PATH pin applies this early) and
+    // EUID-gated (the harness stays on its stubs).
+    const gatePreKill = flakeStep.run.search(
+      /^\s*if \[ "\$\{EUID:-1\}" -eq 0 \]; then\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*for _ in 1 2 3; do\n\s*\[ -n "\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \] \|\| break\n\s*\/usr\/bin\/sleep 1\n\s*\/usr\/bin\/pkill -KILL -u node 2>\/dev\/null \|\| true\n\s*done\n\s*fi$/m,
+    );
+    const gateReExec = flakeStep.run.search(
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then/,
+    );
+    assert.ok(
+      gatePreKill !== -1 && gateReExec !== -1 && gatePreKill < gateReExec,
+      'node survivors must be killed BEFORE the re-exec re-reads this script from disk',
     );
     // Actions merges workflow- and job-level env into every step: the
     // step-key pin above is only exhaustive while those levels stay empty.
@@ -1545,9 +1563,12 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // farm for upload-artifact to follow). It BUILDS a trusted tree inside
     // the 0700 root-only home instead, copying regular files only.
     const sr = stageStep.run;
-    const iPkill = sr.search(/^\s*pkill -KILL -u node/m);
+    const iPkill = sr.search(/^\s*\/usr\/bin\/pkill -KILL -u node/m);
     const iWait = sr.search(
-      /^\s*\[ -n "\$\(ps -o pid=,stat= -u node 2>\/dev\/null \| awk '\$2 !~ \/\^Z\/'\)" \] \|\| break$/m,
+      /^\s*\[ -n "\$\(\/usr\/bin\/ps -o pid=,stat= -u node 2>\/dev\/null \| \/usr\/bin\/awk '\$2 !~ \/\^Z\/'\)" \] \|\| break$/m,
+    );
+    const stageReExec = sr.search(
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then/,
     );
     const iHomeCheck = sr.search(
       /^\s*if \[ ! -L "\$GATE_DIR" \] && \[ -d "\$GATE_DIR" \] && \[ -O "\$GATE_DIR" \] &&$/m,
@@ -1558,17 +1579,40 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     const iRunId = sr.search(
       /^\s*\[ "\$\(cat "\$GATE_DIR\/run-id" 2>\/dev\/null\)" = "\$\{GITHUB_RUN_ID:\?\}-\$\{GITHUB_RUN_ATTEMPT:\?\}" \]; then$/m,
     );
-    const iFresh = sr.search(
-      /^\s*install -d -m 0700 -o root -g root "\$UPLOAD_DIR"$/m,
+    // R12-2: the validated ENTRY lives in the uid-1000-writable
+    // $RUNNER_TEMP top level, so the rebuild cds into the home once,
+    // re-stats the opened directory against the validated identity, and
+    // runs every phase from relative paths anchored to that inode.
+    const iHomeId = sr.search(
+      /^\s*home_id="\$\(stat -c '%d:%i' "\$GATE_DIR" 2>\/dev\/null \|\| true\)"$/m,
     );
+    const iHomeCd = sr.search(/^\s*cd "\$GATE_DIR"$/m);
+    const iHomeIntact = sr.search(
+      /^\s*\[ "\$\(stat -c '%d:%i' \. 2>\/dev\/null\)" = "\$home_id" \]$/m,
+    );
+    const iFresh = sr.search(/^\s*install -d -m 0700 -o root -g root upload$/m);
     const iCopyRegular = sr.search(
-      /^\s*find \. -type f -exec cp -f --no-dereference --parents \{\} "\$UPLOAD_DIR\/" \\;$/m,
+      /^\s*timeout -k 10 60 find \. -type f -exec cp -f --no-dereference --parents \{\} "\$UPLOAD_DIR\/" \\;$/m,
+    );
+    // R12-2: the per-entry find→cp race can still land a symlink or
+    // FIFO/socket/device inside the rebuilt tree; the scrub deletes
+    // every non-regular arrival inside the root-only home before
+    // upload-artifact (which follows links) can ship it.
+    const iScrub = sr.search(
+      /^\s*find upload \\\( -type l -o -type p -o -type s -o -type b -o -type c \\\) -delete$/m,
     );
     const iCopyLog = sr.search(
-      /^\s*cp -f --no-dereference "\$GATE_DIR\/log" "\$UPLOAD_DIR\/flake-gate\.log"$/m,
+      /^\s*cp -f --no-dereference log upload\/flake-gate\.log$/m,
     );
-    const iChown = sr.search(/^\s*chown -R root:root "\$UPLOAD_DIR"$/m);
-    const iChmod = sr.search(/^\s*chmod -R go-rwx "\$UPLOAD_DIR"$/m);
+    const iChown = sr.search(/^\s*chown -R root:root upload$/m);
+    const iChmod = sr.search(/^\s*chmod -R go-rwx upload$/m);
+    // R13-21: the always() upload step enumerates the path
+    // unconditionally, so a home that failed validation must be removed
+    // — a stale tree left in place ships a previous run's evidence
+    // under this run's artifact name.
+    const iStaleRemoval = sr.search(
+      /^\s*rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-gate"$/m,
+    );
     // Round 11 (R8-36): the guard and the cd re-resolve verify-results;
     // a kill-loop survivor owning the uid-1000 parent can swap the
     // entry between the two — the opened directory must still BE the
@@ -1586,9 +1630,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // before the conditional copy — a planted file must not survive a
     // missing authoritative log, and a planted directory must not
     // swallow the authoritative file.
-    const iReserveName = sr.search(
-      /^\s*rm -rf -- "\$UPLOAD_DIR\/flake-gate\.log"$/m,
-    );
+    const iReserveName = sr.search(/^\s*rm -rf -- upload\/flake-gate\.log$/m);
     // The kill must NOT be gated on the log existing: node can unlink the
     // log, and that must not skip the rebuild for the agent's own report.
     assert.ok(
@@ -1616,32 +1658,44 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     for (const [label, idx] of [
       ['pkill', iPkill],
       ['bounded survivor wait', iWait],
+      ['clean re-exec guard', stageReExec],
       ['root-only home integrity check', iHomeCheck],
       ['run-identity check', iRunId],
+      ['home identity pin', iHomeId],
+      ['home cd', iHomeCd],
+      ['home opened-directory re-check', iHomeIntact],
       ['fresh 0700 upload dir', iFresh],
       ['verify-results identity pin', iVrId],
       ['opened-directory identity re-check', iVrIntact],
       ['regular-file-only copy', iCopyRegular],
+      ['non-regular arrival scrub', iScrub],
       ['log-name reservation', iReserveName],
       ['authoritative log copy', iCopyLog],
       ['root re-own', iChown],
       ['mode revoke', iChmod],
+      ['stale-tree removal', iStaleRemoval],
     ]) {
       assert.ok(idx !== -1, `staging must contain the ${label}`);
     }
     assert.ok(
       iPkill < iWait &&
-        iWait < iHomeCheck &&
+        iWait < stageReExec &&
+        stageReExec < iHomeCheck &&
         iHomeCheck < iRunId &&
-        iRunId < iFresh &&
+        iRunId < iHomeId &&
+        iHomeId < iHomeCd &&
+        iHomeCd < iHomeIntact &&
+        iHomeIntact < iFresh &&
         iFresh < iVrId &&
         iVrId < iVrIntact &&
         iVrIntact < iCopyRegular &&
-        iCopyRegular < iReserveName &&
+        iCopyRegular < iScrub &&
+        iScrub < iReserveName &&
         iReserveName < iCopyLog &&
         iCopyLog < iChown &&
-        iChown < iChmod,
-      'staging order must be: kill+wait, home check, fresh dir, identity-pinned copy, reserved log name, authoritative log last, re-own, mode revoke',
+        iChown < iChmod &&
+        iChmod < iStaleRemoval,
+      'staging order must be: kill+wait, re-exec, home check, run identity, home identity pin, fresh dir, identity-pinned copy, scrub, reserved log name, authoritative log last, re-own, mode revoke, stale-tree removal',
     );
     assert.match(
       sr,
@@ -1652,8 +1706,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // and gate blocks, positional child marker (env markers forgeable).
     assert.match(
       sr,
-      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
-      'staging must re-exec through env -i with a positional child marker',
+      /if \[ "\$\{1:-\}" != '--flake-clean-child' \]; then[\s\S]*?LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec \/usr\/bin\/env -i[\s\S]*?\/usr\/bin\/bash --noprofile --norc -e -o pipefail "\$\{BASH_SOURCE\[0\]\}" --flake-clean-child/,
+      'staging must re-exec through env -i with a positional child marker and an absolute-path bash operand',
     );
     assert.doesNotMatch(
       sr,
@@ -1846,6 +1900,24 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   // reset's wait loop.
   const STUB_PKILL = ['#!/bin/bash', 'exit 0', ''].join('\n');
   const STUB_PS = ['#!/bin/bash', 'exit 0', ''].join('\n');
+  // R14-3 model: the invocation's runner binary is a detached survivor —
+  // while the sample runs it swaps the gate home's ENTRY in the
+  // uid-1000-writable $RUNNER_TEMP (rename needs write on the parent
+  // only), then fails the sample. The redirect fd was opened against the
+  // genuine home; every path-based read the mark cascade does afterwards
+  // must be re-validated first.
+  const SWAP_HOME_STUB = [
+    '#!/bin/bash',
+    'if [ ! -e "$RUNNER_TEMP/.flake-home-swapped" ]; then',
+    '  touch "$RUNNER_TEMP/.flake-home-swapped"',
+    '  mv "$RUNNER_TEMP/flake-gate" "$RUNNER_TEMP/flake-gate-stash"',
+    '  mkdir "$RUNNER_TEMP/flake-gate"',
+    '  chmod 700 "$RUNNER_TEMP/flake-gate"',
+    'fi',
+    'echo "stub test failure (home-swap scenario)"',
+    'exit 1',
+    '',
+  ].join('\n');
 
   const scenarioRoot = mkdtempSync(join(tmpdir(), 'flake-behavioral-'));
   after(() => {
@@ -1897,6 +1969,13 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     for (const [k, v] of Object.entries(sequences)) {
       writeFileSync(join(seqDir, k), v);
     }
+    // An ambient GIT_DIR redirects init/add/commit at the AMBIENT
+    // repository (and clobbers its index) while ws gets no .git — scrub
+    // the GIT_* keys the way the gate strips them from its own git
+    // calls.
+    const fixtureGitEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')),
+    );
     if (git) {
       // Default on: production always samples a checkout, the gate's
       // per-invocation `git reset --hard` reset needs a committed tree
@@ -1915,7 +1994,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
           'fixture',
         ],
       ]) {
-        const g = spawnSync('git', args, { cwd: ws, encoding: 'utf8' });
+        const g = spawnSync('git', args, {
+          cwd: ws,
+          encoding: 'utf8',
+          env: fixtureGitEnv,
+        });
         assert.equal(g.status, 0, `git ${args.join(' ')}: ${g.stderr}`);
       }
     }
@@ -1942,7 +2025,12 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     writeFileSync(join(rt, 'github-summary'), '');
     const env = {
       ...process.env,
-      PATH: `${bin}:${process.env.PATH}`,
+      // Hermetic PATH: the gate's env -i re-exec scrubs the environment
+      // while the (non-root) harness skips the EUID-gated PATH pin, so
+      // any env-dependent git wrapper in the ambient PATH (e.g. a shim
+      // exec'ing a variable the scrub drops) breaks every git-backed
+      // scenario with misleading `error` verdicts.
+      PATH: `${bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
       RUNNER_TEMP: rt,
       GITHUB_OUTPUT: out,
       GITHUB_STEP_SUMMARY: join(rt, 'github-summary'),
@@ -2130,6 +2218,47 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'flaky');
     assert.match(log, /a\.test\.js: NPNPN/);
+  });
+
+  it('an N↔F transition is divergence too — the *N*F*|*F*N* arm is behaviorally pinned', () => {
+    // R14-4: the divergence arm's `*N*F*|*F*N*` half had no behavioral
+    // fixture — deleting it kept every suite green (mutant run) while a
+    // file alternating between a real failure and a collection refusal
+    // (e.g. a flaky test intermittently crashing the runner's own
+    // collection) silently lost its earned flaky demotion.
+    const { res, outputs, log } = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      sequences: { 'a.test.js': 'NF' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'flaky');
+    assert.match(log, /a\.test\.js: NFNFN/);
+  });
+
+  it('a home swapped mid-invocation is detected after the subshell returns — the mark comes from the exit status, never from swapped bytes', () => {
+    // R14-3: the cascade after `status=$?` read $out path-based with no
+    // intact re-check — a survivor swapping the home's entry during the
+    // invocation erased recorded F marks into I (the redirect fd opened
+    // against the genuine home, but `[ ! -e "$out" ]` re-resolved
+    // through the swapped entry), dodging the very demotion the gate
+    // exists to apply. Honest bound: a compromised home stops sampling —
+    // the mark comes from the exit status alone and the detection is
+    // visible; preserving the demotion itself would price a mid-run
+    // swap as demoting evidence, which stays a design call.
+    const { res, outputs, log } = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      sequences: { 'a.test.js': 'F' },
+      stubs: { npx: SWAP_HOME_STUB, node: SWAP_HOME_STUB },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    // Sub-2-round stop: one honest sample cannot separate a flake from
+    // a deterministic outcome — the verdict stays informational, but
+    // the mark must be the honest F, never the erased I.
+    assert.equal(outputs.flake_verdict, 'timeout');
+    assert.match(log, /^\s*scripts\/tests\/a\.test\.js: F$/m);
+    assert.doesNotMatch(log, /^\s*scripts\/tests\/a\.test\.js: I$/m);
   });
 
   it('real divergence still outranks an infra exit in another file', () => {
