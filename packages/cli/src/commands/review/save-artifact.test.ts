@@ -68,6 +68,15 @@ const verdict = {
   // the validator's absent-means-zero default.
   deferredCount: 2,
   lowSignal: { agents: 4, srcDiffLines: 120 },
+  // Populated on purpose, like `deferredCount` above: the copy test then
+  // proves passthrough rather than only the validator's absent-means-null.
+  approachSignal: {
+    round: 6,
+    src0: 228,
+    srcDiffLines: 920,
+    growth: 920 / 228,
+    nonConverged: true,
+  },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
 

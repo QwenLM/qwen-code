@@ -71,6 +71,26 @@ export interface Ledger {
    * this pipeline stops looking at.
    */
   sha?: string;
+  /**
+   * Source-diff line count as of the FIRST round that recorded one, carried
+   * forward unchanged. A baseline, never re-measured: growth is only legible
+   * cumulatively. A change that arrives at 228 source lines and leaves at 920
+   * grew 4x, yet only ~1.3x per round across six rounds — a per-round delta
+   * would never notice, which is why this is a baseline and not "last round's
+   * size".
+   *
+   * Its only consumer is one advisory paragraph telling a human that the shape
+   * of the change, rather than the current patch, may be the open question.
+   * Like every other marker field this is untrusted body data, but unlike a
+   * finding there is no code to re-assert a bare number against: a forged small
+   * value fires the paragraph, a forged large one silences it. That is the
+   * entire blast radius — it never reaches a verdict, a cap, or an event.
+   *
+   * Unlike `sha`, this survives truncation. A partial finding list must not
+   * certify a commit range, but it says nothing about how big the diff is, and
+   * the measurement is true either way.
+   */
+  src0?: number;
 }
 
 /**
@@ -204,6 +224,13 @@ export function serializeLedger(ledger: Ledger): string {
     // keeps its findings and loses its anchor, exactly as a fail-closed round
     // does.
     else if (ledger.sha && SHA_RE.test(ledger.sha)) payload.sha = ledger.sha;
+    // Unconditional, unlike `sha` above: the ruling that withholds an anchor
+    // from a partial list does not extend to a measurement of the diff. ~12
+    // bytes against LEDGER_MAX_BYTES, and losing it would silently reset a
+    // baseline the next round cannot recompute.
+    if (Number.isInteger(ledger.src0) && (ledger.src0 as number) > 0) {
+      payload.src0 = ledger.src0;
+    }
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
   // Drop from the END until the whole marker fits. Trailing entries are the
@@ -301,12 +328,21 @@ export function parseLedger(body: string | undefined): Ledger | null {
       typeof raw.sha === 'string' && SHA_RE.test(raw.sha) && !dropped
         ? raw.sha
         : undefined;
+    // Survives truncation on read as it does on write — a partial list still
+    // measured the same diff. Anything that is not a positive integer is
+    // dropped, so a garbled baseline degrades to "unknown" (silence) rather
+    // than to a number that would read as no growth.
+    const src0 =
+      Number.isInteger(raw.src0) && (raw.src0 as number) > 0
+        ? (raw.src0 as number)
+        : undefined;
     return {
       v: 1,
       round: raw.round,
       findings,
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
+      ...(src0 ? { src0 } : {}),
     };
   } catch {
     return null;

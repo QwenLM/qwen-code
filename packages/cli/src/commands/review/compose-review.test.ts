@@ -3445,6 +3445,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       remediation: [],
       deferredCount: 0,
       lowSignal: null,
+      approachSignal: null,
       ...over,
     });
 
@@ -6189,5 +6190,256 @@ describe('composeReview — continuity renders on every verdict', () => {
     const r = composeReview(resumedInput({ suggestionsInline: 1 }));
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+});
+
+// Every finding this review emits is anchored to a `file:line` inside the
+// current diff, so it can report where an approach leaks but never that a
+// different approach would retire all of the leaks at once. When a change has
+// taken many rounds AND grown several times over, that limit is worth saying
+// to the human deciding what happens next. Measured: one change took three
+// attempts across two PRs and 74 individually-correct findings, growing 4x,
+// before the mechanism was replaced and every finding went away with it.
+describe('composeReview — approach signal', () => {
+  const prevLedger = (planPath: string, ledger: Record<string, unknown>) =>
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify(ledger),
+    );
+
+  /** Round 6 over a 4x-grown diff, composing a REQUEST_CHANGES. */
+  const ballooned = (over: Record<string, unknown> = {}) => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+      ...over,
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 228 });
+    return planPath;
+  };
+
+  it('says the approach is the open question, on the body and the verdict line', () => {
+    const planPath = ballooned();
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.approachSignal).toMatchObject({
+      round: 6,
+      src0: 228,
+      srcDiffLines: 920,
+    });
+    expect(r.body).toContain('⚠️ Round 6');
+    expect(r.body).toContain('4.0x');
+    expect(r.body).toContain('228 → 920 source diff lines');
+    expect(r.body).toContain('a human should decide whether the shape');
+    expect(r.body).toContain('Advisory only');
+    expect(verdictLine(r)).toContain(
+      'reconsider the approach, not only the findings',
+    );
+  });
+
+  // The signal is disclosure, exactly like `lowSignal`. If it ever moves an
+  // event or adds a cap it has become a blocker, which is the one thing it
+  // must not be.
+  it('moves no verdict: event, baseEvent and caps are identical without it', () => {
+    const withSignal = composeReview({
+      planPath: ballooned(),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    const withoutPlan = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(withoutPlan, { v: 1, round: 5, findings: [] }); // no src0
+    const without = composeReview({
+      planPath: withoutPlan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(without.approachSignal).toBeNull();
+    expect(withSignal.event).toBe(without.event);
+    expect(withSignal.baseEvent).toBe(without.baseEvent);
+    expect(withSignal.cappedBy).toEqual(without.cappedBy);
+  });
+
+  // An APPROVE is convergence. The posture composes a deferrals-only late
+  // Approve on purpose; telling that PR to reconsider itself would contradict
+  // the very outcome the loop is steering toward.
+  it('never fires on an APPROVE, however many rounds and however much growth', () => {
+    const planPath = ballooned();
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('⚠️ Round');
+    expect(verdictLine(r)).not.toContain('reconsider the approach');
+  });
+
+  // No baseline on record means UNKNOWN growth, which must read as silence.
+  // Every PR already in flight when this ships is in exactly that state, so
+  // degrading to "no growth" instead would be silent-but-wrong at scale.
+  it('stays silent when the previous round recorded no baseline', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(planPath, { v: 1, round: 9, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('⚠️ Round');
+  });
+
+  it('stays silent on an early round, even with large growth', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 2000,
+    });
+    prevLedger(planPath, { v: 1, round: 2, findings: [], src0: 100 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  // A long review is not the same thing as a ballooning one. A PR that took
+  // ten rounds without growing is converging slowly, not diverging.
+  it('stays silent on a late round that did not grow', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 250,
+    });
+    prevLedger(planPath, { v: 1, round: 9, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  // Tripling a tiny diff is not the shape this describes. Reuses the module's
+  // existing "non-trivial diff" floor rather than inventing a second one.
+  it('stays silent below the absolute source-diff floor', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 60,
+    });
+    prevLedger(planPath, { v: 1, round: 9, findings: [], src0: 5 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  it('honours the operator round threshold, and falls back to the built-in on 0', () => {
+    reviewSettingsMock.mockReturnValue({ approachRounds: 8 });
+    expect(
+      composeReview({
+        planPath: ballooned(),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        severityFloor: 'auto',
+      }).approachSignal,
+    ).toBeNull();
+
+    reviewSettingsMock.mockReturnValue({ approachRounds: 0 });
+    expect(
+      composeReview({
+        planPath: ballooned(),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        severityFloor: 'auto',
+      }).approachSignal,
+    ).not.toBeNull();
+    reviewSettingsMock.mockReturnValue({});
+  });
+
+  // The baseline is a BASELINE. #9136 grew 228 -> 920 over six rounds, which
+  // is only ~1.3x per round — a per-round delta would never have noticed it.
+  // Re-measuring each round would also let a diff that shrinks rewrite its own
+  // baseline and erase the growth already on record.
+  it('carries the baseline forward unchanged, even when the diff shrinks', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 150,
+    });
+    prevLedger(planPath, { v: 1, round: 3, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toMatch(/"src0":228/);
+  });
+
+  it('baselines from this round when the previous ledger carries none', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 340,
+    });
+    prevLedger(planPath, { v: 1, round: 1, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toMatch(/"src0":340/);
   });
 });

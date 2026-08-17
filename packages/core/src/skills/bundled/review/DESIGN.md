@@ -774,6 +774,14 @@ With Fork + prompt cache sharing:
 
 The blocks below are incident narratives moved out of SKILL.md (which is loaded into the orchestrator's context on every run). Each one is the story behind a rule that still lives there; the rule references it as `(measured; DESIGN.md — <title>)`.
 
+### The approach that no finding could name
+
+One change to `extractAndStripMeta` took three attempts across two PRs. #9097 (3 rounds, 18 findings) added a timeout to the vm call; #9136 (6 rounds, 56 findings) moved the walk inside the vm and ended up spawning a child process per call, growing 228 → 920 source diff lines. #9325 landed it in one commit by deleting the evaluation entirely and parsing the literal instead.
+
+All 74 findings were individually correct. Each round found a real hole the previous patch did not cover. But every finding is anchored to a `file:line` in the current diff — so the review could say where the approach leaked, never that a different approach would retire all of the leaks at once. The fix that worked took all 74 findings with it.
+
+`did not converge within the reverse-audit round cap` was emitted four times across the two PRs, filed as a coverage gap rather than as a conclusion about the change. The approach signal exists to state that conclusion to a human instead. See `docs/design/2026-08-17-review-approach-signal.md`.
+
 ### The todo-call latency
 
 Measured on real small-PR runs from the harness's own records, the todo calls in one review cost **377 seconds**, in another **179** — minutes spent restating steps that were already written down.

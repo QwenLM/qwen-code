@@ -314,3 +314,75 @@ describe('LEDGER_ID_READBACK', () => {
     expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
   });
 });
+
+// `src0` is the approach signal's baseline — see `Ledger.src0`. It is the one
+// field that survives truncation, because the ruling that withholds an anchor
+// from a partial finding list does not extend to a measurement of the diff.
+describe('ledger src0 — the approach-signal baseline', () => {
+  it('serializes a positive baseline and omits a missing or zero one', () => {
+    expect(
+      serializeLedger({ v: 1, round: 2, findings: [], src0: 228 }),
+    ).toContain('"src0":228');
+    expect(serializeLedger({ v: 1, round: 2, findings: [] })).not.toContain(
+      'src0',
+    );
+    expect(
+      serializeLedger({ v: 1, round: 2, findings: [], src0: 0 }),
+    ).not.toContain('src0');
+  });
+
+  // The explicit ruling the schema demands of any new field: `sha` is dropped
+  // on a truncated list because a partial work list must not certify a commit
+  // range; `src0` certifies nothing, so it rides.
+  it('survives truncation where the anchor does not', () => {
+    const findings = Array.from({ length: 400 }, (_, i) => ({
+      id: `R1-${i}`,
+      sev: 'S' as const,
+      file: `src/some/reasonably/long/path/to/file-${i}.ts`,
+      line: i,
+      title: `a finding title long enough to push the marker past its byte cap ${i}`,
+    }));
+    const parsed = parseLedger(
+      serializeLedger({
+        v: 1,
+        round: 3,
+        findings,
+        sha: 'deadbeef00112233445566778899aabbccddeeff',
+        src0: 228,
+      }),
+    );
+    expect(parsed?.dropped).toBeGreaterThan(0);
+    expect(parsed?.sha).toBeUndefined();
+    expect(parsed?.src0).toBe(228);
+  });
+
+  // A garbled baseline must degrade to "unknown" — which the consumer reads as
+  // silence — rather than to a number that would read as no growth.
+  it.each([0, -5, 1.5, '228', null, undefined])(
+    'drops a non-positive-integer baseline (%p)',
+    (bad) => {
+      const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 2,
+        findings: [],
+        src0: bad,
+      })} -->`;
+      expect(parseLedger(marker)?.src0).toBeUndefined();
+    },
+  );
+
+  it('round-trips a baseline alongside the -- escaping', () => {
+    const parsed = parseLedger(
+      serializeLedger({
+        v: 1,
+        round: 4,
+        findings: [
+          { id: 'R1-1', sev: 'C', file: 'a.ts', title: 'rejects --unsafe' },
+        ],
+        src0: 512,
+      }),
+    );
+    expect(parsed?.src0).toBe(512);
+    expect(parsed?.findings[0].title).toBe('rejects --unsafe');
+  });
+});
