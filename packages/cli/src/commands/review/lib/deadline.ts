@@ -179,6 +179,16 @@ export function claimRetirementDegradeNote(
   const file = join(dir, `retirement-degrade-note-round-${round ?? 'x'}.json`);
   try {
     mkdirSync(dir, { recursive: true });
+  } catch {
+    // An uncreatable record dir is not a claim — the note must still
+    // print. A recursive mkdir throws EEXIST when the path exists but is
+    // NOT a directory, and the create's catch below reads only the `wx`
+    // EEXIST as "claimed already"; conflating the two silenced the note
+    // on every round of a run whose record path was a regular file
+    // (#9272).
+    return true;
+  }
+  try {
     try {
       // The STRICT plan mtime, not the slack-adjusted epoch (#9272): the
       // slack exists for `Date.now()`-stamped artifacts, and a claim file

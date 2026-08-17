@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
 import { appendRunSession, recordResume } from './run-ledger.js';
 import {
+  findingsPointerOf,
   promptRecordDir,
   recordPrompt,
   writeFindingsFile,
@@ -166,10 +167,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     // method, and the scheduler now refuses receipts from an auditor that
     // skipped it. Modeled by default, like the brief-opens elsewhere; a test
     // that wants a skipping auditor writes its own transcript.
-    const pointer = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(
-      launchPrompt,
-    );
-    if (pointer) {
+    const pointer = findingsPointerOf(launchPrompt);
+    if (pointer !== null) {
       lines.push(
         JSON.stringify({
           ...base,
@@ -180,7 +179,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
               {
                 functionCall: {
                   name: 'read_file',
-                  args: { file_path: pointer[1] },
+                  args: { file_path: pointer },
                 },
               },
             ],
@@ -694,6 +693,56 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       'No issues found — there were no issues verified this round across ' +
         'the reconnect state machine and its call sites.',
     ],
+    [
+      'a passive head with a non-walk participle (no issues were checked)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were checked.',
+    ],
+    [
+      'a get-passive head with a non-walk participle (no issues got checked)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues got checked.',
+    ],
+    [
+      'a passive head with a non-walk participle (no issues were confirmed)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were confirmed.',
+    ],
+    [
+      'a hyphenated walk verb in the passive seat (no issues were re-verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were re-verified.',
+    ],
+    [
+      'a passive seat across a no-break space (no issues NBSP were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues\u00A0were verified.',
+    ],
+    [
+      'a passive seat across an ideographic space (no issues U+3000 were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues\u3000were verified.',
+    ],
+    [
+      'a passive seat across a parenthetical (no issues, however, were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues, however, were verified.',
+    ],
+    [
+      'a passive seat across parens (no issues (all 12) were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues (all 12) were verified.',
+    ],
+    [
+      'a prefixed one-token participle in the passive seat (no issues were reverified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were reverified.',
+    ],
+    [
+      'a prefixed one-token participle in the passive seat (no issues were retraced)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were retraced.',
+    ],
   ])(
     'an admission stays marked, however the absence-of-problems phrasing tempts an exception: %s (#9272)',
     (_label, leaked) => {
@@ -756,6 +805,32 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([]);
     expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('an honest echo keeps stripping when the filler rides the word-run (#9272)', () => {
+    // The guard refuses a strip whose word-run after the noun reaches a
+    // walk verb or a passive head — but the phrase's OWN filler exempts
+    // the run: `no issues were found verifying the callers` is the
+    // all-clear the walk produced, not a passive admission, whatever walk
+    // vocabulary rides after `found`. Both honest shapes pin the
+    // exemption: the filler in the receipt's lead with a walk noun after
+    // it (`found after verification`), and the filler inside the clause
+    // with a walk verb after it. Without the exemption the guard fired on
+    // `verification` / `verifying` and refused receipts whose auditors
+    // phrase the all-clear this way.
+    for (const receipt of [
+      'No issues found after verification — re-walked the parser and both ' +
+        'of its call sites.',
+      'No issues found — re-walked the parser; no issues were found ' +
+        'verifying the callers.',
+    ]) {
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([]);
+      expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    }
   });
 
   it('a Chinese receipt separated by a full-width colon is dry', () => {

@@ -65,8 +65,18 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { agentPromptCommand } from './agent-prompt.js';
-import { promptRecordDir, readRecordedPrompts } from './lib/prompt-record.js';
-import { readBudgetStop, writeRoundCapStop } from './lib/deadline.js';
+import {
+  findingsPointerOf,
+  promptRecordDir,
+  readRecordedPrompts,
+} from './lib/prompt-record.js';
+import {
+  DEADLINE_ENV,
+  RESERVE_ENV,
+  TOOL_CONCURRENCY_ENV,
+  readBudgetStop,
+  writeRoundCapStop,
+} from './lib/deadline.js';
 import { runCleanup } from './cleanup.js';
 
 const PLAN = {
@@ -164,17 +174,17 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
       // every round admission (#9259): an ambient deadline inherited from
       // a concurrent review makes round admission environment-dependent
       // and fails this suite for reasons that have nothing to do with it.
-      'QWEN_REVIEW_DEADLINE_EPOCH',
-      'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS',
-      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
+      DEADLINE_ENV,
+      RESERVE_ENV,
+      TOOL_CONCURRENCY_ENV,
     ]) {
       SAVED[k] = process.env[k];
     }
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
-    delete process.env['QWEN_REVIEW_DEADLINE_EPOCH'];
-    delete process.env['QWEN_REVIEW_DEADLINE_RESERVE_SECONDS'];
-    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    delete process.env[TOOL_CONCURRENCY_ENV];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
 
@@ -294,10 +304,8 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
     // points at — the comparison against known findings IS the audit's
     // method, and the dry bar (#9091) refuses a receipt from an auditor
     // that skipped the read.
-    const pointer = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(
-      launchPrompt,
-    );
-    if (pointer) {
+    const pointer = findingsPointerOf(launchPrompt);
+    if (pointer !== null) {
       lines.push(
         JSON.stringify({
           ...base,
@@ -309,7 +317,7 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
                 functionCall: {
                   id: `${id}-c2`,
                   name: 'read_file',
-                  args: { file_path: pointer[1] },
+                  args: { file_path: pointer },
                 },
               },
             ],

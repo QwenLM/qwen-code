@@ -364,28 +364,77 @@ const WALK_VERB_RE = new RegExp(WALK_VERB_SRC, 'i');
  * chunk on it (#9213) — and an honest clause quoting a marker-carrying
  * label now reads `unknown`, the direction every failure here fails.
  *
- * The en strip also refuses a `no <noun>` the clause makes the SUBJECT
- * of a walk-family verb — `…; no issues were verified`, `no findings
- * examined this round` — across any unbroken word-run, because adverbs
- * take a seat between (`no issues at all were verified`): that shape is
- * the admission that the walk was not done, not a restatement of the
- * all-clear, and stripping it blanked the bare `\bno\b` marker's whole
- * domain over these three nouns (#9272 — round 3's bare marker closed
- * the passive and compound entrances yet these still retired, because
- * the strip had eaten the `no` before the marker could see it). Echoes
- * keep stripping: punctuation follows (`no gaps: none.`), the phrase's
- * own filler (`no issues found, no issues found.`), or a non-walk word —
- * `found` in `no issues were found` is not the walk's vocabulary. The
- * `\b` after the noun pins the alternation: without it a refused strip
- * backtracked the noun (`issues` → `issue`) and stripped THAT, leaving
- * `s were verified` marker-less. The zh branch needs no guard: 没/未
- * stay marked whatever follows.
+ * The en strip also refuses a `no <noun>` whose word-run after the noun
+ * reaches a walk-family verb OR a passive head — the CLOSED class of
+ * English passive auxiliaries (`was/were/is/are/been/being/got/…`),
+ * never the open class of participles: `no issues were checked`, `no
+ * issues got confirmed` are admissions whatever participle closes them,
+ * and round 4's probe retired chunks on five such families because the
+ * guard named walk verbs one by one (non-walk participles, hyphenated
+ * and prefixed ones, NBSP-split runs and parentheticals all passed it).
+ * The run is read across inline whitespace — NBSP and ideographic space
+ * included; `[ \t]` alone split the guard's transit — and across commas
+ * and brackets, which carry a parenthetical between the noun and its
+ * verb (`no issues, however, were verified`); a sentence stop still
+ * ends it. That shape is the admission that the walk was not done, not
+ * a restatement of the all-clear, and stripping it blanked the bare
+ * `\bno\b` marker's whole domain over these three nouns (#9272 — round
+ * 3's bare marker closed the passive and compound entrances yet these
+ * still retired, because the strip had eaten the `no` before the marker
+ * could see it). One exemption: a run carrying the phrase's OWN filler
+ * `found` keeps stripping — `no issues were found verifying the
+ * callers` is the all-clear the walk produced, and a lead's `No issues
+ * found after verification` names the walk after the filler; refusing
+ * those fired the guard on the honest receipts it exists to spare
+ * (#9272 round 4). The stated residue is the reduced passive without a
+ * head (`no issues checked`) and an honest `no <noun> <be-form>` with
+ * no filler (`no issues were present`): both read `unknown` and stay
+ * under audit, the direction every failure here fails. The EN
+ * alternative is grouped before the guard binds, so a future
+ * restructure of DRY_RECEIPT_EN into several top-level alternations
+ * cannot leave the guard riding the last one alone (#9272 round 4).
+ * The `\b` after the noun pins the alternation: without it a refused
+ * strip backtracked the noun (`issues` → `issue`) and stripped THAT,
+ * leaving `s were verified` marker-less. The zh branch needs no guard:
+ * 没/未 stay marked whatever follows.
  */
+/**
+ * The passive head the guard reads after the noun — a closed class,
+ * where the walk verbs and the participles they once tried to name are
+ * open ones: a passive admission carries one of these whatever
+ * participle follows it.
+ */
+const PASSIVE_HEAD_SRC =
+  '\\b(?:am|is|are|was|were|be|been|being|get|gets|got|gotten|getting)\\b';
+
+/**
+ * The guard's transit between the noun and what reaches it: inline
+ * whitespace in every width a receipt can carry (NBSP and ideographic
+ * space split `[ \t]` runs) plus the parenthetical punctuation that
+ * sits between a subject and its verb. Sentence stops (`. ; :` and the
+ * dashes) still end the run — a clause's own structure, not the guard,
+ * decides what sits after them.
+ */
+const GUARD_TRANSIT_SRC =
+  '[ \\t\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF,，()（）]';
+
 const PHRASE_CORE_RE = new RegExp(
   '(?:' +
+    '(?:' +
     DRY_RECEIPT_EN +
-    '\\b(?![ \\t]+(?:\\w+[ \\t]+)*(?:' +
+    ')' +
+    '\\b(?!(?!' +
+    GUARD_TRANSIT_SRC +
+    '+(?:\\w+' +
+    GUARD_TRANSIT_SRC +
+    '+)*found\\b)' +
+    GUARD_TRANSIT_SRC +
+    '+(?:\\w+' +
+    GUARD_TRANSIT_SRC +
+    '+)*(?:' +
     WALK_VERB_SRC +
+    '|' +
+    PASSIVE_HEAD_SRC +
     '))' +
     DRY_RECEIPT_ZH +
     ')',

@@ -4,10 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+
+// The real fs, wrapped so the claim-write fault below is injectable
+// under ANY uid: a permission-based stimulus does not fault for root
+// (root ignores 0o555 mode bits), and ESM namespace objects are not
+// configurable for vi.spyOn — the wrapper keeps every other export the
+// real function (#9272).
+const fsFault = vi.hoisted(() => ({ failClaimWrite: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const mock = {
+    ...actual,
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      if (fsFault.failClaimWrite) {
+        const err = new Error('EACCES') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return actual.writeFileSync(...args);
+    },
+  };
+  return { ...mock, default: mock };
+});
 import {
-  chmodSync,
-  mkdirSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -282,18 +303,39 @@ describe('the round-cost estimate — measured when it can be', () => {
     expect(claimRetirementDegradeNote(p, 3)).toBe(true);
   });
 
-  it('claimRetirementDegradeNote fails OPEN on any non-EEXIST error — silence is the only wrong answer (#9272)', () => {
-    // An unwritable record dir faults the `wx` create with EACCES; the
-    // claim must still report printable, or the degrade NOTE is swallowed
-    // exactly when the filesystem is the thing that's broken.
+  it('claimRetirementDegradeNote fails OPEN when the record dir is uncreatable — silence is the only wrong answer (#9272)', () => {
+    // The record path exists as a REGULAR FILE: the recursive mkdir
+    // throws EEXIST — which is not a claim — and the note must still
+    // print, or a dead record path swallows the degrade NOTE on every
+    // round. Filesystem shape faults for every uid; a permission-based
+    // stimulus (chmod 0o555) does not fault at all for a uid-0 run,
+    // where root ignores the mode bits and the test passes through the
+    // success path (#9272).
     const p = plan();
-    const dir = promptRecordDir(p);
-    mkdirSync(dir, { recursive: true });
-    chmodSync(dir, 0o555);
+    writeFileSync(promptRecordDir(p), 'a file where the record dir goes');
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+  });
+
+  it('claimRetirementDegradeNote fails OPEN when the claim write faults — for any uid (#9272)', () => {
+    // The `wx` create's catch must read ONLY EEXIST as "claimed": an
+    // EACCES fault on the write reports printable, or the degrade NOTE
+    // is swallowed exactly when the filesystem is the thing that's
+    // broken. The stimulus is an injected throw, not permission bits —
+    // under uid 0 root ignores a 0o555 dir and the write succeeds,
+    // leaving the catch branch this test exists to pin unexercised. The
+    // claim file's ABSENCE proves the fault actually ran, so this
+    // cannot pass vacuously through the success path.
+    const p = plan();
+    const claim = join(
+      promptRecordDir(p),
+      'retirement-degrade-note-round-3.json',
+    );
+    fsFault.failClaimWrite = true;
     try {
       expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+      expect(existsSync(claim)).toBe(false);
     } finally {
-      chmodSync(dir, 0o755);
+      fsFault.failClaimWrite = false;
     }
   });
 

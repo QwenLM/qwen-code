@@ -3671,17 +3671,17 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       // inherited from a concurrent review makes admission
       // environment-dependent — the same isolation the repro harness
       // carries (#9259), on the describe that actually needs it.
-      'QWEN_REVIEW_DEADLINE_EPOCH',
-      'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS',
-      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
+      DEADLINE_ENV,
+      RESERVE_ENV,
+      TOOL_CONCURRENCY_ENV,
     ]) {
       SAVED[k] = process.env[k];
     }
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
-    delete process.env['QWEN_REVIEW_DEADLINE_EPOCH'];
-    delete process.env['QWEN_REVIEW_DEADLINE_RESERVE_SECONDS'];
-    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    delete process.env[TOOL_CONCURRENCY_ENV];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
   afterEach(() => {
