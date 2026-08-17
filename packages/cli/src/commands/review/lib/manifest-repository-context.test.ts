@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   manifestRepositoryContextProvider,
   MAX_GLOB_CANDIDATES,
@@ -23,7 +23,7 @@ import {
 } from './manifest-repository-context.js';
 import { MAX_IDENTITY_BYTES } from './repository-context.js';
 
-const worktrees: string[] = [];
+let worktrees: string[] = [];
 
 function temp(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'manifest-context-')));
@@ -31,15 +31,19 @@ function temp(): string {
   return root;
 }
 
-// Several fixtures hold 16k-entry trees; leaking them exhausts a tmpfs
-// /tmp within a handful of runs. Deleting them is tens of thousands of
-// unlinks, which has blown past the default 10s hook timeout on a loaded
-// CI runner — give the teardown the time it needs rather than failing a
-// green suite on cleanup.
-afterAll(() => {
+// Several fixtures hold 16k-entry trees, and the skip-set suite stacks ten
+// of them — holding every tree until afterAll keeps ~164k files (inodes)
+// alive for the whole file, which on a shared self-hosted host coincides
+// with concurrent jobs' temp files and has surfaced as ENOSPC mid-suite.
+// Tear down per test instead so at most one 16k tree is live at a time.
+// Deleting one tree is tens of thousands of unlinks, which has blown past
+// the default 10s hook timeout on a loaded CI runner — give the teardown
+// the time it needs rather than failing a green suite on cleanup.
+afterEach(() => {
   for (const root of worktrees) {
     rmSync(root, { recursive: true, force: true });
   }
+  worktrees = [];
 }, 120_000);
 
 function write(path: string, content = ''): void {

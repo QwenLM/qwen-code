@@ -46,6 +46,7 @@ interface TranscriptMessageLabels {
   branchSuccess?: (name: string) => string;
   midTurnInserted?: (message: string) => string;
   modelStreamInterrupted?: string;
+  loopDetected?: string;
 }
 
 interface TranscriptMessageOptions {
@@ -191,10 +192,21 @@ function isUnrecognizedDaemonDebug(
   );
 }
 
+// Resubmitting a prompt the daemon stopped for loop protection tends to
+// re-loop, so no retry affordance is offered for these turn errors.
+export function isRetryableTurnErrorKind(
+  errorKind: string | undefined,
+): boolean {
+  return errorKind !== 'loop_detected';
+}
+
 function getErrorDisplayText(
   block: DaemonStatusTranscriptBlock,
   labels?: TranscriptMessageLabels,
 ): string {
+  if (block.errorKind === 'loop_detected') {
+    return labels?.loopDetected ?? block.text;
+  }
   if (
     block.errorKind === 'model_stream_interrupted' ||
     // Older daemons emit this turn_error before they know about errorKind.
@@ -384,6 +396,12 @@ export function transcriptBlocksToDaemonMessages(
             mimeType: img.mimeType || 'image/*',
           }));
         }
+        if (textBlock.files && textBlock.files.length > 0) {
+          msg.files = textBlock.files.map((file) => ({
+            name: file.name,
+            mimeType: file.mimeType || 'text/plain',
+          }));
+        }
         messages.push(msg);
         break;
       }
@@ -421,6 +439,7 @@ export function transcriptBlocksToDaemonMessages(
           let hasTerminal = false;
           let readyCount = 0;
           let errorCount = 0;
+          let lastAssistantSegmentIndex: number | null = null;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
@@ -450,7 +469,17 @@ export function transcriptBlocksToDaemonMessages(
                 timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
+              lastAssistantSegmentIndex = currentAssistantIdx;
               currentThinkingIdx = null;
+            }
+          }
+          if (textBlock.branchRecordId && lastAssistantSegmentIndex !== null) {
+            const assistant = messages[lastAssistantSegmentIndex];
+            if (assistant?.role === 'assistant') {
+              messages[lastAssistantSegmentIndex] = {
+                ...assistant,
+                branchRecordId: textBlock.branchRecordId,
+              };
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -482,6 +511,9 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
@@ -493,6 +525,9 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
@@ -502,6 +537,9 @@ export function transcriptBlocksToDaemonMessages(
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
         }
@@ -775,7 +813,9 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
-          retryable: errorBlock.source === 'turn_error',
+          retryable:
+            errorBlock.source === 'turn_error' &&
+            isRetryableTurnErrorKind(errorKind),
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
           ...getErrorMessageData(errorBlock.data, errorKind),

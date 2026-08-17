@@ -73,6 +73,27 @@ export default tseslint.config(
     },
   },
   {
+    // `utils/` is the layer every other directory imports, so it must not
+    // import back into one. The daemon direction is clean and enforced here;
+    // the remaining `ui/`, `config/`, `i18n/` and `nonInteractive/` edges are
+    // tracked in #9146 and will be added to this group as they are resolved.
+    files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/serve/*', '**/serve/**'],
+              message:
+                'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // General overrides and rules for the project (TS/TSX files)
     files: [
       'packages/**/src/**/*.{ts,tsx}',

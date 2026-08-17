@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -30,6 +31,13 @@ const workflowsDir = '.github/workflows';
 const workflowFiles = readdirSync(workflowsDir).filter((f) =>
   /\.ya?ml$/.test(f),
 );
+
+// Single shared recipe for the review-config bot login; every suite that pins
+// it reads this constant so the extraction cannot drift between call sites.
+const botLogin =
+  parse(workflow)
+    .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
+    ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
 function runReviewStep() {
   const doc = parse(workflow);
@@ -2515,5 +2523,1043 @@ describe('bot comment markers', () => {
     expect(ackLine).toBeDefined();
     expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
+  });
+});
+
+describe('qwen pr review concurrency routing', () => {
+  // A PENDING run in a concurrency group is replaced by any newer run of the
+  // same group — cancel-in-progress does not protect it. On PR #9091 a push
+  // and three human review requests landed in the same minute: the
+  // synchronize run cancelled the in-flight review but queued behind it while
+  // it terminated, and the review_requested runs — no-ops, since review-pr
+  // only runs when the bot itself is the requested reviewer — superseded it
+  // while pending. The sole survivor skipped review-pr, so the push was never
+  // reviewed. Routing only the human-requested siblings to a per-run group
+  // leaves the race open: group membership is fixed here, before `authorize`
+  // runs, but whether a bot-directed request reviews anything is `authorize`'s
+  // call on the REQUESTER's write permission — a requester without write
+  // produces a guaranteed all-skipped run, and as a shared-group member that
+  // no-op can supersede the pending lifecycle run, losing the review the same
+  // way. Every review_requested run therefore gets a per-run group; an
+  // authorized bot request still reviews immediately, it just can no longer
+  // supersede the lifecycle run for the same head.
+  const group = parse(workflow).concurrency.group;
+
+  it('keeps every review_requested run out of the shared PR group', () => {
+    // Verbatim, like the cancel-in-progress pin in the resolve suite: the
+    // shape IS the fix — `&&` binds tighter than `||`, so exactly the
+    // lifecycle actions reach the PR group and every review_requested (bot
+    // included) falls through to the per-run group. Any requested_reviewer
+    // clause here re-admits the unauthorized-requester no-op and silently
+    // re-ships the race.
+    expect(group).toBe(
+      "${{ github.event_name == 'pull_request_target' && " +
+        "github.event.action != 'review_requested' && " +
+        "format('qwen-pr-review-pr-{0}', github.event.pull_request.number) || " +
+        "format('qwen-pr-review-run-{0}', github.run_id) }}",
+    );
+  });
+
+  it('gates the review_requested jobs on the published bot login', () => {
+    // The group expression no longer names the requested reviewer; the
+    // job-level gates still must. Pin the surviving literal against the
+    // review-config constant so a bot rename cannot desync the sites.
+    expect(parse(workflow).jobs['precheck-pr'].if).toContain(
+      `github.event.requested_reviewer.login == '${botLogin}'`,
+    );
+  });
+});
+
+describe('review_requested burst coalescing (#8945)', () => {
+  // Opening a same-repo PR that touches CODEOWNERS-covered paths auto-requests
+  // every owner individually, so one PR open emits one `review_requested` run
+  // per owner (observed: five within the same second on #8830/#9142). Only
+  // the bot-requested run can reach `review-pr`; the human-requested siblings
+  // used to spend an `authorize` job (permission API + runner slot) each
+  // before no-op exiting. `authorize` and `review-config` must filter those
+  // siblings at the job level so they complete as instant all-skipped runs.
+  const doc = parse(workflow);
+
+  const botRequestedClause = new RegExp(
+    [
+      String.raw`\(\s*github\.event_name != 'pull_request_target' \|\|`,
+      String.raw`\s*github\.event\.action != 'review_requested' \|\|`,
+      String.raw`\s*github\.event\.requested_reviewer\.login == '${botLogin}'\s*\)`,
+    ].join(''),
+  );
+
+  it('resolves the bot login from review-config, not a paraphrase', () => {
+    expect(botLogin).toBe('qwen-code-ci-bot');
+  });
+
+  it('filters non-bot review_requested events before authorize spends compute', () => {
+    // The same disjunction precheck-pr already applies to fork PRs; mirroring
+    // it here covers same-repo PRs, which precheck-pr deliberately skips.
+    expect(doc.jobs['authorize'].if).toMatch(botRequestedClause);
+  });
+
+  it('keeps review-config from running for non-bot review_requested events', () => {
+    // review-config exists to feed bot_login into review-pr; only the
+    // bot-requested run can get there, so every other sibling is pure waste.
+    const cond = doc.jobs['review-config'].if;
+    expect(cond).toContain("github.event.action == 'review_requested'");
+    expect(cond).toContain(
+      `github.event.requested_reviewer.login == '${botLogin}'`,
+    );
+  });
+});
+
+describe('checkout self-heal', () => {
+  // The reused self-hosted pool fails checkout in two observed shapes: a
+  // transient network drop mid-fetch, and a corrupt persisted workspace
+  // whose refs claim objects missing from its object store — then EVERY
+  // later fetch dies in negotiation with "remote did not send all necessary
+  // objects" (ecs-qwen-runner-64c-23, 2026-08-13..15: seven review jobs
+  // dead on the same missing SHAs). The workspace cannot heal itself, so
+  // the workflow must: survive the first failure, wipe, and re-clone.
+  const steps = parse(workflow).jobs['review-pr'].steps;
+  const FIRST = 'Checkout base branch';
+  const WIPE = 'Reset workspace after failed checkout';
+  const RETRY = 'Checkout base branch (retry)';
+  const nameIndex = (name) => steps.findIndex((s) => s.name === name);
+  const first = steps[nameIndex(FIRST)];
+  const wipe = steps[nameIndex(WIPE)];
+  const retry = steps[nameIndex(RETRY)];
+  // Runs the real wipe script under the runner's shell flags: GitHub Actions
+  // executes `run:` blocks with `-eo pipefail`, and that implicit errexit is
+  // what kills a heal step ending on a nonzero status in production, so the
+  // exec tests must reproduce it instead of hiding it behind bare `bash -c`.
+  const runWipe = (env, options = {}) =>
+    execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+      ...options,
+    });
+
+  // `realpath -m` (the script's canonicalization line) is a GNU coreutils
+  // extension: a BSD userland — macOS ships FreeBSD's `realpath [-q] [path
+  // ...]` — exits 1 on it, so the script's `|| printf` fallback keeps the
+  // path raw and no canonicalization happens at all. The review pool is
+  // Linux-only (`runs-on: [self-hosted, linux, x64, ecs-qwen]` /
+  // ubuntu-latest), so the production script is unaffected; this suite is
+  // not — vitest.config.ts excludes it on win32 only, so it also runs on the
+  // merge-queue macOS lane, where an assertion about GNU behavior is red for
+  // a defect that cannot exist there. Probe the host, not the platform: a Mac
+  // with GNU coreutils fronting PATH keeps the coverage.
+  const hasGnuRealpath =
+    spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+
+  it('makes the first checkout failure survivable and addressable', () => {
+    // Without continue-on-error the job dies on the first failure and the
+    // heal chain never runs; without the id the chain cannot gate on the
+    // outcome at all.
+    expect(first.id).toBe('checkout');
+    expect(first['continue-on-error']).toBe(true);
+    // Symmetric half of the invariant: a double checkout failure must stay
+    // red so the job never proceeds into review without code.
+    expect(retry['continue-on-error']).toBeUndefined();
+    // The wipe step must fail loud the same way: its path guard's exit 1 is
+    // the chain's only refusal, and continue-on-error would demote it to a
+    // log annotation — the retry checkout would then wipe the refused path.
+    expect(wipe['continue-on-error']).toBeUndefined();
+  });
+
+  it('wipes and retries exactly when the first checkout fails', () => {
+    expect(wipe).toBeDefined();
+    expect(retry).toBeDefined();
+    const gate = "steps.checkout.outcome == 'failure'";
+    expect(wipe.if).toBe(gate);
+    expect(retry.if).toBe(gate);
+    expect(nameIndex(FIRST)).toBeLessThan(nameIndex(WIPE));
+    expect(nameIndex(WIPE)).toBeLessThan(nameIndex(RETRY));
+  });
+
+  it('retries with the identical checkout', () => {
+    // A drift here silently changes what the review runs against — dropping
+    // fetch-depth on the retry would hand the review a shallow clone. The
+    // equality checks alone cannot catch a coordinated drift of BOTH steps,
+    // so the first checkout is pinned to its required absolute values too.
+    expect(retry.uses).toBe(first.uses);
+    expect(retry.with).toEqual(first.with);
+    expect(first.uses).toBe(
+      'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+    );
+    expect(first.with.ref).toBe(
+      '${{ github.event.repository.default_branch }}',
+    );
+    expect(first.with['fetch-depth']).toBe(0);
+  });
+
+  it('wipes the whole workspace, hidden entries included', () => {
+    // Executes the REAL wipe script against a disposable workspace: it must
+    // remove the directory contents (not just .git — a hostile tree must not
+    // trip the re-clone) and leave the directory itself behind for the
+    // retry. Hidden entries are the regression case: a glob-shaped wipe
+    // skips dotfiles and would leave exactly the .git this heal exists to
+    // remove.
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-'));
+    try {
+      mkdirSync(join(dir, 'leftover-dir'));
+      writeFileSync(join(dir, 'leftover'), 'x');
+      mkdirSync(join(dir, '.git'));
+      writeFileSync(join(dir, '.git', 'HEAD'), 'x');
+      runWipe({ GITHUB_WORKSPACE: dir, RUNNER_WORKSPACE: tmpdir() });
+      expect(existsSync(dir)).toBe(true);
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Fronts PATH with a `sudo` stub so the sudo leg behaves identically on
+  // every lane: the real pool splits between members WITH passwordless sudo
+  // (the leg runs as root) and members without it (the leg dies with "a
+  // password is required"), so a test leaning on the real sudo silently
+  // covers a different branch on each machine.
+  const stubSudo = (exitCode, markerPath) => {
+    const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
+    const body = markerPath
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" >> '${markerPath}'\nexit ${exitCode}\n`
+      : `#!/bin/sh\nexit ${exitCode}\n`;
+    writeFileSync(join(bin, 'sudo'), body);
+    chmodSync(join(bin, 'sudo'), 0o755);
+    return bin;
+  };
+
+  // A workspace whose entries the owning user cannot unlink: find -exec rm
+  // exits nonzero, so the user-mode wipe leg fails deterministically. Root
+  // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
+  // skip there, and win32 has no POSIX permission bits to honor.
+  const lockFixture = () => {
+    // The wipe script canonicalizes $WS via realpath before the sudo leg,
+    // so the recorded argv carries the resolved path; on a host whose
+    // tmpdir is a symlink (macOS /var -> /private/var) the raw mkdtemp
+    // spelling fails the exact-entry assertion.
+    const parent = realpathSync(
+      mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
+    );
+    const dir = join(parent, 'workspace');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'leftover'), 'x');
+    chmodSync(dir, 0o500);
+    // Both halves of the allowlist comparison must be spelled the same way.
+    // The script only reconciles a resolved $WS with a raw $RUNNER_WORKSPACE
+    // where `realpath -m` exists (see hasGnuRealpath above); on a BSD
+    // userland with a symlinked tmpdir the resolved workspace
+    // (/private/var/...) sits outside the raw allowlist root (/var/...), the
+    // guard refuses, and runWipe throws before any assertion in these tests
+    // runs. Canonicalizing the root here keeps the pair consistent on every
+    // host instead of leaning on a GNU-only flag.
+    return { parent, dir, rws: realpathSync(tmpdir()) };
+  };
+  const unlock = ({ parent, dir }) => {
+    chmodSync(dir, 0o755);
+    rmSync(parent, { recursive: true, force: true });
+  };
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'exits 0 and keeps survivors when BOTH wipe legs fail',
+    () => {
+      // The wipe step has no continue-on-error, so its own never-fail exit
+      // contract is what keeps the heal chain alive: a permission-blocked
+      // wipe must warn and exit 0 so the retry checkout still runs, with
+      // the survivors left in place — the retry runs against them, and a
+      // double checkout failure is what turns the job red. The stubbed sudo
+      // makes the else branch reachable even on lanes with passwordless
+      // sudo.
+      const fixture = lockFixture();
+      const bin = stubSudo(1);
+      try {
+        const out = runWipe({
+          GITHUB_WORKSPACE: fixture.dir,
+          RUNNER_WORKSPACE: fixture.rws,
+          PATH: `${bin}:${process.env.PATH}`,
+        }); // must not throw
+        expect(readdirSync(fixture.dir)).toContain('leftover');
+        // The retry must not run blind: survivors get an oncall-visible
+        // annotation naming them, not just the generic wipe-failed warning.
+        expect(out).toContain('survived the workspace wipe');
+        expect(out).toContain('leftover');
+      } finally {
+        unlock(fixture);
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'escalates to the sudo leg when the user-mode wipe fails',
+    () => {
+      // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
+      // turn this red: the marker only appears when the sudo leg actually
+      // runs, and its recorded argv must target the workspace — a refactor
+      // drifting the leg's path shipped green before the argv was pinned.
+      // The stub exits 0 without removing anything, so the then-branch is
+      // pinned without depending on any real sudo.
+      const fixture = lockFixture();
+      const marker = join(fixture.parent, 'sudo-called');
+      const bin = stubSudo(0, marker);
+      try {
+        runWipe({
+          GITHUB_WORKSPACE: fixture.dir,
+          RUNNER_WORKSPACE: fixture.rws,
+          PATH: `${bin}:${process.env.PATH}`,
+        });
+        expect(existsSync(marker)).toBe(true);
+        // Exact argv entry, not substring: a drifted target like
+        // "$WS/does-not-exist" still CONTAINS the workspace path.
+        expect(readFileSync(marker, 'utf8').split('\n')).toContain(fixture.dir);
+      } finally {
+        unlock(fixture);
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The guard must be exercised with the REAL dangerous paths, but pointing
+  // a live `rm -rf` at them detonates the moment the guard regresses — the
+  // exact moment the test must protect (the triage suite's guard-mutation
+  // run spent six minutes trying to delete `/` before it was killed). So
+  // `rm` is a PATH-fronted recorder: with the guard gone, the call log
+  // shows the attempted delete and the test fails having deleted nothing.
+  // The trailing-slash variants pin the strip loop for the realpath-absent
+  // case: the case arms are exact matches, so `/home/` would otherwise slip
+  // past the guard. The dot-component and double-slash variants are the
+  // kernel-resolvable spellings of the guarded roots (`/home/.` -> /home,
+  // `//usr` -> /usr); they sit outside the allowlist root, so the allowlist
+  // refuses them whether canonicalization runs or not — the escape test
+  // below is what pins the realpath line itself. `/tmp` and `/opt` stand in
+  // for every root the denylist does not enumerate — only the
+  // runner-workspace allowlist refuses them.
+  it('refuses suspicious workspace paths without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: bad,
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        // Non-zero, not exactly 1: the case guard exits 1 for a named path,
+        // while an empty one never reaches it because
+        // `${GITHUB_WORKSPACE:?}` aborts the shell first.
+        expect(res.status, `path ${bad || '<empty>'} was not refused`).not.toBe(
+          0,
+        );
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasGnuRealpath)(
+    'refuses an allowlist-escaping .. path via canonicalization',
+    () => {
+      // The bad paths above all sit outside the recorder dir, so the allowlist
+      // refuses them identically whether canonicalization runs or not — they
+      // cannot pin the realpath line. This one string-matches "$RWS"/* but
+      // canonicalizes out of it, so only `realpath -m` can refuse it: with the
+      // line deleted, the raw path passes the allowlist and reaches rm
+      // (executed mutant: exit 0, canary in the call log).
+      const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+      const outside = mkdtempSync(join(tmpdir(), 'checkout-heal-outside-'));
+      mkdirSync(join(dir, 'sub'));
+      writeFileSync(join(outside, 'canary'), 'x');
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              // Keep the '..' spelling raw — resolving it here would
+              // canonicalize the fixture away before the script sees it.
+              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+              RUNNER_WORKSPACE: dir,
+            },
+          },
+        );
+        expect(res.status).not.toBe(0);
+        expect(readFileSync(calls, 'utf8')).toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Fronts PATH with a failing realpath so the script's `|| printf`
+  // fallback engages — the realpath-absent case the strip loops' comments
+  // justify themselves by.
+  const stubRealpath = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'checkout-heal-bin-'));
+    writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'realpath'), 0o755);
+    return bin;
+  };
+
+  it('wipes a legitimate workspace despite a trailing-slash RUNNER_WORKSPACE when realpath is absent', () => {
+    // Without the RWS strip loop the allowlist pattern becomes "$RWS//*"
+    // and refuses the real workspace — the heal would degrade to a
+    // retry-without-wipe on exactly the runner this step exists for.
+    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-rws-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    const bin = stubRealpath();
+    try {
+      runWipe({
+        GITHUB_WORKSPACE: ws,
+        RUNNER_WORKSPACE: `${parent}/`,
+        PATH: `${bin}:${process.env.PATH}`,
+      }); // must not throw
+      expect(readdirSync(ws)).toEqual([]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing-slash GITHUB_WORKSPACE when realpath is absent', () => {
+    // The trailing-slash denylist variants above run with the REAL
+    // realpath, which strips the slash before the WS strip loop executes,
+    // so they pin the case arms, not the loop. With realpath absent,
+    // `/home/` misses every exact-match arm and the allowlist "$RWS"/*
+    // matches it (`*` matches empty), so dropping the loop hands /home's
+    // contents to rm (executed mutant: exit 0, rm invoked). The recorder
+    // fronts PATH, so the call log is the proof and nothing is deleted.
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-guard-'));
+    const bin = stubRealpath();
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      writeFileSync(calls, '');
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${bin}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: '/home/',
+          RUNNER_WORKSPACE: '/home',
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when RUNNER_WORKSPACE resolves to /', () => {
+    // "/" strips to empty, and an empty RWS would degenerate the allowlist
+    // pattern to the match-all "/*" — so the strip loop refuses its own
+    // pathological input instead of weakening the guard.
+    const ws = mkdtempSync(join(tmpdir(), 'checkout-heal-root-rws-'));
+    try {
+      expect(() =>
+        runWipe(
+          { GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: '/' },
+          { stdio: 'pipe' },
+        ),
+      ).toThrow();
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when RUNNER_WORKSPACE is unset or empty', () => {
+    // The allowlist's own `:?` layer: an empty RWS would degenerate the
+    // pattern to the match-all "/*". Later layers also catch the degenerate
+    // expansion (realpath resolves '' to the cwd, and the strip loop refuses
+    // an empty result), so only the error text pins WHICH layer aborts — a
+    // dropped `:?` dies in the strip loop's refusal, which does not name the
+    // variable. The realpath stub engages the fallback axis, and the
+    // GITHUB_WORKSPACE test below aborts at the first `:?` before RWS is
+    // read, so this layer needs its own probe.
+    const ws = mkdtempSync(join(tmpdir(), 'checkout-heal-rws-empty-'));
+    const bin = stubRealpath();
+    try {
+      let stderr = '';
+      try {
+        runWipe(
+          {
+            GITHUB_WORKSPACE: ws,
+            RUNNER_WORKSPACE: '',
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          { stdio: 'pipe' },
+        );
+      } catch (err) {
+        stderr = String(err.stderr);
+      }
+      expect(stderr).toContain('RUNNER_WORKSPACE');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when GITHUB_WORKSPACE is unset or empty', () => {
+    // The `:?` guard is what keeps this from ever running rm against a
+    // surprise expansion; a dropped GITHUB_WORKSPACE must fail loudly.
+    expect(() =>
+      runWipe({ GITHUB_WORKSPACE: '' }, { stdio: 'pipe' }),
+    ).toThrow();
+  });
+});
+
+describe('fallback comment resilience (PR #8894 incident class)', () => {
+  // The health-probe fail-fast, the fallback-comment job, and the cross-job
+  // marker dedup are the incident's three defenses; reverting any hunk must
+  // fail here, since nothing outside this workflow references the marker.
+  const doc = parse(workflow);
+  const job = doc.jobs['fallback-comment'];
+  const step = job.steps.find((s) => s.name === 'Post fallback comment');
+  const inJobStep = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Post fallback comment on failure',
+  );
+  const health = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Verify runner directory health',
+  );
+  const marker = doc.env?.FALLBACK_MARKER;
+
+  it('defines the fallback marker once and every site references the env', () => {
+    expect(marker).toBe('<!-- qwen-review-fallback -->');
+    // Both comment bodies are built from the variable, and the dedup filter
+    // interpolates it — a hardcoded copy surviving in any run block could be
+    // renamed on one side only, silently breaking cross-job dedup.
+    expect(inJobStep.run).toContain(`printf '%s\\n\\n%s' "$FALLBACK_MARKER"`);
+    expect(step.run).toContain(`printf '%s\\n\\n%s' "$FALLBACK_MARKER"`);
+    expect(step.run).toContain('contains(\\"$FALLBACK_MARKER\\")');
+    for (const run of [inJobStep.run, step.run, health.run]) {
+      expect(run).not.toContain('<!-- qwen-review-fallback -->');
+    }
+  });
+
+  it('keeps every failure body linked to the run and marker-prepended', () => {
+    // All four FAILURE_KIND bodies carry the workflow-logs link — dropping it
+    // from a variant ships a dead-end comment on exactly that failure path.
+    expect(
+      inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
+    ).toHaveLength(4);
+    // Same invariant for the fallback job's body: the cross-job dedup
+    // matches `actions/runs/<id>)`, anchored on the markdown link's closing
+    // paren — a body that rendered the URL differently would escape it.
+    expect(step.run).toContain('See [workflow logs](${RUN_URL}).');
+    expect(inJobStep.run).toContain(
+      `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
+    );
+    // ...and it must precede the post: moving the printf below the comment
+    // keeps every existence assertion green yet ships in-job fallbacks
+    // without the marker, breaking the dedup that keys on it.
+    expect(
+      inJobStep.run.indexOf(
+        `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
+      ),
+    ).toBeLessThan(inJobStep.run.indexOf('gh pr comment'));
+  });
+
+  it('scopes the dedup to the authenticated bot login, resolved dynamically', () => {
+    // upsert-bot-comment.sh protocol: only comments by the authenticated
+    // login are dedup targets, or a participant posting the marker suppresses
+    // the fallback. Resolving the login dynamically (as upsert does) locks
+    // the filter to the account CI_BOT_PAT posts as.
+    expect(step.run).toContain('bot_login="$(gh api user --jq \'.login\')"');
+    expect(step.run).toContain('select(.author.login == \\"$bot_login\\")');
+    // The agreement is load-bearing: the in-job comment must be posted by
+    // the same account this lookup resolves via `gh api user`, or the
+    // author-scoped filter never sees it and the fallback double-posts.
+    expect(inJobStep.env.GH_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(step.env.GH_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+  });
+
+  it('pins the run-URL shape the dedup anchors on', () => {
+    // The dedup matches `actions/runs/<id>)` — anchored on the markdown
+    // link's closing paren — so RUN_URL must END at the run id; a suffix
+    // (an /attempts/N deep-link, plausibly) escapes the match and every
+    // re-run of a dead review silently double-posts. Both steps must also
+    // render the same shape, or the in-job comment's URL never matches the
+    // fallback job's pattern.
+    expect(step.env.RUN_URL).toMatch(
+      /\/actions\/runs\/\$\{\{ github\.run_id \}\}$/,
+    );
+    expect(inJobStep.env.RUN_URL).toBe(step.env.RUN_URL);
+  });
+
+  it('opens the gate on any upstream failure but never on skip or resolve', () => {
+    // Every job whose failure marks review-pr 'skipped' is enumerated: the
+    // incident's trigger can kill the chain's self-hosted jobs first
+    // (authorize / review-config), and a transient API failure can kill the
+    // hosted ones (precheck-pr / delay-automatic-review).
+    expect(job.needs).toEqual([
+      'precheck-pr',
+      'review-config',
+      'authorize',
+      'delay-automatic-review',
+      'review-pr',
+    ]);
+    // Failure-keyed, not != 'success': resolve dispatch runs skip review-pr
+    // BY DESIGN and would otherwise mint false-alarm fallbacks.
+    expect(job.if).toContain("needs.review-pr.result == 'failure'");
+    // A review-pr that dies to its own job-level timeout is auto-cancelled
+    // (result 'cancelled', failure() false), which would open neither this
+    // gate nor the in-job step; a run-level cancel cancels this queued job
+    // too, so a live evaluation seeing 'cancelled' is the timeout case.
+    expect(job.if).toContain("needs.review-pr.result == 'cancelled'");
+    expect(job.if).toContain("needs.authorize.result == 'failure'");
+    expect(job.if).toContain("needs.review-config.result == 'failure'");
+    expect(job.if).toContain(
+      "needs.delay-automatic-review.result == 'failure'",
+    );
+    expect(job.if).toContain("needs.precheck-pr.result == 'failure'");
+    expect(job.if).not.toContain("!= 'success'");
+    expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
+    // On pull_request_target and issue_comment events review_mode is null,
+    // so collapsing this disjunction would skip the job exactly where dead
+    // review runs happen.
+    expect(job.if).toContain("(github.event_name != 'workflow_dispatch' ||");
+    expect(job.if).toContain("github.event.inputs.review_mode == 'comment'");
+    // The job exists to survive whatever killed the review job; routing it
+    // onto the self-hosted ECS pool would die the same death.
+    expect(job['runs-on']).toBe('ubuntu-latest');
+  });
+
+  it('never opens the gate on a /resolve run, dispatch- or comment-driven', () => {
+    // /resolve is a first-class issue_comment command too: authorize runs on
+    // `@qwen-code /resolve` comments, and github.event.inputs is empty on
+    // issue_comment, so the dispatch exclusion alone misdiagnoses a failed
+    // resolve run as a dead review and recommends the wrong command.
+    expect(job.if).toContain("github.event.inputs.command != 'resolve'");
+    expect(job.if).toContain(
+      "!(github.event_name == 'issue_comment' &&\n" +
+        " startsWith(github.event.comment.body, '@qwen-code /resolve')) &&",
+    );
+  });
+
+  it('probes the runner root three levels up and _diag when present', () => {
+    const run = health.run;
+    // The workspace sits at <runner-root>/_work/<owner>/<repo>; two levels
+    // resolves to _work and never probes the directory whose _diag/pages
+    // corruption killed the PR #8894 run.
+    expect(run).toContain('GITHUB_WORKSPACE/../../..');
+    expect(run).not.toMatch(/GITHUB_WORKSPACE\/\.\.\/\.\."/);
+    expect(run).toContain('"$HOME"');
+    expect(run).toContain('"${RUNNER_TEMP:?}"');
+    expect(run).toContain('"$RUNNER_ROOT/_diag"');
+    // Polarity: _diag is probed only when it EXISTS — an inverted guard
+    // probes a nonexistent directory and fails fast on a healthy runner.
+    expect(run).toContain('if [ -d "$RUNNER_ROOT/_diag" ]; then');
+    expect(run).toContain('status=1');
+    expect(run.trim()).toMatch(/exit "\$status"$/);
+  });
+
+  // Executed shape for the health probe: run the step's REAL bash against
+  // a fake runner tree with a stub sudo, so the repair-vs-fail-fast
+  // decision is exercised, not just textually pinned.
+  function runHealthProbe({
+    breakDir = '',
+    sudoMode = 'repair',
+    diag = true,
+  } = {}) {
+    const root = mkdtempSync(join(tmpdir(), 'health-probe-'));
+    const home = join(root, 'home');
+    const temp = join(root, 'temp');
+    const runnerRoot = join(root, 'runner');
+    const workspace = join(runnerRoot, '_work', 'owner', 'repo');
+    const broken = breakDir
+      ? {
+          home,
+          temp,
+          root: runnerRoot,
+          diag: join(runnerRoot, '_diag'),
+        }[breakDir]
+      : '';
+    try {
+      mkdirSync(home);
+      mkdirSync(temp);
+      mkdirSync(workspace, { recursive: true });
+      if (diag) mkdirSync(join(runnerRoot, '_diag'));
+      if (broken) chmodSync(broken, 0o555);
+      const bin = join(root, 'bin');
+      mkdirSync(bin);
+      const sudo = join(bin, 'sudo');
+      writeFileSync(
+        sudo,
+        [
+          '#!/bin/bash',
+          '[ "${SUDO_MODE:-repair}" = repair ] || exit 1',
+          'for last in "$@"; do :; done',
+          '[ "$2" = chmod ] && chmod u+rwx "$last"',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      chmodSync(sudo, 0o755);
+      let status = 0;
+      let stdout = '';
+      try {
+        stdout = execFileSync('bash', ['-c', health.run], {
+          encoding: 'utf8',
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            SUDO_MODE: sudoMode,
+            HOME: home,
+            RUNNER_TEMP: temp,
+            GITHUB_WORKSPACE: workspace,
+          },
+        });
+      } catch (e) {
+        status = e.status ?? 1;
+        stdout = `${e.stdout ?? ''}`;
+      }
+      return { status, stdout };
+    } finally {
+      if (broken && existsSync(broken)) chmodSync(broken, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it('passes a healthy runner without repair noise', () => {
+    const r = runHealthProbe();
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain('::warning::');
+    expect(r.stdout).not.toContain('repaired');
+  });
+
+  it('repairs a single unwritable directory instead of failing fast', () => {
+    // Mutant control: a status=1 right after the first failed touch would
+    // abort this repairable runner (exit 1) — a false fail-fast.
+    const r = runHealthProbe({ breakDir: 'home' });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('repaired write access');
+  });
+
+  it('fails fast when repair is impossible', () => {
+    // Mutant control: dropping the post-repair re-probe would report this
+    // unusable directory as repaired (exit 0) and die at FinalizeJob — the
+    // exact PR #8894 death the probe exists to prevent.
+    const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('still unusable after repair');
+    expect(r.stdout).toContain('failing fast instead of dying at job finalize');
+  });
+
+  it('does not probe _diag when it does not exist', () => {
+    // Polarity: an inverted `[ -d ]` guard probes the missing directory,
+    // cannot create its probe file, and fails fast on a healthy runner.
+    const r = runHealthProbe({ diag: false });
+    expect(r.status).toBe(0);
+  });
+
+  // Executed shape: run the step's REAL bash with a stub gh that logs every
+  // call. The stub pre-applies the dedup filter's semantics to the fixture
+  // (the filter's author scope is pinned by the text test above).
+  function runFallbackStep(
+    scenario,
+    {
+      eventName = 'issue_comment',
+      comments = '',
+      runHead = '',
+      prHead = '',
+      useInJobStep = false,
+    } = {},
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      const summary = join(dir, 'summary');
+      const posted = join(dir, 'posted');
+      const commentsFile = join(dir, 'comments');
+      writeFileSync(calls, '');
+      writeFileSync(summary, '');
+      writeFileSync(posted, '');
+      writeFileSync(commentsFile, comments);
+      const stub = (name, body) => {
+        const p = join(bin, name);
+        writeFileSync(p, body);
+        chmodSync(p, 0o755);
+      };
+      stub('sleep', '#!/bin/bash\nexit 0\n');
+      stub(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "gh $*" >> "$CALLS"',
+          'cmd="$1"; sub="${2:-}"',
+          'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
+          '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
+          '  echo "qwen-code-ci-bot"; exit 0',
+          'fi',
+          'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
+          '  [ "${SCENARIO:-}" = "runview_fail" ] && exit 1',
+          '  echo "${RUN_HEAD:-}"; exit 0',
+          'fi',
+          'if [ "$cmd" = "pr" ] && [ "$sub" = "view" ]; then',
+          '  case "$*" in',
+          '    *comments*)',
+          '      case "${SCENARIO:-}" in lookup_fail | comments_lookup_fail) exit 1 ;; esac',
+          '      cat "$COMMENTS_FILE"; exit 0 ;;',
+          '    *state,headRefOid*)',
+          '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
+          '      printf "OPEN\\t%s\\n" "${PR_HEAD:-}"; exit 0 ;;',
+          '    *headRefOid*)',
+          '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
+          '      echo "${PR_HEAD:-}"; exit 0 ;;',
+          '    *state*)',
+          '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
+          '      [ "${SCENARIO:-}" = "pr_closed" ] && echo "MERGED" || echo "OPEN"; exit 0 ;;',
+          '  esac',
+          'fi',
+          'if [ "$cmd" = "pr" ] && [ "$sub" = "comment" ]; then',
+          '  prev=""; body=""',
+          '  for a in "$@"; do [ "$prev" = "--body" ] && body="$a"; prev="$a"; done',
+          '  printf \'%s\' "$body" > "$POSTED"',
+          '  exit 0',
+          'fi',
+          'exit 1',
+        ].join('\n') + '\n',
+      );
+      let status = 0;
+      let stdout = '';
+      try {
+        stdout = execFileSync(
+          'bash',
+          ['-c', useInJobStep ? inJobStep.run : step.run],
+          {
+            encoding: 'utf8',
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              SCENARIO: scenario,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              GITHUB_RUN_ID: '12345',
+              GITHUB_EVENT_NAME: eventName,
+              GITHUB_STEP_SUMMARY: summary,
+              PR_NUMBER: '42',
+              RUN_URL: 'https://github.com/QwenLM/qwen-code/actions/runs/12345',
+              EXPECTED_HEAD_SHA: '',
+              FAILURE_KIND: '',
+              FAILURE_REASON:
+                'Run review failed. See workflow logs for details.',
+              TIMEOUT_MINUTES: '60',
+              FALLBACK_MARKER: marker,
+              RUN_HEAD: runHead,
+              PR_HEAD: prHead,
+              CALLS: calls,
+              COMMENTS_FILE: commentsFile,
+              POSTED: posted,
+            },
+          },
+        );
+      } catch (e) {
+        status = e.status ?? 1;
+        stdout = `${e.stdout ?? ''}`;
+      }
+      return {
+        status,
+        stdout,
+        calls: readFileSync(calls, 'utf8'),
+        summary: readFileSync(summary, 'utf8'),
+        posted: readFileSync(posted, 'utf8'),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('posts the marker-headed retry comment when no fallback exists', () => {
+    const r = runFallbackStep('default');
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('dedupes on the marker plus this run URL', () => {
+    // Mirrors a prior fallback comment's rendered shape: the run URL is a
+    // markdown link, so the run id is always immediately followed by ')'.
+    const r = runFallbackStep('already', {
+      comments: `${marker}\n\nSee [workflow logs](https://github.com/QwenLM/qwen-code/actions/runs/12345).`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('already exists');
+  });
+
+  it("still posts when only another run's fallback exists", () => {
+    // Run ids grow digits over time, so a later run's id (123450) contains
+    // this run's (12345) as a substring — the match must stay anchored to
+    // this run's URL or a distinct run's death is silently suppressed.
+    const r = runFallbackStep('other_run', {
+      comments: `${marker}\n\nSee [workflow logs](https://github.com/QwenLM/qwen-code/actions/runs/123450).`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+
+  it('fails closed when the dedup lookup keeps failing', () => {
+    // A failed listing must never be treated as an empty result — posting
+    // on it is how a transient 5xx mints a permanent duplicate.
+    const r = runFallbackStep('lookup_fail');
+    expect(r.status).toBe(1);
+    expect(r.posted).toBe('');
+    expect(r.stdout).toContain('::error::');
+    expect((r.calls.match(/^gh api user --jq/gm) ?? []).length).toBe(3);
+  });
+
+  it('fails closed when only the comments listing keeps failing', () => {
+    // gh api user succeeds here, so only the loop's post-failure resets
+    // keep bot_login empty; deleting them posts on a failed listing — the
+    // permanent duplicate the step's comment forbids.
+    const r = runFallbackStep('comments_lookup_fail');
+    expect(r.status).toBe(1);
+    expect(r.posted).toBe('');
+    expect(r.stdout).toContain('::error::');
+  });
+
+  it('fails closed when the PR state check itself fails', () => {
+    const r = runFallbackStep('state_fail');
+    expect(r.status).toBe(1);
+    expect(r.posted).toBe('');
+    expect(r.stdout).toContain('::error::');
+  });
+
+  it('skips a non-OPEN PR with exit 0', () => {
+    const r = runFallbackStep('pr_closed');
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('MERGED');
+  });
+
+  it('skips a stale run whose head moved on pull_request_target', () => {
+    const r = runFallbackStep('moved', {
+      eventName: 'pull_request_target',
+      runHead: 'oldsha',
+      prHead: 'newsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    // The skip happens before the dedup lookup is even attempted.
+    expect(r.calls).not.toContain('--json comments');
+  });
+
+  it('still posts on comment/review runs where the head is not comparable', () => {
+    // Comment and review runs report main's tip as headSha, so a naive
+    // comparison would suppress the fallback on the very path the job
+    // exists for; posting wins over silence there.
+    const r = runFallbackStep('moved_comment', {
+      eventName: 'issue_comment',
+      runHead: 'oldsha',
+      prHead: 'newsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+    expect(r.calls).not.toContain('run view');
+  });
+
+  it('degrades to POSTING when the head comparison lookups fail', () => {
+    const r = runFallbackStep('runview_fail', {
+      eventName: 'pull_request_target',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+
+  it('still posts on pull_request_target when only the run-head lookup fails', () => {
+    // A transient gh-run-view failure while gh-pr-view succeeds must not
+    // suppress the fallback: comparison unavailable means posting wins.
+    const r = runFallbackStep('runview_fail', {
+      eventName: 'pull_request_target',
+      prHead: 'newsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+
+  it('still posts on pull_request_target when only the PR-head lookup fails', () => {
+    const r = runFallbackStep('prview_fail', {
+      eventName: 'pull_request_target',
+      runHead: 'oldsha',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).not.toBe('');
+  });
+
+  it('in-job step dedupes on a fallback comment this run already has', () => {
+    // Re-runs of failed jobs keep the run id: when a prior attempt died
+    // before its in-job step, the fallback-comment job already posted for
+    // this run, so the in-job step must not add a second comment.
+    const r = runFallbackStep('already', {
+      useInJobStep: true,
+      comments: `${marker}\n\nSee [workflow logs](https://github.com/QwenLM/qwen-code/actions/runs/12345).`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('already exists');
+  });
+
+  it('in-job step still posts when no fallback comment exists', () => {
+    const r = runFallbackStep('default', { useInJobStep: true });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('in-job step defers to the fallback job when its dedup lookup fails', () => {
+    const r = runFallbackStep('lookup_fail', { useInJobStep: true });
+    expect(r.status).toBe(0);
+    expect(r.posted).toBe('');
+    expect(r.summary).toContain('deferring to the fallback-comment job');
   });
 });

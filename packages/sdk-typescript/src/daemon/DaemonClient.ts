@@ -37,7 +37,11 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   BranchSessionRequest,
+  DaemonBranchSessionRequest,
+  DaemonBranchSessionResult,
   DaemonBranchedSession,
+  HistoricalBranchSessionRequest,
+  DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
   DaemonRestoredSession,
@@ -495,6 +499,22 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   );
 }
 
+/**
+ * The daemon rejected a session branch because the requested checkpoint is
+ * no longer on the session's active history path. Daemon action layers and
+ * UI shells both recover from this contract, so the predicate lives here to
+ * keep the copies from drifting.
+ */
+export function isStaleBranchPointError(
+  error: unknown,
+): error is DaemonHttpError {
+  return (
+    error instanceof DaemonHttpError &&
+    error.status === 409 &&
+    (error.body as { code?: unknown } | null)?.code === 'branch_point_invalid'
+  );
+}
+
 export interface CreateSessionRequest {
   /**
    * Workspace path the daemon must have registered. When
@@ -561,6 +581,8 @@ export interface RestoreSessionRequest {
   approvalMode?: string;
   /** Latest persisted records to include in the initial load replay. */
   historyPageSize?: number;
+  /** Load-only live-turn replay projection. Omit for the complete journal. */
+  liveReplayMode?: 'full' | 'summary';
   /**
    * Client-side deadline for this restore request. `0` disables the client
    * timer and relies on the daemon's own restore deadline.
@@ -2738,24 +2760,41 @@ export class DaemonClient {
 
   async branchSession(
     sessionId: string,
-    req: BranchSessionRequest = {},
+    req: HistoricalBranchSessionRequest,
     clientId?: string,
-  ): Promise<DaemonBranchedSession> {
+  ): Promise<DaemonPersistedBranchedSession>;
+  async branchSession(
+    sessionId: string,
+    req?: BranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchedSession>;
+  async branchSession(
+    sessionId: string,
+    req: DaemonBranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchSessionResult>;
+  async branchSession(
+    sessionId: string,
+    req: DaemonBranchSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonBranchSessionResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/branch`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
-          ...(req.name !== undefined ? { name: req.name } : {}),
+          name: req.name,
+          ...('atRecordId' in req ? { atRecordId: req.atRecordId } : {}),
         }),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
-        return (await res.json()) as DaemonBranchedSession;
+        return (await res.json()) as DaemonBranchSessionResult;
       },
+      120_000,
     );
   }
 
@@ -2998,6 +3037,9 @@ export class DaemonClient {
             : {}),
           ...(action === 'load' && req.historyPageSize !== undefined
             ? { historyPageSize: req.historyPageSize }
+            : {}),
+          ...(action === 'load' && req.liveReplayMode !== undefined
+            ? { liveReplayMode: req.liveReplayMode }
             : {}),
         }),
       },
@@ -6453,9 +6495,34 @@ export function matchTurnEvent(
   promptId: string,
 ): PromptResult | undefined {
   if (event.type === 'turn_complete') {
-    const data = event.data as { promptId?: string; stopReason?: string };
+    const data = event.data as {
+      promptId?: string;
+      stopReason?: string;
+      branchPoint?: {
+        assistantRecordUuid?: unknown;
+        checkpointUuid?: unknown;
+      };
+    };
     if (data.promptId === promptId) {
-      return { stopReason: data.stopReason ?? 'end_turn' };
+      const stopReason = data.stopReason ?? 'end_turn';
+      const candidate = data.branchPoint;
+      const recordUuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const branchPoint =
+        stopReason === 'end_turn' &&
+        typeof candidate?.assistantRecordUuid === 'string' &&
+        recordUuidPattern.test(candidate.assistantRecordUuid) &&
+        typeof candidate.checkpointUuid === 'string' &&
+        recordUuidPattern.test(candidate.checkpointUuid)
+          ? {
+              assistantRecordUuid: candidate.assistantRecordUuid,
+              checkpointUuid: candidate.checkpointUuid,
+            }
+          : undefined;
+      return {
+        stopReason,
+        ...(branchPoint ? { branchPoint } : {}),
+      };
     }
   }
   if (event.type === 'turn_error') {

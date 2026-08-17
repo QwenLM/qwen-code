@@ -233,9 +233,9 @@ export type BackgroundShellNotificationCallback = (
 ) => void;
 
 /**
- * Fires on every status transition (running → terminal). Symmetric with
- * `BackgroundTaskRegistry.setStatusChangeCallback` so the same UI hook can
- * subscribe to both registries.
+ * Fires after registration and every status transition (running →
+ * terminal). Symmetric with `BackgroundTaskRegistry.setStatusChangeCallback`
+ * so the same UI hook can subscribe to both registries.
  */
 export type BackgroundShellStatusChangeCallback = (entry?: ShellTask) => void;
 
@@ -249,8 +249,8 @@ export class BackgroundShellRegistry {
   /**
    * Subscribe to new-entry events. Called synchronously inside `register()`.
    * Setting `undefined` clears the existing subscriber. Single-subscriber on
-   * purpose — the UI hook is the only consumer in the codebase, and a list
-   * would invite drift in error-handling.
+   * purpose — each runtime installs one owner callback, and a list would
+   * invite drift in error-handling.
    */
   setRegisterCallback(cb: BackgroundShellRegisterCallback | undefined): void {
     this.registerCallback = cb;
@@ -263,15 +263,21 @@ export class BackgroundShellRegistry {
   }
 
   /**
-   * Subscribe to status transitions (running → terminal). Called
-   * synchronously inside `complete()` / `fail()` / `cancel()` after the
-   * entry has been mutated. Same single-subscriber rationale as
-   * `setRegisterCallback`.
+   * Subscribe to registration and status transitions (running → terminal).
+   * Called synchronously after the registry has been mutated. Same
+   * single-subscriber rationale as `setRegisterCallback`.
    */
   setStatusChangeCallback(
     cb: BackgroundShellStatusChangeCallback | undefined,
   ): void {
     this.statusChangeCallback = cb;
+  }
+
+  /** Retract `cb` only if it is still the installed callback. */
+  clearStatusChangeCallback(cb: BackgroundShellStatusChangeCallback): void {
+    if (this.statusChangeCallback === cb) {
+      this.statusChangeCallback = undefined;
+    }
   }
 
   register(registration: ShellTaskRegistration): ShellTask {
@@ -589,8 +595,8 @@ export class BackgroundShellRegistry {
    * statusChange callback exactly once after the loop. The per-entry
    * `cancel()` path would have triggered both side channels for every
    * running shell — wasteful on shutdown / `/clear` where the only
-   * subscriber (`useBackgroundTaskView`) just re-pulls `getAll()`
-   * regardless of the entry argument.
+   * current subscriber just re-pulls the registry regardless of the entry
+   * argument.
    */
   abortAll(): void {
     const endTime = Date.now();
@@ -602,10 +608,9 @@ export class BackgroundShellRegistry {
     }
     if (!lastCancelled) return;
     this.pruneTerminalEntries();
-    // The single subscriber (`useBackgroundTaskView`) ignores the entry
-    // arg and re-pulls `getAll()`, so passing the last cancelled entry
-    // here is informational only — any of the just-cancelled entries
-    // would be equally valid as the "what changed" signal.
+    // The current subscriber re-pulls the registry, so passing the last
+    // cancelled entry here is informational only — any of the just-cancelled
+    // entries would be equally valid as the "what changed" signal.
     this.fireStatusChange(lastCancelled);
   }
 }
