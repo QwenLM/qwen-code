@@ -145,9 +145,34 @@ describe('TurnOutputs helpers', () => {
 
     expect(canOpenWorkspaceArtifact(missing)).toBe(false);
     expect(canOpenWorkspaceArtifact(available)).toBe(true);
+    expect(
+      canOpenWorkspaceArtifact({
+        ...missing,
+        status: 'blocked',
+      } as DaemonSessionArtifact),
+    ).toBe(false);
     expect(getWorkspaceArtifactOpenBlockReason(missing, t)).toBe(
       'File not found in the workspace · w/agent/report.csv',
     );
     expect(getWorkspaceArtifactOpenBlockReason(available, t)).toBeUndefined();
+  });
+
+  it('names a missing workspace artifact even without a recorded path', () => {
+    const missing = {
+      id: 'missing-2',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'missing',
+      title: 'Legacy missing',
+    } as DaemonSessionArtifact;
+    const t = (key: string) =>
+      key === 'turnOutputs.artifactMissing'
+        ? 'File not found in the workspace'
+        : key;
+
+    expect(canOpenWorkspaceArtifact(missing)).toBe(false);
+    expect(getWorkspaceArtifactOpenBlockReason(missing, t)).toBe(
+      'File not found in the workspace',
+    );
   });
 });

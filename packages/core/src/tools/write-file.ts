@@ -737,7 +737,14 @@ function getRecordArtifactWorkspacePath(
   if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
     return null;
   }
-  return toCanonicalWorkspaceArtifactPath(filePath, config.getTargetDir());
+  try {
+    return toCanonicalWorkspaceArtifactPath(
+      fs.realpathSync(filePath),
+      fs.realpathSync(config.getTargetDir()),
+    );
+  } catch {
+    return toCanonicalWorkspaceArtifactPath(filePath, config.getTargetDir());
+  }
 }
 
 function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {

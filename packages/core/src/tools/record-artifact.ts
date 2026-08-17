@@ -448,26 +448,32 @@ export function hasUnsafeDisplayPayload(value: string): boolean {
 
 function validateWorkspacePath(value: string, cwd: string): string | null {
   const trimmed = value.trim();
-  const stringError = validateString(
-    trimmed,
-    'workspacePath',
-    ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
-    true,
-  );
-  if (stringError) {
-    return stringError;
+  if (!trimmed) {
+    return 'Missing or empty "workspacePath"';
+  }
+  if (hasControlCharacter(trimmed) || hasUnsafeDisplayPayload(trimmed)) {
+    return hasControlCharacter(trimmed)
+      ? '"workspacePath" contains control characters'
+      : '"workspacePath" contains unsafe markup';
   }
   if (isForeignWindowsAbsolute(trimmed)) {
     return WORKSPACE_PATH_HINT;
   }
   if (isAbsoluteWorkspaceInput(trimmed)) {
-    const root = resolveForContainment(
-      resolveBoundWorkspaceRoot(path.resolve(cwd)),
+    if (trimmed.length > 4096) {
+      return '"workspacePath" exceeds 4096 characters';
+    }
+    const root = resolveBoundWorkspaceRoot(
+      tryResolveForContainment(path.resolve(cwd)) ?? path.resolve(cwd),
     );
-    if (!isWithinRoot(resolveForContainment(path.resolve(trimmed)), root)) {
+    const comparable = tryResolveForContainment(path.resolve(trimmed));
+    if (comparable && !isWithinRoot(comparable, root)) {
       return '"workspacePath" must stay inside the workspace';
     }
     return null;
+  }
+  if (trimmed.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH) {
+    return `"workspacePath" exceeds ${ARTIFACT_WORKSPACE_PATH_MAX_LENGTH} characters`;
   }
   const portableNormalized = path.posix.normalize(trimmed.replace(/\\/g, '/'));
   if (
@@ -596,8 +602,10 @@ async function resolveExistingDir(dir: string): Promise<string> {
  * Compare absolute locators against a realpath'd workspace root. `path.resolve`
  * alone keeps macOS `/var` vs `/private/var` (and similar symlink roots) in
  * different namespaces and false-rejects files that are inside the workspace.
+ * Returns undefined when neither the path nor its parent can be realpath'd, so
+ * callers do not mix namespaces and call a missing-but-inside path "outside".
  */
-function resolveForContainment(absolutePath: string): string {
+function tryResolveForContainment(absolutePath: string): string | undefined {
   const resolved = path.resolve(absolutePath);
   try {
     return realpathSync(resolved);
@@ -608,7 +616,7 @@ function resolveForContainment(absolutePath: string): string {
         path.basename(resolved),
       );
     } catch {
-      return resolved;
+      return undefined;
     }
   }
 }
@@ -619,17 +627,36 @@ async function resolveWorkspaceArtifactLocator(
 ): Promise<WorkspaceLocatorResult> {
   const cwd = await resolveExistingDir(config.getTargetDir());
   const root = await resolveExistingDir(resolveBoundWorkspaceRoot(cwd));
-  const candidate = workspacePathCandidate(rawPath, cwd, root);
-  if (!candidate.ok) {
-    return candidate;
+  const first = workspacePathCandidate(rawPath, cwd, root, true);
+  if (!first.ok) {
+    return first;
   }
-  return inspectWorkspaceCandidate(candidate.path, rawPath, cwd, root);
+  const inspected = await inspectWorkspaceCandidate(
+    first.path,
+    rawPath,
+    cwd,
+    root,
+  );
+  if (
+    inspected.ok ||
+    inspected.type !== ToolErrorType.FILE_NOT_FOUND ||
+    process.platform === 'win32' ||
+    !rawPath.includes('\\')
+  ) {
+    return inspected;
+  }
+  const fallback = workspacePathCandidate(rawPath, cwd, root, false);
+  if (!fallback.ok || fallback.path === first.path) {
+    return inspected;
+  }
+  return inspectWorkspaceCandidate(fallback.path, rawPath, cwd, root);
 }
 
 function workspacePathCandidate(
   locator: string,
   cwd: string,
   root: string,
+  preservePosixBackslash: boolean,
 ): { ok: true; path: string } | WorkspaceLocatorFailure {
   if (isForeignWindowsAbsolute(locator)) {
     return locatorFailure(
@@ -639,7 +666,8 @@ function workspacePathCandidate(
   }
   if (isAbsoluteWorkspaceInput(locator)) {
     const absolute = path.resolve(locator);
-    if (!isWithinRoot(resolveForContainment(absolute), root)) {
+    const comparable = tryResolveForContainment(absolute);
+    if (comparable && !isWithinRoot(comparable, root)) {
       return locatorFailure(
         ToolErrorType.PATH_NOT_IN_WORKSPACE,
         `Failed to record artifact: "${locator}" is outside the workspace.\n${WORKSPACE_PATH_HINT}`,
@@ -648,7 +676,11 @@ function workspacePathCandidate(
     return { ok: true, path: absolute };
   }
 
-  return { ok: true, path: path.resolve(cwd, locator.replace(/\\/g, '/')) };
+  const relative =
+    preservePosixBackslash && process.platform !== 'win32'
+      ? locator
+      : locator.replace(/\\/g, '/');
+  return { ok: true, path: path.resolve(cwd, relative) };
 }
 
 async function inspectWorkspaceCandidate(
@@ -661,18 +693,11 @@ async function inspectWorkspaceCandidate(
   try {
     lst = await fs.lstat(candidate);
   } catch (error) {
-    if (isEnoent(error)) {
-      return locatorFailure(
-        ToolErrorType.FILE_NOT_FOUND,
-        [
-          `Failed to record artifact: file not found at "${candidate}".`,
-          WORKSPACE_PATH_HINT,
-        ].join('\n'),
-      );
-    }
-    return locatorFailure(
-      ToolErrorType.EXECUTION_FAILED,
-      `Failed to record artifact: ${error instanceof Error ? error.message : String(error)}`,
+    return pathInspectFailure(
+      error,
+      candidate,
+      rawPath,
+      `Failed to record artifact: file not found at "${candidate}".`,
     );
   }
 
@@ -687,17 +712,10 @@ async function inspectWorkspaceCandidate(
   try {
     resolved = await fs.realpath(candidate);
   } catch (error) {
-    if (isEnoent(error)) {
-      return locatorFailure(
-        ToolErrorType.FILE_NOT_FOUND,
-        [
-          `Failed to record artifact: file not found at "${candidate}".`,
-          WORKSPACE_PATH_HINT,
-        ].join('\n'),
-      );
-    }
-    return locatorFailure(
-      ToolErrorType.EXECUTION_FAILED,
+    return pathInspectFailure(
+      error,
+      candidate,
+      rawPath,
       `Failed to record artifact: could not resolve "${rawPath}" (${error instanceof Error ? error.message : String(error)}).`,
     );
   }
@@ -713,8 +731,10 @@ async function inspectWorkspaceCandidate(
   try {
     st = await fs.stat(resolved);
   } catch (error) {
-    return locatorFailure(
-      ToolErrorType.EXECUTION_FAILED,
+    return pathInspectFailure(
+      error,
+      resolved,
+      rawPath,
       `Failed to record artifact: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -734,6 +754,15 @@ async function inspectWorkspaceCandidate(
       `Failed to record artifact: "${rawPath}" could not be converted to a workspace-root-relative path.\n${WORKSPACE_PATH_HINT}`,
     );
   }
+  const canonicalError = validateString(
+    workspacePath,
+    'workspacePath',
+    ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+    true,
+  );
+  if (canonicalError) {
+    return locatorFailure(ToolErrorType.INVALID_TOOL_PARAMS, canonicalError);
+  }
 
   return {
     ok: true,
@@ -743,6 +772,40 @@ async function inspectWorkspaceCandidate(
   };
 }
 
-function isEnoent(error: unknown): boolean {
-  return isNodeError(error) && error.code === 'ENOENT';
+function classifyPathError(error: unknown): ToolErrorType {
+  if (!isNodeError(error)) {
+    return ToolErrorType.EXECUTION_FAILED;
+  }
+  if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+    return ToolErrorType.FILE_NOT_FOUND;
+  }
+  if (error.code === 'EACCES' || error.code === 'EPERM') {
+    return ToolErrorType.PERMISSION_DENIED;
+  }
+  return ToolErrorType.EXECUTION_FAILED;
+}
+
+function pathInspectFailure(
+  error: unknown,
+  candidate: string,
+  rawPath: string,
+  fallbackMessage: string,
+): WorkspaceLocatorFailure {
+  const type = classifyPathError(error);
+  if (type === ToolErrorType.FILE_NOT_FOUND) {
+    return locatorFailure(
+      type,
+      [
+        `Failed to record artifact: file not found at "${candidate}".`,
+        WORKSPACE_PATH_HINT,
+      ].join('\n'),
+    );
+  }
+  if (type === ToolErrorType.PERMISSION_DENIED) {
+    return locatorFailure(
+      type,
+      `Failed to record artifact: permission denied for "${rawPath}".\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+  return locatorFailure(type, fallbackMessage);
 }

@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 
-const WORKTREE_DIR_RE = /^(.+)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/;
+const WORKTREE_DIR_RE = /^(.*)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/;
 
 /**
  * Session cwd may be a worktree (`<root>/.qwen/worktrees/<slug>`). Artifact
@@ -20,7 +20,10 @@ const WORKTREE_DIR_RE = /^(.+)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/;
 export function resolveBoundWorkspaceRoot(targetDir: string): string {
   const resolved = path.resolve(targetDir);
   const match = resolved.match(WORKTREE_DIR_RE);
-  return match ? match[1] : resolved;
+  if (!match) {
+    return resolved;
+  }
+  return match[1] || path.parse(resolved).root;
 }
 
 /**

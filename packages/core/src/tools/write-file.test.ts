@@ -1722,6 +1722,21 @@ describe('workspace artifact metadata guard', () => {
     expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
   });
 
+  it('does not auto-record a file whose realpath is outside the workspace', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'write-file-out-'));
+    const linkDir = path.join(rootDir, 'output');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.symlinkSync(outside, linkDir);
+    const filePath = path.join(linkDir, 'report.csv');
+    fs.writeFileSync(filePath, 'a,b\n');
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+    } finally {
+      fs.rmSync(linkDir, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('skips artifacts whose workspace path contains a control character', () => {
     // The control character sits in a directory segment, not the basename: the
     // title is path.basename(filePath), so a control character in the title

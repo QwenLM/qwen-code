@@ -30,6 +30,12 @@ describe('resolveBoundWorkspaceRoot', () => {
     const nested = '/mnt/workspace/w/agent/.qwen/worktrees/my-feature/reports';
     expect(resolveBoundWorkspaceRoot(nested)).toBe(path.resolve(nested));
   });
+
+  it('treats a worktree whose bound workspace is the filesystem root', () => {
+    expect(resolveBoundWorkspaceRoot('/.qwen/worktrees/feature')).toBe(
+      path.parse(path.resolve('/.qwen/worktrees/feature')).root,
+    );
+  });
 });
 
 describe('toCanonicalWorkspaceArtifactPath', () => {

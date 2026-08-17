@@ -5,7 +5,9 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -155,6 +157,46 @@ describe('RecordArtifactTool', () => {
     expect(String(result.llmContent)).toContain('workspacePath: report.csv');
   });
 
+  it('accepts a long absolute locator when the canonical path is short', async () => {
+    const deep = Array.from({ length: 50 }, () => 'dddddddddd').join(path.sep);
+    const ws = await workspace(deep);
+    const abs = await ws.write('a.csv', '1');
+    expect(abs.length).toBeGreaterThan(500);
+
+    const result = await ws.tool
+      .build({
+        title: 'Deep',
+        workspacePath: abs,
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'a.csv',
+    });
+  });
+
+  it('records a POSIX filename that contains a literal backslash', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const ws = await workspace();
+    const literal = 'reports\\summary.csv';
+    await writeFile(path.join(ws.cwd, literal), 'a,b\n');
+
+    const result = await ws.tool
+      .build({
+        title: 'Literal backslash',
+        workspacePath: literal,
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'reports\\summary.csv',
+    });
+  });
+
   it('normalizes Windows-style relative separators to posix', async () => {
     const ws = await workspace();
     await ws.write('reports/summary.html', '<html>ok</html>');
@@ -254,6 +296,93 @@ describe('RecordArtifactTool', () => {
     });
   });
 
+  it('reports missing instead of outside when a symlink-root absolute path has no parent', async () => {
+    const ws = await workspace();
+    const aliasRoot = path.join(
+      os.tmpdir(),
+      `record-artifact-missing-${process.pid}-${Date.now()}`,
+    );
+    await symlink(ws.root, aliasRoot);
+    workspaces.push({
+      cleanup: async () => {
+        await rm(aliasRoot, { force: true });
+      },
+    });
+
+    const result = await ws.tool
+      .build({
+        title: 'Missing parent',
+        workspacePath: path.join(aliasRoot, 'no-such-dir', 'a.csv'),
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+    expect(String(result.llmContent)).not.toContain('outside the workspace');
+  });
+
+  it('rejects a canonical workspacePath that fails display safety checks', async () => {
+    const ws = await workspace();
+    const nasty = path.join(ws.cwd, 'reports', 'actual\nforged.csv');
+    await mkdir(path.dirname(nasty), { recursive: true });
+    await writeFile(nasty, 'x');
+    await symlink(nasty, path.join(ws.cwd, 'safe.csv'));
+
+    const result = await ws.tool
+      .build({
+        title: 'Safe link',
+        workspacePath: 'safe.csv',
+      })
+      .execute(signal);
+
+    expect(result.artifacts).toBeUndefined();
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+  });
+
+  it('rejects a fifo workspacePath', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const ws = await workspace();
+    const fifo = path.join(ws.cwd, 'pipe.fifo');
+    const created = spawnSync('mkfifo', [fifo]);
+    if (created.status !== 0) {
+      return;
+    }
+
+    const result = await ws.tool
+      .build({
+        title: 'Fifo',
+        workspacePath: 'pipe.fifo',
+      })
+      .execute(signal);
+
+    expect(result.artifacts).toBeUndefined();
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_NOT_REGULAR_FILE);
+  });
+
+  it('classifies an unreadable path as permission denied', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) {
+      return;
+    }
+    const ws = await workspace();
+    const hidden = path.join(ws.cwd, 'hidden');
+    await mkdir(hidden);
+    await writeFile(path.join(hidden, 'a.csv'), 'x');
+    await chmod(hidden, 0);
+    try {
+      const result = await ws.tool
+        .build({
+          title: 'Hidden',
+          workspacePath: 'hidden/a.csv',
+        })
+        .execute(signal);
+      expect(result.error?.type).toBe(ToolErrorType.PERMISSION_DENIED);
+      expect(result.artifacts).toBeUndefined();
+    } finally {
+      await chmod(hidden, 0o755);
+    }
+  });
+
   it('rejects a wrong workspace-folder prefix instead of reporting success', async () => {
     const ws = await workspace();
     await ws.write('report.csv', 'a,b\n');
@@ -311,6 +440,23 @@ describe('RecordArtifactTool', () => {
       '..\\..\\secret.txt',
       'reports\\..\\..\\secret.txt',
       'reports/..\\..\\secret.txt',
+    ]) {
+      expect(() =>
+        tool.build({
+          title: 'Escape',
+          workspacePath,
+        }),
+      ).toThrow(/workspacePath/);
+    }
+  });
+
+  it('rejects Windows drive and UNC locators on POSIX', () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const tool = makeTool();
+
+    for (const workspacePath of [
       'C:\\tmp\\report.html',
       'C:/tmp/report.html',
       'C:tmp\\report.html',

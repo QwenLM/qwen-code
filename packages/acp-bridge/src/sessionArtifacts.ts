@@ -1666,11 +1666,15 @@ function mergeBatchArtifact(
   return {
     ...existing,
     title:
-      existing.storage === 'workspace' && next.storage === 'workspace'
+      existing.storage === 'workspace' &&
+      next.storage === 'workspace' &&
+      shouldRefreshWorkspaceDisplay(next, existing)
         ? next.title
         : existing.title,
     description:
-      existing.storage === 'workspace' && next.storage === 'workspace'
+      existing.storage === 'workspace' &&
+      next.storage === 'workspace' &&
+      shouldRefreshWorkspaceDisplay(next, existing)
         ? (next.description ?? existing.description)
         : existing.description,
     status: next.status,
@@ -1763,10 +1767,12 @@ function mergeArtifact(
     delete next.hideWorkspacePath;
   } else if (
     existing.storage === 'workspace' &&
-    incoming.storage === 'workspace'
+    incoming.storage === 'workspace' &&
+    shouldRefreshWorkspaceDisplay(incoming, existing)
   ) {
-    // Workspace re-records keep the same locator identity; refresh the
-    // user-visible title/description so a later, better name is not dropped.
+    // Workspace re-records keep the same locator identity. Explicit
+    // record_artifact (or the same producer) may refresh the display
+    // name; write_file/hook auto-records must not clobber it.
     next.title = incoming.title;
     next.description = incoming.description ?? existing.description;
   }
@@ -1792,6 +1798,16 @@ function shouldRecordEphemeralUnpin(
       existing.persistedAt !== undefined ||
       existing.durableTombstoneRequired === true)
   );
+}
+
+function shouldRefreshWorkspaceDisplay(
+  incoming: Pick<NormalizedArtifact, 'toolName'>,
+  existing: Pick<NormalizedArtifact, 'toolName'>,
+): boolean {
+  if (!incoming.toolName || incoming.toolName === 'record_artifact') {
+    return true;
+  }
+  return incoming.toolName === existing.toolName;
 }
 
 export function publicArtifactsEqual(

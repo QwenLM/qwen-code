@@ -669,7 +669,10 @@ function canDownloadArtifact(
 export function canOpenWorkspaceArtifact(
   artifact: DaemonSessionArtifact,
 ): boolean {
-  return !(artifact.storage === 'workspace' && artifact.status === 'missing');
+  if (artifact.storage !== 'workspace') {
+    return true;
+  }
+  return artifact.status === 'available' || artifact.status === 'changed';
 }
 
 export function getWorkspaceArtifactOpenBlockReason(
