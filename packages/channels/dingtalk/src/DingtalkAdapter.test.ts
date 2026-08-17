@@ -2422,6 +2422,42 @@ describe('DingtalkChannel chat records', () => {
     ).not.toContain('[Chat record messages]');
   });
 
+  it('normalizes a JSON summary and recovers sender names for forwarded entries', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'direct-forward-m1',
+        conversationType: '1',
+        conversationId: 'cid-direct-forward',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isForwardMsg: '1',
+        msgtype: 'chatRecord',
+        content: {
+          summary: JSON.stringify(['Bob:1', 'Bob:2']),
+          chatRecord: JSON.stringify([
+            { senderId: 'opaque-bob-id', msgType: 'text', content: '1' },
+            { senderId: 'opaque-bob-id', msgType: 'text', content: '2' },
+          ]),
+        },
+      }),
+      headers: { messageId: 'direct-forward-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Chat record] Bob:1\nBob:2\n\n[Chat record messages]\nBob: 1\nBob: 2',
+      }),
+    );
+  });
+
   it.each([
     ['chatRecord', false],
     ['records', true],
