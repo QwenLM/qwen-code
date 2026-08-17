@@ -581,6 +581,43 @@ describe('TeamCoordinationHarness', () => {
       expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
     });
 
+    it('rejects an assignment that adds the blocker in the same call', async () => {
+      const h = await createHarness();
+      const blocker = await createTask(h.teamName, {
+        subject: 'Blocker',
+        description: 'Finish first',
+      });
+      // Reserve the blocker as owned BEFORE alice exists so auto-claim
+      // cannot consume it and race a prompt into her inbox.
+      await updateTask(h.teamName, blocker.id, { owner: 'leader' });
+      const task = await createTask(h.teamName, {
+        subject: 'Blocked same-call',
+        description: 'Edge added by the assignment itself',
+      });
+      // Same reservation for the task under test.
+      await updateTask(h.teamName, task.id, { owner: 'leader' });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      // The edge is not persisted yet when the gate runs, so the gate
+      // must merge this call's addBlockedBy into its view — deleting
+      // that merge loop ships green against every other blocked test.
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+        addBlockedBy: [blocker.id],
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('blocked by');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      // Owner stays at the reservation value: the refusal happens
+      // before the write.
+      expect(reloaded?.owner).toBe('leader');
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
     it('rejects assigning to a teammate whose shutdown is pending', async () => {
       const h = await createHarness();
       const task = await createTask(h.teamName, {

@@ -414,6 +414,18 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // what matters is whether THIS call changed the owner or moved the
     // task into in_progress, not the post-update state alone.
     const existing = await getTask(teamName, taskId);
+    if (!existing) {
+      // Answer existence BEFORE the assignment gates below, so a call on
+      // a missing task reports "not found" instead of a wrong reason
+      // derived from the empty snapshot (e.g. a phantom blocked-by
+      // refusal built from this same call's addBlockedBy).
+      const msg = `Task #${taskId} not found.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
 
     // A manual owner assignment can only be delivered to an existing,
     // non-shutting-down teammate (#9282): auto-claim consumes pending,
@@ -538,7 +550,8 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         const msg =
           `Task #${taskId} was updated (status: ${task.status}, ` +
           `owner: ${task.owner}), but the assignment prompt could not ` +
-          `be delivered. Reassign the task or respawn the teammate.`;
+          `be delivered. Reassign the task to a different active ` +
+          `teammate to retry delivery.`;
         dispatchFailure = {
           llmContent: msg,
           returnDisplay: msg,
