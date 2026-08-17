@@ -81,6 +81,13 @@ rm -f "${VERDICT}"
   echo "::error::could not create the gate verdict file at ${VERDICT}"
   exit 125
 }
+# Pin the file's IDENTITY across the run, not just its type: the gate only
+# ever APPENDS to this file (inode preserved), but a pre-staged forgery
+# renamed over it after the gate's final write — one atomic rename(2) before
+# the container exits — passes every other post-run check (the fingerprint
+# set deliberately excludes the verdict, and the type check sees a regular
+# file with exactly one of each flag line). A moved inode is a swap (#9214).
+VERDICT_INODE="$(stat -c '%i' "${VERDICT}" 2> /dev/null || true)"
 # Single host-side reset for the gate-authored rejection detail: the gate
 # writes it only on rejection paths, so a copy surviving a run that never
 # rejected was planted, and the report steps would publish it as the bot's
@@ -182,6 +189,14 @@ if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]; then
   exit 125
 fi
 
+# Refuse a REPLACED verdict before anything reads it: the gate's appends
+# keep the creation-time inode, a rename(2) swap does not (see the capture
+# above). Runs before the type check so a swapped-in FIFO never gets opened.
+VERDICT_INODE_NOW="$(stat -c '%i' "${VERDICT}" 2> /dev/null || true)"
+if [[ "${VERDICT_INODE_NOW}" != "${VERDICT_INODE}" ]]; then
+  echo "::error::the gate verdict file at ${VERDICT} was replaced during the run (inode ${VERDICT_INODE:-?} -> ${VERDICT_INODE_NOW:-?}) — refusing the verdict as tampered."
+  exit 125
+fi
 # Mirror the inputs' type discipline on the verdict file itself BEFORE
 # anything opens it: the container can swap it after the run — rm + mkfifo
 # while holding a reader fd (the gate's appends succeed inside, then the
@@ -240,12 +255,20 @@ case "${GATE_RC}" in
     # fixable rejection as a terminal pre-existing failure. The crash path
     # retries with a fresh checkout instead.
     if [[ "${OUTCOME}" == 'failed' ]]; then
+      # The gate writes `outcome=` exactly once on every genuine path, so a
+      # duplicated or emptied outcome line is an in-container append exactly
+      # like a duplicated flag: without the count, a watcher appending a bare
+      # `outcome=` after the gate's write empties OUTCOME through last-wins
+      # and silently turns an EVALUATED rejection into a no-diagnostic
+      # crash-retry loop (#9214 review).
+      OUTCOME_LINES="$(grep -c '^outcome=' "${VERDICT}" 2> /dev/null || true)"
       RETRYABLE_LINES="$(grep -c '^retryable=' "${VERDICT}" 2> /dev/null || true)"
       PREEXISTING_LINES="$(grep -c '^preexisting=' "${VERDICT}" 2> /dev/null || true)"
-      if [[ "${RETRYABLE_LINES:-0}" -ne 1 ]] ||
+      if [[ "${OUTCOME_LINES:-0}" -ne 1 ]] ||
+        [[ "${RETRYABLE_LINES:-0}" -ne 1 ]] ||
         [[ "${PREEXISTING_LINES:-0}" -ne 1 ]] ||
         [[ "${PREEXISTING}" == 'true' && "${RETRYABLE}" == 'true' ]]; then
-        echo "::error::verdict carries a forged routing flag (retryable lines: ${RETRYABLE_LINES:-0}, preexisting lines: ${PREEXISTING_LINES:-0}) — refusing the verdict as tampered."
+        echo "::error::verdict carries a forged line (outcome lines: ${OUTCOME_LINES:-0}, retryable lines: ${RETRYABLE_LINES:-0}, preexisting lines: ${PREEXISTING_LINES:-0}) — refusing the verdict as tampered."
         exit 125
       fi
       echo "outcome=failed" >> "${GITHUB_OUTPUT}"

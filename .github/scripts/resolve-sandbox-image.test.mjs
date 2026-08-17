@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +15,8 @@ import {
   validateRequestedImage,
   exportImage,
   repoDigestOf,
+  parsePullDigest,
+  pullImage,
 } from './resolve-sandbox-image.mjs';
 
 test('latestSemverTag returns the highest stable semver tag', () => {
@@ -143,5 +151,67 @@ test('repoDigestOf fails closed when the inspect fails', async () => {
       repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
       /no repository digest/,
     );
+  });
+});
+
+// The exported reference is bound to the digest the PULL itself reported:
+// `docker tag` never rewrites digests, so retagged attacker content keeps
+// its original repo in RepoDigests[0] (measured live: a tag moved to other
+// content resolves to `busybox@sha256:…` and passes the `@sha256:` presence
+// check). Only the pull's own Digest line ties the export to the fetched
+// content (#9214 review).
+const GENUINE =
+  'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+test('repoDigestOf refuses a digest the pull did not report (retag race)', async () => {
+  await withDockerStub(
+    'printf "%s\\n" "aaa.example/backdoor@sha256:dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2"',
+    async (stub) => {
+      await assert.rejects(
+        repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
+        /digest the pull did not report/,
+      );
+    },
+  );
+});
+
+test('repoDigestOf accepts the digest the pull reported', async () => {
+  await withDockerStub(
+    `printf "%s\\n" "ghcr.io/qwenlm/qwen-code@${GENUINE}"`,
+    async (stub) => {
+      assert.equal(
+        await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
+        `ghcr.io/qwenlm/qwen-code@${GENUINE}`,
+      );
+    },
+  );
+});
+
+test('parsePullDigest extracts the Digest line from pull output', () => {
+  const pullLog = [
+    '1.2.3: Pulling from qwenlm/qwen-code',
+    `Digest: ${GENUINE}`,
+    'Status: Image is up to date for ghcr.io/qwenlm/qwen-code:1.2.3',
+    'ghcr.io/qwenlm/qwen-code:1.2.3',
+  ].join('\n');
+  assert.equal(parsePullDigest(pullLog), GENUINE);
+  assert.equal(parsePullDigest('Status: Image is up to date'), '');
+  assert.equal(parsePullDigest('Digest: sha256:tooshort'), '');
+});
+
+test('pullImage captures the pull-reported digest on success', async () => {
+  await withDockerStub(
+    `printf "%s\\n" "pulling..." "Digest: ${GENUINE}" "Status: Downloaded"`,
+    async (stub) => {
+      const result = await pullImage(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3');
+      assert.deepEqual(result, { ok: true, digest: GENUINE });
+    },
+  );
+});
+
+test('pullImage reports failure without a digest', async () => {
+  await withDockerStub('exit 1', async (stub) => {
+    const result = await pullImage(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3');
+    assert.deepEqual(result, { ok: false, digest: '' });
   });
 });

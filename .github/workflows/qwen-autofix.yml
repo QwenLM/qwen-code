@@ -4209,7 +4209,11 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
-          cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh"
+          # Absent from the trusted base until this PR merges, and this step
+          # runs under -e: a hard failure here would kill every pre-merge
+          # round. An empty digest reaches the gate steps' own `-z` guard,
+          # which skips the container gate with notice.
+          cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh" 2> /dev/null || true
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
@@ -4224,7 +4228,9 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "gate_container_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-gate-container.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          if [[ -f "${RUNNER_TEMP}/run-autofix-gate-container.sh" ]]; then
+            echo "gate_container_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-gate-container.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          fi
           # The gate EXECUTES these three helpers too, and RUNNER_TEMP is
           # writable by the branch/agent code later steps run on this host: a
           # neutered schema/contracts/resolver helper lets a fix that should be
@@ -5634,6 +5640,15 @@ jobs:
           # verifying cannot themselves be swapped.
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          # Pre-merge: the wrapper is absent from the trusted base (staged
+          # empty above), so there is nothing digest-verifiable to run. Skip
+          # with notice instead of failing sha256sum -c opaquely; the empty
+          # outcome routes through 'Finalize verification's crash path and
+          # the next scan retries — self-resolving once this PR merges.
+          if [[ -z "${GATE_CONTAINER_SHA256}" ]]; then
+            echo "::notice::run-autofix-gate-container.sh is absent from the trusted base (pre-merge) — skipping the container gate; the next scan retries."
+            exit 0
+          fi
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
           echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
           # The helpers the gate executes are staged in the same writable
@@ -5873,6 +5888,15 @@ jobs:
           # verifying cannot themselves be swapped.
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          # Pre-merge: the wrapper is absent from the trusted base (staged
+          # empty above), so there is nothing digest-verifiable to run. Skip
+          # with notice instead of failing sha256sum -c opaquely; the empty
+          # outcome routes through 'Finalize verification's crash path and
+          # the next scan retries — self-resolving once this PR merges.
+          if [[ -z "${GATE_CONTAINER_SHA256}" ]]; then
+            echo "::notice::run-autofix-gate-container.sh is absent from the trusted base (pre-merge) — skipping the container gate; the next scan retries."
+            exit 0
+          fi
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
           echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
           # The helpers the gate executes are staged in the same writable

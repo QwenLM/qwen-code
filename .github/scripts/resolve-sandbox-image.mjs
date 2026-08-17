@@ -73,38 +73,55 @@ async function fetchLatestGhcrSemver() {
   return latest;
 }
 
-function pullImage(command, image) {
+// The `Digest: sha256:…` line docker prints for the tag it just resolved is
+// the only pull-time content identity: the post-pull inspect can race a
+// `docker tag` swap (see repoDigestOf), so the exported reference must be
+// bound to what the pull itself reported, never to inspect alone.
+export function parsePullDigest(pullOutput) {
+  return pullOutput.match(/^Digest: (sha256:[0-9a-f]{64})\s*$/m)?.[1] ?? '';
+}
+
+export function pullImage(command, image) {
   return new Promise((resolve) => {
-    const child = spawn(command, ['pull', image], { stdio: 'inherit' });
+    const child = spawn(command, ['pull', image], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    let stdout = '';
     let settled = false;
     let timer;
-    const finish = (ok) => {
+    const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(ok);
+      resolve(result);
     };
     timer = setTimeout(() => {
       console.error(
         `::error::Timed out pulling ${image} after ${PULL_TIMEOUT_MS / 1000}s.`,
       );
       child.kill('SIGKILL');
-      finish(false);
+      finish({ ok: false, digest: '' });
     }, PULL_TIMEOUT_MS);
 
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      process.stdout.write(chunk);
+    });
     child.on('error', (error) => {
       console.error(
         `::error::Failed to start '${command} pull ${image}': ${error.message}`,
       );
-      finish(false);
+      finish({ ok: false, digest: '' });
     });
     child.on('close', (code) => {
       if (code !== 0) {
         console.error(
           `::error::'${command} pull ${image}' exited with code ${code}.`,
         );
+        finish({ ok: false, digest: '' });
+        return;
       }
-      finish(code === 0);
+      finish({ ok: true, digest: parsePullDigest(stdout) });
     });
   });
 }
@@ -114,7 +131,12 @@ function pullImage(command, image) {
 // local store without re-pull, and a co-resident process with daemon access
 // can `docker tag` different content under the same name between resolve
 // and gate. A digest reference cannot be moved by `docker tag`/`docker build`.
-export function repoDigestOf(command, image) {
+// With `expectedDigest` (the pull's own `Digest:` line), the resolved digest
+// must MATCH it: retagged attacker content keeps ITS original repo in
+// RepoDigests[0] (and a requested-repo entry still carries the attacker
+// digest), so only the digest the pull reported binds the export to the
+// content the pull fetched (#9214 review).
+export function repoDigestOf(command, image, expectedDigest = '') {
   return new Promise((resolve) => {
     const child = spawn(
       command,
@@ -159,6 +181,11 @@ export function repoDigestOf(command, image) {
         `Pulled image ${image} resolved to no repository digest ('${digest}'); refusing to export a mutable tag.`,
       );
     }
+    if (expectedDigest && !digest.endsWith(`@${expectedDigest}`)) {
+      throw new Error(
+        `Pulled image ${image} resolved to a digest the pull did not report ('${digest}' vs '${expectedDigest}') — the tag moved between pull and inspect; refusing.`,
+      );
+    }
     return digest;
   });
 }
@@ -180,8 +207,16 @@ async function main() {
   const requestedImage = validateRequestedImage(process.argv[2]);
 
   const command = process.env.SANDBOX_COMMAND || 'docker';
-  if (await pullImage(command, requestedImage)) {
-    exportImage(await repoDigestOf(command, requestedImage));
+  const requestedPull = await pullImage(command, requestedImage);
+  if (requestedPull.ok) {
+    if (!requestedPull.digest) {
+      throw new Error(
+        `'${command} pull ${requestedImage}' reported no Digest line; refusing to export an unbound image reference.`,
+      );
+    }
+    exportImage(
+      await repoDigestOf(command, requestedImage, requestedPull.digest),
+    );
     return;
   }
 
@@ -196,10 +231,16 @@ async function main() {
   console.warn(
     `::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}; sandbox image version may differ from package version.`,
   );
-  if (!(await pullImage(command, fallbackImage))) {
+  const fallbackPull = await pullImage(command, fallbackImage);
+  if (!fallbackPull.ok) {
     throw new Error(`Fallback sandbox image failed to pull: ${fallbackImage}`);
   }
-  exportImage(await repoDigestOf(command, fallbackImage));
+  if (!fallbackPull.digest) {
+    throw new Error(
+      `'${command} pull ${fallbackImage}' reported no Digest line; refusing to export an unbound image reference.`,
+    );
+  }
+  exportImage(await repoDigestOf(command, fallbackImage, fallbackPull.digest));
 }
 
 if (

@@ -6762,6 +6762,17 @@ exit 1
       expect(gate).not.toMatch(
         /bash "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/,
       );
+      // Pre-merge skip: an empty digest means the wrapper was absent from
+      // the trusted base, and the step must skip with notice BEFORE the
+      // digest checks — sha256sum -c on an empty digest fails opaquely,
+      // and running an unverified wrapper is exactly what the wall forbids.
+      expect(gate).toMatch(
+        /if \[\[ -z "\$\{GATE_CONTAINER_SHA256\}" \]\]; then[\s\S]{0,400}?exit 0\n\s+fi/,
+      );
+      expect(gate.indexOf('-z "${GATE_CONTAINER_SHA256}"')).toBeGreaterThan(-1);
+      expect(gate.indexOf('-z "${GATE_CONTAINER_SHA256}"')).toBeLessThan(
+        gate.indexOf('echo "${VERIFY_RUNNER_SHA256}'),
+      );
       expect(gate).toContain(
         'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -',
       );
@@ -6835,10 +6846,19 @@ exit 1
     expect(envBodyOf(repairVerificationGateStep)).toBe(
       envBodyOf(verificationGateSteps[1]),
     );
+    // The wrapper is absent from the trusted base until this PR merges and
+    // the stage step runs under -e, so its cp is guarded like the sibling
+    // upsert script's cat — an unguarded cp hard-fails every pre-merge
+    // round before triage even starts. The digest is recorded only when the
+    // copy exists; the gate steps turn the empty digest into an explicit
+    // skip (pinned below), never an opaque sha256sum -c failure.
     expect(workflow).toContain(
-      'cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
+      'cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh" 2> /dev/null || true',
     );
     expect(workflow).toContain('echo "gate_container_sha256=$(sha256sum ');
+    expect(workflow).toMatch(
+      /if \[\[ -f "\$\{RUNNER_TEMP\}\/run-autofix-gate-container\.sh" \]\]; then\n\s+echo "gate_container_sha256=\$\(sha256sum "\$\{RUNNER_TEMP\}\/run-autofix-gate-container\.sh"/,
+    );
     // The image output is load-bearing (empty GATE_IMAGE → the wrapper
     // refuses and every round takes the gate-crashed retry), so pin the id
     // itself, not just the consumer string.
@@ -6866,10 +6886,15 @@ exit 1
     // between resolve and gate, and `docker run` follows the swapped tag
     // without re-pull — the gate would execute the doctored runtime.
     expect(sandboxImageResolverScript).toContain(
-      'exportImage(await repoDigestOf(command, requestedImage))',
+      'await repoDigestOf(command, requestedImage, requestedPull.digest)',
     );
     expect(sandboxImageResolverScript).toContain(
-      'exportImage(await repoDigestOf(command, fallbackImage))',
+      'await repoDigestOf(command, fallbackImage, fallbackPull.digest)',
+    );
+    // …and the binding is fail-closed: a pull whose output carries no
+    // Digest line must refuse, not fall back to an unbound inspect.
+    expect(sandboxImageResolverScript).toContain(
+      'reported no Digest line; refusing to export an unbound image reference',
     );
     // The container wall does not, by itself, make the host-side
     // translation shell trusted: MCP stdio servers from a branch-committed
@@ -7034,6 +7059,11 @@ exit 1
     expect(dockerRun).toContain('--env GITHUB_OUTPUT="${VERDICT}"');
     expect(dockerRun).toContain('--env RUNNER_TEMP="${CBIN}"');
     expect(dockerRun).toContain('--env HOME="${CRW}"');
+    // GATE_TMPDIR must land on the WRITABLE scratch mount: the gate's
+    // GIT_CONFIG_GLOBAL resolves onto it and truncates it at start — on the
+    // read-only CBIN mount that dies Permission-denied with no verdict,
+    // every round a permanent crash-retry (mutant run-verified).
+    expect(dockerRun).toContain('--env GATE_TMPDIR="${CRW}"');
     // CI=true is set on every host step by Actions; without it the branch's
     // own suites take their non-CI path (18 TUI tests that are suppressed on
     // CI as timing-flaky would run, and a flake is charged to the round).
@@ -7148,6 +7178,33 @@ exit 1
       'deferred-findings.json',
       'deferred-findings.carry.json',
     ]);
+    // The fingerprint only catches modifications that PERSIST until the
+    // post-run compare: a truncate-during-run-then-restore flips the bite
+    // check's BITE_ENFORCE off mid-run (its -s guard reads the truncated
+    // file) while the restored bytes pass the compare — the bogus-fix round
+    // the bite check exists to reject sails to outcome=fixed. The gate
+    // therefore captures its bite inputs' identity before any branch code
+    // runs and refuses at the bite section if they moved (#9214 review).
+    expect(reviewVerificationRunner).toContain(
+      'BITE_INPUTS_BEFORE="$(bite_input_digest)"',
+    );
+    expect(reviewVerificationRunner).toMatch(
+      /if \[\[ "\$\(bite_input_digest\)" != "\$\{BITE_INPUTS_BEFORE\}" \]\]; then\n\s+reject_fix 'bite check inputs changed during the gate run'/,
+    );
+    expect(
+      reviewVerificationRunner.indexOf(
+        'BITE_INPUTS_BEFORE="$(bite_input_digest)"',
+      ),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        "run_check 'build failed on the agent-committed fix'",
+      ),
+    );
+    expect(
+      reviewVerificationRunner.indexOf(
+        "reject_fix 'bite check inputs changed during the gate run'",
+      ),
+    ).toBeLessThan(reviewVerificationRunner.indexOf("BITE_ENFORCE='false'"));
     // Type-aware, and non-regular paths are refused before anything hashes
     // them: a symlink to gate-verdict makes the gate's own verdict writes trip
     // the compare (exit 125 every round, so a deterministic rejection never
@@ -7168,6 +7225,37 @@ exit 1
       /is not a regular file \(\$\{VERDICT_TYPE:-missing\}\)[\s\S]{0,120}?exit 125/,
     );
     expect(wrapper.indexOf('VERDICT_TYPE="$(stat')).toBeLessThan(
+      wrapper.indexOf('OUTCOME="$(verdict_value'),
+    );
+    // Identity, not just type: the gate only APPENDS to the verdict (inode
+    // preserved), while a pre-staged forgery renamed over it after the
+    // gate's final write passes both the fingerprint compare (the verdict
+    // is deliberately outside the set) and the type check. Capture the
+    // creation inode and refuse a moved one post-run — before the type
+    // check, so a swapped-in FIFO never gets opened (#9214 review).
+    expect(wrapper).toContain('VERDICT_INODE="$(stat -c \'%i\' "${VERDICT}"');
+    expect(wrapper.indexOf('VERDICT_INODE="$(stat')).toBeGreaterThan(
+      wrapper.indexOf(': > "${VERDICT}"'),
+    );
+    expect(wrapper.indexOf('VERDICT_INODE="$(stat')).toBeLessThan(
+      wrapper.indexOf('docker run --rm'),
+    );
+    expect(wrapper).toMatch(
+      /if \[\[ "\$\{VERDICT_INODE_NOW\}" != "\$\{VERDICT_INODE\}" \]\]; then[\s\S]{0,300}?exit 125/,
+    );
+    // The rc=1 arm also counts outcome lines: the gate writes `outcome=`
+    // exactly once on every genuine path, so a watcher appending a bare
+    // `outcome=` after the gate's write would empty OUTCOME through
+    // last-wins and silently turn an EVALUATED rejection into a
+    // no-diagnostic crash-retry loop (#9214 review).
+    expect(wrapper).toContain(
+      'OUTCOME_LINES="$(grep -c \'^outcome=\' "${VERDICT}"',
+    );
+    expect(wrapper).toMatch(/if \[\[ "\$\{OUTCOME_LINES:-0\}" -ne 1 \]\]/);
+    expect(wrapper.indexOf('VERDICT_INODE_NOW="$(stat')).toBeGreaterThan(
+      wrapper.indexOf('GATE_RC=$?'),
+    );
+    expect(wrapper.indexOf('VERDICT_INODE_NOW="$(stat')).toBeLessThan(
       wrapper.indexOf('OUTCOME="$(verdict_value'),
     );
     // The empty-GATE_IMAGE refusal is load-bearing (docker would otherwise
@@ -7267,10 +7355,11 @@ exit 1
     // A real rejection (the gate wrote failed, then exited 1) carries through
     // with its routing flags, which only pick repair vs handoff, never a
     // push. reject_fix writes BOTH flags on every rejection, so the genuine
-    // shape carries the explicit baseline.
+    // shape carries the explicit baseline. The gate writes `outcome=` exactly
+    // once on every genuine path — a two-outcome fixture corresponds to no
+    // real gate shape and is refused by the count check (cases below).
     expect(
       runTranslate(1, [
-        'outcome=fixed',
         'outcome=failed',
         'preexisting=false',
         'retryable=true',
@@ -7356,6 +7445,38 @@ exit 1
     // The pre-baseline flag-less shape is indistinguishable from a forgery
     // and is refused the same way.
     expect(runTranslate(1, ['outcome=failed', 'retryable=true'])).toBe('');
+    // The evaluated-handoff shape the gate's four non-reject_fix failure
+    // exits write (fail_handoff: failure.md aborts, agent produced
+    // nothing): only outcome=failed crosses the wall — the watermark
+    // advances and the item is handed off, exactly as pre-container; a
+    // flag-less `outcome=failed` never reaches the wall anymore.
+    expect(
+      runTranslate(1, [
+        'outcome=failed',
+        'preexisting=false',
+        'retryable=false',
+      ]),
+    ).toBe('outcome=failed');
+    // An in-container appender cannot silence a genuine rejection: a bare
+    // or duplicated `outcome=` line appended after the gate's write trips
+    // the count check and is refused as tampered (explicit ::error:: and
+    // crash-retry) instead of emptying OUTCOME through last-wins.
+    expect(
+      runTranslate(1, [
+        'outcome=failed',
+        'preexisting=false',
+        'retryable=false',
+        'outcome=',
+      ]),
+    ).toBe('');
+    expect(
+      runTranslate(1, [
+        'outcome=failed',
+        'preexisting=false',
+        'retryable=false',
+        'outcome=failed',
+      ]),
+    ).toBe('');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -17110,6 +17231,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     baselineNoIdentity = false,
     trackedDirt = false,
     commFail = false,
+    biteTamper = false,
+    failureMd = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -17219,6 +17342,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '  if [[ "${NOISY_SUCCESS:-}" == "1" ]]; then',
           '    for i in $(seq 1 200); do echo "baseline build banner line $i — all green, nothing to see"; done',
           '  fi',
+          '  if [[ "${BITE_TAMPER:-}" == "1" ]]; then : > "${WORKDIR}/rc.json"; fi',
           'fi',
           'if [[ "$1" == "run" && "$2" == "typecheck" && "${TYPECHECK_FAIL:-}" == "1" ]]; then',
           '  echo "stub typecheck FAILED"; exit 1',
@@ -17255,6 +17379,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
       writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      if (biteTamper) {
+        writeFileSync(
+          join(workdir, 'rc.json'),
+          '[{"id":1,"body":"**[Critical]** something"}]\n',
+        );
+        writeFileSync(join(workdir, 'resolved-comments.txt'), '1\n');
+        writeFileSync(join(workdir, 'rv.json'), '[]\n');
+      }
+      if (failureMd) {
+        writeFileSync(join(workdir, 'failure.md'), 'agent aborted\n');
+      }
       const outFile = join(dir, 'gh-output');
       writeFileSync(outFile, '');
 
@@ -17289,6 +17424,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             HUGE_FAIL: hugeFail ? '1' : '',
             WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
             RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
+            BITE_TAMPER: biteTamper ? '1' : '',
           },
         },
       );
@@ -17329,7 +17465,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('preexisting=true');
-    // retryable stays unset: the repair step keys on it and must not run.
+    // The explicit false baseline rides every rejection — the wrapper
+    // refuses a failed verdict without exactly one of each routing flag —
+    // and the repair step keys on `== 'true'`, so false keeps it parked.
+    expect(r.outputs).toContain('retryable=false');
     expect(r.outputs).not.toContain('retryable=true');
     expect(r.rejection).toContain('pre-existing');
     expect(r.rejection).toContain('base update (merge main)');
@@ -17580,6 +17719,48 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('writes the canonical routing flags on the evaluated-handoff exits', () => {
+    // The four non-reject_fix failure exits (failure.md aborts, agent
+    // produced nothing) used to write a flag-less outcome=failed — the
+    // wrapper's forgery discipline refuses that shape, so the genuine
+    // verdict died as a "forged routing flag" and the round looped in
+    // crash-retries instead of advancing the watermark (#9214 review).
+    // agentCommit: false leaves the branch == origin/branch with no
+    // no-action.md: the 'agent produced nothing' path.
+    const r = runGate({ agentCommit: false });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('preexisting=false');
+    expect(r.outputs).toContain('retryable=false');
+    expect(r.stdout).toContain('Branch unchanged and no no-action.md');
+    // No true flag written: the host semantics are bit-for-bit pre-container.
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('writes the canonical routing flags on the failure.md abort', () => {
+    const r = runGate({ failureMd: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('preexisting=false');
+    expect(r.outputs).toContain('retryable=false');
+    expect(r.stdout).toContain('Agent aborted intentionally');
+  });
+
+  it('refuses when a bite input moves mid-run, even if restored before exit', () => {
+    // The wrapper's post-run fingerprint compare only sees the restoration:
+    // truncating rc.json during the build legs flips the bite check's
+    // BITE_ENFORCE off for the mid-run read, and the restored bytes pass
+    // the compare. The gate-internal digest pin is what catches it (#9214).
+    const r = runGate({ biteTamper: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain(
+      'bite check inputs changed during the gate run',
+    );
   });
 });
 

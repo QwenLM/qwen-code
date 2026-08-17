@@ -65,19 +65,31 @@ if [[ "${committed_rc}" -eq 1 ]]; then
   echo "committed=true" >> "${GITHUB_OUTPUT}"
 fi
 
+# Canonical verdict shape for the evaluated-handoff exits below (failure.md
+# aborts, agent-produced-nothing): the host-side translation refuses an
+# outcome=failed verdict that does not carry exactly one of each routing
+# flag — the same anti-append forgery discipline reject_fix satisfies — so a
+# flag-less shape would be dropped as tampered and loop in crash-retries
+# instead of advancing the watermark as an EVALUATED handoff. The false
+# baseline forwards only `outcome=failed`, keeping pre-container semantics.
+fail_handoff() {
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "preexisting=false" >> "${GITHUB_OUTPUT}"
+  echo "retryable=false" >> "${GITHUB_OUTPUT}"
+  exit 1
+}
+
 if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
   echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
   git status --short
   cat "${WORKDIR}/failure.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
+  fail_handoff
 fi
 
 if [[ -f "${WORKDIR}/failure.md" ]]; then
   echo "🛑 Agent aborted intentionally:"
   cat "${WORKDIR}/failure.md"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
+  fail_handoff
 fi
 
 # Convention: hooks are severed at EVERY host checkout of the PR
@@ -331,6 +343,21 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 VERIFICATION_HEAD="$(git rev-parse HEAD)"
 
+# The bite section reads rc.json / resolved-comments.txt / rv.json AFTER the
+# build legs — host-authored before the container, never written by the gate.
+# A branch background process can truncate one for the mid-run read (flipping
+# BITE_ENFORCE off, so the bogus-fix round the bite check exists to reject
+# sails to outcome=fixed) and restore the bytes before exit — the wrapper's
+# post-run fingerprint compare only sees the restoration. Capture identity
+# now, before any branch code runs, and refuse at the bite section if the
+# inputs moved (#9214 review).
+bite_input_digest() {
+  { sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/resolved-comments.txt" \
+    "${WORKDIR}/rv.json" 2> /dev/null || true; } |
+    sha256sum | cut -d' ' -f1
+}
+BITE_INPUTS_BEFORE="$(bite_input_digest)"
+
 # The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
 # entry point, which the CLI bundle restored from the TRUSTED BASE. When the
 # branch itself changed core's sources, that base-built dist can disagree
@@ -376,14 +403,12 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
     exit 0
   fi
   echo "❌ Branch unchanged and no no-action.md — agent produced nothing"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
+  fail_handoff
 fi
 
 if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
   echo "❌ Branch changed but address-summary.md is missing"
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  exit 1
+  fail_handoff
 fi
 
 # --- Content-based validity checks -------------------------------------------
@@ -874,6 +899,9 @@ BITE_SRC="$(git diff --name-only -z --no-renames "${ROUND_RANGE}" \
 # code? resolved-comments.txt is the agent's own machine-readable claim of
 # what it fixed; rc.json/rv.json carry the thread bodies and review states
 # the scan already fetched. Absent/empty inputs read as "no defect claim".
+if [[ "$(bite_input_digest)" != "${BITE_INPUTS_BEFORE}" ]]; then
+  reject_fix 'bite check inputs changed during the gate run'
+fi
 BITE_ENFORCE='false'
 if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
   # Ids tolerate the rc: prefix and CR the other consumers strip (SKILL
