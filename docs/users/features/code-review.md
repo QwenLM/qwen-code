@@ -145,7 +145,8 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
-- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
+- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh. If the interrupted session still leaves its lease behind — a hard kill that skips this, or a multi-prompt review interrupted during a later prompt — `/review` refuses and names the lease file to delete. Clean stops release it: a finished review and the early stops (empty diff, no new changes since the last review) all run `cleanup`, which releases the lease
+- The worktree is leased to its session: a second `/review` of a PR that is already under review refuses to start (naming the holder) rather than tear down the running review's worktree
 - Review reports and cache are saved to the main project directory (not the worktree)
 - Steps that **modify** code to measure something — the test-efficacy probe's mutants, and a verifier's probe of a specific finding — each run in their own throwaway worktree beside it (`…-probe`, `…-scratch-<agent>`), so one agent's experiment is not visible to the others reading the shared tree. As a backstop, every agent in each wave is also told which paths (if any) differ from the commit under review at the moment it was launched, and that a failure confined to those paths is not a finding. All of these trees are swept along with the worktree at the end of the review.
 

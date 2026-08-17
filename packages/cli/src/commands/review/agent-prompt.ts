@@ -46,6 +46,10 @@ import {
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import {
+  MAX_RESUME_CALLS,
+  SHELL_TOOL_MAX_TIMEOUT_MS,
+} from './lib/build-budget.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
@@ -1603,7 +1607,7 @@ export function buildRoleBrief(
         '**Build and test what the diff changed.** Give this one call a long tool ' +
           'timeout — it installs, builds and tests in a single process, which the ' +
           'default 120-second shell timeout would kill mid-run (the very failure this ' +
-          'command exists to prevent, one level up). Invoke it with `timeout: 600000`:',
+          `command exists to prevent, one level up). Invoke it with \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`:`,
         '',
         '```bash',
         // Prefixed like every other executable review command: this block is run
@@ -1617,6 +1621,32 @@ export function buildRoleBrief(
         `  --plan ${resolve(opts.planPath)} \\`,
         `  --worktree ${resolve(buildTree)} \\`,
         `  --out ${resolve(dirname(opts.planPath), outName)}`,
+        '```',
+        '',
+        '**If the report says work is left, run it again with `--resume`.** The ' +
+          `${SHELL_TOOL_MAX_TIMEOUT_MS / 1000}-second ceiling is per CALL, not per run: this repo needs more than ` +
+          'one call to finish its suites (install, the builds, then `packages/core` ' +
+          'at 106s and `packages/cli` at 401s, before the rest). Work is left when ' +
+          '`testScope.notRun` is non-empty, or when any `test[]` entry has ' +
+          '`"clamped": true` — a suite the budget started too late and killed, which ' +
+          'says nothing about the suite. A third shape carries no field at all: a ' +
+          'single-package repo whose budget ran out before its one suite has an ' +
+          'empty `test[]` and no `testScope`, and only its `note` says so — read ' +
+          'the note before calling the dimension finished. That shape cannot be ' +
+          'continued (a continuation has no recorded scope to read, and answers ' +
+          '"ended before its test phase" without running anything): report the ' +
+          'dimension UNFINISHED and do not spend a continuation on it. A resumed ' +
+          'call skips install and build and ' +
+          'runs only what is left, merging into the SAME report file. Same ' +
+          `\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`, and at most ` +
+          `${MAX_RESUME_CALLS} continuations — then report what the run has:`,
+        '',
+        '```bash',
+        `"\${QWEN_CODE_CLI:-qwen}" review build-test \\`,
+        `  --plan ${resolve(opts.planPath)} \\`,
+        `  --worktree ${resolve(buildTree)} \\`,
+        `  --out ${resolve(dirname(opts.planPath), outName)} \\`,
+        '  --resume',
         '```',
       );
     }
@@ -1632,7 +1662,7 @@ export function buildRoleBrief(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
-          'different claims. Give this call `timeout: 600000` too — besides the revert ' +
+          `different claims. Give this call \`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\` too — besides the revert ` +
           'probe it runs up to 8 single-statement deletion mutants and up to 6 per-hunk ' +
           'reverse-apply probes, each a suite run, and it budgets itself to finish inside ' +
           'that ceiling:',
