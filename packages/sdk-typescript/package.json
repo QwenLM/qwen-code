@@ -45,7 +45,7 @@
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src test",
     "lint:fix": "eslint src test --fix",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test-fence.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build && npm run bundle:cli",
     "prepack": "npm run build && npm run bundle:cli"
