@@ -129,6 +129,7 @@ describe('WorkflowRunner', () => {
       productionHandle.runId,
       emitter,
       'dispatch-1',
+      production.registry.get(productionHandle.runId),
     );
 
     const injected = configWithRegistry();
@@ -293,6 +294,39 @@ describe('WorkflowRunner', () => {
 
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledTimes(2);
     expect(logWorkflowRunMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('records caller-aborted dispatches as cancelled', async () => {
+    const { config, registry } = configWithRegistry();
+    const caller = new AbortController();
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: caller.signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+
+    caller.abort();
+    rejectDispatch?.(new Error('Request was aborted'));
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.dispatches).toEqual([
+      expect.objectContaining({ status: 'cancelled' }),
+    ]);
+    expect(registry.get(handle.runId)?.dispatches[0]).not.toHaveProperty(
+      'error',
+    );
+    expect(registry.get(handle.runId)?.events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'dispatch-failed' }),
+      ]),
+    );
   });
 
   it('keeps background runs alive after the caller turn ends', async () => {
@@ -748,6 +782,56 @@ describe('WorkflowRunner', () => {
     }
 
     expect(registry.get(runId)?.result).toBe('original');
+  });
+
+  it('ignores late dispatch callbacks from a prior retry entry', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    let rejectOriginal: ((error: Error) => void) | undefined;
+    const original = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("original"); throw new Error("original failed")',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectOriginal = reject;
+        }),
+    });
+    await expect(original.completion).resolves.toMatchObject({ ok: false });
+
+    let resolveRetry: ((value: string) => void) | undefined;
+    const retry = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("retry")',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveRetry = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(resolveRetry).toBeDefined());
+
+    rejectOriginal?.(new Error('aborted by old controller'));
+    resolveRetry?.('done');
+    await expect(retry.completion).resolves.toMatchObject({ ok: true });
+
+    expect(registry.get(runId)?.dispatches).toEqual([
+      expect.objectContaining({ status: 'completed' }),
+    ]);
+    expect(registry.get(runId)?.events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'dispatch-failed',
+          error: 'aborted by old controller',
+        }),
+      ]),
+    );
   });
 
   it('classifies a background failure after caller abort as failed', async () => {

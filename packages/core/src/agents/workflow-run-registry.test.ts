@@ -107,6 +107,26 @@ describe('WorkflowRunRegistry', () => {
     });
   });
 
+  it('ignores approval events from a replaced run entry', () => {
+    const r = new WorkflowRunRegistry();
+    r.setApprovalChangeCallback(() => {});
+    const original = r.register(reg('wf_replaced_approval'));
+    const emitter = new AgentEventEmitter();
+    const cleanup = r.bridgeApprovalEvents(
+      original.runId,
+      emitter,
+      undefined,
+      original,
+    );
+    r.complete(original.runId, 'done', 1_700_000_000_200);
+    const replacement = r.register(reg(original.runId));
+
+    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, approvalEvent());
+    cleanup();
+
+    expect(replacement.pendingApprovals).toEqual([]);
+  });
+
   it('parks a workflow-agent approval and resolves it exactly once', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_approval'));

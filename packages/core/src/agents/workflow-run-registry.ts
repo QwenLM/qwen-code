@@ -602,10 +602,14 @@ export class WorkflowRunRegistry {
     runId: string,
     emitter: AgentEventEmitter,
     dispatchId?: string,
+    expectedEntry?: WorkflowTask,
   ): () => void {
     const ownedApprovalIds = new Set<string>();
     const seenSources = new Set<string>();
+    const isCurrentEntry = () =>
+      expectedEntry === undefined || this.entries.get(runId) === expectedEntry;
     const onWaiting = (event: AgentApprovalRequestEvent) => {
+      if (!isCurrentEntry()) return;
       if (dispatchId) {
         const dispatch = this.entries
           .get(runId)
@@ -626,6 +630,7 @@ export class WorkflowRunRegistry {
       ownedApprovalIds.add(parked);
     };
     const onResult = (event: AgentToolResultEvent) => {
+      if (!isCurrentEntry()) return;
       this.clearPendingApproval(
         runId,
         event.subagentId,
@@ -638,6 +643,7 @@ export class WorkflowRunRegistry {
     return () => {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
       emitter.off(AgentEventType.TOOL_RESULT, onResult);
+      if (!isCurrentEntry()) return;
       this.rejectPendingApprovals(runId, (approval) =>
         ownedApprovalIds.has(approval.approvalId),
       );
@@ -919,13 +925,14 @@ export class WorkflowRunRegistry {
     dispatchId: string,
     error?: string,
     at = Date.now(),
+    cancelRequested = false,
   ): void {
     const entry = this.entries.get(runId);
     const dispatch = entry?.dispatches.find(({ id }) => id === dispatchId);
     if (!entry || !dispatch || dispatch.endedAt !== undefined) return;
     const shouldRecordEvent = isActiveWorkflowStatus(entry.status);
     dispatch.status =
-      entry.status === 'cancelled'
+      entry.status === 'cancelled' || cancelRequested
         ? 'cancelled'
         : error !== undefined
           ? 'failed'
@@ -933,7 +940,7 @@ export class WorkflowRunRegistry {
             ? 'cached'
             : 'completed';
     dispatch.endedAt = at;
-    if (error !== undefined)
+    if (error !== undefined && dispatch.status !== 'cancelled')
       dispatch.error = stripAnsiAndControl(error).slice(0, 4_096);
     if (!shouldRecordEvent) {
       this.emitStatusChange(entry);

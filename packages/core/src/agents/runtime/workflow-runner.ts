@@ -105,10 +105,14 @@ export class WorkflowRunner {
       throw new Error('Background workflow start was cancelled.');
     }
     const callerWasAbortedBeforeStart = options.signal.aborted;
+    const registry = config.getWorkflowRunRegistry?.();
+    let entry: WorkflowTask | undefined;
+    const isCurrentEntry = (): boolean =>
+      registry === undefined ||
+      (entry !== undefined && registry.get(runId) === entry);
     const controller = runInBackground
       ? createAbortController()
       : createChildAbortController(options.signal);
-    const registry = config.getWorkflowRunRegistry?.();
     const dispatch =
       options.dispatch ??
       createProductionDispatch(
@@ -117,11 +121,17 @@ export class WorkflowRunner {
         (outputTokens) => budget.recordSpent(outputTokens),
         registry
           ? (emitter, dispatchId) =>
-              registry.bridgeApprovalEvents(runId, emitter, dispatchId)
+              isCurrentEntry()
+                ? registry.bridgeApprovalEvents(
+                    runId,
+                    emitter,
+                    dispatchId,
+                    entry,
+                  )
+                : () => undefined
           : undefined,
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
-    let entry: WorkflowTask | undefined;
     try {
       entry = registry?.register({
         runId,
@@ -148,7 +158,7 @@ export class WorkflowRunner {
       throw error;
     }
     const emitUpdate = (): void => {
-      if (!entry || !options.onUpdate) return;
+      if (!entry || !options.onUpdate || !isCurrentEntry()) return;
       try {
         options.onUpdate(entry);
       } catch {
@@ -157,34 +167,50 @@ export class WorkflowRunner {
     };
     const emitter: WorkflowOrchestratorEmitter = {
       phaseStarted: (title) => {
+        if (!isCurrentEntry()) return;
         registry?.onPhaseStarted(runId, title);
         emitUpdate();
       },
       agentDispatched: () => {
+        if (!isCurrentEntry()) return;
         registry?.onAgentDispatched(runId);
         emitUpdate();
       },
       agentCompleted: () => {
+        if (!isCurrentEntry()) return;
         // No emitUpdate: budgetUpdated fires right after and renders both
         // updates together (avoids 2x TUI redraws per agent).
         registry?.onAgentCompleted(runId);
       },
       dispatchQueued: (event) => {
+        if (!isCurrentEntry()) return;
         registry?.onDispatchQueued(runId, event);
         emitUpdate();
       },
       dispatchStarted: (dispatchId, startedAt) => {
+        if (!isCurrentEntry()) return;
         registry?.onDispatchStarted(runId, dispatchId, startedAt);
         emitUpdate();
       },
       dispatchSettled: (dispatchId, error, endedAt) => {
-        registry?.onDispatchSettled(runId, dispatchId, error, endedAt);
+        if (!isCurrentEntry()) return;
+        registry?.onDispatchSettled(
+          runId,
+          dispatchId,
+          error,
+          endedAt,
+          !runInBackground && options.signal.aborted,
+        );
         emitUpdate();
       },
       // The registry records this without firing a status update, avoiding a
       // TUI redraw per line while retaining the real replay timestamp.
-      logAppended: (line) => registry?.onLogAppended(runId, line),
+      logAppended: (line) => {
+        if (!isCurrentEntry()) return;
+        registry?.onLogAppended(runId, line);
+      },
       budgetUpdated: (spent, total) => {
+        if (!isCurrentEntry()) return;
         registry?.onBudgetUpdated(runId, spent, total);
         emitUpdate();
       },
@@ -193,7 +219,10 @@ export class WorkflowRunner {
     const scheduler = new WorkflowDispatchScheduler(
       resolveConcurrencyLimit(),
       controller.signal,
-      ({ state }) => registry?.onDispatchStateChange(runId, state),
+      ({ state }) => {
+        if (!isCurrentEntry()) return;
+        registry?.onDispatchStateChange(runId, state);
+      },
     );
 
     const handle: WorkflowRunHandle = new WorkflowRunHandle(
