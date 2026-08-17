@@ -554,7 +554,13 @@ jobs:
                   # conditional relies on evaluation order this must not bet on.
                   if [[ "${BASH_REMATCH[1]}" == "${TAKEOVER_COMMAND}" ]]; then
                     CMD='add'
-                    TAKEOVER_FROM="${BASH_REMATCH[2]}"
+                    # 10# canonicalizes the capture to decimal: the value ends
+                    # up in bare-context bash arithmetic downstream (the
+                    # toggle's remainder, the read-site clamps' -ge), where a
+                    # zero-padded spelling is octal — '08'/'09' even error
+                    # outright and drop the seed note. '00' lands on '0', the
+                    # explicit no-seed spelling.
+                    TAKEOVER_FROM="$((10#${BASH_REMATCH[2]}))"
                   fi
                 fi
                 # Re-arm shares the takeover command's authorization exactly:
@@ -2040,7 +2046,18 @@ jobs:
               # a PR that exhausted its rounds continues under management —
               # no label churn needed. The watermark is untouched: feedback
               # already addressed is never replayed.
-              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window%s; management continues.%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口%s，托管继续。%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${REARM_FRESH_CLAUSE}" "${FROM_NOTE_REARM}" "${REARM_FRESH_CLAUSE_ZH}" "${FROM_NOTE_REARM_ZH}" "${FROM_MARKER}")"
+              # Body built ONCE so the retry posts byte-identical text.
+              # Same one-retry shape as the engage post below — the seed
+              # marker's only copy rides in this body too — but the final
+              # fallback is LOUD: nothing heals a missing re-arm (the scan
+              # heals only engage-less PRs, and the pre-existing engage ack
+              # suppresses the dedup), and a 're-armed' claim plus the
+              # stale-escalation cleanup must not follow a window reset that
+              # never landed (R7-7).
+              REARM_BODY="$(printf '🔄 Takeover re-armed: the round counter starts a fresh window%s; management continues.%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口%s，托管继续。%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${REARM_FRESH_CLAUSE}" "${FROM_NOTE_REARM}" "${REARM_FRESH_CLAUSE_ZH}" "${FROM_NOTE_REARM_ZH}" "${FROM_MARKER}")"
+              gh pr comment "${PR}" --repo "${REPO}" --body "${REARM_BODY}" \
+                || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body "${REARM_BODY}"; } \
+                || { echo "::error::re-arm ack comment failed on #${PR} after one retry — the round window was NOT reset and no seed landed; re-run the command"; exit 1; }
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
               # Management resumed — the escalation label is stale. 404 is
               # the common case (the PR was never paused).

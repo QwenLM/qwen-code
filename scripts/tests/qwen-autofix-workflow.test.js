@@ -4094,6 +4094,28 @@ describe('qwen-autofix workflow', () => {
       '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 12 -->',
     );
     expect(transientAckFailure.log).not.toContain('::warning::');
+    // A TRANSIENT re-arm ack failure gets the same one-retry shape — the
+    // seed marker's only copy rides in the re-arm body too, and nothing
+    // heals a missing re-arm (the scan heals only engage-less PRs, and the
+    // pre-existing engage ack suppresses the dedup), so a single 5xx must
+    // not drop the window reset AND the seed. The fallback stays loud
+    // (there is no heal path to warn-and-lean on): a double failure aborts
+    // before the 're-armed' claim and the stale-escalation cleanup.
+    const transientRearmFailure = runToggle({
+      cmd: 'add',
+      labels: ['autofix/takeover'],
+      cmdFrom: '7',
+      commentFails: 'HTTP 502',
+    });
+    expect(transientRearmFailure.done).toBe(true);
+    expect(
+      transientRearmFailure.writes.match(/^COMMENT-ATTEMPT$/gm) ?? [],
+    ).toHaveLength(2);
+    expect(transientRearmFailure.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 7 -->',
+    );
+    expect(transientRearmFailure.log).toContain('re-armed');
+    expect(transientRearmFailure.log).not.toContain('::error::');
     // The release DELETE tolerates the 404 race (a concurrent removal
     // already reached the end state): the release ack still posts, no
     // warning.
@@ -5506,6 +5528,13 @@ exit 1
     // the bare command rather than being rejected, so a maintainer who types
     // it gets management, not silence.
     expect(seedOf('@qwen-code /takeover from 0')).toBe('add|0');
+    // Zero-padded spellings canonicalize to decimal at capture: the seed
+    // reaches bare-context bash arithmetic downstream, where a leading zero
+    // means octal — '08'/'09' error outright and silently drop the seed
+    // note — and '00' lands on the explicit no-seed spelling '0'.
+    expect(seedOf('@qwen-code /takeover from 08')).toBe('add|8');
+    expect(seedOf('@qwen-code /takeover from 01')).toBe('add|1');
+    expect(seedOf('@qwen-code /takeover from 00')).toBe('add|0');
     // The unparameterized forms are untouched.
     expect(seedOf('@qwen-code /takeover')).toBe('add|');
     expect(seedOf('@qwen-code /takeover stop')).toBe('remove|');
@@ -5528,6 +5557,17 @@ exit 1
     ]) {
       expect(seedOf(body)).toBe('|');
     }
+    // The captured value crosses two job-boundary wires no behavioral
+    // harness exercises — every replay injects CMD_FROM directly, starting
+    // inside a single job — so pin them verbatim like the suite's other
+    // wires: a deleted or typo'd wire would silently degrade 'from N' to a
+    // bare '/takeover' with the whole suite still green.
+    expect(workflow).toContain(
+      "takeover_from: '${{ steps.decide.outputs.takeover_from }}'",
+    );
+    expect(workflow).toContain(
+      "CMD_FROM: '${{ needs.route.outputs.takeover_from }}'",
+    );
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
@@ -8030,6 +8070,16 @@ exit 1
     expect(clampedSeed[0]).not.toContain('from 9');
     expect(clampedSeed[1]).toContain('从第 12 轮起算');
     expect(clampedSeed[1]).toContain('收敛为 9');
+    // The seed crosses two more job-boundary wires no behavioral harness
+    // exercises — the cause replay above injects LIVE_ROUND_START and the
+    // digest replay injects ROUND_START, both starting inside a single job
+    // — so pin them verbatim like the suite's other wires.
+    expect(workflow).toContain(
+      'echo "round_start=${LIVE_ROUND_START}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "ROUND_START: '${{ steps.prepare.outputs.round_start }}'",
+    );
 
     // The batch-budget sentence must describe the policy actually in force:
     // the OVER_BUDGET census only builds spans in round-brake territory, so
