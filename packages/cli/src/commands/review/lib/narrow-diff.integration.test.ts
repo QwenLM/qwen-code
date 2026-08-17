@@ -224,7 +224,11 @@ describe('narrowToDelta on real-git captures', () => {
     // invalid path byte onto U+FFFD, which can collide with a legitimate
     // U+FFFD path the full capture carries and publish an unchanged file's
     // hunks. Fatal-decoding the delta refuses the shape instead; the round
-    // keeps the full range.
+    // keeps the full range. The full side carries the collision's other
+    // half — a legitimate U+FFFD path (bytes EF BF BD) whose hunk overlaps
+    // the delta's range — so a lossily decoded delta would pass the path
+    // guard and publish: the assertion answers null only while the fatal
+    // guard stands.
     const delta = Buffer.concat([
       Buffer.from('diff --git a/f'),
       Buffer.from([0xff]),
@@ -232,10 +236,18 @@ describe('narrowToDelta on real-git captures', () => {
       Buffer.from([0xff]),
       Buffer.from('\n@@ -1,1 +1,1 @@\n-x\n+y\n'),
     ]);
-    const full = Buffer.from(
-      'diff --git a/g.ts b/g.ts\n--- a/g.ts\n+++ b/g.ts\n@@ -1,1 +1,1 @@\n-a\n+b\n',
-      'utf8',
-    );
+    const fffd = Buffer.from([0xef, 0xbf, 0xbd]);
+    const full = Buffer.concat([
+      Buffer.from('diff --git a/f'),
+      fffd,
+      Buffer.from(' b/f'),
+      fffd,
+      Buffer.from('\n--- a/f'),
+      fffd,
+      Buffer.from('\n+++ b/f'),
+      fffd,
+      Buffer.from('\n@@ -1,1 +1,1 @@\n-a\n+b\n'),
+    ]);
     expect(narrowToDelta(full, delta)).toBeNull();
   });
 
@@ -457,6 +469,7 @@ describe('narrowToDelta on real-git captures', () => {
       null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('new mode 100755');
+    expect(narrowed).toContain('+M15-EDIT');
     expect(narrowed).toContain('+T4-EDIT');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
@@ -503,6 +516,7 @@ describe('narrowToDelta on real-git captures', () => {
       null;
     expect(narrowed).not.toBeNull();
     expect(narrowed).toContain('rename to rn-new.ts');
+    expect(narrowed).toContain('+O15-EDIT');
     expect(narrowed).toContain('+T4-EDIT');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
@@ -735,6 +749,80 @@ describe('narrowToDelta on real-git captures', () => {
     expect(narrowed).toContain('--- a/f.ts');
     expect(narrowed).toContain('-F1');
     expect(narrowed).toContain('+G7-EDIT');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries the no-trailing-newline marker of a kept hunk', () => {
+    // Both rounds edit the file's last line, which ends without a trailing
+    // newline, so the full hunk — and the narrowed emission of it — carries
+    // git's `\ No newline at end of file` marker. `everyLineIsDisplayed` is
+    // membership-only and stays green when the marker drops or relocates (a
+    // trim, or a range off-by-one at the hunk's last line); pin its presence
+    // and position directly.
+    const base = commit('no-newline base', {
+      'nl.ts': 'N1\nN2',
+      'nl-keep.ts': lines(8, 'K'),
+    });
+    const anchor = commit('no-newline round 1', {
+      'nl.ts': 'N1\nN2-EDIT',
+      'nl-keep.ts': lines(8, 'K').replace('K2\n', 'K2-EDIT\n'),
+    });
+    commit('no-newline round 2', {
+      'nl.ts': 'N1\nN2-EDIT2',
+      'nl-keep.ts': lines(8, 'K').replace('K2\n', 'K2-EDIT\n'),
+    });
+
+    const full = capture(base, 'HEAD');
+    const narrowed =
+      narrowToDelta(
+        captureBytes(base, 'HEAD'),
+        captureBytes(anchor, 'HEAD'),
+      )?.toString('utf8') ?? null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('nl.ts');
+    expect(narrowed).not.toContain('nl-keep.ts');
+    expect(narrowed).toContain('+N2-EDIT2');
+    // Presence AND position: the marker follows the hunk's last line.
+    expect(narrowed).toContain('+N2-EDIT2\n\\ No newline at end of file');
+    expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
+  });
+
+  it('carries a binary-file delta section the full capture also holds', () => {
+    // Round 1 edits a text file; round 2 replaces a NUL-carrying blob. The
+    // delta's binary section names no range — the empty-range list reads as
+    // "emit the section whole", the hunk-less treatment — and the full
+    // capture renders the same change as a binary section. A battery that
+    // never commits binary content cannot see a regression that skips
+    // binary sections or mis-keys them.
+    writeFileSync(
+      join(repo, 'bin.dat'),
+      Buffer.from([0x47, 0x49, 0x00, 0x01, 0xff, 0x00]),
+    );
+    const base = commit('binary base', { 'bin-text.ts': lines(8, 'T') });
+    const anchor = commit('binary round 1', {
+      'bin-text.ts': lines(8, 'T').replace('T3\n', 'T3-EDIT\n'),
+    });
+    writeFileSync(
+      join(repo, 'bin.dat'),
+      Buffer.from([0x47, 0x49, 0x00, 0x02, 0xff, 0x00, 0x03]),
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'binary round 2', '--no-verify');
+
+    const full = capture(base, 'HEAD');
+    const deltaBytes = captureBytes(anchor, 'HEAD');
+    // The scenario's premise: both captures render the blob change as a
+    // binary section with no hunks.
+    expect(full).toContain('Binary files a/bin.dat and b/bin.dat differ');
+    expect(deltaBytes.toString('utf8')).toContain(
+      'Binary files a/bin.dat and b/bin.dat differ',
+    );
+    const narrowed =
+      narrowToDelta(captureBytes(base, 'HEAD'), deltaBytes)?.toString('utf8') ??
+      null;
+    expect(narrowed).not.toBeNull();
+    expect(narrowed).toContain('Binary files a/bin.dat and b/bin.dat differ');
+    expect(narrowed).not.toContain('bin-text.ts');
     expect(everyLineIsDisplayed(narrowed!, full)).toBe(true);
   });
 
