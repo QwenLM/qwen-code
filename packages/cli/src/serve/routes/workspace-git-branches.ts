@@ -24,8 +24,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveContainedCwd,
-  resolveContainedCwdOrFail,
+  resolveSessionManagedGitCwd,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
@@ -460,9 +459,14 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.get('/workspaces/:workspace/git/branches', (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
+    const cwd = resolveSessionManagedGitCwd(req, runtime);
+    if (cwd === null) {
+      res.status(400).json({ error: 'invalid_cwd' });
+      return;
+    }
     void handleBranches(
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      cwd,
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/branches',
       () => runtime.generationGuard?.assertOpen(),
@@ -484,7 +488,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      const cwd = resolveSessionManagedGitCwd(req, runtime);
       if (cwd === null) {
         res.status(400).json({
           error: 'invalid_cwd',
@@ -517,7 +521,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      const cwd = resolveSessionManagedGitCwd(req, runtime);
       if (cwd === null) {
         res.status(400).json({
           error: 'invalid_cwd',
@@ -550,7 +554,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      const cwd = resolveSessionManagedGitCwd(req, runtime);
       if (cwd === null) {
         res.status(400).json({
           error: 'invalid_cwd',
@@ -583,7 +587,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      const cwd = resolveSessionManagedGitCwd(req, runtime);
       if (cwd === null) {
         res.status(400).json({
           error: 'invalid_cwd',
@@ -616,7 +620,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         });
         return;
       }
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      const cwd = resolveSessionManagedGitCwd(req, runtime);
       if (cwd === null) {
         res.status(400).json({
           error: 'invalid_cwd',

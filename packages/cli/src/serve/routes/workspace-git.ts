@@ -13,9 +13,15 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
+import {
+  isBranchWorktreeCreationSupported,
+  resolveBranchWorktreeBaseCheckout,
+} from '../branch-worktree-preparation.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveContainedCwd,
+  resolveSessionManagedGitCwd,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -88,7 +94,36 @@ export function registerWorkspaceQualifiedGitRoutes(
       deps.sendBridgeError(res, err, { route });
       return;
     }
-    const gitCwd = resolveContainedCwd(req, runtime.workspaceCwd);
+    const gitCwd = resolveSessionManagedGitCwd(req, runtime);
+    if (gitCwd === null) {
+      res.status(400).json({
+        error: 'invalid_cwd',
+        message: 'The supplied cwd is not owned by this session',
+      });
+      return;
+    }
+    let worktreeSupported: boolean | undefined;
+    const parsedSessionId = parseCallerSuppliedSessionId(
+      req.query['sessionId'],
+    );
+    if (parsedSessionId.kind === 'valid') {
+      const sessionId = parsedSessionId.sessionId;
+      try {
+        const base = await resolveBranchWorktreeBaseCheckout({
+          workspaceCwd: runtime.workspaceCwd,
+          sessionId,
+          snapshot: runtime.bridge.getSessionExecutionSnapshot(sessionId),
+          sidecarPath:
+            createWorkspaceRuntimeSessionService(
+              runtime,
+            ).getWorktreeSessionPath(sessionId),
+        });
+        worktreeSupported =
+          base !== null && (await isBranchWorktreeCreationSupported(base));
+      } catch {
+        worktreeSupported = false;
+      }
+    }
     try {
       if (gitCwd !== runtime.workspaceCwd) {
         // Worktree cwd: call getGitWorkingTreeStatus directly to avoid
@@ -113,8 +148,18 @@ export function registerWorkspaceQualifiedGitRoutes(
                 stashCount: status.stashCount,
                 ...(status.operation ? { operation: status.operation } : {}),
                 computedAt: Date.now(),
+                ...(worktreeSupported !== undefined
+                  ? { worktreeSupported }
+                  : {}),
               }
-            : { v: 2, workspaceCwd: gitCwd, branch: null },
+            : {
+                v: 2,
+                workspaceCwd: gitCwd,
+                branch: null,
+                ...(worktreeSupported !== undefined
+                  ? { worktreeSupported }
+                  : {}),
+              },
         );
       } else {
         const wait = req.query['wait'] === '1';
@@ -122,7 +167,10 @@ export function registerWorkspaceQualifiedGitRoutes(
           wait,
         });
         runtime.generationGuard?.assertOpen();
-        res.status(200).json(status);
+        res.status(200).json({
+          ...status,
+          ...(worktreeSupported !== undefined ? { worktreeSupported } : {}),
+        });
       }
     } catch (err) {
       deps.sendBridgeError(res, err, { route });

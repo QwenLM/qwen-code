@@ -6,8 +6,11 @@
 
 import * as fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { Request, Response } from 'express';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
+import { parseCallerSuppliedSessionId } from '../config/session-id.js';
+import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -342,4 +345,148 @@ export function resolveContainedCwdOrFail(
     // Path doesn't exist or can't be resolved.
   }
   return null;
+}
+
+function pathIsWithin(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+  );
+}
+
+function resolveGitCommonDir(cwd: string): string | null {
+  try {
+    const raw = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 30_000,
+    }).trim();
+    return fs.realpathSync(path.resolve(cwd, raw));
+  } catch {
+    return null;
+  }
+}
+
+function markerIsOwnedBy(markerPath: string, sessionId: string): boolean {
+  let fd: number | undefined;
+  try {
+    const pathStat = fs.lstatSync(markerPath);
+    if (!pathStat.isFile() || pathStat.nlink !== 1) return false;
+    fd = fs.openSync(
+      markerPath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+    const openedStat = fs.fstatSync(fd);
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1 ||
+      openedStat.dev !== pathStat.dev ||
+      openedStat.ino !== pathStat.ino
+    ) {
+      return false;
+    }
+    const owner = fs.readFileSync(fd, 'utf8').trim();
+    const finalStat = fs.lstatSync(markerPath);
+    return (
+      finalStat.isFile() &&
+      finalStat.nlink === 1 &&
+      finalStat.dev === openedStat.dev &&
+      finalStat.ino === openedStat.ino &&
+      owner === sessionId
+    );
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+export function resolveSessionManagedGitCwd(
+  req: Request,
+  runtime: WorkspaceRuntime,
+): string | null {
+  const rawCwd = req.query['cwd'];
+  if (rawCwd === undefined) return runtime.workspaceCwd;
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) return null;
+
+  let requested: string;
+  let workspace: string;
+  try {
+    requested = fs.realpathSync(path.resolve(rawCwd));
+    workspace = fs.realpathSync(runtime.workspaceCwd);
+  } catch {
+    return null;
+  }
+
+  let repoTop: string | undefined;
+  try {
+    repoTop = fs.realpathSync(
+      execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: workspace,
+        encoding: 'utf8',
+        timeout: 30_000,
+      }).trim(),
+    );
+  } catch {
+    return pathIsWithin(requested, workspace) ? requested : null;
+  }
+  const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
+  if (
+    pathIsWithin(requested, workspace) &&
+    !pathIsWithin(requested, managedRoot)
+  ) {
+    return requested;
+  }
+  if (!pathIsWithin(requested, managedRoot)) return null;
+  const workspaceCommonDir = resolveGitCommonDir(workspace);
+  const requestedCommonDir = resolveGitCommonDir(requested);
+  if (
+    workspaceCommonDir === null ||
+    requestedCommonDir === null ||
+    requestedCommonDir !== workspaceCommonDir
+  ) {
+    return null;
+  }
+
+  const parsedSessionId = parseCallerSuppliedSessionId(req.query['sessionId']);
+  if (parsedSessionId.kind !== 'valid') return null;
+  const sessionId = parsedSessionId.sessionId;
+  try {
+    const snapshot = runtime.bridge.getSessionExecutionSnapshot(sessionId);
+    if (
+      fs.realpathSync(snapshot.workspaceCwd) !== workspace ||
+      !snapshot.worktree
+    ) {
+      return null;
+    }
+    const worktreeRoot = fs.realpathSync(snapshot.worktree.path);
+    if (
+      path.dirname(worktreeRoot) !== managedRoot ||
+      !pathIsWithin(requested, worktreeRoot)
+    ) {
+      return null;
+    }
+    const sidecarPath =
+      createWorkspaceRuntimeSessionService(runtime).getWorktreeSessionPath(
+        sessionId,
+      );
+    const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    if (
+      typeof sidecar['worktreePath'] !== 'string' ||
+      fs.realpathSync(sidecar['worktreePath']) !== worktreeRoot
+    ) {
+      return null;
+    }
+    const markerPath = path.join(worktreeRoot, '.qwen-session');
+    if (!markerIsOwnedBy(markerPath, sessionId)) {
+      return null;
+    }
+    return requested;
+  } catch {
+    return null;
+  }
 }

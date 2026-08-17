@@ -427,7 +427,31 @@ describe('persistStartupWorktreeSidecar', () => {
     );
   });
 
-  it('keeps the marker when the owner runtime is still active', async () => {
+  it('repairs the common-dir exclude when re-attaching the same owner', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('same-owner');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    const markerPath = path.join(setup.context.worktreePath, '.qwen-session');
+    await fs.writeFile(markerPath, 'same-session', 'utf8');
+    await fs.chmod(markerPath, 0o400);
+
+    await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'same-session'),
+      { ...setup.context, wasReattached: true },
+    );
+
+    expect(
+      await fs.readFile(path.join(tempRepo, '.git', 'info', 'exclude'), 'utf8'),
+    ).toContain('/.qwen-session');
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'same-session',
+    );
+  });
+
+  it('rejects adoption when the owner runtime is still active', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
 
@@ -446,17 +470,19 @@ describe('persistStartupWorktreeSidecar', () => {
       },
     );
 
-    await persistStartupWorktreeSidecar(
-      makeConfig(setup.context.worktreePath, 'new-session'),
-      { ...setup.context, wasReattached: true },
-    );
+    await expect(
+      persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      ),
+    ).rejects.toThrow('Worktree is owned by active session old-session');
 
     expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
       'old-session',
     );
   });
 
-  it('finds an active owner under a repo-subdir relative runtime dir', async () => {
+  it('rejects an active owner under a repo-subdir relative runtime dir', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
     const packageDir = path.join(tempRepo, 'packages', 'app');
@@ -477,10 +503,12 @@ describe('persistStartupWorktreeSidecar', () => {
     );
 
     Storage.setRuntimeBaseDir('.qwen', setup.context.worktreePath);
-    await persistStartupWorktreeSidecar(
-      makeConfig(setup.context.worktreePath, 'new-session'),
-      { ...setup.context, wasReattached: true },
-    );
+    await expect(
+      persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      ),
+    ).rejects.toThrow('Worktree is owned by active session old-session');
 
     expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
       'old-session',

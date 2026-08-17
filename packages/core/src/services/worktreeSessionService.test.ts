@@ -11,7 +11,9 @@ import * as path from 'node:path';
 import {
   readWorktreeSession,
   writeWorktreeSession,
+  createWorktreeSession,
   clearWorktreeSession,
+  clearWorktreeSessionDurable,
   restoreWorktreeContext,
   isSessionRuntimeActive,
   type WorktreeSession,
@@ -133,6 +135,17 @@ describe('writeWorktreeSession', () => {
   });
 });
 
+describe('createWorktreeSession', () => {
+  it('exclusively creates a durable sidecar', async () => {
+    await createWorktreeSession(filePath, sample);
+    expect(await readWorktreeSession(filePath)).toEqual(sample);
+
+    await expect(createWorktreeSession(filePath, sample)).rejects.toMatchObject(
+      { code: 'EEXIST' },
+    );
+  });
+});
+
 describe('clearWorktreeSession', () => {
   it('deletes the file', async () => {
     await writeWorktreeSession(filePath, sample);
@@ -142,6 +155,19 @@ describe('clearWorktreeSession', () => {
 
   it('is a no-op when file does not exist', async () => {
     await expect(clearWorktreeSession(filePath)).resolves.not.toThrow();
+  });
+});
+
+describe('clearWorktreeSessionDurable', () => {
+  it('deletes the sidecar idempotently', async () => {
+    await createWorktreeSession(filePath, sample);
+    await clearWorktreeSessionDurable(filePath);
+    await expect(clearWorktreeSessionDurable(filePath)).resolves.not.toThrow();
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('is idempotent when the parent directory is absent', async () => {
+    await expect(clearWorktreeSessionDurable(filePath)).resolves.not.toThrow();
   });
 });
 

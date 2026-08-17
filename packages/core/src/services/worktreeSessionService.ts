@@ -133,6 +133,40 @@ export async function writeWorktreeSession(
   await atomicWriteJSON(filePath, session);
 }
 
+async function fsyncParentDirectory(filePath: string): Promise<void> {
+  try {
+    const handle = await fs.open(path.dirname(filePath), 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code !== 'ENOENT' &&
+      process.platform !== 'win32'
+    ) {
+      throw error;
+    }
+  }
+}
+
+/** Creates a new sidecar without replacing an existing session binding. */
+export async function createWorktreeSession(
+  filePath: string,
+  session: WorktreeSession,
+): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const handle = await fs.open(filePath, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fsyncParentDirectory(filePath);
+}
+
 export async function clearWorktreeSession(filePath: string): Promise<void> {
   try {
     await fs.unlink(filePath);
@@ -140,6 +174,13 @@ export async function clearWorktreeSession(filePath: string): Promise<void> {
     if (isNodeError(error) && error.code === 'ENOENT') return;
     throw error;
   }
+}
+
+export async function clearWorktreeSessionDurable(
+  filePath: string,
+): Promise<void> {
+  await clearWorktreeSession(filePath);
+  await fsyncParentDirectory(filePath);
 }
 
 export async function isSessionRuntimeActive(

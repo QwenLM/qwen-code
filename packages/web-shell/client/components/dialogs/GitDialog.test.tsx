@@ -92,7 +92,11 @@ async function flush() {
   });
 }
 
-function mount(initialView: 'diff' | 'log' | 'prs' = 'diff', gitCwd?: string) {
+function mount(
+  initialView: 'diff' | 'log' | 'prs' = 'diff',
+  gitCwd?: string,
+  sessionId?: string,
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -102,6 +106,7 @@ function mount(initialView: 'diff' | 'log' | 'prs' = 'diff', gitCwd?: string) {
         <GitDialog
           workspaceCwd="/repo"
           gitCwd={gitCwd}
+          sessionId={sessionId}
           initialView={initialView}
           onClose={vi.fn()}
         />
@@ -171,7 +176,13 @@ describe('GitDialog', () => {
     ).toHaveLength(1);
     expect(historyTab?.getAttribute('aria-selected')).toBe('true');
     expect(panel?.getAttribute('aria-labelledby')).toBe('git-dialog-tab-log');
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
+    expect(workspaceGitLog).toHaveBeenCalledWith(
+      50,
+      0,
+      undefined,
+      undefined,
+      undefined,
+    );
   });
 
   it('supports arrow-key tab navigation', async () => {
@@ -228,10 +239,13 @@ describe('GitDialog', () => {
       entries: [],
       hasMore: false,
     });
-    mount('diff', '/worktrees/feature-x');
+    mount('diff', '/worktrees/feature-x', 'session-worktree');
     await flush();
 
-    expect(workspaceGitDiff).toHaveBeenCalledWith('/worktrees/feature-x');
+    expect(workspaceGitDiff).toHaveBeenCalledWith(
+      '/worktrees/feature-x',
+      'session-worktree',
+    );
 
     const historyTab = document.getElementById('git-dialog-tab-log');
     await act(async () => {
@@ -239,7 +253,13 @@ describe('GitDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/feature-x');
+    expect(workspaceGitLog).toHaveBeenCalledWith(
+      50,
+      0,
+      '/worktrees/feature-x',
+      undefined,
+      'session-worktree',
+    );
   });
 
   it('shows the pull requests tab only when the daemon advertises the capability', async () => {
@@ -406,6 +426,7 @@ describe('GitDialog', () => {
           <GitDialog
             workspaceCwd="/repo"
             gitCwd="/worktrees/wt"
+            sessionId="session-worktree"
             initialView="commit"
             onClose={vi.fn()}
           />
@@ -448,10 +469,12 @@ describe('GitDialog', () => {
       'fix: test commit',
       { all: true },
       '/worktrees/wt',
+      'session-worktree',
     );
     expect(workspaceGitPush).toHaveBeenCalledWith(
       { setUpstream: true },
       '/worktrees/wt',
+      'session-worktree',
     );
   });
 
@@ -696,6 +719,7 @@ describe('GitDialog', () => {
       'fix: commit only',
       { all: true },
       undefined,
+      undefined,
     );
     expect(workspaceGitPush).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('Committed abc1234');
@@ -840,6 +864,7 @@ describe('GitDialog', () => {
         body: undefined,
         base: 'main',
       },
+      undefined,
       undefined,
     );
     expect(document.body.textContent).toContain('#99');

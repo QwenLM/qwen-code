@@ -20,7 +20,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveContainedCwd,
+  resolveSessionManagedGitCwd,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -199,10 +199,15 @@ export function registerWorkspaceQualifiedGitLogRoutes(
   app.get('/workspaces/:workspace/git/log', (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
+    const cwd = resolveSessionManagedGitCwd(req, runtime);
+    if (cwd === null) {
+      res.status(400).json({ error: 'invalid_cwd' });
+      return;
+    }
     void handleLogList(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      cwd,
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/log',
     );
@@ -210,10 +215,15 @@ export function registerWorkspaceQualifiedGitLogRoutes(
   app.get('/workspaces/:workspace/git/log/commit', (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
+    const cwd = resolveSessionManagedGitCwd(req, runtime);
+    if (cwd === null) {
+      res.status(400).json({ error: 'invalid_cwd' });
+      return;
+    }
     void handleCommitDetail(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      cwd,
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/log/commit',
     );

@@ -180,8 +180,8 @@ describe('createDaemonSessionActions', () => {
       session: source,
     });
 
-    const firstBranch = actions.branchSession('First');
-    const secondBranch = actions.branchSession('Second');
+    const firstBranch = actions.branchSession({ name: 'First' });
+    const secondBranch = actions.branchSession({ name: 'Second' });
     await expect(secondBranch).rejects.toMatchObject({
       name: 'InvalidStateError',
     });
@@ -213,7 +213,7 @@ describe('createDaemonSessionActions', () => {
       },
     );
 
-    const pending = actions.branchSession('Late branch');
+    const pending = actions.branchSession({ name: 'Late branch' });
     await actions.clearSession();
     branched.resolve({
       sessionId: 'session-b',
@@ -234,6 +234,36 @@ describe('createDaemonSessionActions', () => {
       'client-b',
     );
   });
+
+  it('detaches a late historical worktree branch response', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const branched = createDeferred<{
+      sessionId: string;
+      displayName: string;
+      clientId: string;
+    }>();
+    source.client.branchSession.mockReturnValueOnce(branched.promise);
+    const { actions } = createActionsHarness({ session: source });
+
+    const pending = actions.branchSession({
+      atRecordId: 'checkpoint-1',
+      worktree: {},
+    });
+    await actions.clearSession();
+    branched.resolve({
+      sessionId: 'session-b',
+      displayName: 'Worktree branch',
+      clientId: 'client-b',
+    });
+
+    await expect(pending).resolves.toMatchObject({ switchStarted: false });
+    await Promise.resolve();
+    expect(source.client.detachSession).toHaveBeenCalledWith(
+      'session-b',
+      'client-b',
+    );
+  });
+
   it('creates from the active session client when the connection matches', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');
@@ -1063,9 +1093,9 @@ describe('createDaemonSessionActions', () => {
     );
     const { actions } = createActionsHarness({ addNotice, session });
 
-    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
-      _alreadyDispatched: true,
-    });
+    await expect(
+      actions.branchSession({ atRecordId: 'a1' }),
+    ).rejects.toMatchObject({ _alreadyDispatched: true });
     expect(addNotice).not.toHaveBeenCalled();
   });
 
@@ -1086,7 +1116,7 @@ describe('createDaemonSessionActions', () => {
 
       let settled = false;
       const branch = actions
-        .branchSession(undefined, 'checkpoint-1')
+        .branchSession({ atRecordId: 'checkpoint-1' })
         .finally(() => {
           settled = true;
         });
@@ -1125,7 +1155,7 @@ describe('createDaemonSessionActions', () => {
       session,
     });
 
-    const branch = actions.branchSession(undefined, 'checkpoint-1');
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
     const newerLoad = actions.loadSession('session-b');
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
 

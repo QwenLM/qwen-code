@@ -77,6 +77,8 @@ function mount(
     onOpenDiff: () => void;
     onOpenCommit: () => void;
     onOpenChange: (open: boolean) => void;
+    gitCwd: string;
+    gitSessionId: string;
   }> = {},
 ): void {
   act(() => {
@@ -86,6 +88,8 @@ function mount(
           open
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
+          gitCwd={overrides.gitCwd}
+          gitSessionId={overrides.gitSessionId}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
         >
@@ -113,6 +117,32 @@ afterEach(() => {
 });
 
 describe('BranchPickerPopover actions', () => {
+  it('binds worktree branch queries to the owning session', async () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/.qwen/worktrees/test',
+      available: true,
+      current: null,
+      local: [],
+      remote: [],
+      tags: [],
+      recent: [],
+    });
+    mount({
+      gitCwd: '/repo/.qwen/worktrees/test',
+      gitSessionId: 'session-1',
+    });
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledWith(
+      '/repo/.qwen/worktrees/test',
+      'session-1',
+    );
+  });
+
   it('wires "View Changes" to onOpenDiff and closes', async () => {
     workspaceGitBranches.mockResolvedValue({
       v: 1,

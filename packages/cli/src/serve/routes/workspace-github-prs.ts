@@ -17,7 +17,7 @@ import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveContainedCwdOrFail,
+  resolveSessionManagedGitCwd,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
@@ -186,7 +186,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       const base = typeof body['base'] === 'string' ? body['base'] : undefined;
       const head = typeof body['head'] === 'string' ? body['head'] : undefined;
 
-      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      const cwd = resolveSessionManagedGitCwd(req, runtime);
       if (cwd === null) {
         res.status(400).json({
           error: 'invalid_cwd',

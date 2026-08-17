@@ -24,13 +24,15 @@
 import * as path from 'node:path';
 import {
   createDebugLogger,
+  createWorktreeSessionMarker,
+  ensureWorktreeSessionMarkerExcluded,
   GitWorktreeService,
   readWorktreeSession,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
   worktreeBranchForSlug,
+  replaceWorktreeSessionMarker,
   writeWorktreeSession,
-  writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
 
@@ -393,14 +395,14 @@ export async function persistStartupWorktreeSidecar(
     overriddenSlug = previous.slug;
   }
 
-  // Best-effort marker write. On re-attach, adopt only when the previous
-  // owner is not a live runtime anymore; otherwise keep the old marker so
-  // two active sessions cannot both remove the same worktree.
-  let shouldWriteMarker = !context.wasReattached;
-  if (context.wasReattached) {
+  if (!context.wasReattached) {
+    await createWorktreeSessionMarker(context.worktreePath, sessionId);
+  } else {
     const owner = await readWorktreeSessionMarker(context.worktreePath);
-    if (owner === null || owner === sessionId) {
-      shouldWriteMarker = true;
+    if (owner === null) {
+      await createWorktreeSessionMarker(context.worktreePath, sessionId);
+    } else if (owner === sessionId) {
+      await ensureWorktreeSessionMarkerExcluded(context.worktreePath);
     } else {
       const ownerActive = await isSessionRuntimeActive(owner, [
         context.repoRoot,
@@ -411,13 +413,15 @@ export async function persistStartupWorktreeSidecar(
         );
         return true;
       });
-      shouldWriteMarker = !ownerActive;
+      if (ownerActive) {
+        throw new Error(`Worktree is owned by active session ${owner}`);
+      }
+      await replaceWorktreeSessionMarker(
+        context.worktreePath,
+        owner,
+        sessionId,
+      );
     }
-  }
-  if (shouldWriteMarker) {
-    await writeWorktreeSessionMarker(context.worktreePath, sessionId).catch(
-      () => {},
-    );
   }
 
   await writeWorktreeSession(sidecarPath, {

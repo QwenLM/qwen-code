@@ -24,7 +24,7 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
-  DaemonBranchSessionResult,
+  DaemonBranchSessionRequest,
   DaemonBranchedSession,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
@@ -1648,7 +1648,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async branchSession(name?: string, atRecordId?: string) {
+    async branchSession(options: DaemonBranchSessionRequest = {}) {
       if (branchInFlight) {
         throw new DOMException(
           'A branch request is already in progress',
@@ -1665,24 +1665,19 @@ export function createDaemonSessionActions({
       const loadGeneration = pendingSessionLoadIdRef.current;
       branchInFlight = true;
       try {
-        const branchRequest: Promise<DaemonBranchSessionResult> =
-          atRecordId === undefined
-            ? session.client.branchSession(
-                sourceSessionId,
-                { name },
-                session.clientId,
-              )
-            : session.client.branchSession(
-                sourceSessionId,
-                { name, atRecordId },
-                session.clientId,
-              );
+        const branchRequest = session.client.branchSession(
+          sourceSessionId,
+          options,
+          session.clientId,
+        );
         const result = await branchRequest;
         const switchStarted =
           sessionRef.current === session &&
           pendingSessionLoadIdRef.current === loadGeneration;
         const restored =
-          atRecordId === undefined
+          !('atRecordId' in options) ||
+          options.atRecordId === undefined ||
+          ('worktree' in options && options.worktree !== undefined)
             ? (result as DaemonBranchedSession)
             : undefined;
         if (switchStarted) {

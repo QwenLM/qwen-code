@@ -43,11 +43,13 @@ function CommitRow({
   entry,
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   now,
 }: {
   entry: DaemonGitLogEntry;
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   now: number;
 }) {
   const { client } = useWorkspace();
@@ -84,7 +86,7 @@ function CommitRow({
       setError(false);
       client
         .workspaceByCwd(workspaceCwd)
-        .workspaceGitCommitDetail(entry.sha, gitCwd)
+        .workspaceGitCommitDetail(entry.sha, gitCwd, gitSessionId)
         .then((result) => {
           if (cancelledRef.current) return;
           setDetail(result);
@@ -210,10 +212,12 @@ function CommitRow({
 export function GitLogContent({
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { client } = useWorkspace();
@@ -239,7 +243,7 @@ export function GitLogContent({
     nextSkipRef.current = 0;
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, 0, gitCwd)
+      .workspaceGitLog(PAGE_SIZE, 0, gitCwd, undefined, gitSessionId)
       .then((result) => {
         if (!cancelled) {
           nextSkipRef.current = result.entries.length;
@@ -255,14 +259,20 @@ export function GitLogContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd]);
+  }, [client, workspaceCwd, gitCwd, gitSessionId]);
 
   const loadMore = useCallback(() => {
     if (!log || loadingMore) return;
     setLoadingMore(true);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current, gitCwd)
+      .workspaceGitLog(
+        PAGE_SIZE,
+        nextSkipRef.current,
+        gitCwd,
+        undefined,
+        gitSessionId,
+      )
       .then((result) => {
         nextSkipRef.current += result.entries.length;
         setLog((prev) => {
@@ -284,7 +294,7 @@ export function GitLogContent({
       .finally(() => {
         setLoadingMore(false);
       });
-  }, [client, workspaceCwd, gitCwd, log, loadingMore]);
+  }, [client, workspaceCwd, gitCwd, gitSessionId, log, loadingMore]);
 
   const subtitle = log?.available
     ? t('gitLog.subtitle', { count: log.entries.length })
@@ -313,6 +323,7 @@ export function GitLogContent({
               entry={entry}
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
+              gitSessionId={gitSessionId}
               now={now}
             />
           ))}

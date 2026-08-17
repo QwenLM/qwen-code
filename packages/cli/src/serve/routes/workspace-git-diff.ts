@@ -18,7 +18,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveContainedCwd,
+  resolveSessionManagedGitCwd,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -220,9 +220,14 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
   app.get('/workspaces/:workspace/git/diff', (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
+    const cwd = resolveSessionManagedGitCwd(req, runtime);
+    if (cwd === null) {
+      res.status(400).json({ error: 'invalid_cwd' });
+      return;
+    }
     void handleDiffList(
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      cwd,
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/diff',
       () => runtime.generationGuard?.assertOpen(),
@@ -231,10 +236,15 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
   app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
+    const cwd = resolveSessionManagedGitCwd(req, runtime);
+    if (cwd === null) {
+      res.status(400).json({ error: 'invalid_cwd' });
+      return;
+    }
     void handleDiffFile(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      cwd,
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/diff/file',
       () => runtime.generationGuard?.assertOpen(),
