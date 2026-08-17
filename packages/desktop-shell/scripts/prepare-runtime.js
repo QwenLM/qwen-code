@@ -17,16 +17,20 @@ const sourceRoot = process.env.QWEN_CODE_ROOT
   ? path.resolve(process.env.QWEN_CODE_ROOT)
   : repoRoot;
 const runtimeDir = path.join(packageDir, 'runtime');
-const packageRoot = path.join(runtimeDir, 'qwen-code');
+const finalPackageRoot = path.join(runtimeDir, 'qwen-code');
 const refreshChecksums = process.argv.indexOf('--refresh-checksums');
 if (refreshChecksums !== -1) {
   const root = process.argv[refreshChecksums + 1]
     ? path.resolve(process.argv[refreshChecksums + 1])
-    : packageRoot;
+    : finalPackageRoot;
   writeChecksums(root);
   console.log(`Refreshed desktop runtime checksums at ${root}`);
   process.exit(0);
 }
+fs.mkdirSync(runtimeDir, { recursive: true });
+recoverInterruptedRuntime();
+const stagingRoot = fs.mkdtempSync(path.join(runtimeDir, '.prepare-'));
+const packageRoot = path.join(stagingRoot, 'qwen-code');
 const libDir = path.join(packageRoot, 'lib');
 const nodeDir = path.join(packageRoot, 'node');
 const qwenCodeVersion = JSON.parse(
@@ -87,44 +91,48 @@ for (const required of [
   }
 }
 
-fs.rmSync(runtimeDir, { recursive: true, force: true });
-fs.mkdirSync(libDir, { recursive: true });
-fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
-fs.mkdirSync(binDir, { recursive: true });
-copyDirectory(distDir, libDir);
-await installNodeRuntime(nodeDir, target);
-writeLaunchers(target);
-copyRequiredFile(
-  path.join(sourceRoot, 'LICENSE'),
-  path.join(packageRoot, 'LICENSE'),
-);
-copyRequiredFile(
-  path.join(packageDir, 'NOTICE'),
-  path.join(packageRoot, 'NOTICE'),
-);
-const nodeLicense = path.join(nodeDir, 'LICENSE');
-if (!fs.existsSync(nodeLicense)) {
-  throw new Error(`Bundled Node.js license is missing: ${nodeLicense}`);
+try {
+  fs.mkdirSync(libDir, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
+  fs.mkdirSync(binDir, { recursive: true });
+  copyDirectory(distDir, libDir);
+  await installNodeRuntime(nodeDir, target);
+  writeLaunchers(target);
+  copyRequiredFile(
+    path.join(sourceRoot, 'LICENSE'),
+    path.join(packageRoot, 'LICENSE'),
+  );
+  copyRequiredFile(
+    path.join(packageDir, 'NOTICE'),
+    path.join(packageRoot, 'NOTICE'),
+  );
+  const nodeLicense = path.join(nodeDir, 'LICENSE');
+  if (!fs.existsSync(nodeLicense)) {
+    throw new Error(`Bundled Node.js license is missing: ${nodeLicense}`);
+  }
+  fs.writeFileSync(
+    path.join(packageRoot, 'manifest.json'),
+    `${JSON.stringify(
+      {
+        name: '@qwen-code/qwen-code',
+        desktopVersion,
+        qwenCodeVersion,
+        qwenCodeCommit: process.env.QWEN_CODE_COMMIT || gitCommit(sourceRoot),
+        target,
+        node: `v${process.versions.node}`,
+        builtAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeChecksums();
+  replaceRuntime();
+} finally {
+  fs.rmSync(stagingRoot, { recursive: true, force: true });
 }
-fs.writeFileSync(
-  path.join(packageRoot, 'manifest.json'),
-  `${JSON.stringify(
-    {
-      name: '@qwen-code/qwen-code',
-      desktopVersion,
-      qwenCodeVersion,
-      qwenCodeCommit: process.env.QWEN_CODE_COMMIT || gitCommit(sourceRoot),
-      target,
-      node: `v${process.versions.node}`,
-      builtAt: new Date().toISOString(),
-    },
-    null,
-    2,
-  )}\n`,
-);
-writeChecksums();
 console.log(
-  `Prepared desktop runtime at ${path.relative(repoRoot, packageRoot)}`,
+  `Prepared desktop runtime at ${path.relative(repoRoot, finalPackageRoot)}`,
 );
 
 async function installNodeRuntime(destination, desktopTarget) {
@@ -138,6 +146,12 @@ async function installNodeRuntime(destination, desktopTarget) {
   }
   const archiveName = nodeArchiveName(nodeVersion, desktopTarget);
   const downloadRoot = `https://nodejs.org/dist/v${nodeVersion}`;
+  const cacheRoot = process.env.QWEN_DESKTOP_NODE_CACHE_DIR
+    ? path.resolve(process.env.QWEN_DESKTOP_NODE_CACHE_DIR)
+    : path.join(os.tmpdir(), 'qwen-desktop-node-cache');
+  const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
+  const cachedArchivePath = path.join(cacheDir, archiveName);
+  fs.rmSync(path.join(cacheDir, 'SHASUMS256.txt'), { force: true });
   const temporaryRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'qwen-desktop-node-'),
   );
@@ -145,12 +159,28 @@ async function installNodeRuntime(destination, desktopTarget) {
     const checksumsPath = path.join(temporaryRoot, 'SHASUMS256.txt');
     const archivePath = path.join(temporaryRoot, archiveName);
     await download(`${downloadRoot}/SHASUMS256.txt`, checksumsPath);
-    await download(`${downloadRoot}/${archiveName}`, archivePath);
-    verifyChecksum(
-      archivePath,
-      archiveName,
-      fs.readFileSync(checksumsPath, 'utf8'),
-    );
+    const checksums = fs.readFileSync(checksumsPath, 'utf8');
+    if (
+      copyValidCachedArchive(
+        cachedArchivePath,
+        archivePath,
+        archiveName,
+        checksums,
+      )
+    ) {
+      console.log(`Using cached Node.js runtime ${archiveName}`);
+    } else {
+      await download(`${downloadRoot}/${archiveName}`, archivePath);
+      verifyChecksum(archivePath, archiveName, checksums);
+      fs.mkdirSync(cacheDir, { recursive: true });
+      const temporaryCachePath = `${cachedArchivePath}.${process.pid}.tmp`;
+      try {
+        fs.copyFileSync(archivePath, temporaryCachePath);
+        fs.renameSync(temporaryCachePath, cachedArchivePath);
+      } finally {
+        fs.rmSync(temporaryCachePath, { force: true });
+      }
+    }
     extractNodeArchive(archivePath, temporaryRoot);
     const extractedRoot = path.join(
       temporaryRoot,
@@ -162,6 +192,24 @@ async function installNodeRuntime(destination, desktopTarget) {
     copyDirectory(extractedRoot, destination);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function copyValidCachedArchive(
+  cachedArchivePath,
+  archivePath,
+  archiveName,
+  checksums,
+) {
+  if (!fs.existsSync(cachedArchivePath)) return false;
+  try {
+    fs.copyFileSync(cachedArchivePath, archivePath);
+    verifyChecksum(archivePath, archiveName, checksums);
+    return true;
+  } catch {
+    fs.rmSync(cachedArchivePath, { force: true });
+    fs.rmSync(archivePath, { force: true });
+    return false;
   }
 }
 
@@ -290,4 +338,31 @@ function copyDirectory(source, destination) {
     dereference: true,
     filter: (entry) => path.basename(entry) !== '.DS_Store',
   });
+}
+
+function recoverInterruptedRuntime() {
+  for (const entry of fs.readdirSync(runtimeDir)) {
+    if (!entry.startsWith('.prepare-')) continue;
+    const staleRoot = path.join(runtimeDir, entry);
+    const previousRoot = path.join(staleRoot, 'previous');
+    if (!fs.existsSync(finalPackageRoot) && fs.existsSync(previousRoot)) {
+      fs.renameSync(previousRoot, finalPackageRoot);
+    }
+    fs.rmSync(staleRoot, { recursive: true, force: true });
+  }
+}
+
+function replaceRuntime() {
+  const previousRoot = path.join(stagingRoot, 'previous');
+  if (fs.existsSync(finalPackageRoot)) {
+    fs.renameSync(finalPackageRoot, previousRoot);
+  }
+  try {
+    fs.renameSync(packageRoot, finalPackageRoot);
+  } catch (error) {
+    if (fs.existsSync(previousRoot)) {
+      fs.renameSync(previousRoot, finalPackageRoot);
+    }
+    throw error;
+  }
 }

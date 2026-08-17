@@ -486,3 +486,22 @@ export function readLastJsonStringFieldsSync(
     }
   }
 }
+
+export function readSessionTitleInfoFromFileSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): { title?: string; source?: 'auto' | 'manual' } {
+  const hit = readLastJsonStringFieldsSync(
+    filePath,
+    'customTitle',
+    ['titleSource'],
+    '"subtype":"custom_title"',
+    scratchBuffer,
+  );
+  const title = hit['customTitle'];
+  if (!title) return {};
+  const rawSource = hit['titleSource'];
+  const source =
+    rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
+  return { title, source };
+}

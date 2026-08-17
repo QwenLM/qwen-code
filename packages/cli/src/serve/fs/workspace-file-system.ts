@@ -38,7 +38,12 @@ import {
   type AuditPublisher,
   createAuditPublisher,
 } from './audit.js';
-import { FsError, wrapAsFsError, type FsErrorKind } from './errors.js';
+import {
+  FsError,
+  isFsError,
+  wrapAsFsError,
+  type FsErrorKind,
+} from './errors.js';
 import {
   assertCursorMatchesFile,
   decodeTextCursor,
@@ -55,6 +60,7 @@ import {
   BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
   MAX_TEXT_SCAN_BYTES,
+  MAX_UPLOAD_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
   enforceWriteSize,
@@ -286,6 +292,23 @@ export interface WorkspaceFileSystem {
     newText: string,
     opts: { expectedHash: ContentHash },
   ): Promise<WriteOutcome>;
+  /**
+   * Single-purpose no-clobber binary create. Writes `data` atomically
+   * (temp + publish) at `p`; it cannot modify or replace existing file
+   * content. An existing target (including a final-component symlink)
+   * throws `file_already_exists` (`symlink_escape` for a symlink). The
+   * caller is responsible for choosing a free name; the upload route owns
+   * the numbered-candidate policy; the collision is expected control flow
+   * there and emits no `fs.denied` audit event. `data` is size-checked
+   * against `MAX_UPLOAD_BYTES` here — the binary-ingress policy, NOT the
+   * `MAX_WRITE_BYTES` text default. Trust and generation guards are enforced
+   * at entry, inside the path lock, and at the final publish checkpoint.
+   * New files are created at `0o600`.
+   */
+  writeBytesAtomic(
+    p: ResolvedPath,
+    data: Buffer,
+  ): Promise<{ sizeBytes: number; hash: ContentHash }>;
 }
 
 /**
@@ -1476,6 +1499,48 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async writeBytesAtomic(
+    p: ResolvedPath,
+    data: Buffer,
+  ): Promise<{ sizeBytes: number; hash: ContentHash }> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      enforceWriteSize(data.length, MAX_UPLOAD_BYTES);
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          await assertCreateTargetAbsent(p as string);
+          this.deps.generationGuard?.assertOpen();
+          const result = await atomicPublishResolvedFile({
+            target: p,
+            buf: data,
+            mode: 'create',
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
+          });
+          const verdict = this.ignoreVerdict(p, 'file');
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: verdict.ignored ? verdict.category : undefined,
+          });
+          return { sizeBytes: result.sizeBytes, hash: result.hash };
+        },
+      );
+      return out;
+    } catch (err) {
+      // A no-clobber collision is the upload route's expected candidate-loop
+      // outcome (it numbers on), not a boundary policy denial; auditing it
+      // would emit one `fs.denied` per skipped occupied name.
+      throw this.recordAndWrap(err, 'write', p as string, {
+        audit: !(isFsError(err) && err.kind === 'file_already_exists'),
+      });
+    }
+  }
+
   /**
    * Coerce an arbitrary thrown value into an `FsError`, emit the
    * matching `fs.denied` audit event, and return the typed error
@@ -1489,7 +1554,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
    *   - routes can still rely on `instanceof FsError`
    *     for their `sendFsError` serializer.
    */
-  private recordAndWrap(err: unknown, intent: Intent, input: string): Error {
+  private recordAndWrap(
+    err: unknown,
+    intent: Intent,
+    input: string,
+    opts?: { audit?: boolean },
+  ): Error {
     if (
       err instanceof Error &&
       'code' in err &&
@@ -1498,6 +1568,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       return err;
     }
     const fs = wrapAsFsError(err);
+    if (opts?.audit === false) {
+      return fs;
+    }
     this.deps.audit.recordDenied(this.deps.ctx, {
       intent,
       input,
@@ -2177,7 +2250,39 @@ function mergeWriteMeta(
 async function atomicWriteTextResolvedFile(
   input: AtomicWriteTextInput,
 ): Promise<AtomicWriteTextOutcome> {
-  const target = input.target as string;
+  const buf = await encodeTextFileContentAsync(
+    input.target,
+    input.content,
+    buildWriteMeta(input.meta),
+  );
+  // Text writes keep the `MAX_WRITE_BYTES` policy. The byte upload path
+  // validates its own buffer against `MAX_UPLOAD_BYTES` before calling the
+  // shared publisher, so the two policies stay distinct.
+  enforceWriteSize(buf.length);
+  return atomicPublishResolvedFile({
+    target: input.target,
+    buf,
+    mode: input.mode,
+    expectedHash: input.expectedHash,
+    assertGenerationOpen: input.assertGenerationOpen,
+  });
+}
+
+/**
+ * Shared atomic temp+publish core. `buf` MUST already be size-validated by
+ * the caller against its own policy (`MAX_WRITE_BYTES` for text,
+ * `MAX_UPLOAD_BYTES` for binary uploads). This function does not re-check
+ * size; it only handles the filesystem mechanics: parent validation, temp
+ * reservation, precondition checks, generation gating, and publication.
+ */
+async function atomicPublishResolvedFile(input: {
+  target: string;
+  buf: Buffer;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  assertGenerationOpen?: () => void;
+}): Promise<AtomicWriteTextOutcome> {
+  const target = input.target;
   const parent = path.dirname(target);
   const parentStat = await fsp.lstat(parent);
   // Defense-in-depth against a parent-symlink swap. A full fix requires
@@ -2195,24 +2300,34 @@ async function atomicWriteTextResolvedFile(
       `parent path is not a directory: ${parent}`,
     );
   }
-  const tmpPath = path.join(
-    parent,
-    `.${path.basename(target)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
-  );
+  const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  // The temp name is `.<basename><suffix>`. When the target basename is itself
+  // near the filesystem NAME_MAX (255 bytes) — a 255-byte upload, say — the
+  // untruncated temp name would exceed it and `open()` would fail ENAMETOOLONG
+  // before the atomic publish could run. Cap the basename portion (UTF-8-safe).
+  const tmpNameMaxBytes = 255;
+  const tmpBaseMaxBytes =
+    tmpNameMaxBytes - 1 - Buffer.byteLength(tmpSuffix, 'utf-8');
+  let tmpBase = path.basename(target);
+  if (Buffer.byteLength(tmpBase, 'utf-8') > tmpBaseMaxBytes) {
+    tmpBase = safeUtf8Truncate(
+      Buffer.from(tmpBase, 'utf-8'),
+      tmpBaseMaxBytes,
+    ).toString('utf-8');
+  }
+  const tmpPath = path.join(parent, `.${tmpBase}${tmpSuffix}`);
   let tempLive = false;
   let tempHandle: Awaited<ReturnType<typeof fsp.open>> | undefined;
   let tempStat: Awaited<ReturnType<typeof fsp.lstat>> | undefined;
   try {
     tempHandle = await reserveTempFile(tmpPath);
     tempLive = true;
-    const encoded = await writeEncodedTextTemp({
-      targetPath: target,
+    const written = await writeBufferToTemp({
       tmpPath,
-      content: input.content,
-      meta: input.meta,
+      buf: input.buf,
       handle: tempHandle,
     });
-    tempStat = encoded.stat;
+    tempStat = written.stat;
     const targetState = await assertAtomicTargetPrecondition({
       target,
       mode: input.mode,
@@ -2231,7 +2346,7 @@ async function atomicWriteTextResolvedFile(
     }
     tempLive = false;
     await fsyncParentDirBestEffort(parent);
-    return encoded;
+    return written;
   } catch (err) {
     await tempHandle?.close().catch(() => undefined);
     if (tempLive) {
@@ -2251,20 +2366,17 @@ async function reserveTempFile(
   return fsp.open(tmpPath, 'wx', 0o600);
 }
 
-async function writeEncodedTextTemp(input: {
-  targetPath: string;
+/**
+ * Write an already-validated buffer to the reserved temp handle and verify
+ * the handle still names the same regular file. Shared by the text and
+ * binary publishers; size policy is enforced by the caller, not here.
+ */
+async function writeBufferToTemp(input: {
   tmpPath: string;
-  content: string;
-  meta: ReadMeta;
+  buf: Buffer;
   handle: Awaited<ReturnType<typeof fsp.open>>;
 }): Promise<AtomicWriteTextOutcome> {
-  const buf = await encodeTextFileContentAsync(
-    input.targetPath,
-    input.content,
-    buildWriteMeta(input.meta),
-  );
-  enforceWriteSize(buf.length);
-  await input.handle.writeFile(buf);
+  await input.handle.writeFile(input.buf);
   await syncHandleBestEffort(input.handle);
   const st = await fsp.lstat(input.tmpPath);
   const opened = await input.handle.stat();
@@ -2282,7 +2394,7 @@ async function writeEncodedTextTemp(input: {
       `temporary path is not a regular file: ${input.tmpPath}`,
     );
   }
-  return { sizeBytes: buf.length, hash: hashBuffer(buf), stat: st };
+  return { sizeBytes: input.buf.length, hash: hashBuffer(input.buf), stat: st };
 }
 
 async function assertCreateTargetAbsent(target: string): Promise<void> {

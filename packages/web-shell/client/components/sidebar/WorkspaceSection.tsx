@@ -8,6 +8,8 @@ import {
 } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonChannelsSnapshot,
+  DaemonChannelTypeCatalog,
   DaemonSessionGroup,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
@@ -17,17 +19,27 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
+import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import {
   SESSION_LIST_PAGE_SIZE,
-  WEB_SHELL_SESSION_SOURCE_TYPE,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
+import {
+  hasWorkspaceExpansionPreference,
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { measureSessionTitleScroll } from './sessionTitleScroll';
+import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
+import sidebarStyles from './WebShellSidebar.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
 import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 
@@ -73,9 +85,9 @@ interface WorkspaceSectionProps {
   noSessionsLabel: string;
   loadErrorLabel: string;
   organizationEnabled: boolean;
-  sourceMetadataEnabled?: boolean;
+  sourceType?: string;
+  channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
-  formatTime: (iso: string) => string;
   searchQuery?: string;
   expanded?: boolean;
   autoExpandKey?: string;
@@ -88,6 +100,7 @@ interface WorkspaceSectionProps {
    * instead of a bespoke, feature-poor row.
    */
   renderSession: (session: DaemonSessionSummary) => ReactNode;
+  showSessionDetails?: boolean;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -95,6 +108,7 @@ interface WorkspaceSectionProps {
   deleteGroupLabel?: string;
   groupActionsDisabled?: boolean;
   excludePinned?: boolean;
+  limitSessions?: boolean;
   /**
    * Open the working-tree Changes dialog for this workspace. When provided, the
    * folder header shows a live git chip (branch + dirty/ahead-behind state) that
@@ -115,15 +129,16 @@ export function WorkspaceSection({
   noSessionsLabel,
   loadErrorLabel,
   organizationEnabled,
-  sourceMetadataEnabled = false,
+  sourceType,
+  channelGroupingEnabled = false,
   ungroupedLabel,
-  formatTime,
   searchQuery = '',
   expanded: controlledExpanded,
   autoExpandKey,
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  showSessionDetails = true,
   headerActions,
   onRenameGroup,
   onDeleteGroup,
@@ -131,26 +146,44 @@ export function WorkspaceSection({
   deleteGroupLabel,
   groupActionsDisabled,
   excludePinned = false,
+  limitSessions = true,
   onOpenGitDiff,
   onOpenCommit,
 }: WorkspaceSectionProps) {
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
-  const [internalExpanded, setInternalExpanded] = useState(false);
+  const [channelCatalog, setChannelCatalog] = useState<{
+    catalog: DaemonChannelTypeCatalog;
+    snapshot: DaemonChannelsSnapshot;
+  }>();
+  const [internalExpanded, setInternalExpanded] = useState(() =>
+    readWorkspaceExpanded(workspace.id),
+  );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
     readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const channelCatalogLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
+  const searchActive = searchQuery.trim().length > 0;
 
-  // A workspace always starts collapsed, including the primary workspace.
+  // Uncontrolled workspace rows restore the user's last choice.
   useEffect(() => {
-    if (controlledExpanded === undefined) setInternalExpanded(false);
+    if (controlledExpanded === undefined) {
+      setInternalExpanded(readWorkspaceExpanded(workspace.id));
+    }
   }, [controlledExpanded, workspace.id]);
+
+  useEffect(() => {
+    // The five-row preview is scoped per source; reset the one-shot
+    // show-all when the section collapses or the source changes.
+    setShowAllSessions(false);
+  }, [expanded, sourceType]);
 
   // The render site keys this component by workspace id, so an id change
   // always remounts and the lazy useState initializer re-reads storage.
@@ -159,10 +192,14 @@ export function WorkspaceSection({
   }, [collapsedGroupIds, workspace.id]);
 
   useEffect(() => {
-    if (controlledExpanded === undefined && autoExpandKey) {
+    if (
+      controlledExpanded === undefined &&
+      autoExpandKey &&
+      !hasWorkspaceExpansionPreference(workspace.id)
+    ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded]);
+  }, [autoExpandKey, controlledExpanded, workspace.id]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
@@ -173,15 +210,13 @@ export function WorkspaceSection({
       options: {
         pageSize: SESSION_LIST_PAGE_SIZE,
         archiveState: 'active',
-        ...(sourceMetadataEnabled
-          ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
-          : {}),
+        ...(sourceType ? { sourceType } : {}),
         ...(organizationEnabled
           ? { view: 'organized' as const, group: 'all' }
           : {}),
       },
     }),
-    [organizationEnabled, sourceMetadataEnabled, workspace.cwd],
+    [organizationEnabled, sourceType, workspace.cwd],
   );
   const sessionsResult = useSessionCatalogQuery(client, sessionsQuery, {
     autoLoad: true,
@@ -192,6 +227,7 @@ export function WorkspaceSection({
     page: sessionsPage,
     reload: reloadSessions,
     stale: sessionsStale,
+    loading: sessionsLoading,
   } = sessionsResult;
   const sessionsActive = sessionsEnabled && sessionsVisible;
   const previousSessionsActiveRef = useRef(sessionsActive);
@@ -222,7 +258,12 @@ export function WorkspaceSection({
   }, [sessionsResult.error, workspace.cwd]);
 
   useEffect(() => {
-    if (!renderSessions || disabled || !organizationEnabled) {
+    if (
+      !renderSessions ||
+      disabled ||
+      !organizationEnabled ||
+      channelGroupingEnabled
+    ) {
       setGroups([]);
       return;
     }
@@ -240,12 +281,57 @@ export function WorkspaceSection({
       cancelled = true;
     };
   }, [
+    channelGroupingEnabled,
     client,
     disabled,
     organizationEnabled,
     reloadToken,
     renderSessions,
     workspace.cwd,
+  ]);
+
+  const loadChannelCatalog = useCallback(async () => {
+    if (disabled || readOnly || !channelGroupingEnabled) return;
+    const requestId = ++channelCatalogLoadRequestId.current;
+    try {
+      const workspaceClient = client.workspaceByCwd(workspace.cwd);
+      const [catalog, snapshot] = await Promise.all([
+        workspaceClient.workspaceChannelTypes(),
+        workspaceClient.workspaceChannels(),
+      ]);
+      if (requestId === channelCatalogLoadRequestId.current) {
+        setChannelCatalog({ catalog, snapshot });
+      }
+    } catch (err) {
+      // Keep the last known catalog across a transient failure; the next
+      // poll tick retries.
+      console.warn('[WorkspaceSection] channel catalog load failed:', err);
+    }
+  }, [channelGroupingEnabled, client, disabled, readOnly, workspace.cwd]);
+
+  useEffect(() => {
+    if (!renderSessions || disabled || readOnly || !channelGroupingEnabled) {
+      channelCatalogLoadRequestId.current += 1;
+      setChannelCatalog(undefined);
+      return;
+    }
+    if (!expanded && !searchActive) return;
+    void loadChannelCatalog();
+    // The catalog rides its own tick so instances added or removed while a
+    // section is expanded reach the grouping logic without a collapse cycle.
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void loadChannelCatalog();
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [
+    channelGroupingEnabled,
+    disabled,
+    expanded,
+    loadChannelCatalog,
+    readOnly,
+    reloadToken,
+    renderSessions,
+    searchActive,
   ]);
 
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
@@ -317,9 +403,14 @@ export function WorkspaceSection({
       );
     });
   }, [excludePinned, searchQuery, sessions]);
+  const directSessions =
+    searchActive || showAllSessions || !limitSessions
+      ? visibleSessions
+      : visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
 
   const groupedSessions = useMemo(() => {
-    if (!organizationEnabled || groups.length === 0) return null;
+    if (!organizationEnabled || channelGroupingEnabled || groups.length === 0)
+      return null;
     const assigned = new Set<string>();
     const sections = groups.map((group) => {
       const items = visibleSessions.filter(
@@ -334,12 +425,38 @@ export function WorkspaceSection({
         (session) => !assigned.has(session.sessionId),
       ),
     };
-  }, [groups, organizationEnabled, visibleSessions]);
+  }, [channelGroupingEnabled, groups, organizationEnabled, visibleSessions]);
+
+  const channelSessionGroups = useMemo(
+    () =>
+      channelGroupingEnabled && channelCatalog
+        ? groupSessionsByChannelType(
+            visibleSessions,
+            channelCatalog.catalog,
+            channelCatalog.snapshot.instances,
+            t('sidebar.channelType.other'),
+          )
+        : null,
+    [channelCatalog, channelGroupingEnabled, t, visibleSessions],
+  );
+
+  const toggleExpanded = () => {
+    if (disabled) return;
+    const nextExpanded = !expanded;
+    setInternalExpanded(nextExpanded);
+    if (controlledExpanded === undefined) {
+      writeWorkspaceExpanded(workspace.id, nextExpanded);
+    }
+    onExpandedChange?.(nextExpanded);
+  };
 
   return (
     <div className={styles.section}>
       <div
         className={cx(styles.headerRow, disabled && styles.headerDisabled)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) toggleExpanded();
+        }}
         onMouseEnter={() => setActionsVisible(true)}
         onMouseLeave={() => setActionsVisible(false)}
         onFocus={() => setActionsVisible(true)}
@@ -354,11 +471,7 @@ export function WorkspaceSection({
           type="button"
           disabled={disabled}
           aria-expanded={expanded}
-          onClick={() => {
-            const nextExpanded = !expanded;
-            setInternalExpanded(nextExpanded);
-            onExpandedChange?.(nextExpanded);
-          }}
+          onClick={toggleExpanded}
         >
           {renderHeader ? (
             renderHeader(expanded)
@@ -416,15 +529,44 @@ export function WorkspaceSection({
                 {loadErrorLabel}
               </div>
             ) : visibleSessions.length === 0 ? (
-              <div className={styles.empty}>{noSessionsLabel}</div>
-            ) : groupedSessions ? (
+              // A source switch swaps the query key; until the new source's
+              // page settles there is no data yet, so the "no sessions" notice
+              // would flash for a whole fetch round-trip.
+              sessionsLoading && sessionsPage === undefined ? null : (
+                <div className={styles.empty}>{noSessionsLabel}</div>
+              )
+            ) : channelSessionGroups ? (
+              <>
+                {channelSessionGroups.map((group) => (
+                  <SessionGroupSection
+                    id={group.id}
+                    key={group.id}
+                    label={group.label}
+                    count={group.sessions.length}
+                    limitSessions={limitSessions && !searchActive}
+                    expanded={!collapsedGroupIds.has(group.id)}
+                    onToggle={() => {
+                      setCollapsedGroupIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(group.id)) next.delete(group.id);
+                        else next.add(group.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    {group.sessions.map((session) => renderSession(session))}
+                  </SessionGroupSection>
+                ))}
+              </>
+            ) : groupedSessions && !channelGroupingEnabled ? (
               <>
                 {groupedSessions.sections.map(({ group, sessions }) => (
                   <SessionGroupSection
                     id={`group:${group.id}`}
-                    key={group.id}
+                    key={`${group.id}:${sourceType ?? ''}`}
                     label={group.name}
                     count={sessions.length}
+                    limitSessions={limitSessions && !searchActive}
                     color={group.color}
                     expanded={!collapsedGroupIds.has(group.id)}
                     onToggle={() => {
@@ -454,9 +596,11 @@ export function WorkspaceSection({
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (
                   <SessionGroupSection
+                    key={`ungrouped:${sourceType ?? ''}`}
                     id="ungrouped"
                     label={ungroupedLabel}
                     count={groupedSessions.ungrouped.length}
+                    limitSessions={limitSessions && !searchActive}
                     expanded={!collapsedGroupIds.has('ungrouped')}
                     onToggle={() => {
                       setCollapsedGroupIds((current) => {
@@ -474,26 +618,56 @@ export function WorkspaceSection({
                 )}
               </>
             ) : (
-              visibleSessions.map((session) => {
-                if (!readOnly) return renderSession(session);
-                const label = getSessionLabel(session);
-                const time = session.createdAt
-                  ? formatTime(session.createdAt)
-                  : '';
-                return (
-                  <div
-                    key={session.sessionId}
-                    className={styles.sessionItemReadOnly}
-                    role="note"
-                    aria-label={`${label}${time ? `, ${time}` : ''}. ${trustToOpenLabel}`}
-                  >
-                    <span className={styles.sessionName} title={label}>
-                      {label}
-                    </span>
-                    {time && <span className={styles.sessionTime}>{time}</span>}
-                  </div>
-                );
-              })
+              <>
+                {directSessions.map((session) => {
+                  if (!readOnly) return renderSession(session);
+                  const label = getSessionLabel(session);
+                  const stamp = session.updatedAt || session.createdAt;
+                  const row = (
+                    <div
+                      key={session.sessionId}
+                      className={styles.sessionItemReadOnly}
+                      role="note"
+                      aria-label={`${label}. ${trustToOpenLabel}`}
+                      onMouseEnter={(event) =>
+                        measureSessionTitleScroll(event.currentTarget)
+                      }
+                    >
+                      <span
+                        className={styles.sessionName}
+                        data-web-shell-session-title
+                      >
+                        <span className={styles.sessionNameInner}>{label}</span>
+                      </span>
+                    </div>
+                  );
+                  return showSessionDetails ? (
+                    <SessionDetailsTooltip
+                      key={session.sessionId}
+                      session={session}
+                      label={label}
+                      time={stamp ? formatRelativeTime(stamp, t) : ''}
+                      completedUnread={false}
+                    >
+                      {row}
+                    </SessionDetailsTooltip>
+                  ) : (
+                    row
+                  );
+                })}
+                {limitSessions &&
+                  !searchActive &&
+                  !showAllSessions &&
+                  visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+                    <button
+                      type="button"
+                      className={sidebarStyles.showAllSessions}
+                      onClick={() => setShowAllSessions(true)}
+                    >
+                      {t('sidebar.showAllSessions')}
+                    </button>
+                  )}
+              </>
             )}
           </div>
         )}

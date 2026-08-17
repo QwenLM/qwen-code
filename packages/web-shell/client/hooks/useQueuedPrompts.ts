@@ -27,9 +27,11 @@ import type {
   DaemonInputAnnotation,
   DaemonMidTurnMessagesResult,
   DaemonPendingPromptSummary,
+  DaemonSessionMediaReference,
   DaemonTranscriptStore,
+  PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { EditorHandle } from './useComposerCore';
 import { removeInjectedFromQueue } from '../midTurnDedup';
 import { isCommandPrompt } from '../utils/localCommandQueue';
@@ -61,6 +63,13 @@ interface UseQueuedPromptsArgs {
    * the legacy local fallback used by older daemons.
    */
   canQueryMidTurn: boolean;
+  /**
+   * Whether the daemon advertises `session_media`. With it,
+   * images attached to a mid-turn send travel with the message and are
+   * injected into the running turn; without it they stay queued for the next
+   * turn (an older daemon would silently drop them).
+   */
+  canInjectMidTurnMedia: boolean;
   streamingState: DaemonStreamingState;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
@@ -115,6 +124,7 @@ function areQueuedPromptsEqual(
       prompt.admissionOutcome === other.admissionOutcome &&
       prompt.payloadAvailable === other.payloadAvailable &&
       (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
+      (prompt.files?.length ?? 0) === (other.files?.length ?? 0) &&
       (prompt.inputAnnotations?.length ?? 0) ===
         (other.inputAnnotations?.length ?? 0)
     );
@@ -131,12 +141,83 @@ function toStoreImages(
   }));
 }
 
+/**
+ * Recover queued-row images from a reconciliation snapshot's media blocks.
+ * After a page refresh the in-memory pending admission is gone, so the daemon
+ * snapshot is the only source left for the attachments.
+ */
+function contentToImages(
+  content: readonly PromptContentBlock[] | undefined,
+): PromptImage[] | undefined {
+  if (!content || content.length === 0) return undefined;
+  const images: PromptImage[] = [];
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    const record = block as Record<string, unknown>;
+    if (record['type'] !== 'image') continue;
+    const data = record['data'];
+    const mimeType = record['mimeType'];
+    if (typeof data === 'string') {
+      images.push({
+        data,
+        media_type: typeof mimeType === 'string' ? mimeType : 'image/*',
+      });
+    }
+  }
+  return images.length > 0 ? images : undefined;
+}
+
+// The SDK substitutes this text block for a media reference it could not
+// hydrate (DaemonSessionClient.hydrateBlock); keep in sync with the SDK.
+const MEDIA_UNAVAILABLE_PLACEHOLDER = '[Attached media is no longer available]';
+
+function contentHasDegradedMedia(
+  content: readonly PromptContentBlock[] | undefined,
+): boolean {
+  if (!content || content.length === 0) return false;
+  return content.some((block) => {
+    if (typeof block !== 'object' || block === null) return false;
+    const record = block as Record<string, unknown>;
+    return (
+      record['type'] === 'text' &&
+      record['text'] === MEDIA_UNAVAILABLE_PLACEHOLDER
+    );
+  });
+}
+
+// A transient hydration failure (anything but 404/410) returns the raw
+// reference block — an image-shaped block without string `data` — instead of
+// the placeholder (DaemonSessionClient.hydrateBlock). Treat it as provisional
+// degradation: the daemon still holds the blob, so a later hydrated snapshot
+// upgrades the row back, while editing it must stay blocked.
+function contentHasUnhydratedMedia(
+  content: readonly PromptContentBlock[] | undefined,
+): boolean {
+  if (!content || content.length === 0) return false;
+  return content.some((block) => {
+    if (typeof block !== 'object' || block === null) return false;
+    const record = block as Record<string, unknown>;
+    return record['type'] === 'image' && typeof record['data'] !== 'string';
+  });
+}
+
+function toStoreFiles(
+  files: readonly PromptFile[] | undefined,
+): Array<{ name: string; mimeType: string }> | undefined {
+  if (!files || files.length === 0) return undefined;
+  return files.map((file) => ({
+    name: file.name,
+    mimeType: file.media_type || 'text/plain',
+  }));
+}
+
 export interface UseQueuedPromptsResult {
   queuedPrompts: QueuedPrompt[];
   queuedTexts: string[];
   enqueuePrompt: (
     text: string,
     images?: PromptImage[],
+    files?: PromptFile[],
     onComplete?: () => void,
     inputAnnotations?: DaemonInputAnnotation[],
     onAdmitted?: () => void,
@@ -157,6 +238,7 @@ export function useQueuedPrompts({
   clientId,
   canMutateMidTurn,
   canQueryMidTurn,
+  canInjectMidTurnMedia,
   streamingState,
   sessionActions,
   store,
@@ -275,6 +357,15 @@ export function useQueuedPrompts({
         const hasDisplayedPrompt = displayedServerPromptIdsRef.current.has(
           serverPrompt.promptId,
         );
+        // Extract images from the server prompt's content field (if present)
+        const serverImages = contentToImages(serverPrompt.content);
+        // A partially hydrated payload (a loss placeholder or a raw,
+        // unhydrated reference) must not upgrade a row: editing it would
+        // silently discard the attachments the daemon still holds. Only
+        // fully hydrated content restores images and clears summary-only.
+        const contentFullyHydrated =
+          !contentHasDegradedMedia(serverPrompt.content) &&
+          !contentHasUnhydratedMedia(serverPrompt.content);
         if (existingIndex !== -1) {
           if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
@@ -284,6 +375,13 @@ export function useQueuedPrompts({
             ...next[existingIndex]!,
             ...(next[existingIndex]!.payloadCompleteness === 'summary-only'
               ? { text: serverPrompt.text }
+              : {}),
+            // Restore images from server content if local row doesn't have
+            // them; clearing summary-only makes the restored row editable.
+            ...(serverImages &&
+            contentFullyHydrated &&
+            !next[existingIndex]!.images
+              ? { images: serverImages, payloadCompleteness: undefined }
               : {}),
             midTurnState: undefined,
             midTurnMessageId: undefined,
@@ -299,6 +397,7 @@ export function useQueuedPrompts({
             p.serverState === 'submitting' &&
             p.admissionOutcome !== 'unknown' &&
             (p.images?.length ?? 0) === 0 &&
+            (p.files?.length ?? 0) === 0 &&
             p.text === serverPrompt.text,
         );
         if (submittingMatches.length === 1) {
@@ -317,21 +416,32 @@ export function useQueuedPrompts({
         if (serverPrompt.state === 'running' || hasDisplayedPrompt) {
           continue;
         }
-        const hasUnboundImageSubmission = next.some(
+        const hasUnboundAttachmentSubmission = next.some(
           (prompt) =>
             !prompt.serverPromptId &&
             prompt.serverState === 'submitting' &&
             prompt.admissionOutcome !== 'unknown' &&
-            (prompt.images?.length ?? 0) > 0,
+            ((prompt.images?.length ?? 0) > 0 ||
+              (prompt.files?.length ?? 0) > 0),
         );
-        if (hasUnboundImageSubmission) continue;
+        if (hasUnboundAttachmentSubmission) continue;
         next.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: serverPrompt.text,
+          ...(serverImages && contentFullyHydrated
+            ? { images: serverImages }
+            : {}),
           serverPromptId: serverPrompt.promptId,
           serverState: serverPrompt.state,
-          payloadCompleteness: 'summary-only',
+          // A row rebuilt with fully hydrated images is payload-complete;
+          // pinning it to summary-only would disable editing until the user
+          // deletes (and loses) the attachments. A partially hydrated
+          // payload stays summary-only so editing cannot silently discard
+          // the attachments the daemon still holds — a later fully hydrated
+          // refresh upgrades the row.
+          payloadCompleteness:
+            serverImages && contentFullyHydrated ? undefined : 'summary-only',
         });
       }
       if (areQueuedPromptsEqual(queuedPromptsRef.current, next)) return;
@@ -383,7 +493,18 @@ export function useQueuedPrompts({
     ): Set<string> => {
       const settledIds = new Set(snapshot.settledMessageIds);
       const promotedIds = new Set(snapshot.promotedMessageIds);
+      // The daemon snapshot is text-only; salvage the images still held by the
+      // pending admissions before deleting them, so the restored rows stay
+      // payload-complete (an edited or displayed row must not lose them).
+      const salvagedImages = new Map<string, PromptImage[]>();
       for (const message of snapshot.messages) {
+        const pending = pendingMidTurnAdmissionsRef.current.get(
+          message.messageId,
+        );
+        const images = pending?.prompt.images;
+        if (images && images.length > 0) {
+          salvagedImages.set(message.messageId, images);
+        }
         pendingMidTurnAdmissionsRef.current.delete(message.messageId);
       }
       for (const messageId of settledIds) {
@@ -392,7 +513,17 @@ export function useQueuedPrompts({
         completionCallbacksRef.current.delete(messageId);
         callback?.();
       }
+      // A promoted message surfaces as a pending-prompt (server) row built from
+      // the text-only `getPendingPrompts` summary, so salvage its images here
+      // too — otherwise the promoted row displays nothing and editing it can't
+      // restore the attachments.
+      const promotedImages = new Map<string, PromptImage[]>();
       for (const messageId of promotedIds) {
+        const pending = pendingMidTurnAdmissionsRef.current.get(messageId);
+        const images = pending?.prompt.images;
+        if (images && images.length > 0) {
+          promotedImages.set(messageId, images);
+        }
         pendingMidTurnAdmissionsRef.current.delete(messageId);
       }
       const waitingIds = new Set(
@@ -423,6 +554,29 @@ export function useQueuedPrompts({
             }
           : prompt,
       );
+      // A degraded (summary-only) row is provisional: the daemon still holds
+      // the media, so a later snapshot that hydrates it restores the payload.
+      next = next.map((prompt) => {
+        if (
+          prompt.payloadCompleteness !== 'summary-only' ||
+          prompt.midTurnMessageId === undefined
+        ) {
+          return prompt;
+        }
+        const message = snapshot.messages.find(
+          (item) => item.messageId === prompt.midTurnMessageId,
+        );
+        if (
+          !message ||
+          contentHasDegradedMedia(message.content) ||
+          contentHasUnhydratedMedia(message.content)
+        ) {
+          return prompt;
+        }
+        const hydrated = contentToImages(message.content);
+        if (!hydrated) return prompt;
+        return { ...prompt, images: hydrated, payloadCompleteness: undefined };
+      });
       if (next.length !== current.length) {
         const retainedIds = new Set(next.map((prompt) => prompt.id));
         for (const prompt of current) {
@@ -449,15 +603,38 @@ export function useQueuedPrompts({
       const restoredRows: QueuedPrompt[] = [];
       for (const message of snapshot.messages) {
         if (localIds.has(message.messageId)) continue;
+        // Prefer the in-memory admission's images; after a refresh only the
+        // snapshot's media blocks remain.
+        const salvaged = salvagedImages.get(message.messageId);
+        const images = salvaged ?? contentToImages(message.content);
         restoredRows.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: message.text,
+          ...(images ? { images } : {}),
+          // A hydration-failure placeholder in the snapshot means the row's
+          // attachments are gone from the client; an unhydrated reference
+          // means they are transiently unreachable. Degrade both like a
+          // summary-only row so editing cannot silently discard them — a
+          // later hydrated snapshot upgrades the provisional case back.
+          ...(salvaged === undefined &&
+          (contentHasDegradedMedia(message.content) ||
+            contentHasUnhydratedMedia(message.content))
+            ? { payloadCompleteness: 'summary-only' as const }
+            : {}),
           midTurnState: 'queued',
           midTurnMessageId: message.messageId,
         });
       }
       if (restoredRows.length > 0) next = [...next, ...restoredRows];
+      if (promotedImages.size > 0) {
+        next = next.map((prompt) => {
+          if ((prompt.images?.length ?? 0) > 0) return prompt;
+          const key = prompt.serverPromptId ?? prompt.midTurnMessageId;
+          const images = key ? promotedImages.get(key) : undefined;
+          return images ? { ...prompt, images } : prompt;
+        });
+      }
       if (!areQueuedPromptsEqual(current, next)) {
         queuedPromptsRef.current = next;
         setQueuedPrompts(next);
@@ -593,6 +770,8 @@ export function useQueuedPrompts({
       );
       const images = attachmentPrompts.flatMap((prompt) => prompt.images ?? []);
       if (images.length > 0) editor.restoreImages(images);
+      const files = attachmentPrompts.flatMap((prompt) => prompt.files ?? []);
+      if (files.length > 0) editor.restoreFiles(files);
       let annotationOffset = 0;
       const inputAnnotations: DaemonInputAnnotation[] = [];
       for (const prompt of attachmentPrompts) {
@@ -671,7 +850,9 @@ export function useQueuedPrompts({
       if (
         displayedServerPromptIdsRef.current.has(promptId) ||
         prompt.payloadCompleteness === 'summary-only' ||
-        (!prompt.text && (prompt.images?.length ?? 0) === 0)
+        (!prompt.text &&
+          (prompt.images?.length ?? 0) === 0 &&
+          (prompt.files?.length ?? 0) === 0)
       ) {
         return;
       }
@@ -682,6 +863,7 @@ export function useQueuedPrompts({
         prompt.inputAnnotations?.length
           ? { inputAnnotations: prompt.inputAnnotations }
           : undefined,
+        toStoreFiles(prompt.files),
       );
     },
     [store],
@@ -766,6 +948,7 @@ export function useQueuedPrompts({
                 item.serverState === 'submitting' &&
                 item.admissionOutcome !== 'unknown' &&
                 (item.images?.length ?? 0) === 0 &&
+                (item.files?.length ?? 0) === 0 &&
                 item.text === eventText,
             );
           if (prompt) {
@@ -859,6 +1042,7 @@ export function useQueuedPrompts({
       sessionActions
         .submitPrompt(prompt.text, {
           images: prompt.images,
+          files: prompt.files,
           inputAnnotations: prompt.inputAnnotations,
           optimisticUserMessage: false,
           sessionId: targetSessionId,
@@ -942,7 +1126,10 @@ export function useQueuedPrompts({
             if (prompt.onComplete) {
               settleCompletionCallback(result.promptId, prompt.onComplete);
             }
-            if ((prompt.images?.length ?? 0) > 0) {
+            if (
+              (prompt.images?.length ?? 0) > 0 ||
+              (prompt.files?.length ?? 0) > 0
+            ) {
               void refreshPendingPrompts(targetSessionId);
             }
             return;
@@ -982,7 +1169,10 @@ export function useQueuedPrompts({
           if (prompt.onComplete) {
             settleCompletionCallback(result.promptId, prompt.onComplete);
           }
-          if ((prompt.images?.length ?? 0) > 0) {
+          if (
+            (prompt.images?.length ?? 0) > 0 ||
+            (prompt.files?.length ?? 0) > 0
+          ) {
             void refreshPendingPrompts(targetSessionId);
           }
         })
@@ -1063,18 +1253,35 @@ export function useQueuedPrompts({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       onComplete?: () => void,
       inputAnnotations?: DaemonInputAnnotation[],
       onAdmitted?: () => void,
     ) => {
       const trimmed = text.trim();
-      if (!trimmed && (images?.length ?? 0) === 0) return true;
+      if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
+        return true;
       const targetSessionId = latestSessionIdRef.current;
       const targetWorkspaceCwd = latestWorkspaceCwdRef.current;
       const ownerToken = ownerTokenRef.current;
+      const imageList = images ?? [];
+      // Mid-turn media needs the daemon-owned id surface AND the daemon's media
+      // capability; an image we can't type also keeps the whole message on the
+      // next-turn path so the daemon never drops part of the payload.
+      const canSendMidTurnMedia =
+        imageList.length > 0 &&
+        canQueryMidTurn &&
+        canInjectMidTurnMedia &&
+        imageList.every(
+          (image) =>
+            image.data.length > 0 &&
+            image.media_type.startsWith('image/') &&
+            image.media_type !== 'image/*',
+        );
       const shouldInsertMidTurn =
         latestStreamingStateRef.current !== 'idle' &&
-        (images?.length ?? 0) === 0 &&
+        (files?.length ?? 0) === 0 &&
+        (imageList.length === 0 || canSendMidTurnMedia) &&
         (inputAnnotations?.length ?? 0) === 0 &&
         !isCommandPrompt(trimmed);
       const midTurnMessageId =
@@ -1092,6 +1299,7 @@ export function useQueuedPrompts({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: trimmed,
+          ...(imageList.length > 0 ? { images: [...imageList] } : {}),
           midTurnMessageId,
           admissionOutcome: 'unknown',
           payloadCompleteness: 'complete',
@@ -1101,22 +1309,95 @@ export function useQueuedPrompts({
           prompt: pendingAdmission,
           workspaceCwd: targetWorkspaceCwd,
         });
+        if (imageList.length > 0) {
+          queuedPromptsRef.current = [
+            ...queuedPromptsRef.current,
+            { ...pendingAdmission, midTurnState: 'submitting' },
+          ];
+          setQueuedPrompts(queuedPromptsRef.current);
+        }
         if (onComplete) {
           settleCompletionCallback(midTurnMessageId, onComplete);
         }
-        void sessionActions
-          .enqueueMidTurnMessage(trimmed, { messageId: midTurnMessageId })
+        const abort = midTurnEnqueueAbortRef.current ?? new AbortController();
+        midTurnEnqueueAbortRef.current = abort;
+        let enqueueStarted = false;
+        let uploadedMediaReferences: DaemonSessionMediaReference[] = [];
+        const removeUploadedMedia = async () => {
+          if (!targetSessionId) return;
+          await Promise.allSettled(
+            uploadedMediaReferences.map(
+              async (reference) =>
+                await sessionActions.removeMedia(reference.mediaId, {
+                  sessionId: targetSessionId,
+                }),
+            ),
+          );
+        };
+        void Promise.allSettled(
+          imageList.map(
+            async (image) =>
+              await sessionActions.uploadMedia(
+                {
+                  data: image.data,
+                  mimeType: image.media_type,
+                },
+                { signal: abort.signal },
+              ),
+          ),
+        )
+          .then(async (results) => {
+            uploadedMediaReferences = results.flatMap((result) =>
+              result.status === 'fulfilled' ? [result.value] : [],
+            );
+            const failure = results.find(
+              (result): result is PromiseRejectedResult =>
+                result.status === 'rejected',
+            );
+            if (failure) {
+              await removeUploadedMedia();
+              throw failure.reason;
+            }
+            if (
+              abort.signal.aborted ||
+              latestSessionIdRef.current !== targetSessionId ||
+              latestWorkspaceCwdRef.current !== targetWorkspaceCwd
+            ) {
+              await removeUploadedMedia();
+              throw new DOMException('Session changed', 'AbortError');
+            }
+            enqueueStarted = true;
+            return await sessionActions.enqueueMidTurnMessage(trimmed, {
+              signal: abort.signal,
+              messageId: midTurnMessageId,
+              ...(uploadedMediaReferences.length > 0
+                ? { content: uploadedMediaReferences }
+                : {}),
+            });
+          })
           .then(async (result) => {
             if (!result.accepted) {
+              await removeUploadedMedia();
               completionCallbacksRef.current.delete(midTurnMessageId);
+              const pendingAdmissionStillOwned =
+                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               if (
                 latestSessionIdRef.current !== targetSessionId ||
                 latestWorkspaceCwdRef.current !== targetWorkspaceCwd
               ) {
+                if (pendingAdmissionStillOwned) {
+                  restoreQueuedPromptsToEditor(
+                    [pendingAdmission],
+                    undefined,
+                    true,
+                  );
+                  reportError(
+                    new Error('Daemon rejected mid-turn message'),
+                    t('queue.queueFailed'),
+                  );
+                }
                 return;
               }
-              const pendingAdmissionStillOwned =
-                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               if (!pendingAdmissionStillOwned) return;
               const next = queuedPromptsRef.current.filter(
                 (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
@@ -1141,7 +1422,10 @@ export function useQueuedPrompts({
             ) {
               await reconcileMidTurnMessages(targetSessionId);
             }
-            pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+            // Do NOT delete the pending admission here. `applyMidTurnSnapshot`
+            // deletes it atomically with salvaging its images; deleting early
+            // opens a race where a concurrent (e.g. streaming-driven) reconcile
+            // applies after this delete and rebuilds the row without the images.
           })
           .catch(async (error: unknown) => {
             if (
@@ -1149,6 +1433,45 @@ export function useQueuedPrompts({
               latestWorkspaceCwdRef.current !== targetWorkspaceCwd ||
               !targetSessionId
             ) {
+              completionCallbacksRef.current.delete(midTurnMessageId);
+              const pendingAdmissionStillOwned =
+                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+              if (!enqueueStarted) {
+                // Nothing reached the daemon, so the draft is still ours to
+                // return: restore it to the current editor instead of
+                // leaking it across the session switch.
+                if (pendingAdmissionStillOwned) {
+                  restoreQueuedPromptsToEditor(
+                    [pendingAdmission],
+                    undefined,
+                    true,
+                  );
+                  reportError(error, t('queue.queueFailed'));
+                }
+              }
+              // An enqueue already dispatched when the session changed may
+              // have reached the daemon: keep the uploaded media (a queued
+              // message may reference it) and drop only the admission, so
+              // its base64 payload is not pinned until reload and no stale
+              // row materializes when returning to the old session.
+              return;
+            }
+            if (!enqueueStarted) {
+              completionCallbacksRef.current.delete(midTurnMessageId);
+              const pendingAdmissionStillOwned =
+                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+              if (!pendingAdmissionStillOwned) return;
+              const next = queuedPromptsRef.current.filter(
+                (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              restoreQueuedPromptsToEditor(
+                [pendingAdmission],
+                targetSessionId,
+                true,
+              );
+              reportError(error, t('queue.queueFailed'));
               return;
             }
             const snapshot = await reconcileMidTurnMessages(targetSessionId);
@@ -1169,6 +1492,9 @@ export function useQueuedPrompts({
                     id: nextQueuedPromptIdRef.current++,
                     sessionId: targetSessionId,
                     text: trimmed,
+                    // Keep the images so resolving this unknown row restores
+                    // the full payload, not just the text.
+                    ...(imageList.length > 0 ? { images: [...imageList] } : {}),
                     midTurnMessageId,
                     admissionOutcome: 'unknown' as const,
                     payloadCompleteness: 'complete' as const,
@@ -1181,29 +1507,28 @@ export function useQueuedPrompts({
               reportError(error, t('queue.admissionUnknown'));
               return;
             }
-            const pendingAdmissionStillOwned =
-              pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
             const known =
               snapshot.messages.some(
                 (message) => message.messageId === midTurnMessageId,
               ) ||
               snapshot.settledMessageIds.includes(midTurnMessageId) ||
               snapshot.promotedMessageIds.includes(midTurnMessageId);
-            if (known || !pendingAdmissionStillOwned) return;
-            completionCallbacksRef.current.delete(midTurnMessageId);
-            restoreQueuedPromptsToEditor(
-              [
-                {
-                  id: nextQueuedPromptIdRef.current++,
-                  sessionId: targetSessionId,
-                  text: trimmed,
-                  images: images ? [...images] : undefined,
-                  payloadCompleteness: 'complete',
-                },
-              ],
-              targetSessionId,
+            if (known) return;
+            if (!pendingMidTurnAdmissionsRef.current.has(midTurnMessageId)) {
+              return;
+            }
+            const next = queuedPromptsRef.current.map((prompt) =>
+              prompt.midTurnMessageId === midTurnMessageId
+                ? {
+                    ...prompt,
+                    midTurnState: undefined,
+                    admissionOutcome: 'unknown' as const,
+                  }
+                : prompt,
             );
-            reportError(error, t('queue.queueFailed'));
+            queuedPromptsRef.current = next;
+            setQueuedPrompts(next);
+            reportError(error, t('queue.admissionUnknown'));
           });
         return true;
       }
@@ -1213,6 +1538,7 @@ export function useQueuedPrompts({
         sessionId: targetSessionId,
         text: trimmed,
         images: images ? [...images] : undefined,
+        files: files ? [...files] : undefined,
         inputAnnotations: inputAnnotations ? [...inputAnnotations] : undefined,
         onComplete,
         onAdmitted,
@@ -1262,6 +1588,7 @@ export function useQueuedPrompts({
       return true;
     },
     [
+      canInjectMidTurnMedia,
       canQueryMidTurn,
       fallbackToPendingPrompt,
       reconcileMidTurnMessages,
@@ -1280,8 +1607,11 @@ export function useQueuedPrompts({
   // local rows still fall back to the ordinary queue at the turn boundary.
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    for (const batch of midTurnInjectedBatches) {
-      if (batch.sessionId !== sessionId) continue;
+    const sessionBatches = midTurnInjectedBatches.filter(
+      (batch) => batch.sessionId === sessionId,
+    );
+    if (sessionBatches.length === 0) return;
+    for (const batch of sessionBatches) {
       for (const messageId of batch.messageIds ?? []) {
         pendingMidTurnAdmissionsRef.current.delete(messageId);
         const callback = completionCallbacksRef.current.get(messageId);
@@ -1292,7 +1622,7 @@ export function useQueuedPrompts({
     const current = queuedPromptsRef.current;
     const next = removeInjectedFromQueue(
       current,
-      midTurnInjectedBatches,
+      sessionBatches,
       sessionId,
       clientId,
       canQueryMidTurn,
@@ -1305,21 +1635,23 @@ export function useQueuedPrompts({
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
     }
-    consumeMidTurnInjected(
-      midTurnInjectedBatches.filter((batch) => batch.sessionId === sessionId),
-    );
+    consumeMidTurnInjected(sessionBatches);
+    // Fence an enqueue-time snapshot that may have captured the message before
+    // this injection, then confirm the local removal against daemon state.
+    if (canQueryMidTurn) void reconcileMidTurnMessages(sessionId);
   }, [
     midTurnInjectedBatches,
     sessionId,
     clientId,
     canQueryMidTurn,
     consumeMidTurnInjected,
+    reconcileMidTurnMessages,
   ]);
 
   useEffect(() => {
     if (streamingState !== 'idle' || writeBlocked) return;
     const ctrl = midTurnEnqueueAbortRef.current;
-    if (ctrl) {
+    if (ctrl && !canQueryMidTurn) {
       ctrl.abort();
       midTurnEnqueueAbortRef.current = null;
     }
@@ -1670,6 +2002,7 @@ export function useQueuedPrompts({
               ...prompt,
               text: '',
               images: undefined,
+              files: undefined,
               inputAnnotations: undefined,
               onComplete: undefined,
               payloadAvailable: false,

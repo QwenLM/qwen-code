@@ -226,7 +226,14 @@ export function useReactToolScheduler(
       modelOverride?: string,
     ) => {
       if (!modelOverride?.endsWith('\0')) {
-        void scheduler.schedule(request, signal);
+        void scheduler.schedule(request, signal).catch((error: unknown) => {
+          if (signal.aborted) return;
+          debugLogger.error(
+            `Tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
         return;
       }
       void (async () => {
