@@ -6782,6 +6782,241 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(parseLedger(r.body)).not.toBeNull();
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
   });
+
+  // Round-8 gate classes: every fixture below shipped green with the
+  // notice swallowed (or the only-copy evidence spent) under the hand
+  // model the round falsified. Each one is a jsdom-oracle flip.
+
+  it('closes the script at escape level 1 — a level demotion is not a close', () => {
+    // c1: inside `<script>`, a matching `</script>` at escape level 1
+    // CLOSES the element — only the double-escaped level 2 demotes. The
+    // scan that demoted kept the script open past the first `</script>`,
+    // read the `<style>` after it as script text, and spent the tail on a
+    // comment closer where the page needed `</style>` — the notice rode
+    // inside the style the body never closed.
+    const escaped =
+      '<script>\n<!-- </script> <style> </script>\n\nthen evidence ' +
+      'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [escaped] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('then evidence');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a comment on a dash run — `--->` is a comment end', () => {
+    // c2: the comment-end states accept any run of two or more dashes
+    // before the `>` — `-->`, `--->`, `---->`, `--!->`. The scan that
+    // accepted only `-->` kept the comment open past its real end, never
+    // saw the `<script>` the browser opens after it, and spent the tail
+    // on a comment closer where the page needed `</script>` — the notice
+    // rode inside the script the body never closed.
+    const dashed =
+      'notes\n\n<!-- a ---> <script> var v = 1;' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [dashed] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('var v = 1;');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('scans a template\u2019s content as data — template is not raw text', () => {
+    // c3: a browser tokenizes `<template>` content in the data state, so
+    // a `<script>` inside it opens for real and `</template>` is its
+    // text. The scan that ran template as a raw element closed the
+    // template at that `</template>`, certified the tail clean, and the
+    // script swallowed the notice.
+    const tpl =
+      'tpl: <template><script></template> evidence ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [tpl] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('indexes the scan by the original string — case folding never shifts offsets', () => {
+    // c4: '\u0130' lowercases to TWO code units, so a folded copy's
+    // offsets drift against the original and every tag read lands one
+    // character late — the real `</script>` is never recognised. The
+    // salvage then spent the block the closer was verifiable on.
+    const dotted =
+      'raw: <script>\u0130</script> evidence ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [dotted] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('evidence');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('reads a bare `=` as an attribute-name character, not a value introducer', () => {
+    // c5: in before-attribute-name position `=` STARTS the attribute name
+    // — `<div =" >` is a complete tag at its first `>`. The scan that
+    // read the `"` as a value delimiter skipped to a later quote,
+    // swallowed the `<script>` after the tag, and certified the tail the
+    // script swallows.
+    const bare =
+      'notes\n\n<div =" ><b>" <script> raw tail ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [bare] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('raw tail');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a raw element on a dotted end tag — the attribute tail still closes it', () => {
+    // c6: inside a raw element the end-tag name is ASCII alpha only, and
+    // '.' starts the ignored attribute tail — `</style.foo>` ends an
+    // open `<style>`. The scan that demanded a literal closer kept the
+    // style open over the `<script>` the page opens after it, and spent
+    // the tail on the wrong closer.
+    const dotted =
+      '<style>\na\n</style.foo>\n\n<script> tail ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [dotted] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('tail');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('fails closed over foreign content — svg has no raw-text states', () => {
+    // c7: inside `<svg>` the `<style>` is a foreign element — no raw
+    // state, its "content" ends at `</svg>` and the `<script>` after it
+    // opens for real. The scan that kept its raw model certified
+    // closers the page never honoured; the round-8 gate fails closed
+    // over the uncertifiable region instead — the notice ships, the
+    // region is spent.
+    const foreign = 'fig <svg><style></svg><script> tail ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [foreign] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('does not count a `</details>` the tree ignores under an unclosed table', () => {
+    // c8: tree construction IGNORES a `</details>` while an unclosed
+    // `<table>` stands above it — the details stays open and the tail
+    // rides collapsed inside it. The counter that decremented anyway
+    // certified the tail clean and shipped the notice invisible.
+    const folded =
+      '<details>\n<table>\n</details>\n<p> notice body ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [folded] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('keeps a fence inside an unclosed <details> — the markdown closers carry the fold', () => {
+    // R8-1: the fence arm returned its closer WITHOUT the `</details>`
+    // the browser-state arm appends, so with an unclosed fold around the
+    // fence the gate rejected every candidate by gate, not by room, and
+    // the rewind spent the block's whole content — 626 chars where
+    // 65,024 fit.
+    const wrapped =
+      '<details>\n<summary>s</summary>\n\n```\ncode line\n' +
+      'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [wrapped] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('code line');
+    expect(r.body.lastIndexOf('</details>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('does not blame a closed fence that quotes the sentinel for a later swallow', () => {
+    // R8-2: the backward swallow search skipped the tail's own inline
+    // token and kept scanning, so a closed fence quoting the literal was
+    // blamed for the swallow — its closer fails verification and the
+    // rewind deleted everything from the quote to the end, real
+    // swallower and blockers included. The inline token ends the search,
+    // as the module's own docstring promises.
+    const quoted =
+      'See log:\n```\nQWENREVIEWCUTSENTINEL\n```\n\nfoo <style> tail ' +
+      'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [quoted] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('QWENREVIEWCUTSENTINEL');
+    expect(r.body).toContain('tail');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('salvages a cut inside a quoted attribute value', () => {
+    // R8-3: a tag left open with an unclosed quoted attribute value at
+    // the cut had no proposed closer — `\n">` / `\n'>` / `\n>` are all
+    // gate-verifiable inside the reserve — so a 14-char salvage became a
+    // total loss: the posted body was tail-only, the blocker gone whole.
+    const midAttr =
+      'notes\n\n<div class="a">\n<span title="' + 'V'.repeat(80_000);
+    const r = composeReview(base({ bodyCriticals: [midAttr] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('<div class="a">');
+    expect(r.body).toContain('V'.repeat(1_000));
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('does not pin the rewind to an already-closed <details>', () => {
+    // R8-4: `detailsLine` latched the FIRST depth increase, so a
+    // closed-then-reopened fold pinned the rewind to the already-closed
+    // one and `Math.min` retreated to line 0 — total loss, although the
+    // gate certified three cheaper salvages. A stack of opener lines
+    // reads the earliest fold STILL open.
+    const reopened =
+      '<details>\nfold one\n</details>\n\n' +
+      'evidence paragraph\n\n<details>\n\n<div class="\n' +
+      'V'.repeat(80_000);
+    const r = composeReview(base({ bodyCriticals: [reopened] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('fold one');
+    expect(r.body).toContain('evidence paragraph');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('completes a start tag the cut split, instead of rewinding it whole', () => {
+    // R8-5: a cut INSIDE a start tag absorbs a bare end tag into the
+    // still-open start tag — the gate rejects it, no salvage was
+    // offered, and the caller rewound the whole block. Completing the
+    // start tag first (`\n>`) gives the gate a closer it can verify.
+    const splitTag = 'Intro.\n\n<script ' + 'a'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [splitTag] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('<script');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('rewinds an inline swallower to its own line, not the paragraph start', () => {
+    // R8-6: every html_inline fragment was attributed to the FIRST line
+    // of its inline token, so a `<plaintext>` on a paragraph's second
+    // line rewound to the paragraph start and spent the clean first line
+    // with it — the whole ~64.7k cut — although the prefix rode clean.
+    const inline =
+      'Line one of the paragraph stays.\nLine two has <plaintext> inline.' +
+      'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [inline] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('Line one of the paragraph stays.');
+    expect(r.body).not.toContain('<plaintext>');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
 });
 
 describe('composeReview — the findings file tag check', () => {

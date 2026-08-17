@@ -728,15 +728,21 @@ function noticeRidesClean(cut: string, closer: string): boolean {
   const at = html.lastIndexOf(NOTICE_SENTINEL);
   if (at === -1) return false;
   const scan = scanBrowserState(html.slice(0, at));
-  return scan.end.kind === 'data' && scan.detailsDepth === 0;
+  return (
+    scan.end.kind === 'data' &&
+    scan.detailsDepth === 0 &&
+    scan.templateDepth === 0 &&
+    !scan.uncertain
+  );
 }
 
 /**
  * The elements whose content runs to their closing tag — script, style
  * and friends — plus `plaintext`, which runs to the end of the page and
- * has no closer, and `template`, whose content is inert until its
- * closing tag. An unclosed one swallows everything after its opener,
- * notice included.
+ * has no closer. An unclosed one swallows everything after its opener,
+ * notice included. `template` is NOT a member: a browser tokenizes its
+ * content in the data state, so it is tracked as an inert depth, like
+ * `details`, not as a raw-text element.
  */
 const RAW_TEXT_ELEMENTS: ReadonlySet<string> = new Set([
   'script',
@@ -749,7 +755,22 @@ const RAW_TEXT_ELEMENTS: ReadonlySet<string> = new Set([
   'textarea', // RCDATA — the same closer rule
   'title', // RCDATA — the same closer rule
   'plaintext', // no closer exists — the fail-closed arm handles it
-  'template',
+]);
+
+/**
+ * The elements whose still-open presence puts tree construction in a mode
+ * that ignores or relocates other tags: a browser IGNORES a `</details>`
+ * while an unclosed table stands above it, where this scan's counter used
+ * to decrement. The counter mimics that rule for the details and template
+ * end tags, and a blocker still open at the tail fails closed — foster
+ * parenting inside these modes moves content in ways this scan does not
+ * model.
+ */
+const MODE_BLOCKERS: ReadonlySet<string> = new Set([
+  'table',
+  'select',
+  'object',
+  'marquee',
 ]);
 
 type BrowserState =
@@ -759,75 +780,185 @@ type BrowserState =
   | { kind: 'comment' }
   | { kind: 'raw'; tag: string };
 
-function isTagNameChar(c: string): boolean {
-  return /[a-zA-Z0-9:-]/.test(c);
+interface ScanContext {
+  detailsDepth: number;
+  templateDepth: number;
+  modeDepth: number;
+  foreign: boolean;
+}
+
+interface ScanResult extends ScanContext {
+  end: BrowserState;
+  /** Offset in `s` where the still-open swallow entered, -1 otherwise. */
+  swallowEnteredAt: number;
+  /**
+   * The prefix entered a region this scan cannot prove — foreign content
+   * or a mode-blocking element still open — so no closeness it computes
+   * may certify the tail.
+   */
+  uncertain: boolean;
+}
+
+/** Whether `s` carries `needle` at `at`, ASCII-case-insensitively. */
+function startsWithCI(s: string, needle: string, at: number): boolean {
+  return s.slice(at, at + needle.length).toLowerCase() === needle;
+}
+
+/**
+ * Read a tag name to its HTML5 end — whitespace, `/` or `>` — never to a
+ * '.': `</details.foo>` names `details.foo` and closes no `<details>`,
+ * and `<style.foo>` opens an unknown element, not raw style.
+ */
+function readTagName(s: string, k: number): { name: string; after: number } {
+  let name = '';
+  while (k < s.length) {
+    const c = s.charAt(k);
+    if (
+      c === '\t' ||
+      c === '\n' ||
+      c === '\f' ||
+      c === '\r' ||
+      c === ' ' ||
+      c === '/' ||
+      c === '>'
+    ) {
+      break;
+    }
+    name += c.toLowerCase();
+    k++;
+  }
+  return { name, after: k };
 }
 
 /** The offset after the tag body's `>`, or -1 when the tag never closes. */
 function skipTagBody(s: string, k: number): number {
-  // A quote delimits a span only in before-attribute-VALUE position —
-  // after an `=`. At a name position it is part of the name: `<div "x>`
-  // is the complete tag, and an indexOf jump over the "quoted" span read
-  // the `<script>` inside it as attribute content.
-  let expectValue = false;
+  // The attribute states after the tag name. `=` introduces a value only
+  // from attribute-NAME position — in before-attribute-name position it is
+  // a name character, so `<div ="x>` is one complete tag.
+  let named = false;
+  let beforeValue = false;
+  let unquotedValue = false;
   for (;;) {
     if (k >= s.length) return -1;
     const c = s.charAt(k);
     if (c === '>') return k + 1;
-    if (expectValue && (c === '"' || c === "'")) {
-      const q = s.indexOf(c, k + 1);
-      if (q === -1) return -1;
-      k = q + 1;
-      expectValue = false;
+    const ws =
+      c === '\t' || c === '\n' || c === '\f' || c === '\r' || c === ' ';
+    if (beforeValue) {
+      if (ws) {
+        k++;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        const q = s.indexOf(c, k + 1);
+        if (q === -1) return -1;
+        k = q + 1;
+        beforeValue = false;
+        named = false;
+        continue;
+      }
+      beforeValue = false;
+      unquotedValue = true;
       continue;
     }
-    if (c === '=') expectValue = true;
-    else if (c !== '\t' && c !== '\n' && c !== '\f' && c !== ' ') {
-      expectValue = false;
+    if (unquotedValue) {
+      if (ws) {
+        unquotedValue = false;
+        named = false;
+      }
+      k++;
+      continue;
     }
+    if (ws) {
+      named = false;
+      k++;
+      continue;
+    }
+    if (c === '=' && named) {
+      beforeValue = true;
+      k++;
+      continue;
+    }
+    if (c === '/' && s.charAt(k + 1) === '>') return k + 2;
+    // Every other character — quotes, `<`, a bare `=` — is a name
+    // character in this position.
+    named = true;
     k++;
   }
 }
 
 /**
- * The browser's state after scanning `s`, resumed from `state`, and —
- * when a swallow (comment or raw element) is open at the end — the offset
- * within `s` where that swallow opened (-1 when inherited from `state`).
- * Also the nesting depth of `<details>` elements still open at the end:
- * not a swallow state, but a collapsed-hiding one — a tail inside a
- * `details:not([open])` renders invisible to the author.
- * This is the HTML5 swallow model, attribute-aware: a quoted `<script>`
- * opens nothing and a quoted `</textarea>` closes nothing, the two
- * blindnesses the indexOf scan shipped.
+ * The browser's state after scanning `s`, resumed from `state` and the
+ * carried depths, and — when a swallow (comment or raw element) is open
+ * at the end — the offset within `s` where that swallow opened (-1 when
+ * inherited from `state`). Also the nesting depths of `<details>` and
+ * `<template>` elements still open at the end: not swallow states, but
+ * hiding ones — a tail inside an unclosed `details:not([open])` renders
+ * collapsed, one inside an unclosed `<template>` never renders at all.
+ *
+ * The scan is attribute-aware and indexes only the string it was given:
+ * case folding happens per character, never on a copy whose offsets could
+ * shift against the original. Where the tokenizer model is complete —
+ * script escape levels, comment ends, raw-text closers, attribute values
+ * — it decides; where tree construction is not modelled — foreign content
+ * under `<svg>`/`<math>`, a mode-blocking element still open — it reports
+ * `uncertain` and the gate fails closed instead of certifying.
  */
 function scanBrowserState(
   s: string,
   state: BrowserState = { kind: 'data' },
-  detailsDepth = 0,
-): { end: BrowserState; swallowEnteredAt: number; detailsDepth: number } {
-  const lower = s.toLowerCase();
+  ctx: ScanContext = {
+    detailsDepth: 0,
+    templateDepth: 0,
+    modeDepth: 0,
+    foreign: false,
+  },
+): ScanResult {
   let enteredAt = -1;
-  let depth = detailsDepth;
+  let detailsDepth = ctx.detailsDepth;
+  let templateDepth = ctx.templateDepth;
+  let modeDepth = ctx.modeDepth;
+  let foreign = ctx.foreign;
   let i = 0;
+  const finish = (end: BrowserState, swallowAt: number): ScanResult => ({
+    end,
+    swallowEnteredAt: swallowAt,
+    detailsDepth,
+    templateDepth,
+    modeDepth,
+    foreign,
+    uncertain: foreign || modeDepth > 0,
+  });
   for (;;) {
     if (state.kind === 'comment') {
+      // The comment-end states: a run of two or more dashes closes on the
+      // first `>` after it — `-->`, `--->`, `---->` — and a `!` between
+      // the dash run and the `>` closes too — `--!>`, `--!->`.
       let j = i;
       let closed = -1;
       for (;;) {
         const cc = s.indexOf('--', j);
         if (cc === -1) break;
-        if (s.charAt(cc + 2) === '>') {
-          closed = cc + 3;
+        let m = cc + 2;
+        while (s.charAt(m) === '-') m++;
+        if (s.charAt(m) === '>') {
+          closed = m + 1;
           break;
         }
-        if (s.charAt(cc + 2) === '!' && s.charAt(cc + 3) === '>') {
-          closed = cc + 4;
-          break;
+        if (s.charAt(m) === '!') {
+          let p = m + 1;
+          while (s.charAt(p) === '-') p++;
+          if (s.charAt(p) === '>') {
+            closed = p + 1;
+            break;
+          }
+          j = p;
+          continue;
         }
         j = cc + 2;
       }
       if (closed === -1) {
-        return { end: state, swallowEnteredAt: enteredAt, detailsDepth: depth };
+        return finish(state, enteredAt);
       }
       i = closed;
       state = { kind: 'data' };
@@ -836,7 +967,7 @@ function scanBrowserState(
     if (state.kind === 'markup') {
       const gt = s.indexOf('>', i);
       if (gt === -1) {
-        return { end: state, swallowEnteredAt: enteredAt, detailsDepth: depth };
+        return finish(state, enteredAt);
       }
       i = gt + 1;
       state = { kind: 'data' };
@@ -848,7 +979,7 @@ function scanBrowserState(
       // was read where it opened. Closing it as ordinary is conformant.
       const after = skipTagBody(s, i);
       if (after === -1) {
-        return { end: state, swallowEnteredAt: enteredAt, detailsDepth: depth };
+        return finish(state, enteredAt);
       }
       i = after;
       state = { kind: 'data' };
@@ -856,66 +987,70 @@ function scanBrowserState(
     }
     if (state.kind === 'raw') {
       if (state.tag === 'plaintext') {
-        return { end: state, swallowEnteredAt: enteredAt, detailsDepth: depth };
+        return finish(state, enteredAt);
       }
       let j = i;
       let closed = -1;
       // Script data carries escape levels: a `<!--` enters one, a
-      // `<script` inside it a second, and a `</script>` spent inside
-      // either level exits the LEVEL — the element closes only on one
-      // reached at level 0. A `-->` demotes one level the same way.
+      // `<script` inside it the second. A matching end tag CLOSES the
+      // element at level 0 and 1; only the double-escaped level 2 demotes
+      // a level on it. A `-->` demotes one level from either.
       let esc = 0;
       for (;;) {
-        const lt2 = lower.indexOf('<', j);
-        const levelEnd = esc > 0 ? lower.indexOf('-->', j) : -1;
+        const lt2 = s.indexOf('<', j);
+        const levelEnd = esc > 0 ? s.indexOf('-->', j) : -1;
         if (levelEnd !== -1 && (lt2 === -1 || levelEnd < lt2)) {
           esc--;
           j = levelEnd + 3;
           continue;
         }
         if (lt2 === -1) break;
-        if (lower.startsWith('</', lt2)) {
+        if (s.startsWith('</', lt2)) {
+          // A RAWTEXT end-tag name is ASCII alpha only: the first other
+          // character ends the name and rides the tag's attribute tail,
+          // which the tag still closes — `</style.foo>` ends an open
+          // `<style>` (the data-state end tags use the full name rule).
           let k = lt2 + 2;
           let name = '';
-          while (k < s.length && isTagNameChar(s.charAt(k))) {
+          while (k < s.length && /[a-zA-Z]/.test(s.charAt(k))) {
             name += s.charAt(k).toLowerCase();
             k++;
           }
-          const nx = s.charAt(k);
-          if (
-            name === state.tag &&
-            (nx === '' ||
-              nx === '\t' ||
-              nx === '\n' ||
-              nx === '\f' ||
-              nx === ' ' ||
-              nx === '/' ||
-              nx === '>')
-          ) {
-            if (esc === 0) {
-              closed = nx === '>' ? k + 1 : skipTagBody(s, k);
-              break;
+          if (name === state.tag) {
+            const tagEnd = skipTagBody(s, k);
+            if (tagEnd !== -1) {
+              if (esc <= 1) {
+                closed = tagEnd;
+                break;
+              }
+              esc--;
+              j = tagEnd;
+              continue;
             }
-            esc--;
-            const after = nx === '>' ? k + 1 : skipTagBody(s, k);
-            j = after === -1 ? s.length : after;
-            continue;
           }
           j = lt2 + 2;
           continue;
         }
         if (state.tag === 'script') {
-          if (lower.startsWith('<!--', lt2)) {
+          if (s.startsWith('<!--', lt2)) {
             if (esc === 0) esc = 1;
             j = lt2 + 4;
             continue;
           }
-          if (
-            esc === 1 &&
-            lower.startsWith('<script', lt2) &&
-            !isTagNameChar(s.charAt(lt2 + 7))
-          ) {
-            esc = 2;
+          if (esc === 1 && startsWithCI(s, '<script', lt2)) {
+            const nx = s.charAt(lt2 + 7);
+            if (
+              nx === '' ||
+              nx === '\t' ||
+              nx === '\n' ||
+              nx === '\f' ||
+              nx === '\r' ||
+              nx === ' ' ||
+              nx === '/' ||
+              nx === '>'
+            ) {
+              esc = 2;
+            }
             j = lt2 + 7;
             continue;
           }
@@ -923,7 +1058,7 @@ function scanBrowserState(
         j = lt2 + 1;
       }
       if (closed === -1) {
-        return { end: state, swallowEnteredAt: enteredAt, detailsDepth: depth };
+        return finish(state, enteredAt);
       }
       i = closed;
       state = { kind: 'data' };
@@ -931,11 +1066,7 @@ function scanBrowserState(
     }
     const lt = s.indexOf('<', i);
     if (lt === -1) {
-      return {
-        end: { kind: 'data' },
-        swallowEnteredAt: -1,
-        detailsDepth: depth,
-      };
+      return finish({ kind: 'data' }, -1);
     }
     i = lt;
     if (s.startsWith('<!--', lt)) {
@@ -964,39 +1095,44 @@ function scanBrowserState(
         i = lt + 2;
         continue;
       }
-      let k = lt + 2;
-      let name = '';
-      while (k < s.length && isTagNameChar(s.charAt(k))) {
-        name += s.charAt(k).toLowerCase();
-        k++;
+      const { name, after } = readTagName(s, lt + 2);
+      if (name === 'details' && modeDepth === 0) {
+        detailsDepth = Math.max(0, detailsDepth - 1);
+      } else if (name === 'template' && modeDepth === 0) {
+        templateDepth = Math.max(0, templateDepth - 1);
+      } else if (MODE_BLOCKERS.has(name)) {
+        modeDepth = Math.max(0, modeDepth - 1);
       }
-      if (name === 'details') depth = Math.max(0, depth - 1);
       state = { kind: 'tag' };
-      i = k;
+      i = after;
       continue;
     }
     if (/[a-zA-Z]/.test(s.charAt(lt + 1))) {
-      let k = lt + 1;
-      let name = '';
-      while (k < s.length && isTagNameChar(s.charAt(k))) {
-        name += s.charAt(k).toLowerCase();
-        k++;
-      }
-      const after = k >= s.length ? -1 : skipTagBody(s, k);
-      if (after === -1) {
+      const { name, after } = readTagName(s, lt + 1);
+      const tagEnd = after >= s.length ? -1 : skipTagBody(s, after);
+      if (tagEnd === -1) {
         // The tag does not complete here: a resumed scan closes it as
         // ordinary (see the 'tag' arm). A raw opener cut mid-attribute
         // still swallows at the page — fail closed on it below.
         state = { kind: 'tag' };
-        i = k;
+        i = after;
         continue;
       }
-      i = after;
-      if (RAW_TEXT_ELEMENTS.has(name)) {
+      i = tagEnd;
+      if (name === 'svg' || name === 'math') {
+        // Foreign content: HTML5 has no raw-text states there, and its
+        // tree construction is its own unmodelled surface — everything
+        // after the opener is uncertified.
+        foreign = true;
+      } else if (MODE_BLOCKERS.has(name)) {
+        modeDepth++;
+      } else if (name === 'template') {
+        templateDepth++;
+      } else if (name === 'details') {
+        detailsDepth++;
+      } else if (RAW_TEXT_ELEMENTS.has(name)) {
         state = { kind: 'raw', tag: name };
         enteredAt = lt;
-      } else if (name === 'details') {
-        depth++;
       }
       continue;
     }
@@ -1017,16 +1153,51 @@ function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
     }
     return off;
   };
+  // The probe renders once for both arms: the swallow attribution below
+  // and every candidate's state suffixes read the same scan.
+  const html = blockGrammar.render(probe);
+  const htmlAt = html.lastIndexOf(NOTICE_SENTINEL);
+  const scan = scanBrowserState(htmlAt === -1 ? html : html.slice(0, htmlAt));
+  // A tail inside an unclosed `<template>` or `<details>` rides inert or
+  // collapsed and invisible on the page; every candidate carries one
+  // closer per open level, template first — a template nested in a
+  // details must close before the details does.
+  const stateCloser =
+    '\n</template>'.repeat(scan.templateDepth) +
+    '\n</details>'.repeat(scan.detailsDepth);
+  // The closers the DOMINANT browser state at the tail needs, whatever
+  // the markdown layer blames for the swallow: a type-1 block can ride
+  // inside an earlier raw element the block grammar never saw, and the
+  // block's own end tag is text there — the state's closer alone is the
+  // salvage the gate can verify. Plaintext has no closer; an uncertain
+  // state offers none either and the rewind fails closed.
+  const end = scan.end;
+  const stateSuffixes = ((): string[] => {
+    if (end.kind === 'raw') {
+      return end.tag === 'plaintext' ? [] : [`\n</${end.tag}>${stateCloser}`];
+    }
+    if (end.kind === 'comment') return [`\n<!-- -->${stateCloser}`];
+    if (end.kind === 'markup') return [`\n>${stateCloser}`];
+    if (end.kind === 'tag') {
+      // A tag left open at the cut — including one whose quoted attribute
+      // value never closed — still has gate-verifiable closers; the gate
+      // rejects the quote variant that does not fit.
+      return ['\n">', "\n'>", '\n>'].map((c) => `${c}${stateCloser}`);
+    }
+    return [stateCloser];
+  })();
   // The probe appends the tail at the very end, so the LAST block token
   // carrying the sentinel is, by construction, the block that extends to
-  // the end of the page: no attribution guess over closed blocks.
+  // the end of the page: no attribution guess over closed blocks. The
+  // tail's own inline token ENDS the search — a closed fence or html_block
+  // that merely QUOTES the sentinel is not the swallower, and blaming it
+  // rewinds past the real one and every blocker after it.
   let swallow: (typeof tokens)[number] | null = null;
   for (let i = tokens.length - 1; i >= 0; i--) {
     const tok = tokens[i];
-    if (
-      (tok.type === 'fence' || tok.type === 'html_block') &&
-      tok.content.includes(NOTICE_SENTINEL)
-    ) {
+    if (!tok.content.includes(NOTICE_SENTINEL)) continue;
+    if (tok.type === 'inline') break;
+    if (tok.type === 'fence' || tok.type === 'html_block') {
       swallow = tok;
       break;
     }
@@ -1037,61 +1208,88 @@ function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
     // page, and attribute it to the raw fragment that opened it — raw
     // text reaches the page only through html_block and inline html
     // tokens — so the rewind loses the swallower, not the whole cut.
-    const html = blockGrammar.render(probe);
-    const at = html.lastIndexOf(NOTICE_SENTINEL);
-    const scan = scanBrowserState(at === -1 ? html : html.slice(0, at));
-    const end = scan.end;
     const frags: Array<{ content: string; line: number }> = [];
     for (const tok of tokens) {
       if (tok.type === 'html_block') {
         frags.push({ content: tok.content, line: tok.map?.[0] ?? 0 });
       } else if (tok.type === 'inline') {
-        for (const child of tok.children ?? []) {
-          if (child.type === 'html_inline') {
-            frags.push({ content: child.content, line: tok.map?.[0] ?? 0 });
+        // Inline children carry no line maps: locate each fragment in the
+        // token's source span and count the newlines before it, so a
+        // swallower on a paragraph's LATER line rewinds to that line, not
+        // to the paragraph start.
+        const spanStart = lineStart(tok.map?.[0] ?? 0);
+        let spanEnd = text.length;
+        if (tok.map) {
+          // Unclamped: `lineStart` holds at the last line when the map's
+          // end line runs past EOF, which would starve the bound to the
+          // span's START and mislocate every fragment on a later line.
+          let off = 0;
+          let full = true;
+          for (let l = 0; l < tok.map[1]; l++) {
+            const nl = text.indexOf('\n', off);
+            if (nl === -1) {
+              full = false;
+              break;
+            }
+            off = nl + 1;
           }
+          if (full) spanEnd = off;
+        }
+        let cursor = spanStart;
+        for (const child of tok.children ?? []) {
+          if (child.type !== 'html_inline') continue;
+          const found = text.indexOf(child.content, cursor);
+          let line = tok.map?.[0] ?? 0;
+          if (found !== -1 && found < spanEnd) {
+            line += text.slice(spanStart, found).split('\n').length - 1;
+            cursor = found + child.content.length;
+          }
+          frags.push({ content: child.content, line });
         }
       }
     }
     let state: BrowserState = { kind: 'data' };
     let openLine = -1;
-    let depth = 0;
-    let detailsLine = -1;
+    let carry: ScanContext = {
+      detailsDepth: 0,
+      templateDepth: 0,
+      modeDepth: 0,
+      foreign: false,
+    };
+    // Still-open details and template folds, as stacks of opener lines:
+    // the bottom is the earliest fold still open, and a closed-then-
+    // reopened fold never pins the rewind to the already-closed one.
+    const detailsLines: number[] = [];
+    const templateLines: number[] = [];
+    const track = (stack: number[], delta: number, line: number): void => {
+      for (let n = 0; n < delta; n++) stack.push(line);
+      if (delta < 0) stack.splice(Math.max(0, stack.length + delta));
+    };
     for (const frag of frags) {
-      const r = scanBrowserState(frag.content, state, depth);
+      const r = scanBrowserState(frag.content, state, carry);
       if (r.swallowEnteredAt !== -1) openLine = frag.line;
       else if (r.end.kind !== 'data' && state.kind === 'data') {
         openLine = frag.line;
       }
-      if (detailsLine === -1 && r.detailsDepth > depth) {
-        detailsLine = frag.line;
-      }
+      track(detailsLines, r.detailsDepth - carry.detailsDepth, frag.line);
+      track(templateLines, r.templateDepth - carry.templateDepth, frag.line);
       state = r.end;
-      depth = r.detailsDepth;
+      carry = {
+        detailsDepth: r.detailsDepth,
+        templateDepth: r.templateDepth,
+        modeDepth: r.modeDepth,
+        foreign: r.foreign,
+      };
     }
-    const openLines = [openLine, detailsLine].filter((l) => l !== -1);
+    const openLines = [
+      openLine,
+      detailsLines[0] ?? -1,
+      templateLines[0] ?? -1,
+    ].filter((l) => l !== -1);
     const blockStart = lineStart(
       openLines.length > 0 ? Math.min(...openLines) : 0,
     );
-    // A tail inside an unclosed `<details>` rides collapsed and
-    // invisible on the page; the candidate carries one `</details>` per
-    // open level on top of the swallow's own closer.
-    const detailsCloser = '\n</details>'.repeat(scan.detailsDepth);
-    if (end.kind === 'comment') {
-      // A bare `-->` line renders escaped inside a paragraph and closes
-      // nothing; the one-line comment form reaches the page raw, and its
-      // `-->` half closes the open comment there.
-      return { closers: [`\n<!-- -->${detailsCloser}`], blockStart };
-    }
-    if (end.kind === 'raw' && end.tag !== 'plaintext') {
-      return { closers: [`\n</${end.tag}>${detailsCloser}`], blockStart };
-    }
-    if (end.kind === 'data' && scan.detailsDepth > 0) {
-      return { closers: [detailsCloser], blockStart };
-    }
-    // A plaintext swallow has no closer, and an unrecognised state fails
-    // closed over the whole cut rather than ship an unverified closer.
-    return { closers: [], blockStart };
+    return { closers: stateSuffixes, blockStart };
   }
   const blockStart = lineStart(swallow.map[0]);
   if (swallow.type === 'fence') {
@@ -1103,30 +1301,58 @@ function openBlockAtEnd(text: string): OpenBlockAtEnd | null {
     // list or blockquote is not closed by a column-0 line — that line
     // leaves the container and OPENS a new fence over the tail.
     const prefix = prefixAt === -1 ? '' : line.slice(0, prefixAt);
-    const closers = [`\n${prefix}${run}`];
-    if (prefix) closers.push(`\n${run}`);
-    return { closers, blockStart };
+    // An unclosed fold or swallow AROUND the fence rides the same
+    // candidates: without the suffix the gate rejects every closer by
+    // gate, not by room, and the rewind spends the whole block.
+    const own = [`\n${prefix}${run}`];
+    if (prefix) own.push(`\n${run}`);
+    return {
+      closers: own.flatMap((o) => stateSuffixes.map((s) => `${o}${s}`)),
+      blockStart,
+    };
   }
   const firstLine = swallow.content.split('\n', 1)[0] ?? '';
   const opener = firstLine.trimStart();
+  let own: string[] = [];
   if (opener.startsWith('<!--')) {
     // The one-line form reaches the page as RAW text and closes the
     // comment there; a bare `-->` line renders escaped and closes nothing.
-    return { closers: ['\n-->', '\n<!-- -->'], blockStart };
+    own = ['\n-->', '\n<!-- -->'];
+  } else if (opener.startsWith('<?')) {
+    own = ['\n?>'];
+  } else if (opener.startsWith('<![CDATA[')) {
+    own = ['\n]]>'];
+  } else if (/^<![a-z]/i.test(opener)) {
+    own = ['\n>'];
+  } else {
+    const raw1 =
+      /^<(script|pre|style|textarea|title|xmp|iframe|noembed|noframes|noscript|template)\b/i.exec(
+        opener,
+      );
+    if (raw1) {
+      const tag = raw1[1].toLowerCase();
+      // A cut INSIDE the start tag absorbs a bare end tag into the
+      // still-open start tag — the gate rejects it — so also complete the
+      // start tag first, a salvage the gate can verify.
+      own = [`\n</${tag}>`, `\n>\n</${tag}>`];
+    }
   }
-  if (opener.startsWith('<?')) return { closers: ['\n?>'], blockStart };
-  if (opener.startsWith('<![CDATA[')) {
-    return { closers: ['\n]]>'], blockStart };
+  // The block's OWN fit first (shortest natural close), then the state's
+  // closers appended to each (a fold or swallow around the block rides
+  // the same candidate), then the state's closers ALONE — when the block
+  // rides inside a deeper swallow, its own end tag is text there and
+  // only the state's closer is real.
+  const closers = [...own];
+  for (const o of own) {
+    for (const s of stateSuffixes) {
+      const c = `${o}${s}`;
+      if (!closers.includes(c)) closers.push(c);
+    }
   }
-  if (/^<![a-z]/i.test(opener)) return { closers: ['\n>'], blockStart };
-  const raw1 =
-    /^<(script|pre|style|textarea|title|xmp|iframe|noembed|noframes|noscript|template)\b/i.exec(
-      opener,
-    );
-  if (raw1) {
-    return { closers: [`\n</${raw1[1].toLowerCase()}>`], blockStart };
+  for (const s of stateSuffixes) {
+    if (!closers.includes(s)) closers.push(s);
   }
-  return { closers: [], blockStart };
+  return { closers, blockStart };
 }
 
 /** The plan's PR identity, when it names one — the base for comment anchors. */
@@ -2670,9 +2896,11 @@ function composeReviewBody(
       const open = openBlockAtEnd(cut);
       if (open === null) break;
       const room = bodyBudget - tail.length - cut.length;
-      const chosen = open.closers.find(
-        (c) => c.length <= room && noticeRidesClean(cut, c),
-      );
+      // Verify before funding: a short candidate the gate rejects must not
+      // starve a longer verified closer of its shave — measure the reserve
+      // against the cheapest VERIFIED candidate, not the cheapest text.
+      const verified = open.closers.filter((c) => noticeRidesClean(cut, c));
+      const chosen = verified.find((c) => c.length <= room);
       if (chosen) {
         closer = chosen;
         break;
@@ -2681,7 +2909,7 @@ function composeReviewBody(
       // in the way, spend the difference off the cut and keep the block —
       // its evidence is the author's only copy, and shaving a few
       // characters costs less than the rewind below costs whole.
-      const shortest = Math.min(...open.closers.map((c) => c.length));
+      const shortest = Math.min(...verified.map((c) => c.length));
       if (
         Number.isFinite(shortest) &&
         shortest > room &&
