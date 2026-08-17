@@ -1825,9 +1825,8 @@ describe('qwen-triage verify hardening', () => {
     },
   );
 
-  // Fronts PATH with a failing realpath so the script's `|| printf`
-  // fallback engages — the realpath-absent case the strip loops' comments
-  // justify themselves by.
+  // Fronts PATH with a failing realpath so the script must fail closed instead
+  // of matching and wiping a raw, potentially misleading spelling.
   const stubRealpath = () => {
     const bin = mkdtempSync(join(tmpdir(), 'verify-wipe-bin-'));
     writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
@@ -1835,10 +1834,7 @@ describe('qwen-triage verify hardening', () => {
     return bin;
   };
 
-  it('wipes a legitimate workspace despite a trailing-slash RUNNER_WORKSPACE when realpath is absent', () => {
-    // Without the RWS strip loop the allowlist pattern becomes "$RWS//*"
-    // and refuses the real workspace — the pre-run wipe would then fail
-    // every external verify on exactly the runners it exists for.
+  it('refuses to wipe when realpath is absent', () => {
     const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-rws-'));
     const ws = join(parent, 'repo');
     mkdirSync(ws);
@@ -1865,8 +1861,8 @@ describe('qwen-triage verify hardening', () => {
           },
         },
       );
-      expect(res.status).toBe(0);
-      expect(readdirSync(ws)).toEqual([]);
+      expect(res.status).not.toBe(0);
+      expect(readdirSync(ws)).toEqual(['leftover']);
     } finally {
       rmSync(parent, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });

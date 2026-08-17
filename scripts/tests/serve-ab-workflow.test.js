@@ -37,14 +37,7 @@ const runWipe = (env, options = {}) =>
   });
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
-// extension: a BSD userland — macOS ships FreeBSD's `realpath [-q] [path
-// ...]` — exits 1 on it, so the script's `|| printf` fallback keeps the
-// path raw and no canonicalization happens at all. The serve-ab wipe only
-// runs on the Linux ECS pool, so the production script is unaffected; this
-// suite is not — it also runs on the merge-queue macOS lane, where an
-// assertion about GNU behavior is red for a defect that cannot exist
-// there. Probe the host, not the platform (same discipline as #9220's
-// 90fa6bb4, applied to this port per #9265).
+// extension. Probe the host before asserting GNU-specific path behavior.
 const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
@@ -207,9 +200,8 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     },
   );
 
-  // Fronts PATH with a failing realpath so the script's `|| printf`
-  // fallback engages — the realpath-absent case the strip loops' comments
-  // justify themselves by.
+  // Fronts PATH with a failing realpath so the script must fail closed instead
+  // of matching and wiping a raw, potentially misleading spelling.
   const stubRealpath = () => {
     const bin = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-bin-'));
     writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
@@ -217,23 +209,24 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     return bin;
   };
 
-  it('wipes a legitimate workspace despite a trailing-slash RUNNER_WORKSPACE when realpath is absent', () => {
-    // Without the RWS strip loop the allowlist pattern becomes "$RWS//*"
-    // and refuses the real workspace — the wipe would then fail every
-    // serve-ab run on exactly the self-hosted runners this step exists
-    // for, and the job would die before the first checkout.
+  it('refuses to wipe when realpath is absent', () => {
     const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-rws-'));
     const ws = join(parent, 'repo');
     mkdirSync(ws);
     writeFileSync(join(ws, 'leftover'), 'x');
     const bin = stubRealpath();
     try {
-      runWipe({
-        GITHUB_WORKSPACE: ws,
-        RUNNER_WORKSPACE: `${parent}/`,
-        PATH: `${bin}:${process.env.PATH}`,
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: `${parent}/`,
+          PATH: `${bin}:${process.env.PATH}`,
+        },
       });
-      expect(readdirSync(ws)).toEqual([]);
+      expect(res.status).not.toBe(0);
+      expect(readdirSync(ws)).toEqual(['leftover']);
     } finally {
       rmSync(parent, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
