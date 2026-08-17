@@ -21,9 +21,9 @@ vi.mock('./utils/terminal-resize-reflow.js', () => ({
   buildWakeRepaint: buildWakeRepaintSpy,
 }));
 
-vi.mock('../utils/windowTitle.js', async (importOriginal) => {
+vi.mock('./utils/windowTitle.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/windowTitle.js')>();
+    await importOriginal<typeof import('./utils/windowTitle.js')>();
   return {
     ...actual,
     writeTerminalTitle: (
@@ -62,7 +62,7 @@ import {
 import {
   formatSessionWindowTitle,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
@@ -1867,9 +1867,62 @@ describe('AppContainer State Management', () => {
         '/btw quick side question',
         SendMessageType.UserQuery,
         undefined,
-        { submittedPrompt: '/btw quick side question' },
+        expect.objectContaining({
+          submittedPrompt: '/btw quick side question',
+          onAdmissionFailed: expect.any(Function),
+        }),
       );
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('queues a responding ?btw submission when concurrent admission fails', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('?btw wait for the tool', {
+        submittedPrompt: '?btw wait for the tool',
+      });
+      const metadata = mockSubmitQuery.mock.calls[0]?.[3] as
+        | { onAdmissionFailed?: () => void }
+        | undefined;
+      metadata?.onAdmissionFailed?.();
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '?btw wait for the tool',
+        true,
+        '?btw wait for the tool',
+      );
     });
 
     it('runs opted-in slash commands outside the active turn while responding', () => {

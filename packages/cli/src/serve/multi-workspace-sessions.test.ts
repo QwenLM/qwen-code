@@ -7,7 +7,7 @@
 import * as path from 'node:path';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
@@ -39,8 +39,8 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './live/session-source.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from './conversations/session-source.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   serializeWorkspaceTranscriptResponseForTesting,
@@ -52,6 +52,15 @@ const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
 const UNKNOWN_CWD = path.resolve(path.sep, 'work', 'unknown');
 const TEST_TOKEN = 'test-token';
 const TEST_AUTHORIZATION = `Bearer ${TEST_TOKEN}`;
+const LIVE_COLD_LOAD_ID = '550e8400-e29b-41d4-a716-446655440101';
+const LIVE_COLD_RESUME_ID = '550e8400-e29b-41d4-a716-446655440102';
+const LIVE_PROJECTLESS_TASK_ID = '550e8400-e29b-41d4-a716-446655440103';
+const LIVE_ACTIVE_LOAD_ID = '550e8400-e29b-41d4-a716-446655440104';
+const LIVE_ACTIVE_RESUME_ID = '550e8400-e29b-41d4-a716-446655440105';
+const LIVE_COLD_REJECTED_ID = '550e8400-e29b-41d4-a716-446655440106';
+const LIVE_COLD_ATTACHED_ID = '550e8400-e29b-41d4-a716-446655440107';
+const LIVE_COLD_REAP_REJECTED_ID = '550e8400-e29b-41d4-a716-446655440108';
+const LIVE_INVALID_CHILD_ID = '550e8400-e29b-41d4-a716-446655440109';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -288,9 +297,10 @@ async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
 
 async function withStoredLiveCoordinators<T>(
   sessionIds: readonly string[],
-  fn: () => Promise<T>,
+  fn: (runtimeDir: string) => Promise<T>,
 ): Promise<T> {
   return withRuntimeDir(async () => {
+    const runtimeDir = Storage.getRuntimeBaseDir();
     for (const sessionId of sessionIds) {
       await writeStoredSession({
         sessionId,
@@ -302,15 +312,16 @@ async function withStoredLiveCoordinators<T>(
         sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
       });
     }
-    return fn();
+    return fn(runtimeDir);
   });
 }
 
 async function withStoredProjectlessLiveTasks<T>(
   sessionIds: readonly string[],
-  fn: () => Promise<T>,
+  fn: (runtimeDir: string) => Promise<T>,
 ): Promise<T> {
   return withRuntimeDir(async () => {
+    const runtimeDir = Storage.getRuntimeBaseDir();
     for (const sessionId of sessionIds) {
       await writeStoredSession({
         sessionId,
@@ -321,17 +332,20 @@ async function withStoredProjectlessLiveTasks<T>(
         sourceType: 'default',
       });
     }
-    return fn();
+    return fn(runtimeDir);
   });
 }
 
 async function withStoredLiveWorkers<T>(
   sessionIds: readonly string[],
-  fn: () => Promise<T>,
+  fn: (runtimeDir: string) => Promise<T>,
 ): Promise<T> {
   return withRuntimeDir(async () => {
-    for (const sessionId of sessionIds) {
-      const parentSessionId = `${sessionId}-coordinator`;
+    const runtimeDir = Storage.getRuntimeBaseDir();
+    for (const [index, sessionId] of sessionIds.entries()) {
+      const parentSessionId = `00000000-0000-4000-8000-${String(
+        index + 1,
+      ).padStart(12, '0')}`;
       await writeStoredSession({
         sessionId: parentSessionId,
         cwd: SECONDARY_CWD,
@@ -350,7 +364,7 @@ async function withStoredLiveWorkers<T>(
         parentSessionId,
       });
     }
-    return fn();
+    return fn(runtimeDir);
   });
 }
 
@@ -797,15 +811,31 @@ function makeBridge(
     },
     async branchSession(sessionId: string) {
       primaryOnlyMutationCalls.push({ route: 'branch', sessionId });
-      throw new Error('Unexpected branchSession call');
+      return {
+        sessionId: `${sessionId}-branch`,
+        workspaceCwd,
+        attached: false,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Branch',
+        forkedFrom: { sessionId, displayName: 'Source' },
+      };
     },
     async createSideTaskSession(sessionId: string) {
       primaryOnlyMutationCalls.push({ route: 'side-task', sessionId });
-      throw new Error('Unexpected createSideTaskSession call');
+      return {
+        sessionId: `${sessionId}-side-task`,
+        workspaceCwd,
+        attached: false,
+        clientId: 'side-task-client',
+        state: {},
+        displayName: 'Side task',
+        parentSessionId: sessionId,
+      };
     },
-    async launchSessionForkAgent(sessionId: string) {
+    async launchSessionForkAgent(sessionId: string, directive: string) {
       primaryOnlyMutationCalls.push({ route: 'fork', sessionId });
-      throw new Error('Unexpected launchSessionForkAgent call');
+      return { sessionId, description: directive, launched: true };
     },
     async changeSessionCwd(
       sessionId: string,
@@ -950,7 +980,7 @@ function makeHarness(opts?: {
   secondaryRestoreCurrentCwd?: string;
   secondaryKillSessionResult?: boolean;
   secondaryProvenance?: WorkspaceRuntimeProvenance;
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   serveOptions?: Partial<ServeOptions>;
   primaryRuntimeBaseDir?: string;
   secondaryRuntimeBaseDir?: string;
@@ -1043,6 +1073,26 @@ function host() {
 }
 
 describe('multi-workspace session dispatch', () => {
+  let previousRuntimeDir: string | undefined;
+  let testRuntimeDir: string;
+
+  beforeEach(async () => {
+    previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    testRuntimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-multi-workspace-test-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = testRuntimeDir;
+  });
+
+  afterEach(async () => {
+    if (previousRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+    }
+    await fsp.rm(testRuntimeDir, { recursive: true, force: true });
+  });
+
   it('advertises workspaces and multi_workspace_sessions only when multiple runtimes are registered', async () => {
     const { app } = makeHarness();
     const res = await request(app).get('/capabilities').set('Host', host());
@@ -1813,8 +1863,8 @@ describe('multi-workspace session dispatch', () => {
 
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
     await withStoredLiveCoordinators(
-      ['live-cold-load', 'live-cold-resume'],
-      async () => {
+      [LIVE_COLD_LOAD_ID, LIVE_COLD_RESUME_ID],
+      async (runtimeDir) => {
         const operationLog: string[] = [];
         const materializeConversationDirectory = vi.fn(
           async (sessionId: string) => {
@@ -1833,12 +1883,16 @@ describe('multi-workspace session dispatch', () => {
           }),
           liveConversationWorkspace: {
             materializeConversationDirectory,
-          } as unknown as LiveConversationWorkspace,
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
         });
 
-        for (const action of ['load', 'resume'] as const) {
+        for (const { action, sessionId } of [
+          { action: 'load', sessionId: LIVE_COLD_LOAD_ID },
+          { action: 'resume', sessionId: LIVE_COLD_RESUME_ID },
+        ] as const) {
           const response = await request(app)
-            .post(`/session/live-cold-${action}/${action}`)
+            .post(`/session/${sessionId}/${action}`)
             .set('Host', host())
             .send({ cwd: SECONDARY_CWD });
 
@@ -1847,26 +1901,32 @@ describe('multi-workspace session dispatch', () => {
         }
 
         expect(operationLog).toEqual([
-          'materialize:live-cold-load',
-          'load:live-cold-load',
-          'change:live-cold-load',
-          'materialize:live-cold-resume',
-          'resume:live-cold-resume',
-          'change:live-cold-resume',
+          `materialize:${LIVE_COLD_LOAD_ID}`,
+          `load:${LIVE_COLD_LOAD_ID}`,
+          `change:${LIVE_COLD_LOAD_ID}`,
+          `materialize:${LIVE_COLD_RESUME_ID}`,
+          `resume:${LIVE_COLD_RESUME_ID}`,
+          `change:${LIVE_COLD_RESUME_ID}`,
         ]);
         expect(secondaryBridge.cwdChangeCalls).toEqual([
           {
-            sessionId: 'live-cold-load',
+            sessionId: LIVE_COLD_LOAD_ID,
             request: {
-              path: path.join(SECONDARY_CWD, 'conversation-live-cold-load'),
+              path: path.join(
+                SECONDARY_CWD,
+                `conversation-${LIVE_COLD_LOAD_ID}`,
+              ),
               allowedRoots: [SECONDARY_CWD],
               managedRelocation: 'live-conversation',
             },
           },
           {
-            sessionId: 'live-cold-resume',
+            sessionId: LIVE_COLD_RESUME_ID,
             request: {
-              path: path.join(SECONDARY_CWD, 'conversation-live-cold-resume'),
+              path: path.join(
+                SECONDARY_CWD,
+                `conversation-${LIVE_COLD_RESUME_ID}`,
+              ),
               allowedRoots: [SECONDARY_CWD],
               managedRelocation: 'live-conversation',
             },
@@ -1879,8 +1939,8 @@ describe('multi-workspace session dispatch', () => {
 
   it('loads a projectless task created from Live in the Conversations runtime', async () => {
     await withStoredProjectlessLiveTasks(
-      ['live-projectless-task'],
-      async () => {
+      [LIVE_PROJECTLESS_TASK_ID],
+      async (runtimeDir) => {
         const materializeConversationDirectory = vi.fn(
           async (sessionId: string) =>
             path.join(SECONDARY_CWD, `conversation-${sessionId}`),
@@ -1895,11 +1955,12 @@ describe('multi-workspace session dispatch', () => {
           }),
           liveConversationWorkspace: {
             materializeConversationDirectory,
-          } as unknown as LiveConversationWorkspace,
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
         });
 
         const response = await request(app)
-          .post('/session/live-projectless-task/load')
+          .post(`/session/${LIVE_PROJECTLESS_TASK_ID}/load`)
           .set('Host', host())
           .send({ cwd: SECONDARY_CWD });
 
@@ -1908,29 +1969,77 @@ describe('multi-workspace session dispatch', () => {
           {
             action: 'load',
             req: expect.objectContaining({
-              sessionId: 'live-projectless-task',
+              sessionId: LIVE_PROJECTLESS_TASK_ID,
               workspaceCwd: SECONDARY_CWD,
               sourceType: 'default',
             }),
           },
         ]);
         expect(materializeConversationDirectory).toHaveBeenCalledWith(
-          'live-projectless-task',
+          LIVE_PROJECTLESS_TASK_ID,
         );
       },
     );
   });
 
+  it('rejects an unqualified batch mutation when a Live session id collides with an ordinary transcript', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440110';
+      const runtimeDir = Storage.getRuntimeBaseDir();
+      const storedAt = new Date('2026-07-08T00:00:00.000Z');
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: storedAt.toISOString(),
+        prompt: 'ordinary collision',
+        mtime: storedAt,
+      });
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: storedAt.toISOString(),
+        prompt: 'Live collision',
+        mtime: storedAt,
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
+      });
+      const { app } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: runtimeDir,
+      });
+
+      const response = await request(app)
+        .post('/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] });
+
+      expect(response.status).toBe(500);
+      expect(response.body).toMatchObject({
+        code: 'ambiguous_session_owner',
+        sessionId,
+      });
+      expect(response.body).not.toHaveProperty('workspaceIds');
+      await expect(
+        new SessionService(PRIMARY_CWD).getSessionLocation(sessionId),
+      ).resolves.toBe('active');
+      await expect(
+        new SessionService(SECONDARY_CWD).getSessionLocation(sessionId),
+      ).resolves.toBe('active');
+    });
+  });
+
   it('opens attached active Live workers without waiting for cwd relocation', async () => {
     await withStoredLiveWorkers(
-      ['live-active-load', 'live-active-resume'],
-      async () => {
+      [LIVE_ACTIVE_LOAD_ID, LIVE_ACTIVE_RESUME_ID],
+      async (runtimeDir) => {
         const materializeConversationDirectory = vi.fn(
           async (sessionId: string) =>
             path.join(SECONDARY_CWD, `conversation-${sessionId}`),
         );
-        for (const action of ['load', 'resume'] as const) {
-          const sessionId = `live-active-${action}`;
+        for (const { action, sessionId } of [
+          { action: 'load', sessionId: LIVE_ACTIVE_LOAD_ID },
+          { action: 'resume', sessionId: LIVE_ACTIVE_RESUME_ID },
+        ] as const) {
           const { app, secondaryBridge } = makeHarness({
             secondaryProvenance: 'live-conversation',
             secondaryRestoreAttached: true,
@@ -1941,7 +2050,8 @@ describe('multi-workspace session dispatch', () => {
             ),
             liveConversationWorkspace: {
               materializeConversationDirectory,
-            } as unknown as LiveConversationWorkspace,
+            } as unknown as ConversationWorkspace,
+            secondaryRuntimeBaseDir: runtimeDir,
           });
 
           const response = await request(app)
@@ -1961,129 +2071,145 @@ describe('multi-workspace session dispatch', () => {
   });
 
   it('fails closed and rolls back a cold Live restore when conversation relocation is rejected', async () => {
-    await withStoredLiveCoordinators(['live-cold-rejected'], async () => {
-      const operationLog: string[] = [];
-      const { app, secondaryBridge } = makeHarness({
-        secondaryProvenance: 'live-conversation',
-        secondaryOperationLog: operationLog,
-        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-          sessionId,
-          previousCwd: SECONDARY_CWD,
-          newCwd: `${req.path}-rejected`,
-          warnings: [],
-        }),
-        liveConversationWorkspace: {
-          materializeConversationDirectory: async (sessionId: string) => {
-            operationLog.push(`materialize:${sessionId}`);
-            return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
-          },
-        } as unknown as LiveConversationWorkspace,
-      });
+    await withStoredLiveCoordinators(
+      [LIVE_COLD_REJECTED_ID],
+      async (runtimeDir) => {
+        const operationLog: string[] = [];
+        const { app, secondaryBridge } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryOperationLog: operationLog,
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: `${req.path}-rejected`,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory: async (sessionId: string) => {
+              operationLog.push(`materialize:${sessionId}`);
+              return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
+            },
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
+        });
 
-      const response = await request(app)
-        .post('/session/live-cold-rejected/resume')
-        .set('Host', host())
-        .send({ cwd: SECONDARY_CWD });
+        const response = await request(app)
+          .post(`/session/${LIVE_COLD_REJECTED_ID}/resume`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
 
-      expect(response.status).toBe(500);
-      expect(secondaryBridge.killCalls).toEqual(['live-cold-rejected']);
-      expect(operationLog).toEqual([
-        'materialize:live-cold-rejected',
-        'resume:live-cold-rejected',
-        'change:live-cold-rejected',
-        'kill:live-cold-rejected',
-      ]);
-      expect(secondaryBridge.closeCalls).toEqual([]);
-      expect(secondaryBridge.detachCalls).toEqual([]);
-    });
+        expect(response.status).toBe(500);
+        expect(secondaryBridge.killCalls).toEqual([LIVE_COLD_REJECTED_ID]);
+        expect(operationLog).toEqual([
+          `materialize:${LIVE_COLD_REJECTED_ID}`,
+          `resume:${LIVE_COLD_REJECTED_ID}`,
+          `change:${LIVE_COLD_REJECTED_ID}`,
+          `kill:${LIVE_COLD_REJECTED_ID}`,
+        ]);
+        expect(secondaryBridge.closeCalls).toEqual([]);
+        expect(secondaryBridge.detachCalls).toEqual([]);
+      },
+    );
   });
 
   it('only detaches its lease when an attached cold Live restore relocation is rejected', async () => {
-    await withStoredLiveCoordinators(['live-cold-attached'], async () => {
-      const { app, secondaryBridge } = makeHarness({
-        secondaryProvenance: 'live-conversation',
-        secondaryRestoreAttached: true,
-        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-          sessionId,
-          previousCwd: SECONDARY_CWD,
-          newCwd: `${req.path}-rejected`,
-          warnings: [],
-        }),
-        liveConversationWorkspace: {
-          materializeConversationDirectory: async (sessionId: string) =>
-            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
-        } as unknown as LiveConversationWorkspace,
-      });
+    await withStoredLiveCoordinators(
+      [LIVE_COLD_ATTACHED_ID],
+      async (runtimeDir) => {
+        const { app, secondaryBridge } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRestoreAttached: true,
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: `${req.path}-rejected`,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory: async (sessionId: string) =>
+              path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
+        });
 
-      const response = await request(app)
-        .post('/session/live-cold-attached/resume')
-        .set('Host', host())
-        .send({ cwd: SECONDARY_CWD });
+        const response = await request(app)
+          .post(`/session/${LIVE_COLD_ATTACHED_ID}/resume`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
 
-      expect(response.status).toBe(500);
-      expect(secondaryBridge.detachCalls).toEqual(['live-cold-attached']);
-      expect(secondaryBridge.killCalls).toEqual([]);
-      expect(secondaryBridge.closeCalls).toEqual([]);
-    });
+        expect(response.status).toBe(500);
+        expect(secondaryBridge.detachCalls).toEqual([LIVE_COLD_ATTACHED_ID]);
+        expect(secondaryBridge.killCalls).toEqual([]);
+        expect(secondaryBridge.closeCalls).toEqual([]);
+      },
+    );
   });
 
   it('does not force-close a cold Live restore when zero-attach reap is rejected', async () => {
-    await withStoredLiveCoordinators(['live-cold-reap-rejected'], async () => {
-      const { app, secondaryBridge } = makeHarness({
-        secondaryProvenance: 'live-conversation',
-        secondaryKillSessionResult: false,
-        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-          sessionId,
-          previousCwd: SECONDARY_CWD,
-          newCwd: `${req.path}-rejected`,
-          warnings: [],
-        }),
-        liveConversationWorkspace: {
-          materializeConversationDirectory: async (sessionId: string) =>
-            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
-        } as unknown as LiveConversationWorkspace,
-      });
+    await withStoredLiveCoordinators(
+      [LIVE_COLD_REAP_REJECTED_ID],
+      async (runtimeDir) => {
+        const { app, secondaryBridge } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryKillSessionResult: false,
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: `${req.path}-rejected`,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory: async (sessionId: string) =>
+              path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
+        });
 
-      const response = await request(app)
-        .post('/session/live-cold-reap-rejected/resume')
-        .set('Host', host())
-        .send({ cwd: SECONDARY_CWD });
+        const response = await request(app)
+          .post(`/session/${LIVE_COLD_REAP_REJECTED_ID}/resume`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
 
-      expect(response.status).toBe(500);
-      expect(secondaryBridge.killCalls).toEqual(['live-cold-reap-rejected']);
-      expect(secondaryBridge.closeCalls).toEqual([]);
-    });
+        expect(response.status).toBe(500);
+        expect(secondaryBridge.killCalls).toEqual([LIVE_COLD_REAP_REJECTED_ID]);
+        expect(secondaryBridge.closeCalls).toEqual([]);
+      },
+    );
   });
 
   it('does not restore a cold Live session when conversation workspace validation fails', async () => {
-    await withStoredLiveCoordinators(['live-invalid-child'], async () => {
-      const { app, secondaryBridge } = makeHarness({
-        secondaryProvenance: 'live-conversation',
-        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-          sessionId,
-          previousCwd: SECONDARY_CWD,
-          newCwd: req.path,
-          warnings: [],
-        }),
-        liveConversationWorkspace: {
-          materializeConversationDirectory: async () => {
-            throw new Error(
-              'Live conversation child was replaced by a symlink.',
-            );
-          },
-        } as unknown as LiveConversationWorkspace,
-      });
+    await withStoredLiveCoordinators(
+      [LIVE_INVALID_CHILD_ID],
+      async (runtimeDir) => {
+        const { app, secondaryBridge } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory: async () => {
+              throw new Error(
+                'Live conversation child was replaced by a symlink.',
+              );
+            },
+          } as unknown as ConversationWorkspace,
+          secondaryRuntimeBaseDir: runtimeDir,
+        });
 
-      const response = await request(app)
-        .post('/session/live-invalid-child/load')
-        .set('Host', host())
-        .send({ cwd: SECONDARY_CWD });
+        const response = await request(app)
+          .post(`/session/${LIVE_INVALID_CHILD_ID}/load`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
 
-      expect(response.status).toBe(500);
-      expect(secondaryBridge.restoreCalls).toEqual([]);
-      expect(secondaryBridge.cwdChangeCalls).toEqual([]);
-      expect(secondaryBridge.killCalls).toEqual([]);
-    });
+        expect(response.status).toBe(500);
+        expect(secondaryBridge.restoreCalls).toEqual([]);
+        expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+        expect(secondaryBridge.killCalls).toEqual([]);
+      },
+    );
   });
 
   it('rejects unknown and untrusted restore cwd before touching a bridge', async () => {
@@ -2172,6 +2298,65 @@ describe('multi-workspace session dispatch', () => {
         workspaceId: 'secondary-id',
         workspaceCwd: SECONDARY_CWD,
       });
+    },
+  );
+
+  it('does not expose the Conversations runtime identity in an unsupported session route response', async () => {
+    const { app } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+    });
+
+    const response = await request(app)
+      .post('/session/secondary-session/cd')
+      .set('Host', host())
+      .send({ path: path.resolve(path.sep, 'work', 'next') });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error:
+        'Route "POST /session/:id/cd" is only available for primary workspace sessions.',
+      code: 'non_primary_session_route_not_supported',
+      sessionId: 'secondary-session',
+      route: 'POST /session/:id/cd',
+    });
+  });
+
+  it.each([
+    {
+      suffix: 'branch',
+      body: { name: 'next' },
+      expectedStatus: 201,
+      mutation: 'branch',
+    },
+    {
+      suffix: 'side-task',
+      body: { name: 'research' },
+      expectedStatus: 201,
+      mutation: 'side-task',
+    },
+    {
+      suffix: 'fork',
+      body: { directive: 'review this' },
+      expectedStatus: 202,
+      mutation: 'fork',
+    },
+  ] as const)(
+    'routes an internal owner session $suffix operation to its bridge',
+    async ({ suffix, body, expectedStatus, mutation }) => {
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+      });
+
+      const response = await request(app)
+        .post(`/session/secondary-session/${suffix}`)
+        .set('Host', host())
+        .send(body);
+
+      expect(response.status).toBe(expectedStatus);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([
+        { route: mutation, sessionId: 'secondary-session' },
+      ]);
     },
   );
 
@@ -4321,7 +4506,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('reports archive and delete conflicts while a workspace export is in flight', async () => {
+  it('preserves ordinary batch conflict results while an internal runtime is active', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440283';
       await writeStoredSession({
@@ -4350,7 +4535,18 @@ describe('multi-workspace session dispatch', () => {
           }
           return result;
         });
-      const { app } = makeHarness({ secondarySummaries: [] });
+      const { app, registry } = makeHarness({ secondarySummaries: [] });
+      const conversationCwd = path.join(SECONDARY_CWD, '.conversations');
+      registry.add(
+        makeRuntime({
+          workspaceId: 'conversations-id',
+          workspaceCwd: conversationCwd,
+          primary: false,
+          trusted: true,
+          provenance: 'live-conversation',
+          bridge: makeBridge(conversationCwd, []),
+        }),
+      );
       const exportPromise = request(app)
         .get(`/workspaces/secondary-id/session/${sessionId}/export`)
         .set('Host', host())

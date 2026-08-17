@@ -35,4 +35,89 @@ describe('toDaemonPromptContent', () => {
       { type: 'image', data: 'Qk0=', mimeType: 'image/bmp' },
     ]);
   });
+
+  it('embeds text files as resource blocks with transcript tokens', () => {
+    expect(
+      toDaemonPromptContent(
+        'check this',
+        [],
+        [{ name: 'app.log', text: 'line1\nline2', media_type: 'text/plain' }],
+      ),
+    ).toEqual([
+      {
+        type: 'text',
+        text: 'check this\n\n@attachment:///app.log',
+      },
+      {
+        type: 'resource',
+        resource: {
+          uri: 'attachment:///app.log',
+          mimeType: 'text/plain',
+          text: 'line1\nline2',
+        },
+      },
+    ]);
+  });
+
+  it('keeps the token identical to the resource uri and joins multiple files', () => {
+    const content = toDaemonPromptContent(
+      'look',
+      [],
+      [
+        { name: 'a.log', text: 'aaa' },
+        { name: 'b.md', text: 'bbb', mimeType: 'text/markdown' },
+      ],
+    );
+    expect(content[0]).toEqual({
+      type: 'text',
+      text: 'look\n\n@attachment:///a.log\n@attachment:///b.md',
+    });
+    expect(content[1]).toEqual({
+      type: 'resource',
+      resource: { uri: 'attachment:///a.log', text: 'aaa' },
+    });
+    expect(content[2]).toEqual({
+      type: 'resource',
+      resource: {
+        uri: 'attachment:///b.md',
+        mimeType: 'text/markdown',
+        text: 'bbb',
+      },
+    });
+  });
+
+  it('omits token lines for slash commands while still sending resources', () => {
+    expect(
+      toDaemonPromptContent('/review', [], [{ name: 'app.log', text: 'x' }]),
+    ).toEqual([
+      { type: 'text', text: '/review' },
+      {
+        type: 'resource',
+        resource: { uri: 'attachment:///app.log', text: 'x' },
+      },
+    ]);
+  });
+
+  it('uses bare tokens as the text block when the prompt is file-only', () => {
+    expect(
+      toDaemonPromptContent('', [], [{ name: 'app.log', text: 'x' }])[0],
+    ).toEqual({ type: 'text', text: '@attachment:///app.log' });
+  });
+
+  it('orders text, images, then files', () => {
+    expect(
+      toDaemonPromptContent(
+        'both',
+        [{ data: 'a', mimeType: 'image/png' }],
+        [{ name: 'app.log', text: 'x' }],
+      ),
+    ).toEqual([
+      { type: 'text', text: 'both\n\n@attachment:///app.log' },
+      { type: 'image', data: 'a', mimeType: 'image/png' },
+      {
+        type: 'resource',
+        resource: { uri: 'attachment:///app.log', text: 'x' },
+      },
+    ]);
+  });
 });

@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonBranchPoint,
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
@@ -823,6 +824,7 @@ export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
   promptId?: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
@@ -831,6 +833,7 @@ export interface DaemonTurnErrorData {
   message: string;
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
+  loopType?: string;
   promptId?: string;
   [key: string]: unknown;
 }
@@ -3002,10 +3005,41 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
   );
 }
 
-function isSettingsChangedData(
+function isDaemonSkillToggleMutation(
+  value: unknown,
+): value is DaemonSkillToggleMutation {
+  if (!isRecord(value)) return false;
+  const activation = value['activation'];
+  const skills = value['skills'];
+  return (
+    isNonEmptyString(value['id']) &&
+    value['kind'] === 'skill_toggle' &&
+    Array.isArray(skills) &&
+    skills.length > 0 &&
+    skills.every(
+      (skill) =>
+        isRecord(skill) &&
+        isNonEmptyString(skill['name']) &&
+        typeof skill['enabled'] === 'boolean',
+    ) &&
+    (activation === 'applied' ||
+      activation === 'deferred' ||
+      activation === 'partial') &&
+    isFiniteNumber(value['sessionsRefreshed']) &&
+    isFiniteNumber(value['sessionsFailed'])
+  );
+}
+
+export function isSettingsChangedData(
   value: unknown,
 ): value is DaemonSettingsChangedData {
-  return isRecord(value) && isNonEmptyString(value['key']);
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    (value['scope'] === undefined || typeof value['scope'] === 'string') &&
+    (value['mutation'] === undefined ||
+      isDaemonSkillToggleMutation(value['mutation']))
+  );
 }
 
 function isTrustChangeRequestedData(

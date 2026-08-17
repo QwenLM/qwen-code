@@ -630,6 +630,11 @@ export interface DaemonStatusReport {
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
+    acpPreAttachMaxFramesPerStream?: number | null;
+    acpPreAttachMaxFramesPerConnection?: number | null;
+    acpPreAttachMaxFramesGlobal?: number | null;
+    acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+    acpPreAttachMaxPayloadBytesGlobal?: number | null;
     compactedReplayMaxBytes: number;
     maxJournalEvents: number;
     maxJournalBytes: number;
@@ -725,6 +730,16 @@ export interface DaemonStatusReport {
         sseStreams: number;
         wsStreams: number;
         pendingClientRequests: number;
+        preAttach?: {
+          bufferedConnectionFrames: number;
+          bufferedSessionFrames: number;
+          pendingDeliveryFrames: number;
+          usedFrames: number;
+          usedBytes: number;
+          highWaterFrames: number;
+          highWaterBytes: number;
+          guardFailures: number;
+        };
       };
     };
     rateLimit: {
@@ -866,7 +881,26 @@ export interface DaemonStatusReport {
   /** Present only when requested with `detail=full`. */
   full?: {
     sessions: DaemonStatusReportSession[];
-    acpConnections: Array<Record<string, unknown>>;
+    /** Additive; absent when reading full status from an older daemon. */
+    acpMounts?: Array<{
+      workspaceId: string | null;
+      primary: boolean;
+      connectionCount: number;
+      wsStreams: number;
+      preAttachGuardFailures: number;
+    }>;
+    acpConnections: Array<{
+      connectionIdPrefix?: string;
+      workspaceId?: string | null;
+      workspaceCwd?: string;
+      primary?: boolean;
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+      [key: string]: unknown;
+    }>;
     workspace: Record<string, DaemonStatusReportSection>;
     auth: {
       supportedDeviceFlowProviders: string[];
@@ -998,10 +1032,32 @@ export interface BranchSessionRequest {
   name?: string;
 }
 
-export interface DaemonBranchedSession extends DaemonRestoredSession {
+export interface HistoricalBranchSessionRequest extends BranchSessionRequest {
+  atRecordId: string;
+}
+
+export type DaemonBranchSessionRequest =
+  | BranchSessionRequest
+  | HistoricalBranchSessionRequest;
+
+export interface DaemonBranchPoint {
+  assistantRecordUuid: string;
+  checkpointUuid: string;
+}
+
+export interface DaemonPersistedBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }
+
+export interface DaemonBranchedSession
+  extends DaemonRestoredSession,
+    DaemonPersistedBranchedSession {}
+
+export type DaemonBranchSessionResult =
+  | DaemonBranchedSession
+  | DaemonPersistedBranchedSession;
 
 export interface SideTaskSessionRequest {
   name?: string;
@@ -1463,6 +1519,8 @@ export const DAEMON_ERROR_KINDS = [
   'writer_idle_timeout',
   // The model response stream ended before a complete turn could be read.
   'model_stream_interrupted',
+  // Tool-call loop protection stopped the current turn.
+  'loop_detected',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
@@ -3819,6 +3877,7 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
