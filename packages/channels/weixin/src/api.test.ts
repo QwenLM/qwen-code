@@ -22,6 +22,7 @@ describe('getUpdates', () => {
     const result = await getUpdates('https://ilink.example', 'token', '');
 
     expect(result.msgs?.[0]?.message_id).toBe('7489534892789344264');
+    expect(result.ret).toBe(0);
   });
 });
 
