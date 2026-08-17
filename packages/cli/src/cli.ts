@@ -205,7 +205,7 @@ export function resolveBootstrapRoute(
     return 'help';
   }
 
-  if (hasFlag(argv, '--version', '-v')) {
+  if (!hasFlag(argv, '--help', '-h') && hasFlag(argv, '--version', '-v')) {
     return 'version';
   }
 

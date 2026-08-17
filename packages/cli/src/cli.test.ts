@@ -215,6 +215,9 @@ describe('resolveBootstrapRoute', () => {
       'help',
     );
     expect(resolveBootstrapRoute(['-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['foo', '-v', '--help'])).toBe('default');
+    expect(resolveBootstrapRoute(['serve', '-v', '--help'])).toBe('serve');
+    expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('mcp');
     // Version still wins when no help is requested.
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
