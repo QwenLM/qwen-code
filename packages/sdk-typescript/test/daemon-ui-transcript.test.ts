@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createDaemonTranscriptState,
   reduceDaemonTranscriptEvents,
+  selectUnrecognizedDiagnostics,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../src/daemon/ui/transcript.js';
 import type { DaemonUiEvent } from '../src/daemon/ui/types.js';
@@ -593,5 +594,27 @@ describe('unrecognized diagnostics stay out of the chat transcript', () => {
     expect(state.unrecognizedDiagnostics[0]?.text).toBe(
       'event_5 (unrecognized daemon event): {}',
     );
+  });
+
+  it('selectUnrecognizedDiagnostics returns the routed sidechannel itself', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          text: 'language_changed (unrecognized daemon event): {"language":"en"}',
+          debugReason: 'unrecognized_event',
+        },
+      ],
+      { now: 1 },
+    );
+
+    // The documented read path must return the live sidechannel, not a copy
+    // or a stub: `toBe` discriminates a `return []` or shallow-copy
+    // regression that would compile and export green.
+    expect(selectUnrecognizedDiagnostics(state)).toBe(
+      state.unrecognizedDiagnostics,
+    );
+    expect(selectUnrecognizedDiagnostics(state)).toHaveLength(1);
   });
 });
