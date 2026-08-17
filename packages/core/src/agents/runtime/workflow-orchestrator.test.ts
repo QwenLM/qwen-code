@@ -17,6 +17,10 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   resolveMaxAgentsPerRun,
   resolveConcurrencyLimit,
+  resolveSubagentMaxTurns,
+  resolveSubagentMaxTimeMinutes,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
@@ -126,6 +130,36 @@ vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
     }),
   };
 });
+
+// `workingDir` resolution (shared with AgentTool's `working_dir`) is unit
+// tested in `agents/worktree-pin.test.ts` against a mocked GitWorktreeService.
+// Here it is a seam: these tests assert what the ORCHESTRATOR does with the
+// resolver's verdict — routes off the fast path, rebinds the runtime context,
+// surfaces the refusal — not whether git considers a directory registered.
+const pinStub = vi.hoisted(() => ({
+  resolve: {
+    value: undefined as ((workingDir: string) => Promise<unknown>) | undefined,
+  },
+  seenLabels: [] as string[],
+}));
+
+vi.mock('../worktree-pin.js', () => ({
+  resolveExternalWorktreeDir: async (
+    _config: unknown,
+    workingDir: string,
+    label = 'working_dir',
+  ) => {
+    pinStub.seenLabels.push(label);
+    return (
+      (await pinStub.resolve.value?.(workingDir)) ?? {
+        path: `/fake/repo/${workingDir}`,
+        branch: 'pr-7',
+        slug: workingDir,
+        repoRoot: '/fake/repo',
+      }
+    );
+  },
+}));
 
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
@@ -1898,14 +1932,57 @@ describe('createProductionDispatch', () => {
   });
 
   // T11 (PR #4732 R1): subagents must be bounded so a single agent() call
-  // cannot loop the model indefinitely.
+  // cannot loop the model indefinitely. The dispatch site resolves both
+  // bounds from process.env, so delete the two knobs for this test — an
+  // operator shell exporting them must not flip this hermetic assertion.
   it('passes bounded runConfig (max_turns + max_time_minutes)', async () => {
-    const dispatch = createProductionDispatch(fakeConfig());
-    await dispatch('hello', { label: 'h1' });
-    expect(created[0]!.runConfig).toEqual({
-      max_turns: 50,
-      max_time_minutes: 10,
-    });
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      // Literal anchors, not the DEFAULT_* constants: an edit of the
+      // constant must fail this assertion, not move it along.
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 50,
+        max_time_minutes: 10,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
+  });
+
+  // Resolver-level tests cannot catch a revert at the dispatch site: in a
+  // clean env the DEFAULT_* constants and the resolvers produce identical
+  // numbers, so the wiring test above stays green either way. Stub the env
+  // so the dispatched runConfig itself proves the resolver is wired in.
+  it('fast-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   // T11: disallow SendMessage plus tools that break workflow return/cleanup
@@ -2449,6 +2526,53 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(9999);
     });
 
+    // A build-and-test agent, or an analysis of a 2 000-line file, exceeds
+    // 50 turns / 10 minutes routinely — and under GOAL-terminal semantics
+    // being cut off shows up as a `null` element, i.e. an agent that
+    // silently went missing. Both bounds are operator-tunable, on the same
+    // contract as the agent cap.
+    it('per-subagent bounds default, honor an override, and clamp', () => {
+      expect(resolveSubagentMaxTurns({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+      );
+      expect(resolveSubagentMaxTimeMinutes({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      );
+      expect(
+        resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '120' }),
+      ).toBe(120);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '45',
+        }),
+      ).toBe(45);
+      // Literal anchors for the hard ceilings — comparing against the
+      // HARD_* constants would assert them against themselves.
+      expect(
+        resolveSubagentMaxTurns({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '999999',
+        }),
+      ).toBe(500);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '999999',
+        }),
+      ).toBe(100);
+    });
+
+    it('per-subagent bounds reject non-decimal-integer overrides', () => {
+      for (const raw of ['0', 'abc', '2.5', '0x10', '1e3']) {
+        expect(
+          resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: raw }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS);
+        expect(
+          resolveSubagentMaxTimeMinutes({
+            QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: raw,
+          }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES);
+      }
+    });
+
     it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
@@ -2516,6 +2640,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
     );
+    pinStub.resolve.value = undefined;
+    pinStub.seenLabels.length = 0;
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -2527,6 +2653,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
+    /** What the subagent's Config answers for "where am I?". */
+    runtimeTargetDir?: string;
+    runtimeIgnoreFiles?: string;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
@@ -2584,6 +2713,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
       getTargetDir: () => '/fake/repo',
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+        customIgnoreFiles: ['.cursorignore'],
+      }),
       getSessionId: () => 'sess_fake_test_id',
       getProjectRoot: () => opts.transcriptDir ?? '/fake/repo',
       getCliVersion: () => '9.9.9',
@@ -2605,6 +2739,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
+            runtimeTargetDir: runtimeContext.getTargetDir(),
+            runtimeIgnoreFiles: runtimeContext
+              .getFileService?.()
+              .getQwenIgnoreFileNamesDisplay(),
             options: { runConfigOverrides: options?.runConfigOverrides },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
@@ -3079,6 +3217,37 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await dispatch('hi', { model: 'qwen3-max' });
     // No agentType → ephemeral default config built, then opts.model applied.
     expect(calls[0].config.model).toBe('qwen3-max');
+  });
+
+  // Same wiring guard as the fast-path sibling above, for the override
+  // dispatch site: with a clean env the resolvers and the DEFAULT_*
+  // constants are indistinguishable, so only a stubbed env proves the
+  // runConfigOverrides handed to createAgentHeadless come from the
+  // resolvers.
+  it('override-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const helper = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      await createProductionDispatch(helper.config)('hi', {
+        model: 'qwen3-max',
+      });
+      expect(helper.calls[0]!.options?.runConfigOverrides).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
@@ -3626,6 +3795,169 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       dispatch('extract', { schema: { type: 'object' } }),
     ).rejects.toThrow(/simulated subagent failure/);
     expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── workingDir: pin to a caller-owned worktree ─────────────────
+
+  // The fast path hands `config` to AgentHeadless untouched and has no way
+  // to rebind a directory, so a `workingDir` that reached it would be
+  // silently dropped and the agent would run in the parent working tree —
+  // the exact failure the option exists to prevent.
+  it('workingDir forces the override path even with no agentType/model/schema', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    created.length = 0;
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+      }),
+    ).resolves.toBe('pinned');
+
+    // Went through SubagentManager, not the fast path's AgentHeadless.create.
+    expect(helper.calls).toHaveLength(1);
+    expect(created).toHaveLength(0);
+  });
+
+  it('workingDir rebinds the subagent runtime context to the pinned directory', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    // The subagent's Config answers with the pinned directory, not the
+    // parent's '/fake/repo' — that rebind is what makes its file, shell and
+    // search tools resolve inside the worktree.
+    expect(helper.calls[0]!.runtimeTargetDir).toBe(
+      '/fake/repo/.qwen/tmp/review-pr-7',
+    );
+    expect(helper.calls[0]!.runtimeContextSame).toBe(false);
+    expect(helper.calls[0]!.runtimeIgnoreFiles).toContain('.cursorignore');
+  });
+
+  it('workingDir rejects invalid values before dispatch', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir rejects whitespace-only values at the entrance', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '  ' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The sandbox gate names this contradiction too, but it reads the raw opts
+  // BEFORE the JSON revival — an enumerable getter can withhold `isolation`
+  // during validation and surface it at stringify time. The orchestrator sees
+  // the revived plain object, so its refusal is the one that cannot be
+  // evaded; without it, isolation would silently win and workingDir would be
+  // dropped — the opposite of AgentTool's documented working_dir-wins rule.
+  it('workingDir + isolation throws instead of letting one silently win', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+        isolation: 'worktree',
+      }),
+    ).rejects.toThrow(/incompatible options/);
+    expect(helper.calls).toHaveLength(0);
+    expect(worktreeStubs.instances).toHaveLength(0);
+  });
+
+  // A refused pin must abort the dispatch, not fall through to an agent
+  // running in the parent tree — the failure mode the pin exists to prevent.
+  it('workingDir surfaces the resolver refusal and dispatches nothing', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'workingDir "x" is not a registered linked worktree.',
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      }),
+    ).rejects.toThrow(
+      /agent\(\{workingDir: "not-a-worktree"\}\).*not a registered linked worktree/,
+    );
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir scrubs control characters from resolver errors', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'refused\r\nforged\u0000line',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\r');
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).not.toContain('\u0000');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // Same threat on the other interpolated half: the refusal echoes the
+  // model-authored `workingDir` itself, and `JSON.stringify` escapes only
+  // C0 (U+0000-U+001F), so DEL and the C1 range (incl. NEL U+0085) reach
+  // the message raw unless the echo is sanitized too.
+  it('workingDir refusal scrubs control characters from the echoed workingDir', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'not a registered linked worktree.',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'x\u0085forged\u007fline',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u0085');
+    expect((error as Error).message).not.toContain('\u007f');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The resolver names the offending parameter in its errors; a workflow
+  // script never wrote `working_dir`, so it must be told the opt's own name.
+  it('names the workflow opt, not the tool parameter, when resolving', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', { workingDir: 'wt' });
+    expect(pinStub.seenLabels).toEqual(['workingDir']);
   });
 
   // ─── isolation:'worktree' provision error branches ──────────────

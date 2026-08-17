@@ -10,6 +10,7 @@ import { SpanStatusCode } from '@opentelemetry/api';
 import type {
   AnyDeclarativeTool,
   Config,
+  FileDiff,
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
   ToolConfirmationPayload,
@@ -92,6 +93,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
+import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -138,6 +140,22 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 );
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const boundaryObserveMock = vi.hoisted(() =>
+  vi.fn((_observation: ToolResultBoundaryObservation) => false),
+);
+const boundaryDiagnosticsEnabled = vi.hoisted(() => ({ value: false }));
+
+vi.mock(
+  '../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    isToolResultBoundaryDiagnosticsEnabled: () =>
+      boundaryDiagnosticsEnabled.value,
+    observeToolResultBoundary: boundaryObserveMock,
+  }),
+);
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
 const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
@@ -624,6 +642,8 @@ async function waitForStatus(
 describe('CoreToolScheduler', () => {
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
+    boundaryObserveMock.mockClear();
+    boundaryDiagnosticsEnabled.value = false;
     runSideQueryMock.mockReset();
     modifyWithEditorOverride.value = undefined;
   });
@@ -1154,6 +1174,92 @@ describe('CoreToolScheduler', () => {
       ).runtimeContentGeneratorViews.size,
     ).toBe(0);
   });
+
+  it('marks the budget-exempt plan reminder unchanged in the scheduler pass', async () => {
+    boundaryDiagnosticsEnabled.value = true;
+    const reminder = getPlanModeSystemReminder(false);
+    const enterTool = new MockTool({
+      name: ToolNames.ENTER_PLAN_MODE,
+      maxOutputChars: Number.POSITIVE_INFINITY,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: reminder,
+        returnDisplay: 'Entered plan mode.',
+      }),
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.ENTER_PLAN_MODE, enterTool]]),
+        toolOutputBatchBudget: 1,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'enter-plan-only',
+          name: ToolNames.ENTER_PLAN_MODE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-only',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(
+      boundaryObserveMock.mock.calls
+        .map(([observation]) => observation)
+        .filter((observation) => observation.stage.startsWith('finalizer_'))
+        .map((observation) => [observation.stage, observation.mutated]),
+    ).toEqual([
+      ['finalizer_input', false],
+      ['finalizer_output', false],
+    ]);
+  });
+
+  it.each([200_000, Number.POSITIVE_INFINITY])(
+    'observes oversized output that remains within the batch budget (%s)',
+    async (toolOutputBatchBudget) => {
+      boundaryDiagnosticsEnabled.value = true;
+      const largeOutput = 'a'.repeat(70_000);
+      const tool = new MockTool({
+        name: 'largeWithinBudget',
+        execute: vi.fn().mockResolvedValue({
+          llmContent: largeOutput,
+          returnDisplay: 'large output',
+        }),
+      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['largeWithinBudget', tool]]),
+          toolOutputBatchBudget,
+        });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'large-within-budget',
+            name: 'largeWithinBudget',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-large-within-budget',
+          },
+        ],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+      expect(
+        boundaryObserveMock.mock.calls
+          .map(([observation]) => observation)
+          .filter((observation) => observation.stage.startsWith('finalizer_'))
+          .map((observation) => [observation.stage, observation.mutated]),
+      ).toEqual([
+        ['finalizer_input', false],
+        ['finalizer_output', false],
+      ]);
+    },
+  );
 
   it('keeps siblings suppressed when enter_plan_mode itself fails', async () => {
     const enterExecute = vi.fn().mockResolvedValue({
@@ -3339,6 +3445,17 @@ describe('CoreToolScheduler', () => {
       ]);
       expect(completedCall.response.resultDisplay).toBe('completed');
     }
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    const inputValues = producerObservations[0].values;
+    expect(
+      typeof inputValues === 'function' ? inputValues() : inputValues,
+    ).toEqual([
+      { representation: 'model_text', value: '' },
+      { representation: 'display', value: 'completed' },
+    ]);
   });
 
   it('applies the per-tool budget for a tool invoked via a legacy alias', async () => {
@@ -3518,6 +3635,7 @@ describe('CoreToolScheduler', () => {
   });
 
   it('deterministically bounds tool outputs when a batch exceeds the budget', async () => {
+    boundaryDiagnosticsEnabled.value = true;
     // Both outputs are individually under the single-result threshold (25k),
     // so PR-A truncation leaves them alone; only their SUM (12k) exceeds the
     // per-message batch budget (10k). The small result fits intact and the
@@ -3603,6 +3721,22 @@ describe('CoreToolScheduler', () => {
         ([, result]) => result.executionStatus === 'success',
       ),
     ).toBe(true);
+    const finalizerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('finalizer_'));
+    expect(finalizerObservations).toHaveLength(4);
+    expect(
+      finalizerObservations.map((observation) => [
+        observation.toolCallId,
+        observation.stage,
+        observation.mutated,
+      ]),
+    ).toEqual([
+      ['big', 'finalizer_input', true],
+      ['small', 'finalizer_input', false],
+      ['big', 'finalizer_output', true],
+      ['small', 'finalizer_output', false],
+    ]);
   });
 
   it('hard-caps a batch whose producer outputs already carry truncation markers', async () => {
@@ -5461,6 +5595,17 @@ describe('CoreToolScheduler', () => {
       String(functionResponse?.response?.['output']).length,
     );
     expect(completed.response.visionBridgeNotice).toContain('qwen3-vl-plus');
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
     expect(functionResponse).not.toHaveProperty('parts');
     expect(runSideQueryMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -11497,6 +11642,10 @@ describe('CoreToolScheduler Plan shell routing', () => {
 });
 
 describe('CoreToolScheduler telemetry spans', () => {
+  beforeEach(() => {
+    boundaryObserveMock.mockClear();
+  });
+
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
@@ -11531,6 +11680,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    shouldObserveProducer?: (callId: string) => boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -11612,6 +11762,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       config: mockConfig,
       onAllToolCallsComplete,
       onToolCallsUpdate,
+      shouldObserveProducer: options.shouldObserveProducer,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
     });
@@ -11641,6 +11792,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       providerCallId?: string;
       tools?: AnyDeclarativeTool[];
       toolName?: string;
+      shouldObserveProducer?: (callId: string) => boolean;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -12210,6 +12362,7 @@ describe('CoreToolScheduler telemetry spans', () => {
             hookSpecificOutput: {
               artifacts: [
                 {
+                  kind: 'link',
                   title: 'Hook report',
                   workspacePath: 'reports/hook.html',
                 },
@@ -12227,6 +12380,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         returnDisplay: 'ok',
         artifacts: [
           {
+            kind: 'file',
             title: 'Tool report',
             workspacePath: 'reports/tool.html',
           },
@@ -12239,14 +12393,27 @@ describe('CoreToolScheduler telemetry spans', () => {
     if (completedCall.status === 'success') {
       expect(completedCall.response.artifacts).toEqual([
         {
+          kind: 'file',
           title: 'Tool report',
           workspacePath: 'reports/tool.html',
         },
         {
+          kind: 'link',
           title: 'Hook report',
           workspacePath: 'reports/hook.html',
         },
       ]);
+    }
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
     }
   });
 
@@ -12377,6 +12544,214 @@ describe('CoreToolScheduler telemetry spans', () => {
       'Tool execution failed with exception',
       'tool_exception',
     );
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage === 'producer');
+    expect(producerObservations).toHaveLength(1);
+    expect(producerObservations[0].artifacts).toEqual([
+      { state: 'none', kinds: [] },
+    ]);
+  });
+
+  it('lets an outer owner suppress a scheduler producer observation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('externally owned')),
+      shouldObserveProducer: () => false,
+    });
+
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('preserves a successful result when the producer owner predicate throws', async () => {
+    const { completedCalls } = await runSingleTool({
+      shouldObserveProducer: () => {
+        throw new Error('owner predicate failed');
+      },
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('preserves an execution error when the producer owner predicate throws', async () => {
+    const { completedCalls } = await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('tool failed')),
+      shouldObserveProducer: () => {
+        throw new Error('owner predicate failed');
+      },
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('tool failed');
+    }
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('observes a settled producer when post-processing throws', async () => {
+    const resultFilePaths: string[] = [];
+    Object.defineProperty(resultFilePaths, Symbol.iterator, {
+      value: () => {
+        throw new Error('post-processing failed');
+      },
+    });
+    const readTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'settled result',
+        returnDisplay: 'settled result',
+        resultFilePaths,
+      }),
+    });
+
+    const { completedCalls } = await runSingleTool({
+      tools: [readTool],
+      toolName: ToolNames.READ_FILE,
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(
+      boundaryObserveMock.mock.calls
+        .map(([observation]) => observation.stage)
+        .filter((stage) => stage.startsWith('producer_')),
+    ).toEqual(['producer_input', 'producer_output']);
+  });
+
+  it('does not treat routine multi-part response wrapping as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [{ text: 'alpha' }, { text: 'beta' }],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('does not treat routine media response wrapping as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('does not treat a supported function response as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            functionResponse: {
+              id: 'span-call',
+              name: 'mockTool',
+              response: { output: 'complete' },
+            },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('treats dropped structured parts as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            functionCall: { name: 'nested_call', args: { value: 1 } },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
+  });
+
+  it('treats structured display compaction as a producer mutation', async () => {
+    const oversized = 'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS + 100);
+    const returnDisplay: FileDiff = {
+      fileName: 'large.txt',
+      fileDiff: oversized,
+      originalContent: oversized,
+      newContent: oversized,
+    };
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'updated',
+        returnDisplay,
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
   });
 
   it('preserves original tool exceptions when the failure hook rejects', async () => {

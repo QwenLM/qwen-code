@@ -18,6 +18,7 @@ import type {
   ToolCallConfirmationDetails,
   DeferredToolPresentation,
   ToolArtifact,
+  ToolResultBoundaryArtifact,
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
@@ -173,6 +174,7 @@ export interface ToolCallResponseInfo {
    * Used by ToolSearch + deferred_tool_call routing; not sent to the provider.
    */
   deferredToolPresentations?: DeferredToolPresentation[];
+  boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {

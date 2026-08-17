@@ -280,6 +280,12 @@ The `extra_body` field allows you to add custom parameters to the request body s
 | ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `fastModel` | string | Model used for generating [prompt suggestions](../features/followup-suggestions) and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., `qwen3-coder-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
 
+#### advisorModel
+
+| Setting        | Type   | Description                                                                                                                                                                                                                                                                                                                             | Default |
+| -------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `advisorModel` | string | Model used by [`/advisor`](../features/commands.md#17-second-opinion-advisor) for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider. | `""`    |
+
 #### visionModel
 
 | Setting       | Type   | Description                                                                                                                                                                                                                                                                                                                                                                                                                         | Default |

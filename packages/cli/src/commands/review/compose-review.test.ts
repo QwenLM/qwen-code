@@ -17,12 +17,21 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
-import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
+import {
+  budgetStopEntry,
+  budgetStopEntryZh,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
+  writeBudgetStop,
+  writeRoundCapStop,
+} from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
-import { parseLedger } from './lib/ledger.js';
+import { LEDGER_MAX_ROUND, parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
+  isNonDiffDimensionGap,
   buildLedger,
   repositoryContextGate,
   scriptLintGate,
@@ -340,6 +349,34 @@ function transcript(
 }
 
 /**
+ * Move one agent's transcript into a ledgered PRIOR session — the shape a
+ * resumed run reads.
+ *
+ * The records are re-stamped with the owning session (a transcript copied
+ * into another session's directory is not that session's evidence, and
+ * production refuses the misplaced shape), and the ledger is written by the
+ * real writer so the entries carry the plan mtime they are keyed on. The
+ * current attempt is stamped last and its resume recorded: reading prior
+ * evidence at all requires that authorization.
+ */
+function rehomeToPriorSession(planPath: string, file: string): void {
+  mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  const from = join(dir, 'subagents', 'S1', file);
+  writeFileSync(
+    join(dir, 'subagents', 'S0', file),
+    readFileSync(from, 'utf8').replaceAll(
+      '"sessionId":"S1"',
+      '"sessionId":"S0"',
+    ),
+  );
+  rmSync(from, { force: true });
+  const now = Date.now();
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+  recordResume(planPath, ENV, now + 1500);
+}
+
+/**
  * A prompt the CLI would have built: it names the diff and the read of THIS
  * chunk's lines. The offsets are the chunk's own, as `agent-prompt` emits them —
  * coverage is attributed from the range delivered, not from the words `chunk N`.
@@ -548,14 +585,26 @@ describe('composeReview — modeled-system defect-layer cap', () => {
   ];
   const walked = (...ids: string[]) =>
     ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
-  // A genuine reverse-audit auditor: the identity line, a real diff read
-  // (so `diffToolCalls > 0`), and the given receipts as its final text.
-  const auditor = (id: string, receipts: string) =>
-    transcript(id, `${IDENTITY}\nread_file(file_path="${DIFF}")`, {
+  // A GENUINE auditor: launched with the prompt the CLI recorded for the
+  // role, and it opened the brief that prompt points at (plus a real diff
+  // read, receipts as final text). A receipt only counts from one of these —
+  // otherwise a compliant sibling's floor could carry a hand-written
+  // auditor's claims. (The earlier fixture matched on a bare IDENTITY
+  // constant; the gate no longer accepts that shape.)
+  const auditor = (id: string, receipts: string) => {
+    const planPath = join(dir, 'plan.json');
+    const brief = briefPath(planPath, 'reverse-audit');
+    const launch =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    transcript(id, launch, {
       toolCalls: 1,
       range: [0, 100],
+      opens: [brief],
       text: receipts,
     });
+  };
   const markedPlan = (domains: string[]) =>
     coveredPlan(['verify', 'reverse-audit'], {
       repositoryContext: sentinel(domains),
@@ -1840,6 +1889,23 @@ describe('composeReview — input validation (the producer is a model that omits
         modelId: MODEL,
       }),
     ).toThrow(/suggestionsInline/);
+  });
+
+  it('accepts the array form of suggestionsDiscarded, counting it by length', () => {
+    // The Step 7 prose prescribes a count, but runs following older skill
+    // revisions wrote the LIST of discarded items and used to die at this gate
+    // late, after hours of analysis. `[]` is zero; a populated list is its
+    // length — the same claim as the number, spelled the older way.
+    expect(composeReview(base({ suggestionsDiscarded: [] })).event).toBe(
+      'APPROVE',
+    );
+    const r = composeReview(
+      base({
+        suggestionsDiscarded: ['src/a.ts:12 — could not anchor', 'src/b.ts:7'],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('2 Suggestion-level finding(s)');
   });
 
   it('rejects a non-array list field and a missing or blank modelId', () => {
@@ -4684,6 +4750,11 @@ describe('the ledger marker reaches the POSTED body', () => {
     // raw check and only this case fails (measured — a mutant keeping only
     // `cappedBy.length > 0` survived every other test in the suite).
     for (const failClosed of [
+      // Restored after a live review of this change (#9175, R2-12) named what
+      // deleting it cost: a whiffed lens is recorded in `unreviewedDimensions`
+      // and NOTHING else sees it — `coverageFromTranscripts` reports only idle,
+      // blind and never-opened agents — so exempting the whole field let a
+      // twice-whiffed Security pass advance the range past lines it never read.
       { unreviewedDimensions: ['security — the agent whiffed twice'] },
       { cannotTellCriticals: ['a.ts:3 — could not fetch the full body'] },
       { uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
@@ -4716,6 +4787,287 @@ describe('the ledger marker reaches the POSTED body', () => {
         expect(r.cappedBy).toEqual([]);
       }
     }
+  });
+
+  it('still ANCHORS a round whose only cap is an unreviewable dimension', () => {
+    // The one cap that no longer withholds. `unreviewedDimensions` is the
+    // orchestrator's prose about DEPTH — on this repo, "the integration suite
+    // CI skipped did not run locally", true of every round because
+    // `build-test`'s whole-call budget cannot fit the suites. Withholding on
+    // it closed a loop with no exit: an untestable dimension capped the
+    // verdict, the cap withheld the anchor, and the missing anchor made the
+    // next round re-review the full diff — 119 minutes and 34M tokens on a PR
+    // whose code had not changed since the round before (measured, #9113 r2).
+    // A dimension nobody could run says nothing about WHICH LINES were read,
+    // and the anchor's only claim is about lines.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [
+        'build-and-test — the integration suite never ran',
+      ],
+    });
+
+    expect(r.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(r.scopeUnproven).toBe(false);
+    expect(r.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('classifies a budget stop the same whether or not the entry is relayed', () => {
+    // The stderr instruction MANDATES relaying the stop entry, so a rule that
+    // reads only the prose withheld the anchor from every compliant run and
+    // carried it for every non-compliant one — identical machine state,
+    // opposite outcomes by relay. The marker is the state; the entry is its
+    // echo; a truncated reverse audit is DEPTH over lines the receipts
+    // already prove read.
+    const composeWith = (dims: string[]): ReturnType<typeof composeReview> => {
+      const planPath = coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      });
+      writeBudgetStop(
+        planPath,
+        { remainingSeconds: 10, reserveSeconds: 300, expectedRoundSeconds: 60 },
+        3,
+      );
+      return composeReview({
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+        unreviewedDimensions: dims,
+      });
+    };
+
+    // Non-compliant baseline: the entry is dropped. The machine state alone
+    // decides everything below.
+    const dropped = composeWith([]);
+    expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
+
+    // Compliant: the canonical entry is relayed. The splice retires it, the
+    // structural line carries the disclosure — so the BODY IS BYTE-IDENTICAL
+    // to the dropped case. That is the whole relay-independence claim in one
+    // assertion, and it is what an English-only splice broke for the Chinese
+    // pair: the relayed zh entry survived into the whiffed-dimension
+    // rendering beside the structural stop line — the same gap said twice,
+    // one copy under the wrong cause.
+    const relayed = composeWith([budgetStopEntry(3)]);
+    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayed.body).toBe(dropped.body);
+
+    const relayedZh = composeWith([budgetStopEntryZh(3)]);
+    expect(relayedZh.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayedZh.body).toBe(dropped.body);
+
+    // A LINE-COVERAGE claim whose whiffed scope IS the reverse audit: same
+    // head, mentions the phrase, marker present — and it must withhold. The
+    // exemption is text-anchored to the exact entries the machinery mints,
+    // because anything looser also covers this, and the phrase splice removes
+    // it from the rendered body so nothing else would ever disclose it again.
+    const whiffed = composeWith([
+      'reverse audit — the review time budget ended the round before the chunk-2 relaunch returned evidence',
+    ]);
+    expect(whiffed.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(whiffed.body)?.sha).toBeUndefined();
+  });
+
+  it('classifies a ROUND-CAP stop the same way, relay or no relay', () => {
+    // The round-cap branch mints its own canonical pair; without a pin the
+    // budget branch could hold while this one regressed to relay-dependence.
+    const composeWith = (dims: string[]): ReturnType<typeof composeReview> => {
+      const planPath = coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      });
+      writeRoundCapStop(planPath, 5, 5);
+      return composeReview({
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+        unreviewedDimensions: dims,
+      });
+    };
+    const dropped = composeWith([]);
+    expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
+    // Byte identity across all three relay states, exactly as the budget
+    // branch pins it — the Chinese pair included, whose splice constant
+    // exists for precisely this path.
+    const relayed = composeWith([roundCapStopEntry(5)]);
+    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayed.body).toBe(dropped.body);
+    const relayedZh = composeWith([roundCapStopEntryZh(5)]);
+    expect(relayedZh.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayedZh.body).toBe(dropped.body);
+  });
+
+  it('gives stop-shaped PROSE no exemption when no marker backs it', () => {
+    // Marker-anchored on purpose: without the machine state, an entry that
+    // merely looks like the stop must not buy an anchor — and a lens entry
+    // that mentions the phrase in its reason withholds either way (its head
+    // names the lens, not the reverse audit).
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [budgetStopEntry(3)],
+    });
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('keeps the marker round-trip whole AT the round cap', () => {
+    // The stamp is capped because the round is the id space: an uncapped
+    // prevRound + 1 met the serializer's round clamp at exactly the cap and
+    // produced a marker whose own parser dropped every finding — invisibly,
+    // with the anchor still riding.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: LEDGER_MAX_ROUND, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    const ledger = parseLedger(r.body);
+    expect(ledger?.round).toBe(LEDGER_MAX_ROUND);
+    // The finding survives its own round trip — id round == marker round.
+    expect(ledger?.findings).toHaveLength(1);
+    expect(ledger?.findings[0]?.id).toBe(`R${LEDGER_MAX_ROUND}-1`);
+  });
+
+  it("sees a debt the deterministic gates push in AFTER the caller's entries", () => {
+    // `unreviewed` has three writers, at three different points: the caller's
+    // own entries, the budget-phrase splice that removes some of them, and the
+    // script-lint / layer-audit gates that push machine-owed debts later. A
+    // decision that reads any single snapshot misses one of them — an earlier
+    // fix read too late and missed the splice, its replacement read too early
+    // and missed the gates. Both directions are line-coverage claims, so both
+    // must withhold: an unlinted script or an unwalked defect layer is not a
+    // dimension nobody could run.
+    expect(
+      isNonDiffDimensionGap('the executable-script lint — no report'),
+    ).toBe(false);
+    expect(
+      isNonDiffDimensionGap('reverse-audit layer coverage — 2 layers unwalked'),
+    ).toBe(false);
+    // ...and the only entry that IS exempt stays exempt.
+    expect(
+      isNonDiffDimensionGap('build-and-test — the integration suite never ran'),
+    ).toBe(true);
+  });
+
+  it('sees a lens gap the budget-phrase splice removes from the rendered list', () => {
+    // The splice keeps the body from saying one gap twice, and it matches on a
+    // PHRASE — so an entry that merely mentions the review time budget in its
+    // free-form reason leaves `unreviewedDimensions` before anything else reads
+    // it. Harmless while every cap withheld the anchor; not harmless once one
+    // cap does not, because the spliced entry is the line-coverage claim the
+    // anchor decision exists to respect.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [
+        'security — the review time budget ended the round before the security relaunch returned evidence',
+      ],
+    });
+
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('withholds the anchor when a dimension gap is about LINES, not depth', () => {
+    // The distinction the exemption turns on, and the one a live review of
+    // this change had to restore: Agent 7 is the only role whose brief sets
+    // `readsDiff: false`, so only its gap says nothing about which lines were
+    // read. Any other dimension in that field is a whiffed lens — a claim
+    // about lines that no machine detector produces.
+    const withLensGap = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [
+        'build-and-test — the integration suite never ran',
+        'security — the agent whiffed twice',
+      ],
+    });
+
+    expect(withLensGap.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(withLensGap.scopeUnproven).toBe(false);
+    expect(withLensGap.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(withLensGap.body)?.sha).toBeUndefined();
+    // The findings still ride: a fail-closed round's work list is still a work
+    // list, it just cannot certify a range.
+    expect(parseLedger(withLensGap.body)?.findings).toHaveLength(1);
+  });
+
+  it('withholds it again as soon as the COVERAGE evidence is short', () => {
+    // The safety property the relaxation must not cost: when the machine
+    // evidence itself leaves doubt that the diff was read, the cap wears the
+    // same name (`unreviewed-dimension`) but `scopeUnproven` is what decides.
+    transcript('a1', goodPrompt(1), { toolCalls: 0 });
+    transcript('a2', goodPrompt(2), { toolCalls: 0 });
+    const r = composeReview({
+      planPath: plan({ prNumber: 8255, fetchedSha: 'deadbeef00112233' }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+    });
+
+    expect(r.scopeUnproven).toBe(true);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
   });
 
   it('carries NO marker on a local review — there is no PR to hold it', () => {
@@ -5772,5 +6124,70 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(performance.now() - t0).toBeLessThan(2000);
     // The multi-line entry still collapses to one list item.
     expect(r.body).toContain('comment 102 (b.ts) — body truncated');
+  });
+});
+
+describe('composeReview — a resumed run is continuity, not a coverage gap', () => {
+  it('stays APPROVE and renders the non-capping continuity note', () => {
+    // The interrupted attempt's chunk-1 agent, re-homed into session S0 and
+    // named by the run ledger; the current session covers the rest. The
+    // recovered work COUNTS as reviewed: no cap, no "Not reviewed:" entry —
+    // a capping entry here downgraded every clean resumed run to COMMENT,
+    // permanently, since the prior records never leave the ledger.
+    // Build the input FIRST: `base()`'s object literal evaluates its
+    // `planPath: coveredPlan()` default even when the caller overrides it,
+    // and `coveredPlan()` rewrites the current session's chunk-1 record —
+    // which would then supersede the prior one and (correctly) stop counting
+    // as recovered work.
+    const input = base({});
+    rehomeToPriorSession(input.planPath as string, 'agent-a1.jsonl');
+
+    const r = composeReview(input);
+    expect(r.event).toBe('APPROVE');
+    // The EXACT joined body, not a substring: on the approve path the
+    // separator is chosen per-render, and continuity is the only block
+    // present here. Asserted as a whole, a separator that forgot this block
+    // glues the note onto the verdict sentence with a single space; asserted
+    // with `toContain`, that reads identically.
+    expect(r.body).toBe(
+      'No issues found. LGTM! ✅\n\n' +
+        'Resumed run (not a gap): 1 agent result(s) from the interrupted ' +
+        'earlier attempt were re-certified from the harness records and ' +
+        'counted as reviewed.\n\n' +
+        '_— test-model via Qwen Code /review (vunknown)_',
+    );
+    expect(r.body).not.toContain('Not reviewed: review continuity');
+    expect(r.body).not.toContain('Partially reviewed');
+  });
+});
+
+describe('composeReview — continuity renders on every verdict', () => {
+  /**
+   * A resumed run: chunk-1's agent re-homed to the ledgered prior session.
+   *
+   * `base()`'s object literal evaluates its `planPath: coveredPlan()` default
+   * even when the caller overrides it, and `coveredPlan()` REWRITES
+   * `subagents/S1/agent-a1.jsonl` — so the move must happen after `base()`
+   * has been built, not before. Callers pass the input through here.
+   */
+  function resumedInput(
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    const input = base(over);
+    const p = input.planPath as string;
+    rehomeToPriorSession(p, 'agent-a1.jsonl');
+    return input;
+  }
+
+  it('renders on REQUEST_CHANGES', () => {
+    const r = composeReview(resumedInput({ criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+
+  it('renders on COMMENT', () => {
+    const r = composeReview(resumedInput({ suggestionsInline: 1 }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
   });
 });

@@ -3841,7 +3841,20 @@ export const useGeminiStream = (
                   toolName: request.name,
                   responseParts: response.responseParts,
                   persistedOutputFiles: response.persistedOutputFiles,
+                  artifacts: response.artifacts,
                 }),
+              ),
+              new Map(
+                immediateDuplicateToolResponses.responses.flatMap(
+                  ({ request }) => {
+                    const promptId =
+                      request.prompt_id ??
+                      immediateDuplicateToolResponses.promptId;
+                    return promptId
+                      ? [[request.callId, promptId] as const]
+                      : [];
+                  },
+                ),
               ),
             );
             const responseParts = finalized.flatMap(
@@ -3856,6 +3869,8 @@ export const useGeminiStream = (
                     callId: request.callId,
                     status: response.error ? 'error' : 'success',
                     resultDisplay: response.resultDisplay,
+                    persistedOutputFiles: finalized[index].persistedOutputFiles,
+                    artifacts: finalized[index].artifacts,
                     error: response.error,
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
@@ -4774,7 +4789,15 @@ export const useGeminiStream = (
           toolName: request.name,
           responseParts: response.responseParts,
           persistedOutputFiles: response.persistedOutputFiles,
+          artifacts: response.artifacts,
         })),
+        new Map(
+          orderedResponses.flatMap(({ request }) =>
+            request.prompt_id
+              ? [[request.callId, request.prompt_id] as const]
+              : [],
+          ),
+        ),
       );
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
@@ -4798,6 +4821,9 @@ export const useGeminiStream = (
             callId: request.callId,
             status,
             resultDisplay: response.resultDisplay,
+            persistedOutputFiles:
+              finalizedResponses[index].persistedOutputFiles,
+            artifacts: finalizedResponses[index].artifacts,
             error: response.error,
             errorType: response.errorType,
             deferredToolPresentations,
