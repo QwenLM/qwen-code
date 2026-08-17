@@ -17,6 +17,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { getTeamName, resolveActiveTeamName } from '../agents/team/identity.js';
+import { sanitizeName } from '../agents/team/teamHelpers.js';
 import { listTasks } from '../agents/team/tasks.js';
 
 export interface TaskListParams {
@@ -67,7 +68,10 @@ class TaskListInvocation extends BaseToolInvocation<
 
     const tasks = await listTasks(teamName, {
       status: this.params.status,
-      owner: this.params.owner,
+      owner:
+        this.params.owner === undefined
+          ? undefined
+          : sanitizeName(this.params.owner),
       blockedBy: this.params.blockedBy,
     });
 

@@ -97,6 +97,18 @@ describe('TaskListTool', () => {
     expect(result.llmContent).not.toContain('Pending');
   });
 
+  it('canonicalizes owner filters', async () => {
+    const t = await createTask(TEAM, {
+      subject: 'Owned',
+      description: 'desc',
+    });
+    await updateTask(TEAM, t.id, { owner: 'alice' });
+
+    const invocation = tool.build({ owner: 'Alice' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Owned');
+  });
+
   it('returns TaskListResultDisplay', async () => {
     await createTask(TEAM, {
       subject: 'Task X',

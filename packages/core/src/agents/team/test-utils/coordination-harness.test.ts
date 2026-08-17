@@ -534,6 +534,53 @@ describe('TeamCoordinationHarness', () => {
       expect(reloaded?.owner).toBeUndefined();
     });
 
+    it('rejects owner names that sanitize to empty', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Invalid owner',
+        description: 'Do not clear owner by accident',
+      });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: '!!!',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('owner must include');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+    });
+
+    it('rejects dispatching a task while it is blocked', async () => {
+      const h = await createHarness();
+      const blocker = await createTask(h.teamName, {
+        subject: 'Blocker',
+        description: 'Finish first',
+      });
+      const task = await createTask(h.teamName, {
+        subject: 'Blocked',
+        description: 'Wait for blocker',
+      });
+      await updateTask(h.teamName, task.id, { addBlockedBy: [blocker.id] });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('blocked by');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
     it('rejects assigning to a teammate whose shutdown is pending', async () => {
       const h = await createHarness();
       const task = await createTask(h.teamName, {
@@ -558,6 +605,31 @@ describe('TeamCoordinationHarness', () => {
       expect(reloaded?.status).toBe('in_progress');
       expect(reloaded?.owner).toBe('leader');
       expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
+    it('allows editing an already-dispatched task during owner shutdown', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Already dispatched',
+        description: 'Edit only',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      h.teamManager.markShutdownRequested('alice');
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        owner: 'alice',
+        subject: 'Edited subject',
+      });
+      expect(result.error).toBeUndefined();
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.subject).toBe('Edited subject');
+      expect(reloaded?.owner).toBe('alice');
     });
 
     it('canonicalizes display-name owners before persisting and dispatching', async () => {
@@ -642,6 +714,7 @@ describe('TeamCoordinationHarness', () => {
       const alice = await h.spawnTeammate('alice', {
         onMessage: () => 'stay_running',
       });
+      alice.enqueueMessage('already busy');
       await alice.waitForStatus(AgentStatus.RUNNING);
 
       const result = await leaderAssign(h, {
@@ -651,10 +724,10 @@ describe('TeamCoordinationHarness', () => {
       });
       expect(result.error).toBeUndefined();
 
-      expect(alice.getReceivedMessages()).toHaveLength(0);
+      expect(alice.getReceivedMessages()).toHaveLength(1);
       alice.goIdle();
-      await h.waitForMessages('alice', 1);
-      expect(alice.getReceivedMessages()[0]).toContain('Queue this while busy');
+      await h.waitForMessages('alice', 2);
+      expect(alice.getReceivedMessages()[1]).toContain('Queue this while busy');
     });
   });
 

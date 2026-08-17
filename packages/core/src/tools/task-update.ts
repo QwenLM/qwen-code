@@ -380,6 +380,20 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       this.params.owner === undefined
         ? undefined
         : sanitizeName(this.params.owner);
+    if (
+      this.params.owner !== undefined &&
+      this.params.owner !== '' &&
+      !explicitOwner
+    ) {
+      const msg =
+        `Cannot assign task #${taskId}: owner must include at least one ` +
+        `letter, number, or hyphen.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
 
     if (
       this.params.status === 'in_progress' &&
@@ -408,14 +422,38 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // persisting any other assignment would report success for a task
     // that can never arrive.
     const teamManager = this.config.getTeamManager?.() ?? null;
+    const existingOwner = existing?.owner
+      ? sanitizeName(existing.owner)
+      : undefined;
     const nextOwner = explicitOwner ?? autoOwner ?? existing?.owner;
     const nextStatus = this.params.status ?? existing?.status;
-    if (
-      explicitOwner &&
-      teamManager &&
+    const statusBecameInProgress =
+      this.params.status === 'in_progress' &&
+      existing?.status !== 'in_progress';
+    const ownerChanged =
+      explicitOwner !== undefined && explicitOwner !== existingOwner;
+    const nextBlockedBy = new Set(existing?.blockedBy ?? []);
+    for (const blockedBy of this.params.addBlockedBy ?? []) {
+      nextBlockedBy.add(blockedBy);
+    }
+    const shouldDispatchAssignment =
       nextStatus === 'in_progress' &&
-      nextOwner !== teammateCallerName
-    ) {
+      !!nextOwner &&
+      nextOwner !== teammateCallerName &&
+      (ownerChanged || statusBecameInProgress);
+    if (shouldDispatchAssignment && nextBlockedBy.size > 0) {
+      const msg =
+        `Cannot assign task #${taskId} to "${nextOwner}" while it is ` +
+        `blocked by ${Array.from(nextBlockedBy)
+          .map((id) => `#${id}`)
+          .join(', ')}. Complete or remove the blocker first.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+    if (explicitOwner && teamManager && shouldDispatchAssignment) {
       const refusal = teamManager.validateTaskOwner(explicitOwner);
       if (refusal) {
         return {
@@ -473,12 +511,13 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // knows; it just made the call). Re-asserting an unchanged
     // owner+status dispatches nothing, so a retried task_update cannot
     // double-deliver the same assignment.
-    const statusBecameInProgress =
-      this.params.status === 'in_progress' &&
-      existing?.status !== 'in_progress';
-    const existingOwner = existing?.owner
-      ? sanitizeName(existing.owner)
-      : undefined;
+    let dispatchFailure:
+      | {
+          llmContent: string;
+          returnDisplay: string;
+          error: { message: string };
+        }
+      | undefined;
     if (
       teamManager &&
       task.status === 'in_progress' &&
@@ -492,7 +531,11 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           `Task #${taskId} was updated (status: ${task.status}, ` +
           `owner: ${task.owner}), but the assignment prompt could not ` +
           `be delivered. Reassign the task or respawn the teammate.`;
-        return { llmContent: msg, returnDisplay: msg, error: { message: msg } };
+        dispatchFailure = {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
       }
     }
 
@@ -545,6 +588,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     if (reciprocalUpdates.length > 0) {
       await Promise.all(reciprocalUpdates);
     }
+    if (dispatchFailure) return dispatchFailure;
 
     const llmContent =
       `Task #${taskId} updated (status: ${task.status}` +
