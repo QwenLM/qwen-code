@@ -61,6 +61,22 @@ export function commentMarkerSeverity(
 }
 
 /**
+ * Whether the invisible marker `submit` appends to an attribution-off post
+ * would land INSIDE a code fence (or an HTML block) still open at the
+ * body's end — rendered as visible code instead of nothing, with the
+ * claim vanished into the fence's info string when the delimiter carries
+ * one. The attribution-off prefix strip can move a fence delimiter to
+ * line-leading position, creating the exposure on a draft whose delimiter
+ * sat mid-line, so the check runs on the POST-strip shape, mirroring the
+ * fence refusal `ingestEntryList` applies to the body lists.
+ */
+export function swallowsAppendedMarker(body: string): boolean {
+  const lines = scanLines(`${body}\n\n${COMMENT_MARKER}`);
+  const last = lines[lines.length - 1];
+  return last !== undefined && (last.kind === 'fence' || last.kind === 'html');
+}
+
+/**
  * Bare marker LINES removed from a body — used by `submit` before appending
  * the canonical marker, so a marker quoted from the reviewed code (or
  * planted to be mistaken for one) cannot survive next to the real one.
@@ -477,12 +493,17 @@ interface ScannedLine {
  * VISIBLY on GitHub, so the state only stops a fence-shaped line inside one
  * from toggling fence state — and a `>`-only line is not the blank line
  * that ends such a block.
+ *
+ * Splits on every CommonMark line ending — `\n`, `\r\n`, and a bare
+ * `\r`: GitHub renders all three as a line break, and a `\n`-only scan
+ * read the CR twins of these bodies as one line, leaving a forged footer
+ * or a hollow fence the LF twin strips or refuses.
  */
 function scanLines(body: string): ScannedLine[] {
   let fence: { char: string; len: number; depth: number } | null = null;
   let html: { endRe: RegExp | null } | null = null;
   const out: ScannedLine[] = [];
-  for (const line of body.split('\n')) {
+  for (const line of body.split(/\r\n?|\n/)) {
     const quote = QUOTE_PREFIX_RE.exec(line);
     const depth = quote === null ? 0 : quote[0].split('>').length - 1;
     const content = quote === null ? line : line.slice(quote[0].length);
@@ -564,6 +585,11 @@ function mapLinesAware(
   // Junctions into `out` (the index a dropped line's gap lands at) where a
   // line was dropped.
   const drops = new Set<number>();
+  // Drops of HTML-block CONTENT lines: the one droppable quotation kind.
+  // Their junctions land inside the quotation the scan keeps verbatim (or
+  // at its edge), so the collapse must never touch the blank runs around
+  // them — those blanks belong to the quotation and render.
+  const quotedDrops = new Set<number>();
   for (const { line, kind } of scanLines(body)) {
     if (kind !== 'text' && kind !== 'html') {
       out.push(line);
@@ -573,6 +599,7 @@ function mapLinesAware(
     if (mapped === null) {
       changed = true;
       drops.add(out.length);
+      if (kind === 'html') quotedDrops.add(out.length);
       continue;
     }
     if (mapped !== line) changed = true;
@@ -583,13 +610,16 @@ function mapLinesAware(
   // A drop collapses the blank run it lands in to at most one blank line
   // (and removes it at the edges); every other run stays byte-identical —
   // a global collapse deleted blank lines inside the fenced/indented code
-  // and <pre> quotations this scan keeps verbatim.
-  const runHasDrop = (from: number, to: number): boolean => {
+  // and <pre> quotations this scan keeps verbatim. A run touching a
+  // quoted drop stays byte-identical too, for the reason above.
+  const runHas = (set: Set<number>, from: number, to: number): boolean => {
     for (let p = from; p <= to; p += 1) {
-      if (drops.has(p)) return true;
+      if (set.has(p)) return true;
     }
     return false;
   };
+  const collapsible = (from: number, to: number): boolean =>
+    runHas(drops, from, to) && !runHas(quotedDrops, from, to);
   const nonEmpty: number[] = [];
   out.forEach((l, i) => {
     if (l !== '') nonEmpty.push(i);
@@ -597,19 +627,19 @@ function mapLinesAware(
   if (nonEmpty.length === 0) return '';
   const pieces: string[] = [];
   const first = nonEmpty[0]!;
-  pieces.push(runHasDrop(0, first) ? '' : '\n'.repeat(first));
+  pieces.push(collapsible(0, first) ? '' : '\n'.repeat(first));
   for (let k = 0; k + 1 < nonEmpty.length; k += 1) {
     const a = nonEmpty[k]!;
     const b = nonEmpty[k + 1]!;
     pieces.push(out[a]!);
     pieces.push(
-      runHasDrop(a + 1, b) && b - a > 2 ? '\n\n' : '\n'.repeat(b - a),
+      collapsible(a + 1, b) && b - a > 2 ? '\n\n' : '\n'.repeat(b - a),
     );
   }
   const last = nonEmpty[nonEmpty.length - 1]!;
   pieces.push(out[last]!);
   pieces.push(
-    runHasDrop(last + 1, out.length) ? '' : '\n'.repeat(out.length - 1 - last),
+    collapsible(last + 1, out.length) ? '' : '\n'.repeat(out.length - 1 - last),
   );
   return pieces.join('');
 }
@@ -694,7 +724,7 @@ export function rendersAsNothing(text: string): boolean {
     stripped = next;
   }
   const kept: string[] = [];
-  const lines = stripped.split('\n');
+  const lines = stripped.split(/\r\n?|\n/);
   for (let i = 0; i < lines.length; i += 1) {
     const l = lines[i]!;
     if (/^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.test(l)) continue;

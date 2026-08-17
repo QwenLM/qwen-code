@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  carriedClaimLine,
   countInlineFindings,
   severityOf,
   stripSeverityPrefix,
@@ -64,6 +65,36 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripSeverityPrefix('**[Critical]**\u200B')).toBe('');
     expect(stripSeverityPrefix('**[Critical]**<!-- x -->')).toBe('');
     expect(stripSeverityPrefix('**[Critical]** <!-- x --> \u200B')).toBe('');
+  });
+});
+
+describe('carriedClaimLine — the shared readback strip', () => {
+  it('reads the claim through every shape the classifier admits', () => {
+    // Leading residue: severityOf classifies through it, so the slice
+    // must too — slicing the raw bytes cut mid-marker and garbled the
+    // claim ('* R1-3: …' for the zwsp-led body).
+    expect(carriedClaimLine('\u200B**[Critical]** R1-3: zwsp residue')).toBe(
+      'R1-3: zwsp residue',
+    );
+    expect(carriedClaimLine('<!-- x -->**[Suggestion]** the claim')).toBe(
+      'the claim',
+    );
+    // Residue BETWEEN the marker and the carried id.
+    expect(carriedClaimLine('**[Critical]** <!-- x --> R1-2: the claim')).toBe(
+      'R1-2: the claim',
+    );
+    // The full-width colon the prefix strip admits ('[:：]') — the
+    // ASCII-only separator nulled the readback on this shape.
+    expect(carriedClaimLine('**[Critical]**：R2-3: the claim')).toBe(
+      'R2-3: the claim',
+    );
+    // The ASCII colon and the plain shapes keep their existing readback.
+    expect(carriedClaimLine('**[Critical]**: R4-1: the claim')).toBe(
+      'R4-1: the claim',
+    );
+    expect(carriedClaimLine('**[Suggestion]** plain')).toBe('plain');
+    expect(carriedClaimLine('**[Critical]** first\nsecond')).toBe('first');
+    expect(carriedClaimLine('no marker')).toBe(null);
   });
 });
 

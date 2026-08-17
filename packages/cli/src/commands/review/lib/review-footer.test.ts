@@ -20,6 +20,7 @@ import {
   stripForgedFooterLines,
   stripParagraphMarkers,
   stripReviewFooter,
+  swallowsAppendedMarker,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
 
@@ -205,12 +206,15 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('one\n\ntwo');
     });
 
-    it('tolerates CRLF line endings', () => {
+    it('tolerates CRLF line endings — a changed body normalizes to LF', () => {
+      // GitHub renders LF and CRLF identically; when a strip removes a
+      // line the rejoin normalizes the survivors. An UNCHANGED body still
+      // returns byte-identical (no rewrite when nothing strips).
       expect(
         stripForgedFooterLines(
           'null deref\r\n_— qwen3-coder via Qwen Code /review (v0.21.3)_\r\nUpdate: more',
         ),
-      ).toBe('null deref\r\nUpdate: more');
+      ).toBe('null deref\nUpdate: more');
     });
 
     it('leaves a footer-shaped span with text after it on the same line alone', () => {
@@ -278,6 +282,60 @@ describe('the review footer and the regex that strips it', () => {
         'the earlier comment said:\n\n```\n_— model via Qwen Code /review (v1.2.3)_\n```\n\nand it was wrong';
       expect(stripForUnattributedPost(quoted)).toBe(quoted);
     });
+
+    it('keeps blank runs inside a type-1 HTML quotation when a drop lands in it', () => {
+      // HTML-block content lines are the ONE quotation kind a map can
+      // drop: the drop-collapse must not treat the quotation's own blank
+      // run as the run to collapse — blanks inside the preserved <pre>
+      // render, and deleting one corrupts the quotation the post carries.
+      expect(
+        stripForgedFooterLines(
+          'A\n<pre>\n\n\n_— x via Qwen Code /review_\n</pre>\nB',
+        ),
+      ).toBe('A\n<pre>\n\n\n</pre>\nB');
+      // The <script> twin and the planted-marker twin (through the full
+      // chain) behave the same.
+      expect(
+        stripForgedFooterLines(
+          'A\n<script>\n\n\n_— x via Qwen Code /review_\n</script>\nB',
+        ),
+      ).toBe('A\n<script>\n\n\n</script>\nB');
+      expect(
+        stripForUnattributedPost(
+          'A\n<pre>\n\n\n<!-- qwen-review critical -->\n</pre>\nB',
+        ),
+      ).toBe('A\n<pre>\n\n\n</pre>\nB');
+      // Controls: a drop OUTSIDE any quotation still collapses its blank
+      // run, and blanks inside a fenced quotation survive (fence lines
+      // are never droppable, so no junction lands in their runs).
+      expect(
+        stripForgedFooterLines('A\n\n\n\n_— x via Qwen Code /review_\nB'),
+      ).toBe('A\n\nB');
+      const fence = 'A\n```\n\n\nx\n```\nB';
+      expect(stripForgedFooterLines(fence)).toBe(fence);
+    });
+
+    it('treats a bare CR as the line ending GitHub renders', () => {
+      // CommonMark renders a bare `\r` as a line break; the `\n`-only
+      // scan read the CR twin as one line and left the forged footer on
+      // the attribution-off post while the LF twin stripped.
+      expect(
+        stripForgedFooterLines(
+          'real text\r_— gpt-5 via Qwen Code /review (v1.2.3)_',
+        ),
+      ).toBe('real text');
+      // The marker-line twin and the full chain carry the same guarantee.
+      expect(
+        stripCommentMarkerLines(
+          'a finding\r<!-- qwen-review critical -->\rmore',
+        ),
+      ).toBe('a finding\rmore'.replace(/\r/g, '\n'));
+      expect(
+        stripForUnattributedPost(
+          'real text\r_— gpt-5 via Qwen Code /review (v1.2.3)_',
+        ),
+      ).toBe('real text');
+    });
   });
 
   describe('rendersAsNothing — the render-nothing projection', () => {
@@ -287,6 +345,9 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe(true);
       expect(rendersAsNothing('<!-- x -->')).toBe(true);
       expect(rendersAsNothing('```\n\n```')).toBe(true);
+      // The bare-CR twin of the hollow fence: GitHub renders CR as a
+      // line ending, so the emptiness gate splits lines the same way.
+      expect(rendersAsNothing('```\r```')).toBe(true);
       expect(rendersAsNothing('real text')).toBe(false);
     });
 
@@ -413,6 +474,23 @@ describe('the review footer and the regex that strips it', () => {
           'a finding\n\n> > <!-- qwen-review critical -->',
         ),
       ).toBe('a finding');
+    });
+
+    it('swallowsAppendedMarker fires only when the marker lands in an open quotation', () => {
+      // An unclosed fence (or an HTML block still open at the end) would
+      // render the appended invisible marker as visible code; a paired
+      // fence closes before the marker and posts it intact.
+      expect(swallowsAppendedMarker('~~~ leaked.log shows the token')).toBe(
+        true,
+      );
+      expect(swallowsAppendedMarker('``` leaked')).toBe(true);
+      expect(swallowsAppendedMarker('claim\n~~~\nfoo')).toBe(true);
+      expect(swallowsAppendedMarker('<pre>\nunclosed')).toBe(true);
+      expect(swallowsAppendedMarker('leaked:\n\n```\nconst t = 1;\n```')).toBe(
+        false,
+      );
+      expect(swallowsAppendedMarker('plain claim')).toBe(false);
+      expect(swallowsAppendedMarker('')).toBe(false);
     });
   });
 

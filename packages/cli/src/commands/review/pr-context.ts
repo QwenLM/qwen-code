@@ -1476,19 +1476,32 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   let me = '';
   let identityKnown = false;
   if (reviews.length || inline.length) {
+    let lookupError: unknown = null;
     try {
       const login = currentUser();
       identityKnown = login !== '';
       me = login;
     } catch (err) {
-      if (anyRootCarriesCriticalMarker(inline)) {
-        throw new Error(
-          `cannot determine the reviewing account (${
-            err instanceof Error ? err.message : String(err)
-          }) while a posted root comment carries a Qwen critical marker — ` +
-            'the blocker re-check depends on it; re-run',
-        );
-      }
+      lookupError = err;
+    }
+    // Both unknown shapes fail closed identically — a thrown lookup AND an
+    // empty login (exit-0-with-empty-output, the stubbed/proxied `gh`
+    // shape named above): the check used to live in the `catch` branch
+    // only, so the empty login proceeded with `me = ''` while the marker
+    // disjunct of `isBlockerBody` never fires — an unresolved
+    // attribution-off Critical would classify as ordinary discussion and
+    // disappear from the blocker set later rounds use.
+    if (!identityKnown && anyRootCarriesCriticalMarker(inline)) {
+      throw new Error(
+        `cannot determine the reviewing account (${
+          lookupError === null
+            ? 'empty login'
+            : lookupError instanceof Error
+              ? lookupError.message
+              : String(lookupError)
+        }) while a posted root comment carries a Qwen critical marker — ` +
+          'the blocker re-check depends on it; re-run',
+      );
     }
   }
   // Recover the previous round's machine ledger from the LATEST posted review

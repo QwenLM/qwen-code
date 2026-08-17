@@ -1942,6 +1942,44 @@ describe('prContextCommand handler — identity fail-closed', () => {
     );
   });
 
+  it('refuses the context when the login is EMPTY while a severity marker is posted', async () => {
+    // Exit-0-with-empty-output — the stubbed or proxied `gh` shape — is
+    // not a confirmed identity. It must fail closed exactly like a
+    // throw: with `me = ''` the marker disjunct never fires, and the
+    // unresolved attribution-off Critical demotes to ordinary discussion
+    // ("0 blocker(s) to re-check") — the silent demotion the guard
+    // exists to refuse.
+    withMarkerPosted();
+    currentUserMock.mockReturnValue('');
+    await expect(run(join(outDir, 'context.md'))).rejects.toThrow(
+      /cannot determine the reviewing account/,
+    );
+    expect(writeFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('proceeds best-effort when the login is empty and nothing needs it', async () => {
+    // No marker posted: the identity decides nothing, so an empty login
+    // degrades to an anonymous context instead of refusing the run.
+    ghApiAllMock.mockImplementation((path: string) =>
+      path.includes('/pulls/') && path.endsWith('/comments')
+        ? [
+            {
+              id: 1,
+              user: { login: 'someone' },
+              path: 'a.ts',
+              line: 3,
+              body: 'plain prose',
+            },
+          ]
+        : [],
+    );
+    currentUserMock.mockReturnValue('');
+    const out = join(outDir, 'context.md');
+    await run(out);
+    const written = writeFileSyncMock.mock.calls[0]?.[1] as string;
+    expect(written).toContain('## Open inline comments');
+  });
+
   it('proceeds best-effort when identity fails and nothing needs it', async () => {
     ghApiAllMock.mockImplementation((path: string) =>
       path.includes('/pulls/') && path.endsWith('/comments')

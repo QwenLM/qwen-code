@@ -1589,6 +1589,21 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body.split(FOOTER)).toHaveLength(2);
   });
 
+  it('refuses a fence delimiter a bare CR hides in the raw entry', () => {
+    // The LF twin throws: the CR twin used to slip past the `\n`-only
+    // split, collapse to a one-line entry opening a fence, and post an
+    // unclosed fence swallowing every later body part.
+    for (const field of ['bodyCriticals', 'cannotTellCriticals'] as const) {
+      expect(() =>
+        composeReview(
+          base({
+            [field]: ['**[Critical]** data loss on flush\r~~~ leaked'],
+          }),
+        ),
+      ).toThrow(/quotes a code fence/);
+    }
+  });
+
   it('collapses a bare carriage return like a newline — CommonMark treats CR as a line ending', () => {
     // A bare CR survived the `\n`-only collapsers and GFM renders it as a
     // line break: the continuation leaked out of the list item, injecting
@@ -1622,6 +1637,43 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
     expect(r.body).toContain('本轮确认的 2 条建议级发现已在 PR 上报告过');
+  });
+
+  it('attribution off strips markers and forged footers from duplicate entries too', () => {
+    // Duplicates entries are transcribed from earlier rounds' posted
+    // findings, and every attribution-on round posts visible prefixes —
+    // this leg is an attribution-off body part like the other two, so it
+    // routes through the same sanitation instead of posting the machine
+    // markers and a forged attribution line in the mode that exists to
+    // remove them.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          '**[Suggestion]** R1-2 loose pins — already reported (comment 42)',
+          '_— gpt-5 via Qwen Code /review (v1.0)_ R2-1 stale guard — already reported',
+        ],
+      }),
+      'unknown',
+      false,
+    );
+    expect(r.body).toContain(
+      '- R1-2 loose pins — already reported (comment 42)',
+    );
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+    expect(r.body).not.toContain('**[Suggestion]**');
+    expect(r.body).not.toContain('gpt-5');
+    // Attribution-on keeps the entries as written — visible prefixes are
+    // that mode's contract.
+    const attributed = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          '**[Suggestion]** R1-2 loose pins — already reported (comment 42)',
+        ],
+      }),
+    );
+    expect(attributed.body).toContain(
+      '- **[Suggestion]** R1-2 loose pins — already reported (comment 42)',
+    );
   });
 
   it('drops entries that normalize to nothing, so the count never overclaims the list', () => {
@@ -4838,6 +4890,25 @@ describe('buildLedger', () => {
     expect(l.findings.map((f) => f.id)).toEqual(['R1-1', 'R2-1']);
   });
 
+  it('reads the claim through residue BEFORE the marker, as the classifier does', () => {
+    // severityOf classifies through leading residue, so the shared
+    // readback slice must too — slicing the raw bytes cut mid-marker
+    // ('* R1-3: zwsp residue'), minting a fresh id with a corrupted
+    // title for a still-standing carried finding.
+    const l = buildLedger(
+      2,
+      [
+        { path: 'a.ts', body: '\u200b**[Critical]** R1-3: zwsp residue' },
+        { path: 'b.ts', body: '<!-- x -->**[Critical]** R1-4: comment-led' },
+      ],
+      [],
+    );
+    expect(l.findings.map((f) => `${f.id}|${f.title}`)).toEqual([
+      'R1-3|zwsp residue',
+      'R1-4|comment-led',
+    ]);
+  });
+
   it('reads a carried id through render-nothing residue after the marker', () => {
     // A looping draft can leave an invisible comment or Cf run between the
     // marker and the id it carries; the id anchor must see through it, or
@@ -5070,14 +5141,10 @@ describe('the ledger marker reaches the POSTED body', () => {
     // lastCommitSha: an anchor written past unreviewed scope lets the next
     // round's incremental range skip it forever. Each named input reaches the
     // predicate through the cap entry composeReviewBody pushes for it — the
-    // predicate reads the module's own verdict, not a parallel list — except
-    // the last case: a whitespace-only cannotTellCriticals entry is filtered
-    // out of the rendered caps (nothing to render), but an undecided blocker
-    // whose text was lost is still an undecided blocker, so the one raw
-    // input check must catch what the cap list deliberately drops. That case
-    // asserts cappedBy is EMPTY, which is exactly why it exists: delete the
-    // raw check and only this case fails (measured — a mutant keeping only
-    // `cappedBy.length > 0` survived every other test in the suite).
+    // predicate reads the module's own verdict, not a parallel list. (The
+    // whitespace-only cannot-tell entry no longer needs a raw check: it
+    // never reaches a marker — the renders-nothing gate fails the draft at
+    // ingest; see the sibling test below.)
     for (const failClosed of [
       // Restored after a live review of this change (#9175, R2-12) named what
       // deleting it cost: a whiffed lens is recorded in `unreviewedDimensions`
@@ -5088,7 +5155,6 @@ describe('the ledger marker reaches the POSTED body', () => {
       { cannotTellCriticals: ['a.ts:3 — could not fetch the full body'] },
       { uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
       { contextUnavailable: true },
-      { cannotTellCriticals: [' '] },
     ]) {
       const r = composeReview({
         planPath: coveredPlan(['verify', 'reverse-audit'], {
@@ -5108,12 +5174,22 @@ describe('the ledger marker reaches the POSTED body', () => {
       // Keyed by the fail-closed input so a regression names its condition.
       expect({ ...failClosed, sha: ledger?.sha }).toEqual({ ...failClosed });
       expect(ledger?.findings).toHaveLength(1);
-      if (
-        Array.isArray(failClosed.cannotTellCriticals) &&
-        failClosed.cannotTellCriticals[0] === ' '
-      ) {
-        // The raw-check-only case: no cap fires, the input alone withholds.
-        expect(r.cappedBy).toEqual([]);
+    }
+  });
+
+  it('a whitespace-only entry fails the draft instead of vanishing', () => {
+    // The renders-nothing gates' own invariant: an entry the render leg
+    // would reduce to nothing must fail the draft, not vanish — silently
+    // dropping it lifts the cannot-tell-existing-critical cap and flips
+    // the verdict (a whitespace bodyCriticals entry composed COMMENT
+    // instead of REQUEST_CHANGES). The emptiness filter that used to run
+    // before the gates did exactly that vanishing; the marker-only twin
+    // already threw, so the shapes now agree.
+    for (const field of ['bodyCriticals', 'cannotTellCriticals'] as const) {
+      for (const entry of ['', ' \n ']) {
+        expect(() => composeReview(base({ [field]: [entry] }))).toThrow(
+          /renders as nothing/,
+        );
       }
     }
   });

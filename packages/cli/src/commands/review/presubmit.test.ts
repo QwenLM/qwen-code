@@ -1084,6 +1084,49 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
+    it('extracts the carried id from the attribution-off posted shape', async () => {
+      // An attribution-off re-post carries NO severity prefix — submit
+      // strips it before posting — and its severity rides the trailing
+      // invisible marker. The carried id still leads the first line;
+      // without reading it back off the marker-less body, the re-post
+      // lands as a plain overlap and is dedup-dropped from round 3
+      // onward, while the surviving id token bars the id-less fallback —
+      // a still-standing carried Critical the verdict then flips past.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps a marker-carrying id-less comment out of the repost bucket when the location is ambiguous', async () => {
+      // The attribution-off shape without a carried id: the id-less
+      // fallback stays off while two ids share the location, so the
+      // comment is a plain overlap — exactly the strictness the marked
+      // bodies get.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: 'eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-3' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
     it('reads no carried id out of an unmarked body (#9212)', async () => {
       // A re-post always leads with its severity marker — `submit` refuses
       // to post an unmarked finding — so an unmarked body is not a re-post

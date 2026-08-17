@@ -82,16 +82,24 @@ export function severityOf(
  * `LEDGER_ID_READBACK`, so the no-marker decision and the slice order can no
  * longer drift between the write side and the read sides — the drift the
  * shared regex removed for the id half (#9212 review).
+ *
+ * The slice runs on the same projection the classifier admits: leading
+ * render-nothing residue is invisible BEFORE the marker on the rendered
+ * post, so slicing the raw bytes cut mid-marker; the same residue can sit
+ * BETWEEN the marker and the carried id; and the separator admits both
+ * colon widths — every shape `severityOf` and `stripSeverityPrefix`
+ * accept, and a shape they accept must read back, not garble or null.
  */
 export function carriedClaimLine(body: string): string | null {
   const sev = severityOf({ body });
   if (!sev) return null;
   const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
   const rest = body
-    .trimStart()
+    .replace(LEADING_INVISIBLE_RE, '')
     .slice(marker.length)
-    .replace(/^:?\s*/, '');
-  return rest.split('\n')[0].trim();
+    .replace(LEADING_INVISIBLE_RE, '')
+    .replace(/^\s*[:：]?\s*/, '');
+  return rest.split(/\r\n?|\n/)[0].trim();
 }
 
 /** How many drafted comments open with each severity marker. */

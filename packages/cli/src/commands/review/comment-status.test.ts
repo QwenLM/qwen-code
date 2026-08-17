@@ -4,10 +4,69 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const {
+  csGhMock,
+  csGhApiAllMock,
+  csCurrentUserMock,
+  csEnsureAuthenticatedMock,
+  csSetGhHostMock,
+  csGitOptMock,
+  csWorktreePathMock,
+  csWriteFileSyncMock,
+  csMkdirSyncMock,
+  csStdoutMock,
+} = vi.hoisted(() => ({
+  csGhMock: vi.fn(),
+  csGhApiAllMock: vi.fn(),
+  csCurrentUserMock: vi.fn(),
+  csEnsureAuthenticatedMock: vi.fn(),
+  csSetGhHostMock: vi.fn(),
+  csGitOptMock: vi.fn(),
+  csWorktreePathMock: vi.fn(),
+  csWriteFileSyncMock: vi.fn(),
+  csMkdirSyncMock: vi.fn(),
+  csStdoutMock: vi.fn(),
+}));
+
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    gh: csGhMock,
+    ghApiAll: csGhApiAllMock,
+    currentUser: csCurrentUserMock,
+    ensureAuthenticated: csEnsureAuthenticatedMock,
+    setGhHost: csSetGhHostMock,
+  };
+});
+vi.mock('./lib/git.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, gitOpt: csGitOptMock };
+});
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, worktreePath: csWorktreePathMock };
+});
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: csStdoutMock,
+  writeStderrLine: csStdoutMock,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = {
+    ...actual,
+    mkdirSync: csMkdirSyncMock,
+    writeFileSync: csWriteFileSyncMock,
+  };
+  return { ...mock, default: mock };
+});
+
 import {
   buildThreadStatuses,
   summarizeThreads,
+  commentStatusCommand,
   type CodeChangeProbe,
   type RawStatusComment,
 } from './comment-status.js';
@@ -279,5 +338,90 @@ describe('summarizeThreads', () => {
       withReplies: 1,
       authorReplied: 1,
     });
+  });
+});
+
+describe('commentStatusCommand handler — identity fail-closed', () => {
+  // The same gate pr-context applies, probed at the handler level: both
+  // unknown-identity shapes — a thrown lookup AND an empty login — must
+  // degrade the report to an \`error\` a consumer sees, never a
+  // complete-looking index that silently undercounts blockers.
+  const MARKER_COMMENT = {
+    id: 1,
+    user: { login: 'review-bot' },
+    path: 'a.ts',
+    line: 3,
+    body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+    commit_id: 'headsha',
+    original_commit_id: 'headsha',
+  };
+
+  const runHandler = (): Promise<void> =>
+    Promise.resolve(
+      commentStatusCommand.handler({
+        pr_number: '42',
+        owner_repo: 'o/r',
+        out: '/tmp/comment-status/report.json',
+      } as never) as void,
+    );
+
+  const writtenReport = () =>
+    JSON.parse(csWriteFileSyncMock.mock.calls[0]?.[1] as string) as {
+      error?: string;
+      summary?: { blockers: number };
+    };
+
+  beforeEach(() => {
+    csGhMock.mockClear();
+    csGhMock.mockReturnValue(
+      JSON.stringify({ author: { login: 'author' }, headRefOid: 'headsha' }),
+    );
+    csGhApiAllMock.mockClear();
+    csGhApiAllMock.mockReturnValue([MARKER_COMMENT]);
+    csCurrentUserMock.mockClear();
+    csCurrentUserMock.mockReturnValue('review-bot');
+    csGitOptMock.mockClear();
+    csGitOptMock.mockReturnValue(null);
+    csWorktreePathMock.mockClear();
+    csWorktreePathMock.mockReturnValue('/tmp/no-such-worktree');
+    csWriteFileSyncMock.mockClear();
+    csStdoutMock.mockClear();
+  });
+
+  it('refuses the report when the login is EMPTY while a critical marker is posted', async () => {
+    // Exit-0-with-empty-output is a stubbed or proxied gh, not a
+    // confirmed identity: with `me = ''` the marker disjunct never fires
+    // and the blocker index undercounts while reading as complete.
+    csCurrentUserMock.mockReturnValue('');
+    await runHandler();
+    expect(writtenReport().error).toMatch(
+      /cannot determine the reviewing account/,
+    );
+  });
+
+  it('refuses the report when the lookup throws while a critical marker is posted', async () => {
+    csCurrentUserMock.mockImplementation(() => {
+      throw new Error('network down');
+    });
+    await runHandler();
+    expect(writtenReport().error).toMatch(
+      /cannot determine the reviewing account/,
+    );
+  });
+
+  it('proceeds best-effort when the login is empty and no marker is posted', async () => {
+    csGhApiAllMock.mockReturnValue([
+      { ...MARKER_COMMENT, body: 'plain prose' },
+    ]);
+    csCurrentUserMock.mockReturnValue('');
+    await runHandler();
+    expect(writtenReport().error).toBeUndefined();
+  });
+
+  it('counts the marker as a blocker when identity resolves', async () => {
+    await runHandler();
+    const report = writtenReport();
+    expect(report.error).toBeUndefined();
+    expect(report.summary?.blockers).toBe(1);
   });
 });

@@ -418,19 +418,28 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
 
     // The reviewing account gates the comment marker's blocker promotion —
     // the same gate pr-context applies, so this report and the context file
-    // agree on what is a blocker. A failed lookup fails closed like the
-    // ledger read there when a posted root comment carries a critical
-    // marker: an index that silently undercounts blockers reads as
-    // complete, while the report's degradation contract is an `error` a
-    // consumer sees.
+    // agree on what is a blocker. Both unknown shapes fail closed
+    // identically — a thrown lookup AND an empty login (a stubbed or
+    // proxied `gh` exiting 0 with no output) — when a posted root comment
+    // carries a critical marker: an index that silently undercounts
+    // blockers reads as complete, while the report's degradation contract
+    // is an `error` a consumer sees.
     let me = '';
-    try {
-      me = comments.length ? currentUser() : '';
-    } catch (err) {
-      if (anyRootCarriesCriticalMarker(comments)) {
+    if (comments.length) {
+      let lookupError: unknown = null;
+      try {
+        me = currentUser();
+      } catch (err) {
+        lookupError = err;
+      }
+      if (me === '' && anyRootCarriesCriticalMarker(comments)) {
         throw new Error(
           `cannot determine the reviewing account (${
-            err instanceof Error ? err.message : String(err)
+            lookupError === null
+              ? 'empty login'
+              : lookupError instanceof Error
+                ? lookupError.message
+                : String(lookupError)
           }) while a posted root comment carries a Qwen critical marker — ` +
             'the blocker signal depends on it; re-run',
         );

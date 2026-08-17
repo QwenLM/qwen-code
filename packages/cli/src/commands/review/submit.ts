@@ -73,6 +73,7 @@ import {
   stripForgedFooterLines,
   stripForUnattributedPost,
   stripReviewFooter,
+  swallowsAppendedMarker,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -326,7 +327,11 @@ function structuralProblems(payload: ReviewPayload): string[] {
   return problems;
 }
 
-function inconsistencies(payload: ReviewPayload, event: string): string[] {
+function inconsistencies(
+  payload: ReviewPayload,
+  event: string,
+  attribution: boolean,
+): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
 
@@ -370,12 +375,24 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
     // scaffolded-but-invisible comment that posts counts toward the verdict
     // and re-promotes as an unanswerable blocker.
     if (c.body && severityOf(c) !== null) {
-      if (
-        rendersAsNothing(stripReviewFooter(stripForUnattributedPost(c.body)))
-      ) {
+      const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
+      if (rendersAsNothing(stripped)) {
         problems.push(
           `${at} renders as nothing (marker-only, empty comment, or ` +
             `otherwise invisible) — redraft it with the finding's description`,
+        );
+      } else if (!attribution && swallowsAppendedMarker(stripped)) {
+        // The prefix strip can move a fence delimiter to line-leading
+        // position on a draft whose delimiter sat mid-line; the unclosed
+        // fence then swallows the appended invisible marker as visible
+        // code and the claim into its info string. The exposure is
+        // created by the strip, so the check runs on the post-strip
+        // shape, mirroring the fence refusal the body lists apply.
+        problems.push(
+          `${at} leaves a code fence open in its posted shape — the ` +
+            `invisible marker this mode appends would post inside it as ` +
+            `visible code. Redraft it quoting the code inline or ` +
+            `indented instead`,
         );
       }
     }
@@ -523,7 +540,7 @@ export function runSubmit(
     );
   }
 
-  const problems = inconsistencies(payload, event);
+  const problems = inconsistencies(payload, event, attribution);
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +

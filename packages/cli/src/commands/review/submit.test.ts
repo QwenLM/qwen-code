@@ -1062,6 +1062,63 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(posted().event).toBe('REQUEST_CHANGES');
   });
 
+  it('attribution off refuses a draft whose post-strip shape opens a fence', () => {
+    // The prefix strip moves the delimiter to line-leading position; the
+    // unclosed fence swallows the appended invisible marker as visible
+    // code and the claim into its info string — the marker this mode
+    // exists to keep invisible, posted by the very transform that creates
+    // the exposure. The draft carries no line-leading delimiter, so only
+    // a check on the POST-strip shape catches it.
+    const bodies = [
+      '**[Critical]** ~~~ leaked.log shows the token',
+      '**[Critical]** ``` leaked',
+      '**[Critical]** claim\n~~~\nfoo',
+    ];
+    for (const [i, body] of bodies.entries()) {
+      const review = file(`fence-open-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line: 12, body }],
+      });
+      expect(() =>
+        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      ).toThrow(/leaves a code fence open/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('attribution off still posts a paired fence — the marker lands after the closer', () => {
+    const review = file('paired-fence.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** leaked:\n\n```\nconst token = 1;\n```',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('const token = 1;');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('refuses a bare-CR hollow fence the LF twin refuses', () => {
+    // GitHub renders a bare CR as a line break: 'CR + ~~~' is the hollow
+    // fence the LF twin already refuses, and it used to pass the gate and
+    // post the marker inside the fence.
+    const review = file('cr-hollow-fence.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**\r~~~' }],
+    });
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/renders as nothing/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('the standing review.comment setting authorises a post without --comment in the args', () => {
     // The setting replaces the flag, not the binding: the recorded arguments
     // still name the PR, and only that PR.

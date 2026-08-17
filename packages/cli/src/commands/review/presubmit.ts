@@ -21,7 +21,11 @@ import {
   ensureAuthenticated,
   setGhHost,
 } from './lib/gh.js';
-import { carriedClaimLine, severityOf } from './lib/inline-counts.js';
+import {
+  LEADING_INVISIBLE_RE,
+  carriedClaimLine,
+  severityOf,
+} from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
 import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
 
@@ -70,8 +74,21 @@ interface CommentSummary {
 const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 /** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
-  const line = carriedClaimLine(body) ?? '';
-  const carried = LEDGER_ID_READBACK.exec(line);
+  let line = carriedClaimLine(body);
+  if (line === null && carriesCommentMarker(body)) {
+    // The attribution-off POSTED shape: `submit` strips the severity
+    // prefix before posting, so the marker-less body carries the claim on
+    // its first line and the severity in the trailing invisible marker.
+    // Without reading the id back off that line, a carried re-post lands
+    // as a plain overlap and is dedup-dropped from round 3 onward, while
+    // the surviving id token bars the id-less fallback.
+    line = body
+      .trimStart()
+      .split(/\r\n?|\n/)[0]
+      .replace(LEADING_INVISIBLE_RE, '')
+      .trim();
+  }
+  const carried = LEDGER_ID_READBACK.exec(line ?? '');
   return carried ? [carried[1]] : [];
 }
 
