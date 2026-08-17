@@ -9930,10 +9930,14 @@ exit 1
     const emitRejected = reviewAddressReportStep.match(
       /HEADLINE="(🤖 Could not (?:address the latest feedback|produce a passing fix)[^"]*)"/,
     )?.[1];
+    const emitHandoff = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix deferred this item to a human under instruction[^"]*)"/,
+    )?.[1];
     expect(emitPush).toBeTruthy();
     expect(emitNoop).toBeTruthy();
     expect(emitTimeout).toBeTruthy();
     expect(emitRejected).toBeTruthy();
+    expect(emitHandoff).toBeTruthy();
     const needlePushed = digestBlock.match(/N_PUSHED=.*grep -c '([^']*)'/)?.[1];
     const needleNoop = digestBlock.match(/N_NOOP=.*grep -c '([^']*)'/)?.[1];
     const needleTimeout = digestBlock.match(
@@ -9942,14 +9946,19 @@ exit 1
     const needleRejected = digestBlock.match(
       /N_REJECTED=.*grep -cE '([^']*)'/,
     )?.[1];
+    const needleHandoff = digestBlock.match(
+      /N_HANDOFF=.*grep -c '([^']*)'/,
+    )?.[1];
     expect(needlePushed).toBeTruthy();
     expect(needleNoop).toBeTruthy();
     expect(needleTimeout).toBeTruthy();
     expect(needleRejected).toBeTruthy();
+    expect(needleHandoff).toBeTruthy();
     expect(emitPush).toContain(needlePushed);
     expect(emitNoop).toContain(needleNoop);
     expect(`🤖 AutoFix ${emitTimeout}`).toContain(needleTimeout);
     expect(emitRejected).toMatch(new RegExp(needleRejected));
+    expect(emitHandoff).toContain(needleHandoff);
     const HEADS = {
       push: '🤖 Addressed the latest review feedback (round 2/100). What changed…',
       noop: '🤖 Reviewed the latest feedback — no changes needed. Why…',
@@ -9962,6 +9971,8 @@ exit 1
       crash:
         '🤖 AutoFix crashed before it could evaluate the feedback (attempt 2/100) — it will retry on the next scan.',
       gate: '🤖 AutoFix hit a verification-gate error before reaching a verdict (attempt 3/100) — it will retry on the next scan.',
+      handoff:
+        "🤖 AutoFix deferred this item to a human under instruction (round 3/100) — the agent's handoff note below names the decision and the options.",
     };
     const K = '2026-07-01T00:00:00Z';
     const evalC = (head, win, at, login = 'qwen-code-dev-bot') => ({
@@ -10048,13 +10059,14 @@ exit 1
       evalC(HEADS.timeout, K, '2026-07-08T00:00:00Z'),
       evalC(HEADS.rejectedOld, K, '2026-07-09T00:00:00Z'),
       evalC(HEADS.rejectedNew, K, '2026-07-10T00:00:00Z'),
+      evalC(HEADS.handoff, K, '2026-07-11T12:00:00Z'),
       evalC(HEADS.push, '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z'),
       evalC(HEADS.push, K, '2026-07-11T00:00:00Z', 'some-human'),
       baseC('2026-07-12T00:00:00Z'),
       baseC('2026-05-02T00:00:00Z'),
     ]);
     expect(mixed.body).toContain(
-      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 2 rejected attempt(s), 0 other round(s)',
+      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 2 rejected attempt(s), 1 deliberate stop(s) under instruction (deferred to a human), 0 other round(s)',
     );
     expect(mixed.body).toContain('1 base update(s)');
     expect(mixed.body).toContain('round 10/100, in the current window');
@@ -10078,7 +10090,7 @@ exit 1
       evalC(HEADS.gate, K, '2026-07-10T00:00:00Z'),
     ]);
     expect(grim.body).toContain(
-      '2 pushed fix(es), 0 no-change review(s), 0 timeout(s), 0 rejected attempt(s), 8 other round(s)',
+      '2 pushed fix(es), 0 no-change review(s), 0 timeout(s), 0 rejected attempt(s), 0 deliberate stop(s) under instruction (deferred to a human), 8 other round(s)',
     );
 
     // Crossing trigger: a digest at round 10 suppresses round 12 but not
@@ -12788,6 +12800,11 @@ exit 1
       "needs.route.outputs.dry_run == 'true'",
     );
     expect(reviewAddressReportStep).toContain('failure() || cancelled()');
+    // The handoff outcome also routes here: a green, deliberate stop must
+    // still post its report + eval marker, never go silent.
+    expect(reviewAddressReportStep).toContain(
+      "steps.final_verify.outputs.outcome == 'handoff'",
+    );
     expect(reviewAddressReportStep).not.toContain(
       "steps.verify.outputs.outcome == 'failed'",
     );
@@ -12966,6 +12983,13 @@ exit 1
     expect(run({ FIRST_OUTCOME: 'noop' })).toMatchObject({
       status: 0,
       written: expect.stringContaining('outcome=noop'),
+    });
+    // A handoff is a deliberate verdict like fixed/noop, not a failure: the
+    // job must end green so the red-check scan does not count the stop as
+    // new feedback and re-arm the loop against itself.
+    expect(run({ FIRST_OUTCOME: 'handoff' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=handoff'),
     });
     expect(
       run({
@@ -13236,7 +13260,12 @@ exit 1
       expect(statusStep).toContain('^[0-9]+$');
     }
     // Tells a round that published a report from one that died before it.
-    expect(finalizeStatusCommentStep).toContain("== 'fixed'");
+    // handoff publishes one too (the handoff note + eval marker), so it
+    // reads "finished", never "ended without publishing a report" above its
+    // own report.
+    expect(finalizeStatusCommentStep).toContain(
+      '[[ "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' ]]',
+    );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
     );
@@ -13989,7 +14018,7 @@ exit 1
     // — an `if true` mutation on the timeout guard flips the headline and
     // must fail here.
     expect(bothCapped.headline).toContain(
-      'consecutive rounds that failed to push',
+      'consecutive rounds that pushed nothing',
     );
     expect(bothCapped.headline).not.toContain('time-budget exhaustions');
     // Pin the census greps to the actual emit line: the timeout CAUSE text
@@ -15346,6 +15375,12 @@ exit 1
         JOB_STATUS: 'failure',
       }),
     ).toBe('false');
+    // A handoff round ends GREEN (a deliberate verdict), so the trigger must
+    // key on the outcome itself — without that clause nothing would post and
+    // the loop would go silent on exactly the rounds that need a human.
+    expect(
+      runPostHandoff({ ...base, OUTCOME: 'handoff', JOB_STATUS: 'success' }),
+    ).toBe('true');
     expect(reviewAddressReportStep).toContain(
       "STALE: '${{ steps.prepare.outputs.stale }}'",
     );
@@ -15421,6 +15456,17 @@ exit 1
     expect(
       runMark({ NEWEST: '', WATERMARK: '', PREPARE_OUTCOME: 'failure' }),
     ).toBe(`${SENTINEL}|5`);
+    // 4. A deliberate handoff (the brake's BLOCKED stop): the feedback WAS
+    //    read, so the watermark advances and the round stays NON-terminal —
+    //    the loop stays engaged for new feedback and base conflicts.
+    expect(
+      runMark({
+        NEWEST: '2026-07-16T00:00:00Z',
+        DETAIL_FILE: '/tmp/handoff.md',
+        OUTCOME: 'handoff',
+        JOB_STATUS: 'success',
+      }),
+    ).toBe('2026-07-16T00:00:00Z|3');
 
     // The no-output-crash HEADLINE must only promise a retry when one will
     // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
@@ -15442,6 +15488,20 @@ exit 1
         },
         encoding: 'utf8',
       });
+    const handoffHead = runHeadline({
+      ROUND: '2',
+      DETAIL_FILE: '/tmp/handoff.md',
+      OUTCOME: 'handoff',
+      JOB_STATUS: 'success',
+    });
+    expect(handoffHead).toContain(
+      'deferred this item to a human under instruction',
+    );
+    expect(handoffHead).toContain('The loop stays engaged');
+    // Wording guard: no "🤖 AutoFix stopped" prefix — the fleet shepherd's
+    // REASON regex reads that as a TERMINAL stop reason, and this stop is
+    // transient. The shepherd contract test pins the same distinction.
+    expect(handoffHead).not.toContain('AutoFix stopped');
     const midCrash = runHeadline({ ROUND: '2' }); // MARK_ROUND=3 < 5
     expect(midCrash).toContain('it will retry on the next scan');
     expect(midCrash).not.toContain('Run log:');
@@ -16329,6 +16389,54 @@ exit 1
     });
   });
 
+  it('logs handoff.md content when the agent writes it and exits 0', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('handoff.md:');
+      expect(result.stderr).toContain('needs a maintainer decision');
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+    });
+  });
+
+  it('treats an empty handoff.md as no verdict, like the gate', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/handoff.md`, '');",
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        'finished without required output file(s)',
+      );
+    });
+  });
+
+  it('keeps an API-error tail from reclassifying a handoff verdict', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
   it('rejects mutually exclusive address-review output files', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -16423,6 +16531,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     baselineNoIdentity = false,
     trackedDirt = false,
     commFail = false,
+    workdirFiles = { 'address-summary.md': 'summary\n' },
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -16567,7 +16676,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       );
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
-      writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      for (const [name, content] of Object.entries(workdirFiles)) {
+        writeFileSync(join(workdir, name), content);
+      }
       const outFile = join(dir, 'gh-output');
       writeFileSync(outFile, '');
 
@@ -16872,6 +16983,58 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('classifies an unchanged branch by its verdict files (handoff contract)', () => {
+    // The no-commit decision table, in the gate's own precedence order: a
+    // handoff outranks a co-written no-action verdict (a BLOCKED stop must
+    // not close silently as "no changes needed"), failure.md keeps the crash
+    // classification, and a 0-byte handoff.md is not a verdict — the same
+    // non-empty convention the runner's missing() helper applies.
+    const handoff = runGate({
+      agentCommit: false,
+      workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+    });
+    expect(handoff.status).toBe(0);
+    expect(handoff.outputs).toContain('outcome=handoff');
+
+    const handoffBeatsNoAction = runGate({
+      agentCommit: false,
+      workdirFiles: {
+        'handoff.md': 'needs a maintainer decision\n',
+        'no-action.md': 'nothing to change\n',
+      },
+    });
+    expect(handoffBeatsNoAction.status).toBe(0);
+    expect(handoffBeatsNoAction.outputs).toContain('outcome=handoff');
+
+    const failureBeatsHandoff = runGate({
+      agentCommit: false,
+      workdirFiles: {
+        'handoff.md': 'needs a maintainer decision\n',
+        'failure.md': 'crashed before finishing\n',
+      },
+    });
+    expect(failureBeatsHandoff.status).toBe(1);
+    expect(failureBeatsHandoff.outputs).toContain('outcome=failed');
+
+    const emptyHandoff = runGate({
+      agentCommit: false,
+      workdirFiles: { 'handoff.md': '' },
+    });
+    expect(emptyHandoff.status).toBe(1);
+    expect(emptyHandoff.outputs).toContain('outcome=failed');
+
+    const noAction = runGate({
+      agentCommit: false,
+      workdirFiles: { 'no-action.md': 'nothing to change\n' },
+    });
+    expect(noAction.status).toBe(0);
+    expect(noAction.outputs).toContain('outcome=noop');
+
+    const nothing = runGate({ agentCommit: false, workdirFiles: {} });
+    expect(nothing.status).toBe(1);
+    expect(nothing.outputs).toContain('outcome=failed');
   });
 
   it('never A/Bs the dist-coupled and stdin-fed checks', () => {

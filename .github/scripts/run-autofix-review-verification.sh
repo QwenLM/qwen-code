@@ -362,7 +362,10 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   # death or a pre-verdict crash — and keeps the failed classification.)
   if [[ -s "${WORKDIR}/handoff.md" && ! -s "${WORKDIR}/failure.md" ]]; then
     echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
-    cat "${WORKDIR}/handoff.md"
+    # Agent-written content: a line-start `::` would be parsed as a workflow
+    # command (::error::, ::add-mask::), the same reason 'Show run artifacts'
+    # neutralizes these files.
+    sed 's/::/;;/g' "${WORKDIR}/handoff.md"
     echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
     exit 0
   fi

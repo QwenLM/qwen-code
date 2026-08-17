@@ -493,6 +493,12 @@ const presentOutputs = spec.outputs.filter(
 const hasOutputVerdict = spec.anyOutput
   ? presentOutputs.length > 0
   : missingOutputs.length === 0;
+// A zero-byte handoff.md is not a verdict — the same non-empty convention
+// missing() and the gate's -s checks apply, so the two layers cannot
+// classify an empty file oppositely.
+const hasHandoffVerdict = !missing(options.workdir, ['handoff.md']).includes(
+  'handoff.md',
+);
 const apiErrorWithoutVerdict =
   result.status === 0 &&
   result.apiError &&
@@ -500,7 +506,7 @@ const apiErrorWithoutVerdict =
   !existsSync(file(options.workdir, 'failure.md')) &&
   // A handoff is a verdict too: an agent that reached its BLOCKED stop must
   // not be reclassified as a bare API blip by an error render in the tail.
-  !existsSync(file(options.workdir, 'handoff.md'));
+  !hasHandoffVerdict;
 if (
   result.error ||
   result.signal ||
@@ -594,12 +600,18 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
 // verdict. Same standing as failure.md: a real, human-facing outcome, NOT
 // the missing-output failure class (which once reported a deliberate stop as
 // "finished without required output file(s)" and buried the brake's decision
-// under a generic failure.md). Honored only when no spec output exists: a
-// round that also wrote address-summary.md or no-action.md published a
-// result, and that verdict outranks the handoff.
-if (!hasOutputVerdict && existsSync(file(options.workdir, 'handoff.md'))) {
+// under a generic failure.md). Honored only when no spec output exists: if
+// address-summary.md or no-action.md coexists, the runner exits on that
+// verdict, and the GATE decides the round — its handoff branch runs before
+// the no-action branch, so a deliberate stop outranks a co-written
+// no-change verdict and cannot close silently as "no action needed".
+if (!hasOutputVerdict && hasHandoffVerdict) {
   const content = readFileSync(file(options.workdir, 'handoff.md'), 'utf8');
-  console.error(`Autofix agent wrote handoff.md:\n${content}`);
+  // Neutralize `::` workflow commands in agent-written content before it
+  // reaches the step log ('Show run artifacts' does the same).
+  console.error(
+    `Autofix agent wrote handoff.md:\n${content.replaceAll('::', ';;')}`,
+  );
   process.exit(0);
 }
 

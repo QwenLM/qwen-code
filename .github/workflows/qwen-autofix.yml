@@ -6432,12 +6432,16 @@ jobs:
                 # present — the census must not silently zero when the
                 # headline is reworded.
                 N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)' <<< "${WIN_HEADS}" || true)"
+                # The brake's deliberate stop — its own bucket, not the
+                # residual crash bucket: it tells the maintainer a human
+                # decision is already waiting on this PR.
+                N_HANDOFF="$(grep -c 'deferred this item to a human under instruction' <<< "${WIN_HEADS}" || true)"
                 # Every other outcome (crash, model error, gate error,
                 # infra) lands in a residual bucket: a window that burned
                 # 80% of its budget on crashes must be the LOUDEST line in
                 # the digest, not four zeros quieter than a healthy one.
                 N_TOTAL=$(( $(grep -c . <<< "${WIN_HEADS}" || true) + 1 ))
-                N_OTHER=$(( N_TOTAL - N_PUSHED - N_NOOP - N_TIMEOUT - N_REJECTED ))
+                N_OTHER=$(( N_TOTAL - N_PUSHED - N_NOOP - N_TIMEOUT - N_REJECTED - N_HANDOFF ))
                 (( N_OTHER < 0 )) && N_OTHER=0
                 # Base updates carry their own marker with no win= field;
                 # their window is recovered by timestamp (the window key IS
@@ -6454,7 +6458,7 @@ jobs:
                   WIN_DESC='since the PR opened (no counting window yet)'
                   WIN_DESC_ZH='自 PR 创建以来（尚无计数窗口）'
                 fi
-                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '📊 Takeover milestone — round %s/%s, %s. Census: %s pushed fix(es), %s no-change review(s), %s timeout(s), %s rejected attempt(s), %s other round(s) (crash / model error / gate error / infra), %s base update(s).\n\nThis many rounds deserves a human look. Options: keep going (fine — nothing changes), split or reduce the PR if rounds keep accumulating, or release takeover (remove the `%s` label or comment `%s stop`). Management continues unchanged unless you act.\n\n<details>\n<summary>中文说明</summary>\n\n📊 接管里程碑 —— 第 %s/%s 轮（%s）。统计：推送修复 %s 次、审阅无需改动 %s 次、超时 %s 次、验证拒绝 %s 次、其他轮次（崩溃/模型错误/门错误/infra）%s 次、base 更新 %s 次。\n\n轮次到这个量值得人工看一眼。可选：继续（无需操作）；若轮次持续累积，考虑拆分或缩减 PR；或释放接管（移除 `%s` 标签或评论 `%s stop`）。不操作则托管照常继续。\n\n</details>\n\n<!-- autofix-milestone round=%s win=%s -->' "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC_ZH}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${WINDOW:-none}")"; then
+                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '📊 Takeover milestone — round %s/%s, %s. Census: %s pushed fix(es), %s no-change review(s), %s timeout(s), %s rejected attempt(s), %s deliberate stop(s) under instruction (deferred to a human), %s other round(s) (crash / model error / gate error / infra), %s base update(s).\n\nThis many rounds deserves a human look. Options: keep going (fine — nothing changes), split or reduce the PR if rounds keep accumulating, or release takeover (remove the `%s` label or comment `%s stop`). Management continues unchanged unless you act.\n\n<details>\n<summary>中文说明</summary>\n\n📊 接管里程碑 —— 第 %s/%s 轮（%s）。统计：推送修复 %s 次、审阅无需改动 %s 次、超时 %s 次、验证拒绝 %s 次、按指示有意停止（移交人工）%s 次、其他轮次（崩溃/模型错误/门错误/infra）%s 次、base 更新 %s 次。\n\n轮次到这个量值得人工看一眼。可选：继续（无需操作）；若轮次持续累积，考虑拆分或缩减 PR；或释放接管（移除 `%s` 标签或评论 `%s stop`）。不操作则托管照常继续。\n\n</details>\n\n<!-- autofix-milestone round=%s win=%s -->' "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_HANDOFF}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC_ZH}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_HANDOFF}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${WINDOW:-none}")"; then
                   echo "📊 milestone digest posted on #${PR} (round ${NEXT_ROUND})"
                 else
                   echo "::warning::milestone digest failed to post on PR #${PR}; the round report above already landed"
@@ -6753,7 +6757,11 @@ jobs:
                   # headline says what actually happened — the old
                   # "could not produce a passing fix" wording reported the
                   # brake's decision as a failure and buried the handoff.
-                  HEADLINE="🤖 AutoFix stopped this item under instruction and deferred it to a human (round ${MARK_ROUND}/${MAX_ROUNDS}) — the agent's handoff note below names the decision and the options. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                  # Wording guard: no "🤖 AutoFix stopped" prefix — the fleet
+                  # shepherd's REASON regex reads that as a TERMINAL stop
+                  # reason, and this stop is transient (the loop stays
+                  # engaged); the shepherd contract test pins the distinction.
+                  HEADLINE="🤖 AutoFix deferred this item to a human under instruction (round ${MARK_ROUND}/${MAX_ROUNDS}) — the agent's handoff note below names the decision and the options. The loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 else
                 # The gate ran and rejected the agent's fix (a build/test
                 # failure). Before handing to a human, check whether the PR is
@@ -7161,9 +7169,10 @@ jobs:
           if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
             ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
           fi
-          # 'fixed'/'noop' are the two outcomes that published a round report;
-          # anything else means the round stopped before publishing one.
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]]; then
+          # 'fixed'/'noop'/'handoff' are the outcomes that published a round
+          # report — handoff posts its note + eval marker from the report
+          # step; anything else means the round stopped before publishing one.
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' ]]; then
             EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
             ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
           else
