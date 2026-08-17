@@ -66,16 +66,24 @@ interface DingTalkRichTextPart {
   atName?: string;
 }
 
+interface DingTalkMessageContent {
+  text?: string;
+  richText?: DingTalkRichTextPart[];
+  downloadCode?: string;
+  fileName?: string;
+  recognition?: string;
+  title?: string;
+  summary?: string;
+  chatRecord?: unknown;
+  records?: unknown;
+  messages?: unknown;
+}
+
 interface DingTalkRepliedMsg {
   msgId?: string;
   msgType?: string;
   senderId?: string;
-  content?: {
-    text?: string;
-    richText?: DingTalkRichTextPart[];
-    downloadCode?: string;
-    fileName?: string;
-  };
+  content?: DingTalkMessageContent;
 }
 
 interface DingTalkAtUser {
@@ -107,12 +115,86 @@ interface DingTalkMessageData {
     text?: { content?: string };
     msgtype?: string;
   };
-  content?: {
-    richText?: DingTalkRichTextPart[];
-    downloadCode?: string;
-    fileName?: string;
-    recognition?: string;
-  };
+  content?: DingTalkMessageContent;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function formatChatRecordEntryBody(record: Record<string, unknown>): string {
+  const rawContent = record['content'];
+  const content =
+    rawContent && typeof rawContent === 'object'
+      ? (rawContent as Record<string, unknown>)
+      : undefined;
+  const body =
+    nonEmptyString(record['text']) ||
+    nonEmptyString(rawContent) ||
+    nonEmptyString(content?.['text']) ||
+    nonEmptyString(record['message']) ||
+    nonEmptyString(record['body']);
+  if (body) return body;
+
+  const msgType =
+    nonEmptyString(record['msgType']) || nonEmptyString(record['msgtype']);
+  switch (msgType) {
+    case 'picture':
+      return '[image]';
+    case 'file':
+      return `[file: ${nonEmptyString(content?.['fileName']) || 'file'}]`;
+    case 'audio':
+      return '[audio]';
+    case 'video':
+      return '[video]';
+    default:
+      return msgType ? `[${msgType}]` : '[message]';
+  }
+}
+
+function formatChatRecord(content?: DingTalkMessageContent): string {
+  const title = nonEmptyString(content?.title);
+  const summary = nonEmptyString(content?.summary);
+  let entries = content?.chatRecord ?? content?.records ?? content?.messages;
+
+  if (typeof entries === 'string') {
+    try {
+      entries = JSON.parse(entries);
+    } catch {
+      entries = undefined;
+    }
+  }
+
+  const recordLines = Array.isArray(entries)
+    ? entries.flatMap((entry) => {
+        if (typeof entry === 'string') {
+          const body = nonEmptyString(entry);
+          return body ? [`Unknown: ${body}`] : [];
+        }
+        if (!entry || typeof entry !== 'object') return [];
+        const record = entry as Record<string, unknown>;
+        const sender =
+          nonEmptyString(record['senderName']) ||
+          nonEmptyString(record['senderNick']) ||
+          nonEmptyString(record['sender']) ||
+          nonEmptyString(record['senderId']) ||
+          'Unknown';
+        return [`${sender}: ${formatChatRecordEntryBody(record)}`];
+      })
+    : [];
+
+  const parts: string[] = [];
+  if (summary && summary !== '[]') {
+    parts.push(`[${title || 'Chat record'}] ${summary}`);
+  } else if (title) {
+    parts.push(`[${title}]`);
+  }
+  if (recordLines.length > 0) {
+    parts.push(`[Chat record messages]\n${recordLines.join('\n')}`);
+  }
+  return parts.join('\n\n');
 }
 
 /** Track seen msgIds to deduplicate retried callbacks. */
@@ -1431,6 +1513,10 @@ export class DingtalkChannel extends ChannelBase {
       if (summary) return summary;
     }
 
+    if (msgType === 'chatRecord') {
+      return formatChatRecord(content);
+    }
+
     // Media type placeholders
     switch (msgType) {
       case 'picture':
@@ -1518,6 +1604,13 @@ export class DingtalkChannel extends ChannelBase {
         text: '(video)',
         downloadCodes: code ? [code] : [],
         mediaType: 'video',
+      };
+    }
+
+    if (msgtype === 'chatRecord') {
+      return {
+        text: formatChatRecord(data.content) || '(chat record)',
+        downloadCodes: [],
       };
     }
 

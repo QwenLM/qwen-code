@@ -2373,6 +2373,106 @@ describe('DingtalkChannel parsed-message logging', () => {
   });
 });
 
+describe('DingtalkChannel chat records', () => {
+  it('includes a replied chat-record title and summary as referenced context', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'chat-record-reply-m1',
+        conversationType: '2',
+        conversationId: 'cid-chat-record',
+        conversationTitle: 'Channel test group',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        isInAtList: true,
+        text: {
+          content: '@DingTalkTest can you see this?',
+          isReplyMsg: true,
+          repliedMsg: {
+            msgId: 'forwarded-record-m1',
+            msgType: 'chatRecord',
+            senderId: 'sender-1',
+            content: {
+              title: 'Group chat history',
+              summary: 'Alice: first message\nBob: [message]',
+            },
+          },
+        },
+      }),
+      headers: { messageId: 'chat-record-reply-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'can you see this?',
+        referencedText:
+          '[Group chat history] Alice: first message\nBob: [message]',
+      }),
+    );
+    expect(
+      vi.mocked(channel.handleInbound).mock.calls[0]![0].referencedText,
+    ).not.toContain('[Chat record messages]');
+  });
+
+  it.each([
+    ['chatRecord', false],
+    ['records', true],
+    ['messages', false],
+  ])(
+    'expands top-level %s entries in their original order',
+    (entryField, stringifyEntries) => {
+      const channel = createChannel();
+      const entries = [
+        { senderName: 'Alice', content: 'first message' },
+        { senderNick: 'Bob', msgType: 'picture' },
+        {
+          sender: 'Carol',
+          msgType: 'file',
+          content: { fileName: 'report.pdf' },
+        },
+        { senderId: 'dan-id', content: { text: 'last message' } },
+      ];
+      const downstream = {
+        data: JSON.stringify({
+          msgId: `chat-record-${entryField}`,
+          conversationType: '1',
+          conversationId: 'cid-chat-record-dm',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/send?access_token=token',
+          senderNick: 'Alice',
+          senderStaffId: 'staff-1',
+          senderId: 'sender-1',
+          msgtype: 'chatRecord',
+          content: {
+            title: 'Group chat history',
+            summary: 'Alice: first message\nBob: [image]',
+            [entryField]: stringifyEntries ? JSON.stringify(entries) : entries,
+          },
+        }),
+        headers: { messageId: `chat-record-${entryField}` },
+      } as unknown as DWClientDownStream;
+
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream);
+
+      expect(channel.handleInbound).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: '[Group chat history] Alice: first message\nBob: [image]\n\n[Chat record messages]\nAlice: first message\nBob: [image]\nCarol: [file: report.pdf]\ndan-id: last message',
+        }),
+      );
+    },
+  );
+});
+
 describe('DingtalkChannel downstream logging', () => {
   it('replaces raw SDK Buffer logging with a structured downstream summary', () => {
     createChannel();
