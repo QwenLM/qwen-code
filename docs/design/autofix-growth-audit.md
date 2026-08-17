@@ -170,16 +170,47 @@ gate's first read necessarily comes AFTER that — the gate validates
 shape, taxonomy, and routing, but can never prove the file's
 provenance against code that ran before its read (a planted
 shape-valid `sound` replacing an honest `drift`/`conflict`). Blast
-radius is control-plane forgery bounded by the window caps: the verify
-step holds no token, so a forgery cannot push — it can re-arm/re-anchor
-the window or park the PR. The channels that ARE closed: check
-subprocesses are stripped of the runner injection channels
-(`GITHUB_OUTPUT`/`GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_STEP_SUMMARY`),
-the gate re-records its validated verdict on every exit (step outputs
-are last-write-wins, so an append to the output file discovered via
-`$RUNNER_TEMP` loses), and the inherited execution knobs with no
-legitimate setter (`BASH_ENV`, `BITE_RUNNER`) are unset in the gate's
-preamble.
+radius is control-plane forgery bounded by the window caps, held by
+STRUCTURAL invariants rather than an enumerated channel list (the
+entrance-by-entrance approach kept growing new entrances each review
+round):
+
+- A push requires `outcome=fixed|noop`, and 'Finalize verification'
+  accepts those two outcomes ONLY from a pass whose step CONCLUSION is
+  success — a gate that reached them exited 0. A gate killed mid-check
+  concludes failure, so a forged `outcome=fixed` + `verified_head`
+  appended to its discovered output file is discarded there (read as a
+  crashed gate, retried) and never reaches the push condition. Every
+  live exit additionally writes its own outcome AFTER the checks, so a
+  mid-check append loses last-write-wins even without a kill.
+- The gate launches through the workflow's `env -i` clean-child pattern
+  with a step-level `BASH_ENV`/`SHELLOPTS` pin: bash sources a planted
+  `BASH_ENV` at process STARTUP, before any body-side unset runs, so
+  the pin + allowlisted child close the class instead of enumerating
+  it. The runner's `$GITHUB_ENV`/`$GITHUB_PATH`/`$GITHUB_STEP_SUMMARY`
+  BACKING files under `$RUNNER_TEMP/_runner_file_commands/` (which stay
+  discoverable after the variable strip) are locked read-only for the
+  step's lifetime, so no check can append an environment plant into the
+  later PAT-bearing steps. The directory itself stays writable — the
+  runner creates the next step's backing files there at step start, and
+  locking it would stall every later step of the job — which leaves a
+  rename-over residual (create a new file and rename it onto a locked
+  one): narrower than the open append, and priced deliberately.
+- The control bits ride the gate's own defended output: `kiss_audit`
+  is recorded before any branch code runs and re-appended at EVERY exit
+  with the same last-writer discipline as the verdict; later steps
+  consume it (like `audit_verdict`) through the finalize chain, never
+  steps.prepare's raw copy except as the crash fallback for a pass that
+  died before recording it.
+
+Known residuals, stated rather than claimed closed: the `$GITHUB_OUTPUT`
+backing file itself stays writable (the gate must write it), so a
+CONCURRENT detached writer spawned by branch code and outliving the gate
+can still race the last append — outcome flips are blocked by the
+conclusion gate above, and a forged trail marker on a FAILED round
+cannot re-arm (the failure path never re-arms); and steps.prepare's
+`kiss_audit` copy is consumed as the fallback only when no gate
+recorded the bit (a crash path with no push).
 
 Every audit round posts its verdict in the round report comment with a
 machine-readable marker
@@ -246,17 +277,26 @@ queue).
   for this window, scans with no new wake since post nothing and do not
   launch the agent. The wake set is feedback the loop cannot produce
   itself: a trusted-human review or comment, or a failing check from
-  OUTSIDE the Qwen Autofix workflow. The Qwen Autofix workflow's OWN
-  check runs (address lanes included) are excluded wholesale: under a
-  park no address round can legitimately run, so any review-address
-  check newer than the marker is the conflict round's OWN failed check
-  (its check concludes after the handoff posts) — counting it would let
-  the loop's own output unpark the round it came from, and the wasted
-  failure rounds would feed the consecutive-failure cap toward a
-  terminal lockout on the exact PR a human is settling. `/retry` (which
-  moves the window key past the marker) is the sanctioned lift. This
-  fixes the handoff churn in problem 3 for the one remaining stopping
-  path; the non-stopping paths do not churn by construction.
+  OUTSIDE the loop's fleet. Excluded wholesale from the checks leg: the
+  Qwen Autofix workflow's OWN check runs (address lanes included — under
+  a park no address round can legitimately run, so any review-address
+  check newer than the marker is the conflict round's OWN failed check,
+  and counting it would let the loop's own output unpark the round it
+  came from), AND the loop's sibling machinery — the review workflow
+  (re-fired by every head the loop's own base-update merge creates),
+  the CI-failure patrol (cron re-runs on the unchanged head), and the
+  fork bridge/signal lanes (the loop's own checks for fork PRs). All of
+  it completes after both park clocks with no human in the input, and
+  the wasted failure rounds would feed the consecutive-failure cap
+  toward a terminal lockout on the exact PR a human is settling.
+  Belt-and-braces with the name exclusion, the loop performs NO head
+  moves while a handoff pends: the scan's stale-base auto-update and
+  the conflict round's own stale-base retry both skip parked PRs, so
+  any check newer than both clocks ran on a head a human moved.
+  `/retry` (which moves the window key past the marker) is the
+  sanctioned lift. This fixes the handoff churn in problem 3 for the
+  one remaining stopping path; the non-stopping paths do not churn by
+  construction.
 
 ## State machine
 

@@ -3437,6 +3437,64 @@ jobs:
             if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
               continue
             fi
+            # Conflict-park gate for the loop's OWN head move: while a
+            # conflict handoff pends in the live window, an update-branch
+            # merge re-fires every synchronize-triggered workflow on the new
+            # head, and those loop-generated checks complete after both
+            # park clocks — lifting the park with zero human activity, and
+            # every woken round feeds CONSEC_FAIL toward a terminal lockout
+            # on the exact PR a human is settling. Mirrors prepare's
+            # conflict-handoff idempotence block (same marker scan, same
+            # wake legs, same fail-closed fallbacks); a base that goes
+            # stale during a park is re-handled by the address gate's own
+            # stale-base retry once a human wakes a round.
+            CONFLICT_PARKED='false'
+            CONFLICT_SINCE_SCAN="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${REARM_KEY}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-growth-audit verdict=conflict win=([^ ]+) -->") ] | .[]
+                | select(.[0] == $key) | ($c.created_at // "") ]
+              | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+            if [[ -n "${CONFLICT_SINCE_SCAN}" ]]; then
+              gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/rv.scan.json" || echo '[]' > "${WORKDIR}/rv.scan.json"
+              gh api "repos/${REPO}/pulls/${PR}/comments" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/rc.scan.json" || echo '[]' > "${WORKDIR}/rc.scan.json"
+              printf '%s' "${CHECKS_JSON}" > "${WORKDIR}/checks.scan.json"
+              BASE_UPD_AT_SCAN="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- autofix-base-updated"))
+                  | (.created_at // "") ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+              CONFLICT_WAKE_SCAN="$(jq -rs \
+                --arg since "${CONFLICT_SINCE_SCAN}" --arg baseupd "${BASE_UPD_AT_SCAN}" \
+                --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" '
+                (.[0] | map(select((.submitted_at // "") > $since)
+                  | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                  | select(((.author_association // "") | IN($trust[])))
+                  | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
+                + (.[1] | map(select((.created_at // "") > $since)
+                  | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                  | select(((.author_association // "") | IN($trust[])))) | length)
+                + (.[2] | map(select((.created_at // "") > $since)
+                  | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                  | select(((.author_association // "") | IN($trust[])))
+                  | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                  | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
+                + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                  | select(((.workflowName // "") | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)
+                  | select((.completedAt // .updatedAt // "") > $since)
+                  | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
+                "${WORKDIR}/rv.scan.json" "${WORKDIR}/rc.scan.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.scan.json" 2> /dev/null || echo 0)"
+              [[ "${CONFLICT_WAKE_SCAN}" =~ ^[0-9]+$ ]] || CONFLICT_WAKE_SCAN=0
+              if [[ "${CONFLICT_WAKE_SCAN}" == "0" ]]; then
+                CONFLICT_PARKED='true'
+              fi
+              rm -f "${WORKDIR}/rv.scan.json" "${WORKDIR}/rc.scan.json" "${WORKDIR}/checks.scan.json"
+            fi
+            if [[ "${CONFLICT_PARKED}" == 'true' ]]; then
+              echo "🫥 #${PR}: conflict handoff pending in the live window — skipping the stale-base update (the loop does not move the head while parked)"
+              fleet_row "${PR}" 'conflict-parked' 'conflict handoff pending — no stale-base head move while parked'
+            fi
             # Auto-update a PR that is red ONLY because of a stale base (see the
             # MAIN_GREEN_CHECKS rationale above). The gate: the failing check also
             # passed for the PR that produced current main (a necessary-but-NOT-
@@ -3445,7 +3503,7 @@ jobs:
             # round cap and pending-checks gates but before the feedback logic,
             # because a stuck-on-stale-base PR often has no NEW feedback at all (it
             # just sits red), which is exactly #7490's case.
-            if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" ]]; then
+            if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" && "${CONFLICT_PARKED}" != 'true' ]]; then
               # STALE_BASE_REDS is pure jq over data already in memory
               # (CHECKS_JSON, MAIN_GREEN_CHECKS) — free, and far more selective
               # than the compare round-trip. Compute it FIRST and skip the network
@@ -4986,6 +5044,17 @@ jobs:
           # update-branch push cancels in-flight runs on the old head (and a
           # close/reopen does the same), which the loop produces without any
           # human.
+          # The exclusion set is wider than the loop's own workflow: the
+          # loop's SIBLING machinery produces check events too — the review
+          # workflow re-fires on every head the loop's own base-update merge
+          # creates, the CI-failure patrol re-runs flaky failures on the
+          # UNCHANGED head by cron, and the fork lanes carry the loop's own
+          # checks for fork PRs. All of it completes after both clocks with
+          # no human anywhere in the input, so all of it is excluded by
+          # name; and while a handoff pends, the loop performs NO head
+          # moves at all (the scan's stale-base auto-update and the
+          # conflict round's own stale-base retry both skip parked PRs),
+          # so any check newer than both clocks is human-caused.
           CONFLICT_SINCE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-audit verdict=conflict win=([^ ]+) -->") ] | .[]
@@ -5009,7 +5078,7 @@ jobs:
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
-                | select((.workflowName // "") != "Qwen Autofix")
+                | select(((.workflowName // "") | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)
                 | select((.completedAt // .updatedAt // "") > $since)
                 | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
               "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json" 2> /dev/null || echo 0)"
@@ -5595,6 +5664,14 @@ jobs:
         # its case to exit 1, and the always() report step posts.
         timeout-minutes: 60
         env:
+          # BASH_ENV is sourced by bash at process STARTUP, before line 1 of
+          # the body below — a body-side unset is one hop late. Pinning it
+          # empty at step level outranks any $GITHUB_ENV plant (same
+          # doctrine as FOOTPRINT_ENFORCE below); SHELLOPTS is the sibling
+          # option-import channel. The gate then launches through an env -i
+          # clean child, so its bash inherits nothing at all.
+          BASH_ENV: ''
+          SHELLOPTS: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
@@ -5614,7 +5691,23 @@ jobs:
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          # Launch the gate through the workflow's env -i clean-child
+          # pattern: the step environment inherits every $GITHUB_ENV plant
+          # earlier steps left (verdict-variable plants, BITE_RUNNER
+          # overrides, whatever is next), and enumeration is the failure
+          # mode this design keeps hitting — an allowlisted child drops the
+          # whole class. The gate re-declares the variables it needs.
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
+            WORKDIR="${WORKDIR}" \
+            BRANCH="${BRANCH}" \
+            GITHUB_OUTPUT="${GITHUB_OUTPUT}" \
+            KISS_AUDIT="${KISS_AUDIT:-false}" \
+            FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Repair deterministic rejection'
         id: 'repair'
@@ -5771,13 +5864,25 @@ jobs:
         # Same bound as the first pass, for the same reason.
         timeout-minutes: 60
         env:
+          # BASH_ENV is sourced by bash at process STARTUP, before line 1 of
+          # the body below — a body-side unset is one hop late. Pinning it
+          # empty at step level outranks any $GITHUB_ENV plant (same
+          # doctrine as FOOTPRINT_ENFORCE below); SHELLOPTS is the sibling
+          # option-import channel. The gate then launches through an env -i
+          # clean child, so its bash inherits nothing at all.
+          BASH_ENV: ''
+          SHELLOPTS: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
-          KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
+          # The control bit arrives through the FIRST gate's defended
+          # output (recorded before any check ran, re-appended at every
+          # exit); the prepare copy is only the fallback for a first pass
+          # that died before recording it.
+          KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5788,7 +5893,23 @@ jobs:
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          # Launch the gate through the workflow's env -i clean-child
+          # pattern: the step environment inherits every $GITHUB_ENV plant
+          # earlier steps left (verdict-variable plants, BITE_RUNNER
+          # overrides, whatever is next), and enumeration is the failure
+          # mode this design keeps hitting — an allowlisted child drops the
+          # whole class. The gate re-declares the variables it needs.
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
+            WORKDIR="${WORKDIR}" \
+            BRANCH="${BRANCH}" \
+            GITHUB_OUTPUT="${GITHUB_OUTPUT}" \
+            KISS_AUDIT="${KISS_AUDIT:-false}" \
+            FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Finalize verification'
         id: 'final_verify'
@@ -5806,11 +5927,21 @@ jobs:
           REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'
           FIRST_AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict }}'
           REPAIR_AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict }}'
+          # The pass conclusions are the tamper-evident seal on the output
+          # claims below: a gate that reached fixed/noop EXITED 0, and a
+          # step killed mid-check (whose output file stays discoverable and
+          # appendable under $RUNNER_TEMP) never concludes success.
+          FIRST_CONCLUSION: '${{ steps.verify.conclusion }}'
+          REPAIR_CONCLUSION: '${{ steps.verify_repair.conclusion }}'
+          FIRST_KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'
+          REPAIR_KISS_AUDIT: '${{ steps.verify_repair.outputs.kiss_audit }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
           AUDIT_VERDICT="${FIRST_AUDIT_VERDICT}"
+          KISS_AUDIT="${FIRST_KISS_AUDIT}"
+          PASS_CONCLUSION="${FIRST_CONCLUSION}"
           # The flag travels WITH the attempt whose outcome is selected: the
           # first pass can fail a round-caused check, the repair fixes it, and
           # the repair verification can then hit a pre-existing failure — that
@@ -5837,6 +5968,26 @@ jobs:
             # a repair that validated nothing leaves the first pass's
             # validated verdict as the record.
             AUDIT_VERDICT="${REPAIR_AUDIT_VERDICT:-${FIRST_AUDIT_VERDICT}}"
+            KISS_AUDIT="${REPAIR_KISS_AUDIT:-${FIRST_KISS_AUDIT}}"
+            PASS_CONCLUSION="${REPAIR_CONCLUSION}"
+          fi
+          # Conclusion gate: fixed/noop are the ONLY outcomes that release
+          # the PAT push. A silent gate death (the step killed mid-check)
+          # concludes failure, yet its step-output file stays discoverable
+          # under $RUNNER_TEMP and appendable — a forged outcome=fixed +
+          # verified_head must not flow to the push condition. Accept
+          # fixed/noop only from a pass whose step concluded success;
+          # anything else reads as a crashed gate (empty outcome → the
+          # report's retry path), never as a verdict, and the audit bit
+          # riding the tainted outputs is discarded with it.
+          if [[ "${OUTCOME}" == 'fixed' || "${OUTCOME}" == 'noop' ]] &&
+            [[ "${PASS_CONCLUSION}" != 'success' ]]; then
+            echo "::error::verify pass claims outcome=${OUTCOME} but concluded '${PASS_CONCLUSION:-<none>}' — discarding the claim (forged or crashed-gate outputs); NOT pushing"
+            OUTCOME=''
+            COMMITTED=''
+            VERIFIED_HEAD=''
+            AUDIT_VERDICT=''
+            KISS_AUDIT=''
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${COMMITTED}" ]]; then
@@ -5847,6 +5998,9 @@ jobs:
           fi
           if [[ -n "${AUDIT_VERDICT}" ]]; then
             echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${KISS_AUDIT}" ]]; then
+            echo "kiss_audit=${KISS_AUDIT}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
             fixed|noop) ;;
@@ -5921,8 +6075,10 @@ jobs:
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           # Whether this round was a growth-audit round; when it was, the
           # report carries the audit's verdict marker (and a sound verdict
-          # additionally re-arms the window at the current size).
-          KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
+          # additionally re-arms the window at the current size). The bit
+          # rides Finalize verification's copy — the gates' defended output
+          # chain, never steps.prepare's raw copy.
+          KISS_AUDIT: '${{ steps.final_verify.outputs.kiss_audit }}'
           # The verdict Finalize verification selected WITH the outcome —
           # never a re-read of the branch-writable growth-audit.json. The
           # pass whose outcome was selected wins (a repair pass legitimately
@@ -6625,7 +6781,9 @@ jobs:
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
-          KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
+          # Same selection chain as AUDIT_VERDICT below — the gates'
+          # defended output, never steps.prepare's raw copy.
+          KISS_AUDIT: '${{ steps.final_verify.outputs.kiss_audit }}'
           # The verdict Finalize verification selected WITH the outcome —
           # see 'Push and report' for the selection rule. Never a re-read of
           # the branch-writable file.
@@ -6892,12 +7050,22 @@ jobs:
                 # scan's stale-base auto-update, which only sees PR status
                 # checks, never the gate's own build.
                 STALE_BASE_RETRY=false
-                MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
-                if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
-                  CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                  if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
-                    && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
-                    STALE_BASE_RETRY=true
+                # A conflict round must PARK quietly at the human call: its
+                # own stale-base merge would re-fire every synchronize-
+                # triggered workflow on the new head, and those loop-
+                # generated checks complete after the conflict marker this
+                # same report posts — waking the very park it establishes.
+                # The scan's stale-base auto-update carries the matching
+                # gate; base staleness is re-handled by this retry once a
+                # human wakes.
+                if [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+                  MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
+                  if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
+                    CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
+                    if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
+                      && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                      STALE_BASE_RETRY=true
+                    fi
                   fi
                 fi
                 if [[ "${STALE_BASE_RETRY}" == 'true' ]]; then

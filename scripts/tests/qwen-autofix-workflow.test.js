@@ -491,11 +491,13 @@ describe('qwen-autofix workflow', () => {
     // Every failed-check selector must guard against the loop reading its OWN
     // runs as feedback about the PR. Most selectors carry the review-address
     // carve-out; the stale-base selector instead excludes ALL Qwen Autofix
-    // checks (no carve-out), which is strictly narrower. Assert PER SELECTOR
-    // that its own text carries one guard or the other — a global count is
-    // vacuous here because `!= "Qwen Autofix"` is a substring of the carve-out
-    // expression, so every carve-out selector increments BOTH counters and a
-    // guardless selector slips through (proven by A/B mutation).
+    // checks (no carve-out), which is strictly narrower, and the conflict-
+    // park wake filter excludes the loop's whole FLEET by name (wider
+    // still). Assert PER SELECTOR that its own text carries one guard or
+    // another — a global count is vacuous here because `!= "Qwen Autofix"`
+    // is a substring of the carve-out expression, so every carve-out
+    // selector increments BOTH counters and a guardless selector slips
+    // through (proven by A/B mutation).
     const scanCheckSelectors =
       reviewScanJob.match(/IN\("(?:FAILURE|QUEUED)"/g) ?? [];
     expect(scanCheckSelectors.length).toBeGreaterThanOrEqual(3);
@@ -507,6 +509,7 @@ describe('qwen-autofix workflow', () => {
         return (
           !/startswith\("review-address"\)/.test(sel) &&
           !/!= "Qwen Autofix"/.test(sel) &&
+          !/IN\("Qwen Autofix"/.test(sel) &&
           // The review-in-flight gate (#8888) selects BY NAME for the LLM
           // review check — a liveness probe, not a feedback selector, so it
           // needs neither the review-address carve-out nor the workflow guard.
@@ -2900,12 +2903,13 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
-    // Six sites now: the four feedback/deferral exclusions, the over-budget
-    // census (command comments are not feedback batches), and the conflict
-    // handoff wake filter (a /command comment is not a trusted-human
-    // response and must not unpark a conflict verdict).
+    // Seven sites now: the four feedback/deferral exclusions, the
+    // over-budget census (command comments are not feedback batches), the
+    // conflict handoff wake filter, and its scan-side mirror for the
+    // stale-base park gate (a /command comment is not a trusted-human
+    // response and must not unpark a conflict verdict in either).
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      6,
+      7,
     );
   });
 
@@ -2929,11 +2933,13 @@ describe('qwen-autofix workflow', () => {
     // Pin the total --paginate code-site count so ANY new paginated site
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
-    // the count below too) — bumping this pin alone leaves toBe(10) green.
-    expect(workflow.split('--paginate').length - 1).toBe(18);
+    // the count below too) — bumping this pin alone leaves toBe(12) green.
+    expect(workflow.split('--paginate').length - 1).toBe(20);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
-    // fetch (R4-1) = ten normalized fetch sites. The
+    // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
+    // needs the same human-feedback legs prepare reads) = twelve normalized
+    // fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
@@ -2945,7 +2951,7 @@ describe('qwen-autofix workflow', () => {
     // takeover-ack are the same class too: captured into shell variables
     // and consumed by slurp-style `jq -rs 'add // [] | …'` (idempotent
     // over a single flat array), never a WORKDIR file.
-    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(12);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
     // the PRIOR_HEADS consumer below iterates the result with .[], which
@@ -6766,22 +6772,23 @@ exit 1
     expect(prepareBranchAndFeedbackStep).toContain(
       'echo "kiss_audit=${KISS_AUDIT}"',
     );
-    expect(
-      workflow.match(
-        /KISS_AUDIT: '\$\{\{ steps\.prepare\.outputs\.kiss_audit \}\}'/g,
-      ) ?? [],
-    ).toHaveLength(4);
+    // The bit enters the FIRST gate from prepare, but every later consumer
+    // reads the gates' DEFENDED copy (recorded before any branch code ran,
+    // re-appended at every exit) through the finalize chain — a control
+    // bit routed around the gate's defenses re-opens the forgery class.
+    // The repair gate keeps prepare only as the crash fallback for a first
+    // pass that died before recording the bit.
     expect(verificationGateSteps[1]).toContain(
       "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
     );
     expect(repairVerificationGateStep).toContain(
-      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+      "KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'",
     );
     expect(pushAndReportStep).toContain(
-      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+      "KISS_AUDIT: '${{ steps.final_verify.outputs.kiss_audit }}'",
     );
     expect(reviewAddressReportStep).toContain(
-      "KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'",
+      "KISS_AUDIT: '${{ steps.final_verify.outputs.kiss_audit }}'",
     );
 
     // Extract the census + audit-trigger block and run it against fixture
@@ -7605,6 +7612,32 @@ exit 1
         ],
       }),
     ).toEqual({ stale: 'true', parked: true });
+    // The loop's SIBLING machinery is excluded with it: the review
+    // workflow re-fires on every head the loop's own base-update merge
+    // creates (its failing checks complete AFTER both clocks), the
+    // CI-failure patrol re-runs flaky failures on the UNCHANGED head by
+    // cron, and the fork lanes carry the loop's own checks for fork PRs —
+    // all of it completes with no human anywhere in the input
+    // (probe-verified wake entrances).
+    for (const loopWorkflow of [
+      '🧐 Qwen Pull Request Review',
+      'Qwen CI Failure Patrol',
+      'Qwen Autofix Fork Bridge',
+      'Qwen Autofix Fork Signal',
+    ]) {
+      expect(
+        park({
+          checks: [
+            {
+              name: 'build',
+              workflowName: loopWorkflow,
+              conclusion: 'FAILURE',
+              completedAt: '2026-01-02T00:00:00Z',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'true', parked: true });
+    }
     // The checks leg reads `.conclusion // .state` and `.completedAt //
     // .updatedAt` — a check reported through the FALLBACK fields wakes too
     // (dropping a fallback must not silently disable check-driven wakes).
@@ -7803,15 +7836,47 @@ exit 1
     // BASH_ENV and BITE_RUNNER are execution-steering knobs with no
     // legitimate setter.
     expect(reviewVerificationRunner).toContain("AUDIT_VERDICT_RECORDED='true'");
-    // Five re-record sites: reject_fix, the two crash exits, and the
-    // noop/fixed outcome writes — dropping any one re-opens the forge on
-    // that exit path.
+    // Nine re-record sites: reject_fix, the two failure.md exits, the two
+    // crash exits, the noop exit, the two no-commit exits (which run AFTER
+    // the schema/contracts checks — probe-verified forge entrance), and the
+    // fixed outcome write. Dropping any one re-opens the forge on that
+    // exit path.
     expect(
       reviewVerificationRunner.match(
         /if \[\[ "\$\{AUDIT_VERDICT_RECORDED:-false\}" == 'true' \]\]; then/g,
       ) ?? [],
-    ).toHaveLength(5);
+    ).toHaveLength(9);
     expect(reviewVerificationRunner).toContain('unset BASH_ENV BITE_RUNNER');
+    // The verdict variables are GATE state: an inherited plant must not
+    // ride the every-exit re-append back into the outputs.
+    expect(reviewVerificationRunner).toContain(
+      'unset AUDIT_VERDICT AUDIT_VERDICT_RECORDED',
+    );
+    // kiss_audit rides the same last-writer discipline: one record before
+    // any branch code runs plus the re-append at all nine exits.
+    expect(
+      reviewVerificationRunner.match(
+        /echo "kiss_audit=\$\{KISS_AUDIT:-false\}" >> "\$\{GITHUB_OUTPUT\}"/g,
+      ) ?? [],
+    ).toHaveLength(10);
+    // The runner backs GITHUB_ENV/GITHUB_PATH/GITHUB_STEP_SUMMARY with
+    // files under $RUNNER_TEMP/_runner_file_commands/ that stay
+    // discoverable after the variable strip — lock them so a check cannot
+    // plant environment into the later PAT-bearing steps. The
+    // GITHUB_OUTPUT backing file is the exception: the gate writes it, and
+    // forges against it lose to the every-exit re-append plus the finalize
+    // conclusion gate. The directory stays writable: the runner creates
+    // the next step's backing files there, and a lock would stall every
+    // later step (the rename-over residual is documented, not bought).
+    expect(reviewVerificationRunner).toContain(
+      'if [[ -n "${GITHUB_OUTPUT:-}" && -d "${RUNNER_TEMP}/_runner_file_commands" ]]; then',
+    );
+    expect(reviewVerificationRunner).toContain(
+      '[[ -f "${_rfc}" && "${_rfc}" != "${GITHUB_OUTPUT}" ]]',
+    );
+    expect(reviewVerificationRunner).not.toContain(
+      'chmod a-w "${RUNNER_TEMP}/_runner_file_commands"',
+    );
     // Conflict routing is gate-enforced: a conflict verdict that did not
     // stop with a handoff must not clear the gate and push.
     expect(reviewVerificationRunner).toContain(
@@ -10200,7 +10265,7 @@ exit 1
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
     const reviewVerificationGateStep = verificationGateSteps[1];
     expect(reviewVerificationGateStep).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
     expect(reviewVerificationGateStep).not.toContain('npm run build');
     expect(reviewVerificationGateStep).not.toContain(
@@ -11837,7 +11902,10 @@ exit 1
       const launchIdx = argStart;
       expect(execIdx).toBeGreaterThan(launchIdx);
     }
-    expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(2);
+    // Four clean children: the two deferred-findings upserts plus the two
+    // verification-gate launches (the gate runs after the agent step's
+    // branch code, so its bash must inherit nothing at all).
+    expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(4);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -13266,7 +13334,7 @@ exit 1
       "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
     );
     expect(reviewVerificationGateStep).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
     expect(reviewVerificationRunner).toContain('failure.md');
     expect(reviewVerificationRunner).toContain('outcome=failed');
@@ -13337,7 +13405,7 @@ exit 1
       "steps.repair.outputs.attempted == 'true'",
     );
     expect(repairVerificationGateStep).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
     expect(
       reviewVerificationRunner.match(/retryable=true/g) ?? [],
@@ -13437,6 +13505,12 @@ exit 1
           REPAIR_OUTCOME: '',
           REPAIR_COMMITTED: '',
           REPAIR_VERIFIED_HEAD: '',
+          FIRST_AUDIT_VERDICT: '',
+          REPAIR_AUDIT_VERDICT: '',
+          FIRST_CONCLUSION: '',
+          REPAIR_CONCLUSION: '',
+          FIRST_KISS_AUDIT: '',
+          REPAIR_KISS_AUDIT: '',
           ...env,
         },
       });
@@ -13446,12 +13520,18 @@ exit 1
     };
 
     expect(
-      run({ FIRST_OUTCOME: 'fixed', FIRST_VERIFIED_HEAD: 'first-sha' }),
+      run({
+        FIRST_OUTCOME: 'fixed',
+        FIRST_VERIFIED_HEAD: 'first-sha',
+        FIRST_CONCLUSION: 'success',
+      }),
     ).toMatchObject({
       status: 0,
       written: expect.stringContaining('verified_head=first-sha'),
     });
-    expect(run({ FIRST_OUTCOME: 'noop' })).toMatchObject({
+    expect(
+      run({ FIRST_OUTCOME: 'noop', FIRST_CONCLUSION: 'success' }),
+    ).toMatchObject({
       status: 0,
       written: expect.stringContaining('outcome=noop'),
     });
@@ -13464,6 +13544,8 @@ exit 1
         REPAIR_OUTCOME: 'fixed',
         REPAIR_COMMITTED: 'true',
         REPAIR_VERIFIED_HEAD: 'repair-sha',
+        FIRST_CONCLUSION: 'failure',
+        REPAIR_CONCLUSION: 'success',
       }),
     ).toMatchObject({
       status: 0,
@@ -13475,6 +13557,7 @@ exit 1
       FIRST_VERIFIED_HEAD: 'stale-first-sha',
       REPAIR_ATTEMPTED: 'true',
       REPAIR_OUTCOME: 'fixed',
+      REPAIR_CONCLUSION: 'success',
     });
     expect(repairedWithoutVerifiedHead).toMatchObject({
       status: 0,
@@ -13537,10 +13620,86 @@ exit 1
     });
     // No repair: the first pass's verdict surfaces.
     expect(
-      run({ FIRST_OUTCOME: 'fixed', FIRST_AUDIT_VERDICT: 'sound' }),
+      run({
+        FIRST_OUTCOME: 'fixed',
+        FIRST_AUDIT_VERDICT: 'sound',
+        FIRST_CONCLUSION: 'success',
+      }),
     ).toMatchObject({
       status: 0,
       written: expect.stringContaining('audit_verdict=sound'),
+    });
+    // Conclusion gate: fixed/noop are the ONLY outcomes that release the
+    // PAT push, and a gate that reached them exited 0 — step conclusion
+    // success. A silent gate death (killed mid-check) concludes failure,
+    // yet its step-output file stays discoverable under $RUNNER_TEMP and
+    // appendable; the forged claim must be discarded, never pushed
+    // (probe-verified entrance on the pre-gate finalize body).
+    expect(workflow).toContain(
+      "FIRST_CONCLUSION: '${{ steps.verify.conclusion }}'",
+    );
+    expect(workflow).toContain(
+      "REPAIR_CONCLUSION: '${{ steps.verify_repair.conclusion }}'",
+    );
+    const forgedFixed = run({
+      FIRST_OUTCOME: 'fixed',
+      FIRST_COMMITTED: 'true',
+      FIRST_VERIFIED_HEAD: 'forged-sha',
+      FIRST_AUDIT_VERDICT: 'sound',
+      FIRST_CONCLUSION: 'failure',
+    });
+    expect(forgedFixed.status).toBe(1);
+    expect(forgedFixed.written).not.toContain('outcome=fixed');
+    expect(forgedFixed.written).not.toContain('verified_head=');
+    expect(forgedFixed.written).not.toContain('audit_verdict=');
+    // noop releases the push-bound report + thread resolution too.
+    expect(
+      run({ FIRST_OUTCOME: 'noop', FIRST_CONCLUSION: 'failure' }),
+    ).toMatchObject({ status: 1 });
+    // A killed repair pass is gated identically.
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'fixed',
+        REPAIR_CONCLUSION: 'failure',
+      }),
+    ).toMatchObject({ status: 1 });
+    // A legitimate rejection (outcome=failed on a failing conclusion)
+    // still surfaces — the gate binds only the push-releasing outcomes.
+    expect(
+      run({ FIRST_OUTCOME: 'failed', FIRST_CONCLUSION: 'failure' }),
+    ).toMatchObject({
+      status: 1,
+      written: expect.stringContaining('outcome=failed'),
+    });
+    // kiss_audit rides the same selection chain — the gates' defended
+    // output, forwarded with the selected pass.
+    expect(workflow).toContain(
+      "FIRST_KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'",
+    );
+    expect(
+      run({
+        FIRST_OUTCOME: 'fixed',
+        FIRST_CONCLUSION: 'success',
+        FIRST_KISS_AUDIT: 'true',
+      }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('kiss_audit=true'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'fixed',
+        REPAIR_CONCLUSION: 'success',
+        FIRST_KISS_AUDIT: 'false',
+        REPAIR_KISS_AUDIT: 'true',
+      }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('kiss_audit=true'),
     });
   });
 
@@ -16929,6 +17088,181 @@ exit 1
   });
 });
 
+describe('growth-audit hardening: park wake set and verdict pipeline (round 3)', () => {
+  it('skips the scan stale-base update while a conflict handoff pends', () => {
+    // The loop's OWN head move must not fire wake checks while parked: an
+    // update-branch merge re-fires every synchronize-triggered workflow on
+    // the new head, and those loop-generated checks complete after both
+    // park clocks — lifting the park with zero human activity and feeding
+    // CONSEC_FAIL toward a terminal lockout on the exact PR a human is
+    // settling (probe-verified entrance). The scan block mirrors prepare's
+    // conflict-handoff idempotence wake set; execute the real block.
+    expect(reviewScanJob).toContain('&& "${CONFLICT_PARKED}" != \'true\' ]]');
+    const scanParkGateBlock = reviewScanJob.match(
+      /CONFLICT_PARKED='false'[\s\S]*?rm -f "\$\{WORKDIR\}\/rv\.scan\.json" "\$\{WORKDIR\}\/rc\.scan\.json" "\$\{WORKDIR\}\/checks\.scan\.json"\n {12}fi\n/,
+    )?.[0];
+    expect(scanParkGateBlock).toBeTruthy();
+    const T0 = '2026-01-01T00:00:00Z';
+    const runScanPark = ({
+      markerWin = 'W1',
+      ic = [],
+      rv = [],
+      rc = [],
+      checks = [],
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'scan-park-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      try {
+        const marker = {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: T0,
+          body: `<!-- autofix-growth-audit verdict=conflict win=${markerWin} -->`,
+        };
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify([marker, ...ic]));
+        writeFileSync(join(dir, 'rv.fixture.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.fixture.json'), JSON.stringify(rc));
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            'case " $* " in',
+            '  *reviews*) cat "${RV_FIXTURE}" ;;',
+            '  *comments*) cat "${RC_FIXTURE}" ;;',
+            '  *) echo "[]" ;;',
+            'esac',
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\n${scanParkGateBlock}\nprintf '%s' "$CONFLICT_PARKED"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              REVIEW_BOT: 'qwen-code-ci-bot',
+              REARM_KEY: 'W1',
+              WORKDIR: dir,
+              REPO: 'o/r',
+              PR: '1',
+              CHECKS_JSON: JSON.stringify(checks),
+              TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]',
+              RV_FIXTURE: join(dir, 'rv.fixture.json'),
+              RC_FIXTURE: join(dir, 'rc.fixture.json'),
+            },
+          },
+        );
+        return out.trim().split('\n').pop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // No human response since the marker → parked, no head move.
+    expect(runScanPark({})).toBe('true');
+    // A trusted-human comment or review after the marker lifts the gate —
+    // the base update may resume once a human is engaged.
+    expect(
+      runScanPark({
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            created_at: '2026-01-02T00:00:00Z',
+            body: 'decision: option B',
+          },
+        ],
+      }),
+    ).toBe('false');
+    expect(
+      runScanPark({
+        rv: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            state: 'COMMENTED',
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: 'take direction B',
+          },
+        ],
+      }),
+    ).toBe('false');
+    // A marker under a DEAD window key (re-armed since) parks nothing.
+    expect(runScanPark({ markerWin: 'W0' })).toBe('false');
+    // Loop-generated checks do not lift the gate either: the patrol's
+    // same-head re-run failure is excluded by the shared workflow filter.
+    expect(
+      runScanPark({
+        checks: [
+          {
+            name: 'build',
+            workflowName: 'Qwen CI Failure Patrol',
+            conclusion: 'FAILURE',
+            completedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toBe('true');
+    // …but a genuinely external failing check still lifts it.
+    expect(
+      runScanPark({
+        checks: [
+          {
+            name: 'build',
+            workflowName: 'Qwen Code CI',
+            conclusion: 'FAILURE',
+            completedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      }),
+    ).toBe('false');
+  });
+
+  it('a conflict round parks quietly — no stale-base merge in its report', () => {
+    // The conflict round's own stale-base retry would re-fire every
+    // synchronize-triggered workflow on the new head; those loop-generated
+    // checks complete after the conflict marker the same report posts —
+    // waking the very park it establishes. The retry is gated on the
+    // verdict, BEFORE any compare/update-branch call.
+    const guard = reviewAddressReportStep.indexOf(
+      'if [[ "${AUDIT_VERDICT:-}" != \'conflict\' ]]; then',
+    );
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(
+      reviewAddressReportStep.indexOf(
+        'gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch"',
+      ),
+    );
+  });
+
+  it('launches both gates through pinned, allowlisted clean children', () => {
+    // BASH_ENV is sourced at bash STARTUP, before the body's line 1 — the
+    // steps pin it (and the SHELLOPTS option-import channel) empty at step
+    // level, which outranks any $GITHUB_ENV plant; the gate itself then
+    // runs through the workflow's env -i clean-child pattern, so its bash
+    // inherits nothing at all (enumerating plants is the failure mode the
+    // verdict pipeline kept hitting).
+    for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
+      expect(step).toContain("BASH_ENV: ''");
+      expect(step).toContain("SHELLOPTS: ''");
+      expect(step).toContain('/usr/bin/env -i');
+      expect(step).toContain(
+        'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      );
+      // The gate re-declares the variables it needs inside the child.
+      expect(step).toContain('KISS_AUDIT="${KISS_AUDIT:-false}"');
+      expect(step).toContain(
+        'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      );
+    }
+  });
+});
+
 describe('review verification gate: baseline A/B on deterministic rejection', () => {
   // The A/B re-runs a failed check at the pre-round ref and reports
   // pre-existing ONLY when the baseline fails with a MATCHING failure
@@ -16970,6 +17304,14 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // the audit's verdict file in the workdir.
     kissAudit = false,
     auditJson = null,
+    // The agent's stop-artifact shapes around the no-commit exits: a
+    // present no-action.md takes the unchanged-branch arm to noop;
+    // dropping address-summary.md reaches the missing-summary exit.
+    noAction = false,
+    summaryPresent = true,
+    // Forgery probe: the schema check attempts to plant an env line into
+    // the runner file-command backing files the gate must lock.
+    forgeEnvFile = false,
     // Stop markers the agent leaves in the workdir: a BLOCKED conflict
     // round exits via failure.md; handoff.md is the other stop shape.
     failureMd = null,
@@ -17127,7 +17469,15 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       mkdirSync(rt);
       writeFileSync(
         join(rt, 'check-settings-schema.sh'),
-        'if [[ "${DISCOVER_OUTPUT:-}" == "1" ]]; then\n' +
+        'if [[ "${DISCOVER_ENV:-}" == "1" ]]; then\n' +
+          '  envfile="$(find "${RUNNER_TEMP:-}/_runner_file_commands" -name "set_env_*" 2>/dev/null | head -1)"\n' +
+          '  if [[ -n "${envfile}" ]] && echo "BASH_ENV=/evil" >> "${envfile}" 2>/dev/null; then\n' +
+          '    echo "env forge landed: backing file writable"\n' +
+          '  else\n' +
+          '    echo "env forge blocked: backing file locked"\n' +
+          '  fi\n' +
+          'fi\n' +
+          'if [[ "${DISCOVER_OUTPUT:-}" == "1" ]]; then\n' +
           '  target="$(find "${RUNNER_TEMP:-}" -name "set_output_*" 2>/dev/null | head -1)"\n' +
           '  if [[ -n "${target}" ]]; then\n' +
           '    echo "audit_verdict=sound" >> "${target}"\n' +
@@ -17148,7 +17498,12 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       );
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
-      writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      if (summaryPresent) {
+        writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      }
+      if (noAction) {
+        writeFileSync(join(workdir, 'no-action.md'), 'no action\n');
+      }
       if (auditJson !== null) {
         writeFileSync(join(workdir, 'growth-audit.json'), auditJson);
       }
@@ -17164,6 +17519,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // binding closes.
       const outFile = join(rt, 'set_output_gate');
       writeFileSync(outFile, '');
+      if (forgeEnvFile) {
+        mkdirSync(join(rt, '_runner_file_commands'), { recursive: true });
+        writeFileSync(join(rt, '_runner_file_commands', 'set_env_probe'), '');
+      }
       const summaryFile = join(dir, 'step-summary');
       writeFileSync(summaryFile, '');
 
@@ -17202,9 +17561,15 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             KISS_AUDIT: kissAudit ? 'true' : 'false',
             FORGE_OUTPUT: forgeOutput ? '1' : '',
             DISCOVER_OUTPUT: discoverOutput ? '1' : '',
+            DISCOVER_ENV: forgeEnvFile ? '1' : '',
           },
         },
       );
+      // The gate locks the file-command directory for the step's
+      // lifetime; restore it so the fixture teardown can delete it.
+      if (forgeEnvFile) {
+        chmodSync(join(rt, '_runner_file_commands'), 0o755);
+      }
       return {
         status: res.status,
         stdout: `${res.stdout}\n${res.stderr}`,
@@ -17846,6 +18211,66 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Step outputs are last-write-wins: the gate's re-record must outwrite
     // the forged append.
     expect(verdicts.at(-1)).toBe('audit_verdict=drift');
+  });
+
+  it('outwrites the forge at the post-check no-commit exits too', () => {
+    // The unchanged-branch and missing-summary exits run AFTER the
+    // schema/contracts checks: a RUNNER_TEMP-discovered forge appended
+    // mid-check won last-write-wins on both when those exits wrote only
+    // outcome (probe-verified entrance). The gate's validated verdict must
+    // be the last line at EVERY exit.
+    for (const shape of [
+      { agentCommit: false },
+      { agentCommit: true, summaryPresent: false },
+    ]) {
+      const r = runGate({
+        ...shape,
+        kissAudit: true,
+        auditJson: driftAuditJson,
+        discoverOutput: true,
+      });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain(
+        'forge landed: output file discovered via RUNNER_TEMP',
+      );
+      const verdicts = r.outputs
+        .split('\n')
+        .filter((l) => l.startsWith('audit_verdict='));
+      expect(verdicts.at(-1)).toBe('audit_verdict=drift');
+      // The control bit rides the same last-writer discipline.
+      expect(r.outputs).toContain('kiss_audit=true');
+    }
+  });
+
+  it('outwrites the forge at the noop exit (regression pin)', () => {
+    const r = runGate({
+      agentCommit: false,
+      noAction: true,
+      kissAudit: true,
+      auditJson: driftAuditJson,
+      discoverOutput: true,
+    });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=noop');
+    const verdicts = r.outputs
+      .split('\n')
+      .filter((l) => l.startsWith('audit_verdict='));
+    expect(verdicts.at(-1)).toBe('audit_verdict=drift');
+    expect(r.outputs).toContain('kiss_audit=true');
+  });
+
+  it('locks the runner file-command backing files against env plants', () => {
+    // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
+    // backing files under $RUNNER_TEMP/_runner_file_commands/ stay
+    // discoverable (a predictable path) and writable — an append there
+    // plants environment into every later step of the job, the PAT-
+    // bearing one included. The gate locks them for the step's lifetime.
+    const r = runGate({ forgeEnvFile: true });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('env forge blocked: backing file locked');
+    // The gate's OWN channel keeps working through the lock.
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.outputs).toContain('kiss_audit=false');
   });
 
   it('leaves the growth-audit verdict check inert on non-audit rounds', () => {

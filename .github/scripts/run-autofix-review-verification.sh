@@ -47,13 +47,40 @@ if [ -s /etc/gitconfig ]; then
 fi
 # Two more inherited knobs steer EXECUTION itself, and neither has a
 # legitimate setter: BASH_ENV names a file every non-interactive bash
-# child sources at startup — a $GITHUB_ENV plant from an earlier step
-# would run inside the trusted helpers this gate spawns, past the channel
-# strip below (it covers their environment, not bash's startup file) —
-# and BITE_RUNNER selects the bite check's runner command, which executes
-# unwrapped with the gate's full environment. Strip them with the GIT_*
-# class.
+# sources at STARTUP — a body-side unset is one hop late (bash sources a
+# plant before line 1), so the verify steps pin it empty at step level AND
+# launch this gate through their env -i clean child; the unset here keeps
+# the gate's own bash children clean too. BITE_RUNNER selects the bite
+# check's runner command, which executes unwrapped with the gate's full
+# environment. Strip them with the GIT_* class.
 unset BASH_ENV BITE_RUNNER
+# The verdict variables are GATE state, not inherited state: a plant of
+# AUDIT_VERDICT_RECORDED=true plus a verdict from an earlier step would
+# otherwise ride the every-exit re-append back into this step's outputs on
+# paths where the gate validated nothing.
+unset AUDIT_VERDICT AUDIT_VERDICT_RECORDED
+# The runner backs $GITHUB_ENV/$GITHUB_PATH/$GITHUB_STEP_SUMMARY with files
+# under $RUNNER_TEMP/_runner_file_commands/ that it reads back at step end.
+# The channel strip below removes the VARIABLES from the checks, but the
+# files stay discoverable under the inherited (predictable) $RUNNER_TEMP
+# and stay WRITABLE — a check that appends there plants environment into
+# every later step of this job, the PAT-bearing one included (discovery
+# verified on a live runner). Lock the files for the lifetime of this
+# step. The $GITHUB_OUTPUT backing file is the ONE exception: the gate
+# must keep writing it, and forges against it lose to the every-exit
+# re-append below plus the conclusion gate Finalize verification applies
+# to outcome. The directory itself stays writable on purpose: the runner
+# creates the NEXT step's backing files there at step start, and a locked
+# directory would stall every later step of the job; the residual
+# rename-over (create + rename onto a locked file) is documented in the
+# design doc instead of bought at that price.
+if [[ -n "${GITHUB_OUTPUT:-}" && -d "${RUNNER_TEMP}/_runner_file_commands" ]]; then
+  for _rfc in "${RUNNER_TEMP}/_runner_file_commands"/*; do
+    if [[ -f "${_rfc}" && "${_rfc}" != "${GITHUB_OUTPUT}" ]]; then
+      chmod a-w "${_rfc}" 2> /dev/null || true
+    fi
+  done
+fi
 
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
@@ -85,6 +112,7 @@ reject_fix() {
   # step means the gate itself crashed, so losing the detail file must not turn
   # a deterministic rejection into an infrastructure retry.
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
   if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
     echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
   fi
@@ -124,12 +152,21 @@ reject_fix() {
 # BEFORE the branch's build/tests run, and a check can still discover the
 # step-output FILE through the inherited $RUNNER_TEMP (the strip removes
 # the variable, not the backing file) and append its own audit_verdict —
-# step outputs are last-write-wins. Every exit past the record therefore
-# re-appends the validated verdict INLINE (no function call: gate snippets
-# extracted by the contract suite must stay executable standalone), so
-# the gate's copy outwrites any forged append. The flag gates it: a
-# verdict rejected BEFORE its record (missing, malformed, or a routing
-# violation) never surfaces.
+# step outputs are last-write-wins. EVERY exit therefore re-appends the
+# validated verdict INLINE (no function call: gate snippets extracted by
+# the contract suite must stay executable standalone), including the exits
+# that run after branch checks (a forge appended mid-check loses to the
+# exit's rewrite) — so the gate's copy outwrites any forged append. The
+# flag gates it: a verdict rejected BEFORE its record (missing, malformed,
+# or a routing violation) never surfaces. kiss_audit rides the same
+# discipline (recorded above, re-appended unconditionally at every exit).
+# Defended control-bit surface: kiss_audit reaches every later step ONLY
+# through this output — recorded HERE, before any branch code runs in this
+# step, and re-appended at every exit below with the same last-writer
+# discipline as the verdict. A consumer that read steps.prepare's copy
+# directly would route the bit around the gate's defenses.
+echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+
 # Growth-audit verdict gate: a round tagged KISS_AUDIT (its counting window
 # is over the growth budget) must carry the audit's machine-readable verdict
 # — the audit IS the round's judgment of the over-budget approach, and a
@@ -201,6 +238,10 @@ if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
   git status --short
   cat "${WORKDIR}/failure.md"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
@@ -208,6 +249,10 @@ if [[ -f "${WORKDIR}/failure.md" ]]; then
   echo "🛑 Agent aborted intentionally:"
   cat "${WORKDIR}/failure.md"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
@@ -284,6 +329,7 @@ baseline_also_fails() {
       tail -c 3000 "${GATE_LOG}" 2> /dev/null
       echo '````'
     } > "${WORKDIR}/gate-rejection.md" || true
+    echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
     if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
       echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
     fi
@@ -464,6 +510,7 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
     cat "${WORKDIR}/no-action.md"
     echo "verified_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
     echo "outcome=noop" >> "${GITHUB_OUTPUT}"
+    echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
     if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
       echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
     fi
@@ -471,12 +518,20 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   fi
   echo "❌ Branch unchanged and no no-action.md — agent produced nothing"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
 if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
   echo "❌ Branch changed but address-summary.md is missing"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
+  if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
+    echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+  fi
   exit 1
 fi
 
@@ -1115,6 +1170,7 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
           tail -c 3000 "${GATE_LOG}" 2> /dev/null
           echo '````'
         } > "${WORKDIR}/gate-rejection.md" || true
+        echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
         if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
           echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
         fi
@@ -1178,6 +1234,7 @@ if [[ "${AUDIT_VERDICT:-}" == 'conflict' ]]; then
 fi
 echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
+echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
 if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
   echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
 fi
