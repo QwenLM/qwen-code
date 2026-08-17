@@ -5431,7 +5431,10 @@ export class Config {
       // `<runtime>/projects/` forever (issue #7906). The startup sweep
       // backstops crash paths that skip shutdown. The chat recording
       // flush happens in shutdown() before this runs, so no records are
-      // removed mid-write. Two guards keep this from destroying data
+      // removed mid-write. A handoff is the one exception: its writer
+      // was sealed so a successor can resume from this very entry, so
+      // the entry must survive. Two more guards keep this from
+      // destroying data
       // that isn't ours: the entry must contain only this session's
       // artifacts (sanitized-cwd collisions and concurrent sessions can
       // share an entry), and every cwd recorded in those artifacts must
@@ -5440,7 +5443,10 @@ export class Config {
       // decide the fate of a transiently absent mount; that gone-cwd
       // class is left to the grace-gated startup sweep.
       try {
-        if (isTempDirPath(this.storage.getProjectRoot())) {
+        if (
+          !this.sessionWriterHandoffRequested &&
+          isTempDirPath(this.storage.getProjectRoot())
+        ) {
           const projectDir = this.storage.getProjectDir();
           if (
             Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)

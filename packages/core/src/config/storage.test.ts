@@ -834,6 +834,13 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(actualFs.existsSync(path.join(projectsDir, '-multi-cwd'))).toBe(
       true,
     );
+    // Kept via the live-cwd veto, not via the marker branch: no marker
+    // may be written, or a later disappearance would lose its grace.
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, '-multi-cwd', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
   });
 
   it('keeps stale entries owned by a live session (runtime sidecar pid)', async () => {
@@ -887,10 +894,6 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       JSON.stringify({ pid: DEAD_PID, work_dir: `${goneCwd}-1` }),
     );
     actualFs.writeFileSync(
-      path.join(chats, 'session-1.worktree.json'),
-      JSON.stringify({ originalCwd: `${goneCwd}-2` }),
-    );
-    actualFs.writeFileSync(
       path.join(archive, 'session-0.jsonl'),
       JSON.stringify({ cwd: `${goneCwd}-3` }) + '\n',
     );
@@ -913,11 +916,16 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   });
 
   it('removes stale entries whose only surviving cwds sit under temp roots', async () => {
-    // Crashed temp session whose temp dir survived: the cwd exists, but
-    // temp roots are disposable by definition — no marker grace needed.
-    writeSession('-temp-crash', path.join(os.tmpdir(), 'qwen-gone-temp'));
+    // Crashed temp session whose temp dir survived: it gets the same
+    // marker grace as any other gone-cwd entry — a live-but-idle temp
+    // session must not die on a single sweep — but removal follows once
+    // the marker ages.
+    const survived = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-temp-survived-'),
+    );
+    writeSession('-temp-crash', survived);
     ageEntry('-temp-crash');
-    await Storage.cleanOrphanProjectDirs('current');
+    await sweepPastMarkerGrace('-temp-crash');
     expect(actualFs.existsSync(path.join(projectsDir, '-temp-crash'))).toBe(
       false,
     );
@@ -950,12 +958,16 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       true,
     );
     expect(actualFs.existsSync(marker)).toBe(true);
+    // Write-once invariant: the marker's mtime is the grace anchor, so
+    // the second pass must not rewrite it.
+    const graceAnchor = actualFs.statSync(marker).mtimeMs;
 
     // Second pass: marker is still fresh — still kept.
     await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, '-marked-gone'))).toBe(
       true,
     );
+    expect(actualFs.statSync(marker).mtimeMs).toBe(graceAnchor);
 
     ageFile(marker);
     await Storage.cleanOrphanProjectDirs('current');
@@ -969,6 +981,9 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     ageEntry('-hooked');
     const seen: string[] = [];
     const hook = async (entryPath: string) => {
+      // Ordering: salvage must run BEFORE the deletion, so the entry is
+      // still readable when the hook fires.
+      expect(actualFs.existsSync(entryPath)).toBe(true);
       seen.push(entryPath);
     };
     await sweepPastMarkerGrace('-hooked', hook);
@@ -992,6 +1007,13 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     ageEntry('current');
     await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(path.join(projectsDir, 'current'))).toBe(true);
+    // Self-skip must not even write a marker: the active session's own
+    // entry getting GC'd would delete its transcripts mid-run.
+    expect(
+      actualFs.existsSync(
+        path.join(projectsDir, 'current', '.qwen-orphan-since'),
+      ),
+    ).toBe(false);
   });
 
   it('removes empty record-less entries older than one day', async () => {

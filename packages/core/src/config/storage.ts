@@ -7,6 +7,7 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   getProjectHash,
@@ -394,25 +395,21 @@ export class Storage {
    */
   private static readonly ORPHAN_MARKER_FILE = '.qwen-orphan-since';
 
-  /** Cap on bytes read from any single record file during the sweep. */
-  private static readonly MAX_RECORD_SCAN_BYTES = 1024 * 1024;
-
   /**
    * Removes orphaned project snapshot directories under
    * `<runtime>/projects/` (issue #7906). An entry is orphaned when none
    * of the working directories recorded in its artifacts (chat logs,
-   * runtime/worktree sidecars, archived transcripts) still exists — or
-   * when they all sit under OS temp roots and the entry is stale (a
-   * crashed temp session whose temp dir survived). Entries owned by a
-   * still-running session (runtime sidecar with a live pid) are never
-   * touched, as are entries with recent file activity — sidecar-less
-   * sessions (headless, ACP, SDK, `qwen serve`) stay protected that
-   * way — and `currentProjectId`. Entries whose recorded cwds are all
-   * gone but include a non-temp path are marked first and only removed
+   * runtime sidecars, archived transcripts) still exists outside OS
+   * temp roots. Entries owned by a still-running session (runtime
+   * sidecar with a live pid) are never touched, as are entries with
+   * recent file activity — sidecar-less sessions (headless, ACP, SDK,
+   * `qwen serve`) stay protected that way — and `currentProjectId`.
+   * Every other record-bearing entry is marked first and only removed
    * once the marker has aged past the grace window, so a transiently
-   * absent mount gets its chance to come back. Entries without any
-   * readable records are only removed when completely empty and older
-   * than one day.
+   * absent mount gets its chance to come back and a live-but-idle
+   * temp-rooted session is never removed on a single sweep. Entries
+   * without any readable records are only removed when completely empty
+   * and older than one day.
    *
    * `onBeforeRemove` runs before each deletion so callers can salvage
    * derived state (e.g. usage summaries) from the transcripts; its
@@ -442,13 +439,22 @@ export class Storage {
     }
     const now = Date.now();
     for (const entry of entries) {
-      if (entry === currentProjectId) continue;
       const entryPath = path.join(projectsDir, entry);
+      if (entry === currentProjectId) {
+        // The active session's own entry: also clear any marker an
+        // earlier absence episode left behind, so a later disappearance
+        // gets a full grace window again.
+        Storage.removeOrphanMarker(entryPath);
+        continue;
+      }
       try {
         // A still-running session owns this entry even if its cwd was
         // deleted underneath it (worktree teardown mid-session); its
         // runtime sidecar carries a live pid.
-        if (Storage.hasLiveSession(entryPath)) continue;
+        if (Storage.hasLiveSession(entryPath)) {
+          Storage.removeOrphanMarker(entryPath);
+          continue;
+        }
         // Sidecars only exist for interactive sessions: a running
         // sidecar-less session (headless/ACP/SDK/serve) is protected by
         // its ongoing appends instead.
@@ -466,17 +472,13 @@ export class Storage {
             Storage.removeOrphanMarker(entryPath);
             continue;
           }
-          if (cwds.every((cwd) => isTempDirPath(cwd))) {
-            // Crashed temp session whose temp dir survived: temp roots
-            // are disposable by definition, and the freshness gate
-            // above is the only grace this class needs.
-            await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
-            continue;
-          }
-          // All non-temp cwds are gone. The absence may be transient
-          // (ejected media, mount down at boot), so one sweep must not
-          // decide: mark first, remove only once the marker itself is
-          // older than the grace window.
+          // No live non-temp cwd — a crashed temp session, a deleted
+          // worktree, or a real project transiently absent (ejected
+          // media, mount down). One sweep must not decide any of these:
+          // mark first, remove only once the marker itself is older
+          // than the grace window. An immediate remove here would also
+          // hit live-but-idle (>24 h) temp-rooted sessions, whose
+          // sidecar aged past trust and whose appends stopped.
           if (Storage.orphanMarkerExpired(entryPath, now)) {
             await Storage.removeEntry(entryPath, entry, onBeforeRemove, result);
           } else {
@@ -591,11 +593,12 @@ export class Storage {
 
   /**
    * Collects every working directory recorded in an entry's artifacts.
-   * Chat logs contribute the cwd of their first AND last record (`/cd`
-   * relocation keeps the old cwd on line 1 and moves the file); runtime
-   * sidecars contribute `work_dir`, worktree sidecars `originalCwd`.
-   * Subdirectories (`chats/archive/`) are scanned too. All reads are
-   * bounded so startup cost stays independent of chat history size.
+   * Chat logs contribute the cwd of every record they hold (`/cd` hops
+   * leave earlier cwds on earlier lines and move the file); runtime
+   * sidecars contribute `work_dir`. Subdirectories (`chats/archive/`)
+   * are scanned too. Scanning stops once a cwd is found that still
+   * exists outside temp roots: such a cwd vetoes removal for every
+   * caller, and transcripts can be large.
    */
   static collectRecordedCwds(entryPath: string): string[] {
     const cwds = new Set<string>();
@@ -603,122 +606,70 @@ export class Storage {
     return [...cwds];
   }
 
+  /**
+   * A cwd that still exists outside temp roots vetoes removal on every
+   * caller's predicate, so it can end the scan early.
+   */
+  private static isVetoCwd(cwd: string): boolean {
+    return fs.existsSync(cwd) && !isTempDirPath(cwd);
+  }
+
   private static scanDirForCwds(
     dir: string,
     cwds: Set<string>,
     depth: number,
-  ): void {
-    if (depth > 2) return;
+  ): boolean {
+    if (depth > 2) return false;
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      return;
+      return false;
     }
     for (const dirent of dirents) {
       const entryPath = path.join(dir, dirent.name);
+      let vetoed = false;
       if (dirent.isDirectory()) {
-        Storage.scanDirForCwds(entryPath, cwds, depth + 1);
+        vetoed = Storage.scanDirForCwds(entryPath, cwds, depth + 1);
       } else if (dirent.name.endsWith('.jsonl')) {
-        const head = Storage.readLineHead(entryPath);
-        if (head) Storage.addRecordedCwd(head, cwds);
-        const tail = Storage.readLineTail(entryPath);
-        if (tail && tail !== head) {
-          Storage.addRecordedCwd(tail, cwds);
-        }
+        vetoed = Storage.scanFileForCwds(entryPath, cwds);
       } else if (dirent.name.endsWith('.runtime.json')) {
         const cwd = Storage.readJsonStringField(entryPath, 'work_dir');
-        if (cwd) cwds.add(cwd);
-      } else if (dirent.name.endsWith('.worktree.json')) {
-        const cwd = Storage.readJsonStringField(entryPath, 'originalCwd');
-        if (cwd) cwds.add(cwd);
+        if (cwd) {
+          cwds.add(cwd);
+          vetoed = Storage.isVetoCwd(cwd);
+        }
       }
+      if (vetoed) return true;
     }
+    return false;
   }
 
-  private static addRecordedCwd(line: string, cwds: Set<string>): void {
-    // Parsing stays local to storage.ts: jsonl-utils' parseLineTolerant
-    // would be the natural reuse, but its import chain (atomicFileWrite
-    // -> debugLogger) cycles back into this module.
+  /** Streams a transcript and records every line's cwd. */
+  private static scanFileForCwds(filePath: string, cwds: Set<string>): boolean {
+    let fd: number | undefined;
     try {
-      Storage.takeCwdFromJson(line, cwds);
-      return;
-    } catch {
-      // Possibly `}{`-glued records (crash mid-append): walk balanced
-      // top-level objects and parse each fragment individually.
-    }
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let start = -1;
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      if (escape) {
-        escape = false;
-        continue;
-      }
-      if (inString) {
-        if (c === '\\') escape = true;
-        else if (c === '"') inString = false;
-        continue;
-      }
-      if (c === '"') {
-        inString = true;
-      } else if (c === '{') {
-        if (depth === 0) start = i;
-        depth++;
-      } else if (c === '}') {
-        depth--;
-        if (depth === 0 && start >= 0) {
-          try {
-            Storage.takeCwdFromJson(line.slice(start, i + 1), cwds);
-          } catch {
-            // Fragment is not valid JSON — skip it.
+      fd = fs.openSync(filePath, 'r');
+      const decoder = new StringDecoder('utf8');
+      const buf = Buffer.alloc(64 * 1024);
+      let leftover = '';
+      for (;;) {
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, null);
+        const text = leftover + decoder.write(buf.subarray(0, bytesRead));
+        if (bytesRead === 0) {
+          if (leftover && Storage.extractLineCwds(leftover, cwds)) {
+            return true;
           }
-          start = -1;
-        } else if (depth < 0) {
-          // Unbalanced close brace (e.g. a stray leading `}` from a torn
-          // write) — reset and keep scanning, mirroring
-          // `_recoverObjectsFromLine` in utils/jsonl-utils.ts (kept local
-          // here because that module's import chain cycles back into
-          // storage.ts).
-          depth = 0;
-          start = -1;
+          return false;
+        }
+        const lines = text.split('\n');
+        leftover = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line && Storage.extractLineCwds(line, cwds)) return true;
         }
       }
-    }
-  }
-
-  private static takeCwdFromJson(text: string, cwds: Set<string>): void {
-    const record = JSON.parse(text) as { cwd?: unknown };
-    if (typeof record.cwd === 'string' && record.cwd) {
-      cwds.add(record.cwd);
-    }
-  }
-
-  /** First physical line of a file, read in bounded chunks. */
-  private static readLineHead(filePath: string): string | null {
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(filePath, 'r');
-      const chunks: Buffer[] = [];
-      const buf = Buffer.alloc(8192);
-      let offset = 0;
-      while (offset < Storage.MAX_RECORD_SCAN_BYTES) {
-        const bytesRead = fs.readSync(fd, buf, 0, buf.length, offset);
-        if (bytesRead === 0) break;
-        const slice = Buffer.from(buf.subarray(0, bytesRead));
-        const newline = slice.indexOf('\n');
-        if (newline !== -1) {
-          chunks.push(slice.subarray(0, newline));
-          return Buffer.concat(chunks).toString('utf8');
-        }
-        chunks.push(slice);
-        offset += bytesRead;
-      }
-      return Buffer.concat(chunks).toString('utf8');
     } catch {
-      return null;
+      return false;
     } finally {
       if (fd !== undefined) {
         try {
@@ -730,31 +681,43 @@ export class Storage {
     }
   }
 
-  /** Last non-empty physical line of a file, via one bounded tail read. */
-  private static readLineTail(filePath: string): string | null {
-    let fd: number | undefined;
-    try {
-      const { size } = fs.statSync(filePath);
-      if (size === 0) return null;
-      const length = Math.min(size, Storage.MAX_RECORD_SCAN_BYTES);
-      const buf = Buffer.alloc(length);
-      fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, buf, 0, length, size - length);
-      const lines = buf.toString('utf8').split('\n');
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i].trim();
-        if (line) return line;
-      }
-      return null;
-    } catch {
-      return null;
-    } finally {
-      if (fd !== undefined) {
-        try {
-          fs.closeSync(fd);
-        } catch {
-          // Ignore.
+  /**
+   * Records every `cwd` value on the line without parsing the record's
+   * (potentially huge) message payload. Records serialize `cwd` near
+   * the start, and a pattern scan also recovers cwds from oversized,
+   * `}{`-glued, or torn records. A false match inside message content
+   * only adds an extra cwd, which errs on the keep side.
+   */
+  private static extractLineCwds(line: string, cwds: Set<string>): boolean {
+    let pos = 0;
+    for (;;) {
+      const at = line.indexOf('"cwd"', pos);
+      if (at === -1) return false;
+      pos = at + '"cwd"'.length;
+      let i = pos;
+      while (i < line.length && line[i] === ' ') i++;
+      if (line[i] !== ':') continue;
+      i++;
+      while (i < line.length && line[i] === ' ') i++;
+      if (line[i] !== '"') continue;
+      let end = i + 1;
+      while (end < line.length) {
+        if (line[end] === '\\') {
+          end += 2;
+          continue;
         }
+        if (line[end] === '"') break;
+        end++;
+      }
+      if (end >= line.length) return false;
+      try {
+        const value = JSON.parse(line.slice(i, end + 1)) as string;
+        if (value) {
+          cwds.add(value);
+          if (Storage.isVetoCwd(value)) return true;
+        }
+      } catch {
+        // Malformed escape sequence — not a real cwd value.
       }
     }
   }

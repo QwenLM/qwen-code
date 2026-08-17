@@ -7138,9 +7138,43 @@ describe('Server Config (config.ts)', () => {
           recursive: true,
           force: true,
         });
+        // Ordering: salvage must read the transcripts BEFORE they are
+        // deleted, otherwise there is nothing left to salvage.
+        expect(
+          vi.mocked(persistUsageBeforeTranscriptDeletion).mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(rmSpy.mock.invocationCallOrder[0]);
       } finally {
         cwdSpy.mockRestore();
         listSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when the session writer was sealed for handoff', async () => {
+      // A certified handoff seals the writer so a successor can resume
+      // from this very entry — shutdown must not delete the transcripts
+      // out from under it, even when every guard would pass.
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue([path.join(os.tmpdir(), 'qwen-sess-cwd')]);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-handoff-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+        config['sessionWriterHandoffRequested'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        cwdSpy.mockRestore();
       }
     });
 
@@ -7306,9 +7340,12 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('salvages usage from an entry’s transcripts via the hook', async () => {
+      // Derive the transcript path from the argument so the test also
+      // pins that the hook receives the doomed entry's path (a hook
+      // salvaging the wrong directory would yield a different path).
       const listSpy = vi
         .spyOn(Storage, 'listTranscriptPaths')
-        .mockReturnValue(['/entry/chats/sess.jsonl']);
+        .mockImplementation((dir: string) => [`${dir}/sess.jsonl`]);
       const sweepSpy = vi
         .spyOn(Storage, 'cleanOrphanProjectDirs')
         .mockResolvedValue({ removed: [], errors: [] });
@@ -7319,8 +7356,9 @@ describe('Server Config (config.ts)', () => {
         const hook = sweepSpy.mock.calls[0]?.[1];
         expect(hook).toBeDefined();
         await hook?.('/some/entry');
+        expect(listSpy).toHaveBeenCalledWith('/some/entry');
         expect(persistUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
-          '/entry/chats/sess.jsonl',
+          '/some/entry/sess.jsonl',
         );
       } finally {
         sweepSpy.mockRestore();
