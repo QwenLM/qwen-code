@@ -421,6 +421,31 @@
   text-decoration: underline;
 }
 
+.locationRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.openButton {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--link-color, #2563eb);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 10px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.openButton:hover {
+  background: color-mix(in srgb, var(--link-color, #2563eb) 12%, transparent);
+}
+
 .review {
   min-height: 100%;
   display: grid;

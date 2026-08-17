@@ -83,6 +83,7 @@ import {
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
+import * as sessionRegistry from '../services/session-registry.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
@@ -2394,6 +2395,112 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
+    // A pre-canonical transcript whose newest Goal record is a legacy
+    // `goal_status` card. Recovering it is the one restore path that has to
+    // *write*: it journals a migrated `goal_state` record.
+    const legacyGoalSession = (): ResumedSessionData => {
+      const record = {
+        uuid: 'legacy-goal',
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          phase: 'result',
+          outputHistoryItems: [
+            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
+          ],
+        },
+      } as unknown as ChatRecord;
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    // Under a writer lease the recorder is `inactive` until it is handed the
+    // lease, and rejects every write until then. Kicking the legacy
+    // migration off from the constructor drove that write into the guard,
+    // and `restore()` latches the failure as `recoveryError` permanently:
+    // the migrated goal was dropped and the whole resumed session lost goal
+    // persistence. Ordering is the deciding variable, so this asserts the
+    // deferred restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before migrating a legacy Goal', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      expect(recorder.hasWriteOwnership()).toBe(false);
+
+      let settled = false;
+      const ready = config.getGoalRuntimeReady().then(
+        (runtime) => {
+          settled = true;
+          return runtime;
+        },
+        (error: unknown) => {
+          settled = true;
+          throw error;
+        },
+      );
+      // Flush microtasks: the pre-fix code had already rejected by here.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      const recordGoalState = vi
+        .spyOn(recorder, 'recordGoalState')
+        .mockResolvedValue({} as ChatRecord);
+      // Stands in for `activateChatRecording()` handing over the lease.
+      vi.spyOn(recorder, 'hasWriteOwnership').mockReturnValue(true);
+      (
+        config as unknown as { startPendingGoalRestore(): void }
+      ).startPendingGoalRestore();
+
+      const runtime = await ready;
+      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        objective: 'ship the thing',
+        status: 'paused',
+      });
+      // The runtime is usable, not latched on `recoveryError` — which is
+      // what `assertOperational()` would rethrow from every later
+      // beginTurn/dispatch/finishTurn.
+      expect(() => runtime.beginTurn('turn-1')).not.toThrow();
+    });
+
+    it('fails a deferred Goal restore instead of hanging when the writer never arrives', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const ready = config.getGoalRuntimeReady();
+      config.startNewSession('replacement-session');
+
+      await expect(ready).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -2414,6 +2521,83 @@ describe('Server Config (config.ts)', () => {
       const replacement = await config.getGoalRuntimeReady();
       expect(replacement).not.toBe(initial);
       expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('holds selective Goal readiness and autonomous work until finalization', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const started: string[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      let ready = false;
+      void config.getGoalRuntimeReady().then(() => {
+        ready = true;
+      });
+
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(started).toEqual([]);
+
+      config.finalizeSessionRestore();
+
+      await expect(config.getGoalRuntimeReady()).resolves.toBe(
+        config.getGoalRuntime(),
+      );
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+    });
+
+    it('rejects selective Goal readiness when restore is abandoned', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const readiness = config.getGoalRuntimeReady();
+
+      config.startNewSession('replacement-session');
+
+      await expect(readiness).rejects.toThrow('Session restore was abandoned');
     });
 
     it('owns one durable Goal runtime per canonical session', async () => {
@@ -6143,6 +6327,7 @@ describe('Server Config (config.ts)', () => {
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
+    config.trackSessionRegistration(Promise.resolve(true));
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -6161,7 +6346,21 @@ describe('Server Config (config.ts)', () => {
       return checked === oldRuntimeStatusPath || checked === newDir;
     });
 
+    // The registry patch rides its own chain and `/cd` deliberately does
+    // not await it: the patch writes the HOME filesystem, and awaiting
+    // it in the flush would hang `/cd` whenever HOME stalls while the
+    // project directory is healthy. The settlement log pins the new
+    // contract — `/cd` returns first, and `ps` settles a tick later.
+    const settled: string[] = [];
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settled.push('patch');
+      });
+
     await config.relocateWorkingDirectory(newDir);
+    settled.push('relocated');
 
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldRuntimeStatusPath,
@@ -6172,8 +6371,229 @@ describe('Server Config (config.ts)', () => {
       workDir: newDir,
       qwenVersion: null,
     });
+    // The registry's DIRECTORY column is how a user tells two live
+    // sessions apart; the switch must reach it (and the directory-derived
+    // name) or `qwen sessions ps` keeps showing the folder that was left.
+    await vi.waitFor(() => {
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        cwd: newDir,
+        name: sessionRegistry.deriveSessionName(newDir, sessionId),
+      });
+      expect(settled).toContain('patch');
+    });
+    expect(settled[0]).toBe('relocated');
 
     writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should patch the registry even when the sidecar write failed at startup', async () => {
+    // Mirror of the startNewSession divergence pin: registration writes
+    // to the global dir, the sidecar to the project's chats/ dir —
+    // independent failure domains, so the registered-but-sidecar-off
+    // state is reachable and the /cd patch must survive it.
+    const config = new Config(baseParams);
+    // No markRuntimeStatusEnabled(): models the failed sidecar write.
+    config.trackSessionRegistration(Promise.resolve(true));
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue('unused');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck.toString() === newDir,
+    );
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    // The patch rides its own fire-and-forget chain; let it settle.
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        cwd: newDir,
+        name: sessionRegistry.deriveSessionName(newDir, sessionId),
+      }),
+    );
+    expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should refresh the sidecar even when registration failed', async () => {
+    // The opposite divergence: the sidecar write succeeded at startup
+    // but registerSession returned false (foreign-identity refusal,
+    // unwritable global dir), so only the sidecar gate is armed. A gate
+    // regressed to `if (!this.sessionRegistryActive) return;` would silently
+    // stop refreshing runtime.json on /cd for these sessions.
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    // No trackSessionRegistration(): models the failed registration.
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const newStorage = new Storage(newDir);
+    const oldStorage = new Storage(config.getTargetDir());
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue(newRuntimeStatusPath);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
+      sessionId,
+      workDir: newDir,
+      qwenVersion: null,
+    });
+    expect(patchSessionRecordSpy).not.toHaveBeenCalled();
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('startNewSession patches the registry even when the sidecar write rejects', async () => {
+    // The sidecar (project-local chats/) and the registry (global dir)
+    // are independent failure domains: a sidecar write rejecting on a
+    // read-only or full project filesystem mid-session must not skip
+    // the registry patch, or `ps` advertises the pre-/clear session id
+    // until process exit.
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    config.trackSessionRegistration(Promise.resolve(true));
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockRejectedValue(new Error('read-only project fs'));
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    const newSessionId = config.startNewSession('replacement-session');
+
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        sessionId: newSessionId,
+        cwd: config.getTargetDir(),
+      }),
+    );
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('serializes pending registration, transitions, and unregister', async () => {
+    const config = new Config(baseParams);
+    let finishRegistration!: (registered: boolean) => void;
+    const registration = new Promise<boolean>((resolve) => {
+      finishRegistration = resolve;
+    });
+    let finishPatch!: () => void;
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPatch = resolve;
+          }),
+      );
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    config.trackSessionRegistration(registration);
+    const newSessionId = config.startNewSession('replacement-session');
+    const cleanup = config.unregisterSessionRegistry();
+
+    expect(patchSessionRecordSpy).not.toHaveBeenCalled();
+    expect(unregisterSessionSpy).not.toHaveBeenCalled();
+
+    finishRegistration(true);
+    await vi.waitFor(() => {
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        sessionId: newSessionId,
+        cwd: config.getTargetDir(),
+      });
+    });
+    expect(unregisterSessionSpy).not.toHaveBeenCalled();
+
+    finishPatch();
+    await cleanup;
+    expect(unregisterSessionSpy).toHaveBeenCalledTimes(1);
+
+    patchSessionRecordSpy.mockRestore();
+    unregisterSessionSpy.mockRestore();
+  });
+
+  it('does not unregister when initial registration was refused', async () => {
+    const config = new Config(baseParams);
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    config.trackSessionRegistration(Promise.resolve(false));
+    await config.unregisterSessionRegistry();
+
+    expect(unregisterSessionSpy).not.toHaveBeenCalled();
+    unregisterSessionSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory patches the registry even when the sidecar write rejects', async () => {
+    // The /cd-side mirror of the /clear pin: a rejecting sidecar write
+    // must not skip the directory patch, and its rejection must not
+    // surface through relocateWorkingDirectory either.
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    config.trackSessionRegistration(Promise.resolve(true));
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockRejectedValue(new Error('read-only project fs'));
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck.toString() === newDir,
+    );
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        cwd: newDir,
+        name: sessionRegistry.deriveSessionName(newDir, sessionId),
+      }),
+    );
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
   });
@@ -7626,6 +8046,17 @@ describe('Server Config (config.ts)', () => {
     it('should return the default threshold', () => {
       const config = new Config(baseParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
+    });
+
+    it('treats a null runtime threshold as unset', () => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: null as unknown as number,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
     });
 
     it('should use a custom truncateToolOutputThreshold if provided', () => {
@@ -7646,6 +8077,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(
         Number.POSITIVE_INFINITY,
       );
+    });
+
+    it.each([
+      [25_000, 25_000],
+      [10_000, 10_000],
+      [100_000, 100_000],
+      [-1, Number.POSITIVE_INFINITY],
+    ])('tracks an explicit threshold of %s', (threshold, expectedThreshold) => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: threshold,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(expectedThreshold);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(true);
     });
   });
 

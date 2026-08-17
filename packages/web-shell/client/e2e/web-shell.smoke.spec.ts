@@ -73,6 +73,105 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   }
 });
 
+test('branches from an earlier completed Assistant response and resumes the fork @smoke', async ({
+  page,
+}, testInfo) => {
+  const branchRecordId = '11111111-1111-4111-8111-111111111111';
+  const branchSessionId = 'web-shell-e2e-branch';
+  const firstTurn = [
+    userTextEvent('First question', { id: 1 }),
+    assistantTextEvent('First completed answer', {
+      id: 2,
+      branchRecordId,
+    }),
+    turnCompleteEvent('prompt-1', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      ...firstTurn,
+      userTextEvent('Second question', { id: 4 }),
+      assistantTextEvent('Second completed answer', {
+        id: 5,
+        branchRecordId: '22222222-2222-4222-8222-222222222222',
+      }),
+      turnCompleteEvent('prompt-2', { id: 6 }),
+      userTextEvent('Third question', { id: 7 }),
+      assistantTextEvent('Third completed answer', {
+        id: 8,
+        branchRecordId: '33333333-3333-4333-8333-333333333333',
+      }),
+      turnCompleteEvent('prompt-3', { id: 9 }),
+    ],
+    branch: {
+      sessionId: branchSessionId,
+      clientId: 'web-shell-e2e-branch-client',
+      displayName: 'First answer branch',
+      events: firstTurn,
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const firstAnswerRow = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'First completed answer' });
+  await firstAnswerRow.hover();
+  await firstAnswerRow
+    .getByRole('button', { name: 'Branch', exact: true })
+    .click();
+
+  await expect.poll(() => daemon.branchRequests().length).toBe(1);
+  const branchRequest = firstRequest(daemon.branchRequests());
+  expect(branchRequest.path).toBe(
+    `/session/${encodeURIComponent(scenario.sessionId)}/branch`,
+  );
+  expect(requestBodyRecord(branchRequest)).toEqual({
+    atRecordId: branchRecordId,
+  });
+  await expect(page).toHaveURL(
+    new RegExp(`/session/${encodeURIComponent(branchSessionId)}$`),
+  );
+  await completeReplay(
+    page,
+    daemon,
+    branchSessionId,
+    scenario.branch?.events.length,
+  );
+  const messages = page.locator('[data-web-shell-message-list]');
+  await expect(messages).toContainText('First completed answer');
+  await expect(messages).not.toContainText('Second completed answer');
+  await expect(messages).not.toContainText('Third completed answer');
+  expect(scenario.events).toHaveLength(9);
+
+  await fillComposer(page, 'Continue from the fork');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await expect
+    .poll(
+      () =>
+        daemon
+          .promptRequests()
+          .filter(
+            (request) => request.path === `/session/${branchSessionId}/prompt`,
+          ).length,
+    )
+    .toBe(1);
+
+  await page.reload();
+  await completeReplay(
+    page,
+    daemon,
+    branchSessionId,
+    scenario.branch?.events.length,
+  );
+  const restoredFirstAnswer = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'First completed answer' });
+  await restoredFirstAnswer.hover();
+  await expect(
+    restoredFirstAnswer.getByRole('button', { name: 'Branch', exact: true }),
+  ).toBeVisible();
+});
+
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
   page,
 }, testInfo) => {
@@ -98,6 +197,82 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Pong from fake SSE',
   );
+});
+
+test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'xhigh', name: 'Extra high' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  const modelSubmenu = page.locator('[data-web-shell-model-submenu-trigger]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  const medium = controls.locator('[data-web-shell-effort="medium"]');
+  const xhigh = controls.locator('[data-web-shell-effort="xhigh"]');
+  await expect(controls).toBeVisible();
+  await expect(modelSubmenu).toBeVisible();
+  await expect(modelButton).toContainText('Extra High');
+  await expect(thinking).toBeChecked();
+  await expect(xhigh).toHaveAttribute('aria-pressed', 'true');
+
+  await medium.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Medium');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+  });
+  await expect(thinking).not.toBeChecked();
+  await expect(medium).toBeDisabled();
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
+  expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Medium');
+
+  await modelSubmenu.click();
+  await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-model-submenu] input[type="search"]'),
+  ).toBeVisible();
 });
 
 test('uploads an Extension archive from the manager @smoke', async ({

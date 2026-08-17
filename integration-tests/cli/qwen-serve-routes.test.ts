@@ -314,6 +314,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_source_metadata',
       'session_side_task',
       'session_prompt',
+      'session_media',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
       'session_cancel',
@@ -364,6 +365,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_bytes',
       'workspace_file_read_cursor',
       'workspace_file_write',
+      'workspace_file_upload',
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_toggle',
@@ -405,6 +407,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
+      'workspace_session_live_state',
+      'workspace_session_metadata',
       'voice_transcribe',
     ]);
   });

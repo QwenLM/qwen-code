@@ -434,6 +434,7 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         lastReason: expect.stringContaining('bounded evidence catalog'),
+        limitKind: 'evidence_catalog',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -507,6 +508,7 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         lastReason: expect.stringContaining('bounded evidence catalog'),
+        limitKind: 'evidence_catalog',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -966,6 +968,7 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'usage_limited',
       lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+      limitKind: 'checkpoint_request',
     });
     // The oversized request cannot shrink on its own, so resume must stay
     // blocked instead of re-limiting on every resumed turn.
@@ -1078,9 +1081,10 @@ describe('goal runtime', () => {
       expect(host.started).toHaveLength(1);
       expect(checkpointVerifier).toHaveBeenCalledTimes(0);
       if (failurePoint === 'truncated') {
-        expect(runtime.getSnapshot().goal?.lastReason).toBe(
-          GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
-        );
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+          limitKind: 'evidence_catalog',
+        });
         await expect(
           runtime.dispatch({
             action: 'resume',
@@ -2049,6 +2053,30 @@ describe('goal runtime', () => {
     });
   });
 
+  it('promotes a waiting reservation when the current turn is released', async () => {
+    // The host drains continuations one at a time and the caller holding
+    // `queued-user` is what blocks that drain, so minting a fresh
+    // continuation here would leave the reservation waiting on a turn that
+    // can never start. `finishTurn` promotes in the same situation.
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const initialPermit = host.started[0];
+
+    expect(runtime.beginTurn('queued-user')).toBeUndefined();
+    await expect(
+      runtime.releaseTurn(`goal-runtime:${initialPermit.turnId}`),
+    ).resolves.toBe(true);
+
+    expect(runtime.permitForTurn('queued-user')).toBeDefined();
+    expect(host.started).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active' },
+    });
+  });
+
   it('releases a promoted user reservation and resumes autonomously', async () => {
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
@@ -2583,6 +2611,43 @@ describe('goal runtime', () => {
     });
     expect(observed).toEqual([]);
     expect(vi.isMockFunction(journal.recordGoalState)).toBe(false);
+  });
+
+  it('reports a lost session writer as GoalPersistenceUnavailableError', async () => {
+    // The journal rejects a lost writer with its own error type, but callers
+    // key the "no persistence, so no goal" degradation off this class. A raw
+    // writer error escaping `clear` is what makes an ACP `/goal clear` fail
+    // the user's whole prompt request for the rest of the session.
+    class SessionWriterUnavailableError extends Error {
+      constructor() {
+        super('Session writer is unavailable');
+        this.name = 'SessionWriterUnavailableError';
+      }
+    }
+    const writerLost = new SessionWriterUnavailableError();
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, writerLost],
+    });
+    const runtime = createGoalRuntime({ journal });
+    await runtime.dispatch({ action: 'create', objective: 'ship it' });
+    const current = runtime.getSnapshot().goal;
+    if (!current) throw new Error('expected the created goal');
+
+    const clearing = runtime.dispatch({
+      action: 'clear',
+      expectedGoalId: current.goalId,
+      expectedRevision: current.revision,
+    });
+
+    await expect(clearing).rejects.toBeInstanceOf(
+      GoalPersistenceUnavailableError,
+    );
+    await expect(clearing).rejects.toMatchObject({
+      message: 'Session writer is unavailable',
+      cause: writerLost,
+    });
+    // The failed write must not be mistaken for a committed clear.
+    expect(runtime.getSnapshot().goal?.goalId).toBe(current.goalId);
   });
 
   it('publishes a lifecycle cause only after its append commits', async () => {
@@ -3607,6 +3672,82 @@ describe('goal runtime', () => {
       objective: 'ship it',
       status: 'paused',
     });
+  });
+
+  it('prepares an active restore without broadcasting or starting work', async () => {
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    const listener = vi.fn();
+    runtime.bindHost(host);
+    runtime.subscribe(listener);
+    const record = goalStateRecord({
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'g-selective',
+        revision: 1,
+        objective: 'resume selectively',
+        status: 'active',
+        evidenceCursor: { recordId: 'restore-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    });
+
+    await runtime.prepareRestore([record]);
+
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(listener).not.toHaveBeenCalled();
+    expect(host.started).toEqual([]);
+
+    await runtime.activateRestoredWork();
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('coalesces preparation and activation and rejects activation before preparation', async () => {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    await expect(runtime.activateRestoredWork()).rejects.toThrow(
+      'preparation has not started',
+    );
+    const record = goalStateRecord({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+
+    const firstPreparation = runtime.prepareRestore([record]);
+    const secondPreparation = runtime.prepareRestore([record]);
+    await Promise.all([firstPreparation, secondPreparation]);
+    const firstActivation = runtime.activateRestoredWork();
+    const secondActivation = runtime.activateRestoredWork();
+
+    await expect(
+      Promise.all([firstActivation, secondActivation]),
+    ).resolves.toEqual([undefined, undefined]);
+  });
+
+  it('prevents unfinished restore preparation from committing after disposal', async () => {
+    let releaseAppend!: () => void;
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal({ beforeAppend: () => appendGate }),
+    });
+    const preparing = runtime.prepareRestore([legacyGoalRecord()]);
+
+    await Promise.resolve();
+    runtime.dispose();
+    releaseAppend();
+
+    await expect(preparing).rejects.toThrow('Goal runtime has been disposed');
+    await expect(runtime.activateRestoredWork()).rejects.toThrow(
+      'Goal runtime has been disposed',
+    );
   });
 
   it('commits paused legacy recovery before a reentrant resume', async () => {

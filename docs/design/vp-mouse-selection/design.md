@@ -136,6 +136,8 @@ virtualRow  = scrollTop + viewportRow
 
 Before starting a selection, hit-test that `(col, layoutRow)` lies inside the history viewport content region and not in the scrollbar column, composer, or footer; presses elsewhere fall through to the existing scrollbar-drag / click-to-focus handlers. This arbitration is the contract between the new selection subscriber and the existing mouse subscribers.
 
+The issue #8131 follow-up keeps that history-region arbitration but registers the footer as a separate selectable rectangle. A drag remains clamped to the rectangle where it started, so the composer and other controls stay excluded.
+
 Anchors are stored in **virtual-row space** so a selection stays pinned to content, but in PR 1 any non-selection scroll/resize/streaming clears the selection (off-screen content is not cached), so virtual-row anchoring here is just consistent bookkeeping, not cross-screen persistence.
 
 ### Copy

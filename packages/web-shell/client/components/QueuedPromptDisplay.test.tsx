@@ -75,6 +75,82 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).toContain('排队消息二');
   });
 
+  it('renders image thumbnails after the text', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '带图消息',
+          images: [{ data: 'aW1n', media_type: 'image/png' }],
+        },
+      ],
+    });
+    expect(container.textContent).toContain('带图消息');
+    const img = container.querySelector<HTMLImageElement>(
+      'img[class*="queuedPromptImage"]',
+    );
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,aW1n');
+    expect(img?.getAttribute('alt')).toBe('用户上传的图片 1');
+    // The thumbnail sits in the row after the text span.
+    const row = container.querySelector('[class*="queuedPromptText"]');
+    expect(row).not.toBeNull();
+    const position = row?.compareDocumentPosition(img as Node) ?? 0;
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('does not render unsafe image data URIs', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '不安全图片',
+          images: [{ data: 'PHNjcmlwdD4=', media_type: 'text/html' }],
+        },
+      ],
+    });
+
+    expect(
+      container.querySelector('img[class*="queuedPromptImage"]'),
+    ).toBeNull();
+    expect(container.querySelector('[class*="queuedPromptImages"]')).toBeNull();
+  });
+
+  it('calls onImagePreview when a thumbnail is clicked', () => {
+    const onImagePreview = vi.fn();
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '带图消息',
+          images: [{ data: 'aW1n', media_type: 'image/png' }],
+        },
+      ],
+      onImagePreview,
+    });
+    const img = container.querySelector<HTMLImageElement>(
+      'img[class*="queuedPromptImage"]',
+    );
+    expect(img).not.toBeNull();
+    expect(img?.classList.toString()).toContain('queuedPromptImageInteractive');
+    act(() => img?.click());
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,aW1n',
+      '用户上传的图片 1',
+    );
+    expect(img?.getAttribute('role')).toBe('button');
+    expect(img?.tabIndex).toBe(0);
+    act(() => {
+      img?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      img?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: ' ', bubbles: true }),
+      );
+    });
+    expect(onImagePreview).toHaveBeenCalledTimes(3);
+  });
+
   it('shows server queue status without an insert action', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],

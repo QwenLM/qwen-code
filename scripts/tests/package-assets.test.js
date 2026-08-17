@@ -41,6 +41,57 @@ describe('package asset scripts', () => {
     }
   });
 
+  it('emits an executable dist/cli.js — shebang plus the exec bit, once', () => {
+    // shellContextEnv blanks a QWEN_CODE_CLI a POSIX shell cannot exec (no
+    // shebang, or no exec bit), and `"${QWEN_CODE_CLI:-qwen}"` then silently
+    // runs whatever `qwen` the PATH resolves — a different install for every
+    // review subcommand of a session launched off the bundle (measured on
+    // three live runs). Deleting the block, dropping the chmod, or dropping
+    // the already-has-a-shebang guard must not stay green.
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'dist/cli.js', 'console.log("bundle");\n');
+    const cliEntry = path.join(rootDir, 'dist', 'cli.js');
+    // A build time in the past, so the rewrite's own clock cannot coincide
+    // with it: the digest stamp reads this mtime as "when the bundle was
+    // built", and a rewrite that bumps it certifies a bundle as newer than
+    // review sources edited before it — the staleness warning then never
+    // fires and a review silently measures the old behaviour.
+    const builtAt = new Date(Date.now() - 60_000);
+    utimesSync(cliEntry, builtAt, builtAt);
+    // Read back what the filesystem actually recorded. Comparing against the
+    // `Date` handed to `utimesSync` would re-pin libuv's double-seconds →
+    // `timespec` truncation (about half of all millisecond values land 1 ns
+    // low), which is not the invariant under test — only whether the rewrite
+    // moves the time the filesystem holds.
+    const builtMs = fs.statSync(cliEntry).mtimeMs;
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    const once = readFileSync(cliEntry, 'utf8');
+    expect(once.startsWith('#!/usr/bin/env node\n')).toBe(true);
+    expect(once).toContain('console.log("bundle");');
+    expect(fs.statSync(cliEntry).mtimeMs).toBe(builtMs);
+    if (process.platform !== 'win32') {
+      // Windows has no POSIX exec bit for chmod to set; the shebang half
+      // still holds there.
+      expect(fs.statSync(cliEntry).mode & 0o777).toBe(0o755);
+    }
+
+    // Re-running the bundle step must not stack a second shebang — and must
+    // still set the exec bit on a file that already carries one (an entry
+    // arriving with a shebang but mode 0644 is exactly the shape that blanks
+    // QWEN_CODE_CLI; demoting the chmod inside the shebang guard must fail).
+    if (process.platform !== 'win32') {
+      fs.chmodSync(cliEntry, 0o644);
+    }
+    copyBundleAssets({ root: rootDir });
+    expect(readFileSync(cliEntry, 'utf8')).toBe(once);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(cliEntry).mode & 0o777).toBe(0o755);
+    }
+  });
+
   it('stamps the review source digest into dist', () => {
     // Nothing gated this call site: removing it left the whole scripts suite
     // green while `npm run bundle` silently stopped writing the stamp — and a
@@ -722,6 +773,8 @@ describe('package asset scripts', () => {
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
+
+    expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.4');
     expect(
       existsSync(
         path.join(
@@ -738,6 +791,60 @@ describe('package asset scripts', () => {
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
       ),
     ).toBe(true);
+  });
+
+  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'package-lock.json',
+      JSON.stringify({
+        packages: {
+          'node_modules/sharp': {
+            version: '0.35.3',
+          },
+        },
+      }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.35.0',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.3');
+  });
+
+  it('rejects a locked sharp version outside the core declaration', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify({ dependencies: { sharp: '^0.34.0' } }),
+    );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1078,8 +1185,42 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
+      'package-lock.json',
+      JSON.stringify(
+        {
+          packages: {
+            'node_modules/sharp': {
+              version: '0.35.3',
+            },
+            'packages/core/node_modules/sharp': {
+              version: '0.35.4',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    writeFile(
+      rootDir,
       'packages/cli/src/i18n/locales/en.json',
       '{"hello":"world"}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.35.0',
+          },
+        },
+        null,
+        2,
+      ),
     );
     writeFile(
       rootDir,

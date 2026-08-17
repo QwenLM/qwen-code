@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { inspect } from 'node:util';
 import type { AnyMessage, Stream } from '@agentclientprotocol/sdk';
 
 export interface NdJsonMessageObservation {
@@ -25,6 +26,8 @@ export interface NdJsonStreamLimits {
   maxQueuedMessages: number;
   maxQueuedBytes: number;
 }
+
+export type NdJsonInboundMessageValidator = (message: AnyMessage) => boolean;
 
 export class NdJsonFrameTooLargeError extends Error {
   readonly code = 'ndjson_frame_too_large';
@@ -68,44 +71,92 @@ export class NdJsonIncompleteFrameError extends Error {
   }
 }
 
+export class NdJsonUnexpectedEofError extends Error {
+  readonly code = 'ndjson_unexpected_eof';
+
+  constructor() {
+    super('NDJSON input ended while the bounded transport was active');
+    this.name = 'NdJsonUnexpectedEofError';
+  }
+}
+
+export class NdJsonInvalidMessageError extends Error {
+  constructor(
+    readonly code: 'ndjson_parse_error' | 'ndjson_invalid_message',
+    readonly observedBytes: number,
+  ) {
+    super(`NDJSON input contains an invalid ${observedBytes}-byte message`);
+    this.name = 'NdJsonInvalidMessageError';
+  }
+}
+
 interface TextDecoderLike {
   decode(input?: Uint8Array): string;
 }
+
+const MAX_JSON_RPC_METHOD_BYTES = 1024;
+const MAX_JSON_RPC_ID_BYTES = 256;
+const MAX_JSON_RPC_ERROR_MESSAGE_BYTES = 1024;
+const MAX_JSON_DEPTH = 64;
+const MAX_JSON_NODES = 10_000;
+const MAX_JSON_ARRAY_LENGTH = 4096;
 
 export function ndJsonStream(
   output: WritableStream<Uint8Array>,
   input: ReadableStream<Uint8Array>,
   hooks?: NdJsonStreamHooks,
   limits?: NdJsonStreamLimits,
+  validateInboundMessage?: NdJsonInboundMessageValidator,
+  fatalCleanEof = false,
 ): Stream {
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
   if (limits) validateNdJsonStreamLimits(limits);
+  const outboundRequests = limits
+    ? new BoundedOutstandingRequestLedger(limits)
+    : undefined;
+  const inboundRequests = limits
+    ? new BoundedInboundRequestLedger(limits)
+    : undefined;
 
   const readable = limits
-    ? createBoundedReadable(input, textDecoder, hooks, limits)
+    ? createBoundedReadable(
+        input,
+        textDecoder,
+        hooks,
+        limits,
+        outboundRequests!,
+        inboundRequests!,
+        validateInboundMessage,
+        fatalCleanEof,
+      )
     : createLegacyReadable(input, textDecoder, hooks);
 
   const writable = new WritableStream<AnyMessage>({
     async write(message) {
-      const content = JSON.stringify(message);
-      const payload = textEncoder.encode(content);
-      const frameBytes = payload.byteLength + 1;
-      if (limits && frameBytes > limits.maxFrameBytes) {
-        const error = new NdJsonFrameTooLargeError(
-          'sent',
-          limits.maxFrameBytes,
-          frameBytes,
-        );
-        callHook(hooks?.onTransportError, error);
-        throw error;
-      }
-      const frame = new Uint8Array(frameBytes);
-      frame.set(payload);
-      frame[payload.byteLength] = 0x0a;
-      const writer = output.getWriter();
+      let writer: WritableStreamDefaultWriter<Uint8Array> | undefined;
+      let expectedResponseId: string | number | null | undefined;
       try {
+        const content = JSON.stringify(message);
+        const payload = textEncoder.encode(content);
+        const frameBytes = payload.byteLength + 1;
+        if (limits && frameBytes > limits.maxFrameBytes) {
+          throw new NdJsonFrameTooLargeError(
+            'sent',
+            limits.maxFrameBytes,
+            frameBytes,
+          );
+        }
+        const frame = new Uint8Array(frameBytes);
+        frame.set(payload);
+        frame[payload.byteLength] = 0x0a;
+        if (outboundRequests && isJsonRpcRequestMessage(message)) {
+          outboundRequests.admit(message.id, frameBytes);
+          expectedResponseId = message.id;
+        }
+        writer = output.getWriter();
         await writer.write(frame);
+        inboundRequests?.release(message);
         callHook(hooks?.onMessageSent, payload.byteLength);
         callHook(hooks?.onMessageObserved, {
           direction: 'sent',
@@ -113,10 +164,13 @@ export function ndJsonStream(
           message,
         });
       } catch (error) {
+        if (expectedResponseId !== undefined) {
+          outboundRequests?.discard(expectedResponseId);
+        }
         if (limits) callHook(hooks?.onTransportError, error);
         throw error;
       } finally {
-        writer.releaseLock();
+        writer?.releaseLock();
       }
     },
   });
@@ -153,6 +207,10 @@ function createBoundedReadable(
   textDecoder: TextDecoderLike,
   hooks: NdJsonStreamHooks | undefined,
   limits: NdJsonStreamLimits,
+  outboundRequests: BoundedOutstandingRequestLedger,
+  inboundRequests: BoundedInboundRequestLedger,
+  validateInboundMessage: NdJsonInboundMessageValidator | undefined,
+  fatalCleanEof: boolean,
 ): ReadableStream<AnyMessage> {
   const pending = new BoundedFrameBuffer(limits.maxFrameBytes);
   const minimumQueueCharge = Math.ceil(
@@ -173,6 +231,10 @@ function createBoundedReadable(
           textDecoder,
           hooks,
           limits,
+          outboundRequests,
+          inboundRequests,
+          validateInboundMessage,
+          fatalCleanEof,
           minimumQueueCharge,
           (charge) => {
             nextQueueCharge = charge;
@@ -200,6 +262,10 @@ async function pumpBoundedInput(
   textDecoder: TextDecoderLike,
   hooks: NdJsonStreamHooks | undefined,
   limits: NdJsonStreamLimits,
+  outboundRequests: BoundedOutstandingRequestLedger,
+  inboundRequests: BoundedInboundRequestLedger,
+  validateInboundMessage: NdJsonInboundMessageValidator | undefined,
+  fatalCleanEof: boolean,
   minimumQueueCharge: number,
   setNextQueueCharge: (charge: number) => void,
   isCanceled: () => boolean,
@@ -212,6 +278,7 @@ async function pumpBoundedInput(
         if (pending.byteLength > 0) {
           throw new NdJsonIncompleteFrameError(pending.byteLength);
         }
+        if (fatalCleanEof) throw new NdJsonUnexpectedEofError();
         controller.close();
         return;
       }
@@ -223,6 +290,9 @@ async function pumpBoundedInput(
         textDecoder,
         hooks,
         limits,
+        outboundRequests,
+        inboundRequests,
+        validateInboundMessage,
         minimumQueueCharge,
         setNextQueueCharge,
       );
@@ -238,6 +308,8 @@ async function pumpBoundedInput(
     if (!isCanceled()) controller.close();
   } finally {
     pending.clear();
+    outboundRequests.clear();
+    inboundRequests.clear();
     reader.releaseLock();
   }
 }
@@ -272,6 +344,9 @@ function readBoundedChunk(
   textDecoder: TextDecoderLike,
   hooks: NdJsonStreamHooks | undefined,
   limits: NdJsonStreamLimits,
+  outboundRequests: BoundedOutstandingRequestLedger,
+  inboundRequests: BoundedInboundRequestLedger,
+  validateInboundMessage: NdJsonInboundMessageValidator | undefined,
   minimumQueueCharge: number,
   setNextQueueCharge: (charge: number) => void,
 ): void {
@@ -298,7 +373,15 @@ function readBoundedChunk(
       );
     }
     setNextQueueCharge(queueCharge);
-    handleBoundedLine(pending.take(current), controller, textDecoder, hooks);
+    handleBoundedLine(
+      pending.take(current),
+      controller,
+      textDecoder,
+      hooks,
+      outboundRequests,
+      inboundRequests,
+      validateInboundMessage,
+    );
     start = newline + 1;
     newline = chunk.indexOf(0x0a, start);
   }
@@ -350,31 +433,267 @@ function handleBoundedLine(
   controller: ReadableStreamDefaultController<AnyMessage>,
   textDecoder: TextDecoderLike,
   hooks?: NdJsonStreamHooks,
+  outboundRequests?: BoundedOutstandingRequestLedger,
+  inboundRequests?: BoundedInboundRequestLedger,
+  validateInboundMessage?: NdJsonInboundMessageValidator,
 ): void {
   const line = textDecoder.decode(lineBytes);
   const trimmedLine = line.trim();
   if (!trimmedLine) return;
 
-  let message: AnyMessage;
+  let parsed: unknown;
   try {
-    message = JSON.parse(trimmedLine) as AnyMessage;
+    parsed = JSON.parse(trimmedLine);
   } catch {
-    const bytes = jsonPayloadByteLength(lineBytes);
-    const digest = createHash('sha256')
-      .update(lineBytes.subarray(0, bytes))
-      .digest('hex');
-    // eslint-disable-next-line no-console -- bounded metadata only
-    console.error('Failed to parse JSON message:', {
-      errorKind: 'ndjson_parse_error',
-      bytes,
-      sha256: digest,
-      payloadOmitted: true,
-    });
-    return;
+    throw logBoundedInvalidMessage('ndjson_parse_error', lineBytes);
   }
+  if (!isJsonRpcMessage(parsed)) {
+    throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
+  }
+  const isResponse = isJsonRpcResponseMessage(parsed);
+  if (
+    (!isResponse && !hasBoundedJsonStructure(parsed)) ||
+    (validateInboundMessage && !validateInboundMessage(parsed))
+  ) {
+    throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
+  }
+  if (
+    isJsonRpcResponseMessage(parsed) &&
+    !outboundRequests?.consumeResponse(parsed.id)
+  ) {
+    throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
+  }
+  inboundRequests?.admit(parsed, lineBytes.byteLength + 1);
+  const message = installBoundedLogRedaction(parsed);
 
   controller.enqueue(message);
   reportReceivedMessage(lineBytes, message, hooks);
+}
+
+function installBoundedLogRedaction(message: AnyMessage): AnyMessage {
+  Object.defineProperty(message, inspect.custom, {
+    configurable: false,
+    enumerable: false,
+    value: inspectBoundedJsonRpcMessage,
+    writable: false,
+  });
+  return message;
+}
+
+function inspectBoundedJsonRpcMessage(this: AnyMessage): object {
+  return {
+    jsonrpc: '2.0',
+    messageType:
+      'method' in this
+        ? 'id' in this
+          ? 'request'
+          : 'notification'
+        : 'response',
+    payloadOmitted: true,
+  };
+}
+
+function isJsonRpcMessage(value: unknown): value is AnyMessage {
+  if (!isRecord(value) || value['jsonrpc'] !== '2.0') return false;
+
+  const hasMethod = Object.hasOwn(value, 'method');
+  const hasId = Object.hasOwn(value, 'id');
+  if (hasMethod) {
+    return (
+      typeof value['method'] === 'string' &&
+      Buffer.byteLength(value['method']) <= MAX_JSON_RPC_METHOD_BYTES &&
+      (!hasId || isJsonRpcId(value['id']))
+    );
+  }
+  if (!hasId || !isJsonRpcId(value['id'])) return false;
+
+  const hasResult = Object.hasOwn(value, 'result');
+  const hasError = Object.hasOwn(value, 'error');
+  if (hasResult === hasError) return false;
+  if (!hasError) return true;
+  const error = value['error'];
+  return (
+    isRecord(error) &&
+    typeof error['code'] === 'number' &&
+    Number.isFinite(error['code']) &&
+    typeof error['message'] === 'string' &&
+    Buffer.byteLength(error['message']) <= MAX_JSON_RPC_ERROR_MESSAGE_BYTES
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasBoundedJsonStructure(value: unknown): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    nodes++;
+    if (nodes > MAX_JSON_NODES || current.depth > MAX_JSON_DEPTH) return false;
+    if (Array.isArray(current.value)) {
+      if (current.value.length > MAX_JSON_ARRAY_LENGTH) return false;
+      for (let index = current.value.length - 1; index >= 0; index--) {
+        if (
+          nodes + stack.length >= MAX_JSON_NODES ||
+          current.depth + 1 > MAX_JSON_DEPTH
+        ) {
+          return false;
+        }
+        stack.push({
+          value: current.value[index],
+          depth: current.depth + 1,
+        });
+      }
+    } else if (isRecord(current.value)) {
+      for (const key in current.value) {
+        if (!Object.hasOwn(current.value, key)) continue;
+        if (
+          nodes + stack.length >= MAX_JSON_NODES ||
+          current.depth + 1 > MAX_JSON_DEPTH
+        ) {
+          return false;
+        }
+        stack.push({
+          value: current.value[key],
+          depth: current.depth + 1,
+        });
+      }
+    }
+  }
+  return true;
+}
+
+function isJsonRpcId(value: unknown): boolean {
+  return (
+    value === null ||
+    (typeof value === 'string' &&
+      Buffer.byteLength(value) <= MAX_JSON_RPC_ID_BYTES) ||
+    (typeof value === 'number' && Number.isFinite(value))
+  );
+}
+
+function isJsonRpcRequestMessage(
+  value: AnyMessage,
+): value is AnyMessage & { id: string | number | null; method: string } {
+  return (
+    'method' in value &&
+    'id' in value &&
+    typeof value.method === 'string' &&
+    isJsonRpcId(value.id)
+  );
+}
+
+function isJsonRpcResponseMessage(
+  value: AnyMessage,
+): value is AnyMessage & { id: string | number | null } {
+  return !('method' in value) && 'id' in value;
+}
+
+class BoundedInboundRequestLedger {
+  private readonly requests = new Map<string | number | null, number>();
+  private retainedBytes = 0;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  admit(message: AnyMessage, frameBytes: number): void {
+    if (!isJsonRpcRequestMessage(message)) return;
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    if (
+      this.requests.has(message.id) ||
+      this.requests.size >= this.limits.maxQueuedMessages ||
+      frameBytes > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        frameBytes,
+        this.requests.has(message.id) ? 0 : availableBytes,
+      );
+    }
+    this.requests.set(message.id, frameBytes);
+    this.retainedBytes += frameBytes;
+  }
+
+  release(message: AnyMessage): void {
+    if (!isJsonRpcResponseMessage(message)) return;
+    const frameBytes = this.requests.get(message.id);
+    if (frameBytes === undefined) return;
+    this.requests.delete(message.id);
+    this.retainedBytes -= frameBytes;
+  }
+
+  clear(): void {
+    this.requests.clear();
+    this.retainedBytes = 0;
+  }
+}
+
+class BoundedOutstandingRequestLedger {
+  private readonly requests = new Map<string | number | null, number>();
+  private retainedBytes = 0;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  admit(id: string | number | null, frameBytes: number): void {
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    if (
+      this.requests.has(id) ||
+      this.requests.size >= this.limits.maxQueuedMessages ||
+      frameBytes > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        frameBytes,
+        this.requests.has(id) ? 0 : availableBytes,
+      );
+    }
+    this.requests.set(id, frameBytes);
+    this.retainedBytes += frameBytes;
+  }
+
+  consumeResponse(id: string | number | null): boolean {
+    return this.discard(id);
+  }
+
+  discard(id: string | number | null): boolean {
+    const frameBytes = this.requests.get(id);
+    if (frameBytes === undefined) return false;
+    this.requests.delete(id);
+    this.retainedBytes -= frameBytes;
+    return true;
+  }
+
+  clear(): void {
+    this.requests.clear();
+    this.retainedBytes = 0;
+  }
+}
+
+function logBoundedInvalidMessage(
+  errorKind: 'ndjson_parse_error' | 'ndjson_invalid_message',
+  lineBytes: Uint8Array,
+): NdJsonInvalidMessageError {
+  const bytes = jsonPayloadByteLength(lineBytes);
+  const digest = createHash('sha256')
+    .update(lineBytes.subarray(0, bytes))
+    .digest('hex');
+  // eslint-disable-next-line no-console -- bounded metadata only
+  console.error('Failed to parse JSON message:', {
+    errorKind,
+    bytes,
+    sha256: digest,
+    payloadOmitted: true,
+  });
+  return new NdJsonInvalidMessageError(errorKind, bytes);
 }
 
 function reportReceivedMessage(
