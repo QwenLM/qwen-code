@@ -217,7 +217,70 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 >
 > Use `/btw` when you need a quick answer without derailing your main task. It's especially useful for clarifying concepts, checking facts, or getting quick explanations while staying focused on your primary workflow.
 
-### 1.7 Session Recap (`/recap`)
+### 1.7 Second Opinion (`/advisor`)
+
+The `/advisor` command runs an independent, read-only review of the conversation so far and returns a structured second opinion — without performing the task or interrupting the main conversation.
+
+| Command            | Description                            |
+| ------------------ | -------------------------------------- |
+| `/advisor`         | Review the conversation above          |
+| `/advisor <focus>` | Focus the review on a specific concern |
+
+**How It Works:**
+
+- The review is sent as a separate, single-turn API call with recent conversation context (up to the last 40 messages)
+- The reviewer model **cannot execute tools** — tools are stripped at the request level (the same mechanism as `/btw`), so the review never writes code or runs commands; every claim must be grounded in the visible transcript
+- The main conversation is **not** interrupted; the review is shown only to you
+- The review is rendered as a boxed markdown block with four fixed sections — **Verdict**, **Risks**, **Missing evidence**, and **Recommendation** — under an `/advisor · <model>` header that names the resolved reviewer model
+- Unlike `/btw`, which is fire-and-forget and leaves the session usable, `/advisor` blocks input until the review returns; over a full context window with a strong reviewer this can take tens of seconds
+- By default the main model is used; set [`advisorModel`](../configuration/settings.md#advisormodel) to route the review to a different (typically stronger) model — the recent transcript is sent to that model even when it uses another provider
+
+**Example:**
+
+```
+> /advisor is my fix for the null check actually correct?
+
+  Consulting advisor...
+
+  ╭──────────────────────────────────────────────────────╮
+  │ /advisor · qwen3-max                                 │
+  │                                                      │
+  │ Verdict                                              │
+  │ The approach is sound, but the edge case at line 42  │
+  │ is unverified.                                       │
+  │                                                      │
+  │ Risks                                                │
+  │  - The fix assumes the config is always loaded; a    │
+  │    startup race could leave it null.                 │
+  │                                                      │
+  │ Missing evidence                                     │
+  │  - No test exercises the null-config path in the     │
+  │    visible transcript.                               │
+  │                                                      │
+  │ Recommendation                                       │
+  │ Add a focused unit test for the null-config branch   │
+  │ before merging.                                      │
+  ╰──────────────────────────────────────────────────────╯
+```
+
+The review renders in a bordered box whose header names the resolved reviewer model. An unknown `advisorModel` is not validated up front — if the provider rejects it, `/advisor` reports the failure, so check the model name; only unresolvable alias selectors (e.g. `fast` with no fast model configured) fall back to the main model. Advisor requests do not use configured model fallbacks.
+
+**Supported Execution Modes:**
+
+| Mode                 | Behavior                                            |
+| -------------------- | --------------------------------------------------- |
+| Interactive          | Renders the four-section review in the conversation |
+| ACP (Agent Protocol) | Returns the review as a message result              |
+
+> [!tip]
+>
+> Use `/advisor` for a second opinion before committing to a direction — it is especially useful for catching flawed assumptions, unverified claims, or risky next steps. Configure `advisorModel` to get the review from a different model than the one driving the main conversation.
+
+> [!note]
+>
+> `advisorModel` is set in settings only; unlike `fastModel` and `visionModel`, it has no `/model` flag counterpart yet.
+
+### 1.8 Session Recap (`/recap`)
 
 The `/recap` command generates a short "where you left off" summary of the
 current session, so you can resume an old conversation without scrolling
@@ -268,7 +331,7 @@ this setting.
 > `general.showSessionRecap` to `true` to enable the auto-trigger; the
 > manual `/recap` command always works regardless of this setting.
 
-### 1.8 Diff Viewer (`/diff`)
+### 1.9 Diff Viewer (`/diff`)
 
 The `/diff` command opens an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between the current git diff and individual conversation turns, ↑/↓ to browse files, and Enter to view inline diffs.
 
@@ -373,7 +436,7 @@ Use **Load more** at the bottom to fetch the next page of commits (50 per page).
 >
 > `/log` requires a git repository workspace. If the workspace is not a git repository or has no commits, the dialog shows a placeholder message.
 
-### 1.9 Information, Settings, and Help
+### 1.10 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
@@ -412,7 +475,7 @@ Commands for obtaining information and performing system settings.
 >
 > `/config` reads and writes individual settings by dot-path key (e.g. `general.vimMode`), complementing the interactive `/settings` editor. Running `/config` with no argument (or `--help`) lists every settable key with its type and current value. `/config <key>` prints the current value — except for boolean keys, where it toggles the value. `/config <key>=<value>` sets the value. Changes are written to user settings (`~/.qwen/settings.json`). Only `boolean`, `string`, `number`, and `enum` settings can be changed this way — `array` and `object` settings must be edited in `settings.json` directly. Sensitive values (API keys, tokens, base URLs) are masked in output, and setting `tools.approvalMode` to `yolo` is blocked.
 
-### 1.10 Common Shortcuts
+### 1.11 Common Shortcuts
 
 | Shortcut           | Function                | Note                                                                      |
 | ------------------ | ----------------------- | ------------------------------------------------------------------------- |
@@ -422,7 +485,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing                                                              |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing                                                              |
 
-### 1.11 Authentication Commands
+### 1.12 Authentication Commands
 
 Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor` to inspect the current authentication and environment status.
 
@@ -641,9 +704,10 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command              | Description                       | Usage Examples                                               |
-| -------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `qwen sessions list` | List recent conversation sessions | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| Command              | Description                                 | Usage Examples                                               |
+| -------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list` | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| `qwen sessions ps`   | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
 
 #### `qwen sessions list`
 
@@ -681,4 +745,52 @@ qwen sessions list --limit 50
 
 # Output as JSON for scripting
 qwen sessions list --json | jq .
+```
+
+#### `qwen sessions ps`
+
+Lists the interactive Qwen Code sessions running on this machine right
+now. `sessions list` walks saved transcripts ("what have I worked on");
+this walks the live-process registry ("what is running at this moment").
+Records left behind by a killed session are swept as they are found.
+Headless sessions (`qwen -p`) do not register with the live-process
+registry, so they are not shown.
+
+**Flags:**
+
+| Flag     | Type    | Default | Description                                     |
+| -------- | ------- | ------- | ----------------------------------------------- |
+| `--json` | boolean | `false` | Output as JSON Lines (one JSON object per line) |
+
+**Human-readable output (default):**
+
+A table with columns: NAME, PID, AGE, DIRECTORY.
+
+**JSON output (`--json`):**
+
+Outputs JSON Lines on stdout, newest session first. Each line is a JSON
+object with fields:
+
+```
+schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
+qwenVersion
+```
+
+Nothing else is written to stdout — an empty listing prints nothing at
+all — so `qwen sessions ps --json | jq .` is safe to script against.
+
+JSON output is raw data: field values are emitted exactly as recorded,
+with no terminal sanitization. Treat them as data, and sanitize before
+rendering them in a terminal.
+
+**Examples:**
+
+```bash
+# Show the other live sessions
+qwen sessions ps
+
+# Which directories are busy right now?
+# Note: `jq -r` renders the raw recorded value in your terminal (see the
+# raw-data note above); pipe through a sanitizer if the path is untrusted.
+qwen sessions ps --json | jq -r .cwd
 ```

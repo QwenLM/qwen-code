@@ -39,7 +39,7 @@ The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — 
 - ✅ Bring-your-own bearer token via `QWEN_SERVER_TOKEN` env var ([Authentication](#authentication) for setup)
 - ❌ **Containerized deployment** — Docker / Compose / Kubernetes / nginx reverse-proxy with TLS termination NOT in v0.16-alpha. Defers to v0.16.x once an enterprise pilot is committed (would otherwise rot from no-one-validating).
 - ❌ **Multi-daemon coordination on one host** — one daemon can host several explicitly registered workspaces, but daemons do not coordinate with each other. Cross-host federation, instance-path token keying, and stale-token cleanup defer to v0.16.x.
-- ✅ **Fresh Local Control tokens** — `--local-control` generates a token for that process. General daemon token storage remains BYO-token.
+- ✅ **Revocable Local Control pairing tokens** — `--local-control` mints a separate LAN pairing token owned by the daemon. General daemon token storage remains BYO-token.
 
 **Hardening — minimum viable for local single-user:**
 
@@ -384,7 +384,8 @@ Notes:
 | --------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--port <n>`                            | `4170`             | TCP port. `0` = OS-assigned ephemeral port.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--hostname <addr>`                     | `127.0.0.1`        | Bind interface. Anything beyond loopback requires a token.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `--local-control`                       | `false`            | Share the authenticated Web Shell on every non-loopback IPv4 interface with a fresh per-process token, labelled terminal QR codes, exact browser origins, a fixed port, and best-effort sleep inhibition. Conflicts with `--token`, `--allow-origin`, `--no-web`, `--port 0`, and non-default `--hostname`; add `--tls-cert` + `--tls-key` for secure-context browser APIs such as voice input.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `--local-control`                       | `false`            | Share the Web Shell on one selected private IPv4 interface with a daemon-owned revocable pairing token, terminal QR code, exact browser origin, and best-effort sleep inhibition. Composes with `--token`, `--allow-origin`, and `--port 0`; conflicts with `--no-web` and non-default `--hostname`. Use `--local-control-address` when multiple LAN candidates are available, and add `--tls-cert` + `--tls-key` for secure-context browser APIs such as voice input.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `--local-control-address <ip>`         | —                  | Which LAN IPv4 address to share when the host has more than one candidate. Only needed if `--local-control` reports an ambiguous choice. |
 | `--token <str>`                         | —                  | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `--require-auth`                        | `false`            | Refuse to start without a bearer token, even on loopback. Hardens the `127.0.0.1` developer default for shared dev hosts / CI runners / multi-tenant workstations where any local user can hit the listener. Boots only with `--token` or `QWEN_SERVER_TOKEN` set; gates `/health` behind the bearer too.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `--tls-cert <path>`                     | —                  | Path to a PEM certificate file. Serve over **HTTPS** instead of HTTP. Must be paired with `--tls-key` (boot fails if only one is given). Unlocks secure-context browser APIs — voice input (`getUserMedia`), WebRTC — over a LAN IP, which browsers otherwise block on plain `http://`. TLS termination only; no auto-generation / ACME. See [HTTPS / TLS](#https--tls-for-mobile--cross-device-access) below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -433,6 +434,71 @@ Notes:
 >   is trimmed and lowercased (`"  Workspace  "` works); the CLI flag is
 >   matched case-sensitively by yargs `choices` (`--memory-project-scope
 Workspace` is rejected). Use lowercase values when copying between the two.
+
+### Built-in daemon Git relocation guard
+
+Every managed daemon ACP session applies a built-in pre-execution guard for
+model shell commands, independent of `--external-tool-guard-mode` and without
+any capability advertisement. The daemon owns the bound workspace and the
+session's current effective working directory; both are supplied from trusted
+session state and never accepted from the ACP child.
+
+The guard inspects the tools that run a shell command line — `run_shell_command`
+and `monitor` — and denies a mutating Git
+command before execution when its repository location resolves outside the
+session's effective working directory. Relocation is recognized for literal
+forms of `git -C <path>`, `git --git-dir[=]<path>`,
+`git --work-tree[=]<path>`, leading
+`GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE` assignments (also
+when made through `export`/`declare`/`readonly`, which keep them in the
+environment of every later command in the chain),
+directory-shifting wrapper flags (`env -C`, `sudo -D`), and `cd`, `pushd`, or
+`popd` builtins earlier in the same command chain. Common wrapper prefixes
+(`sh -c`, `bash -c`, `eval`, `sudo`, `nohup`, `timeout`, `exec`, `command`,
+`builtin`,
+`env`, path-qualified `git` binaries, and `{ …; }` / `! …` shell syntax) are
+unwrapped so the same policy applies to the inner Git invocation, and `$(…)`
+or backtick substitution bodies are analyzed as commands of their own.
+
+A sub-agent pinned to its own worktree is contained to that worktree rather
+than to the session's directory; a shell call whose execution directory the
+daemon cannot place is denied.
+
+Relative targets resolve from the command's effective starting directory
+(`arguments.directory` when present, otherwise the session's current effective
+working directory) after canonical path resolution, including `.git` gitfile
+redirects, symlinks, and per-worktree administrative directories. A relocated
+target that cannot be fully resolved before execution — a dynamic target
+(`$VAR`, backticks, `~`, globs), a path that does not exist yet, or an
+unreadable indirection — is denied for mutating or unclassifiable subcommands.
+A relocated target that cannot be resolved is denied whatever the subcommand
+is — including the read-only ones. Relocated commands whose subcommand is one
+of a small verified read-only set (`rev-parse`, `cat-file`) remain allowed
+once the target resolves, unless the command carries command-executing `-c`
+config, or
+it carries a `--output`, `--textconv`, or `--filters` flag: those write a file
+or run the target repository's configured drivers. Commands with no recognized
+relocation keep their existing behavior.
+Denials are final and are reported to the model as
+`Daemon shell guard denied a mutating Git command…` for a resolved, dynamic,
+or unresolvable repository location, and as
+`Daemon shell guard denied a shell command…` when the command could not be
+parsed, its payload could not be resolved, or an unrecognized program may run
+a relocated Git command.
+
+The guard is reliable against Git relocation written in the literal forms
+above — the mis-targeted command this control exists for — and is
+**best-effort, not a boundary**, against shell text written to defeat it:
+constructions that hide the relocation from a static reader may pass, and new
+ones will keep being found. Do not grant a daemon broader trust on the
+strength of it. It does not interpret script files,
+track environment variable values across commands, or analyze heredoc bodies
+(Git-shaped text inside a heredoc can be denied even though the shell never
+executes it). `/fork` and agent-backed workspace memory remember/dream remain
+available under the built-in guard; they are only restricted while the
+external provider mode below is active. An optional external tool guard
+remains an additional policy and receives the same request only after the
+built-in policy allows it.
 
 ### Required external Tool Guard
 
