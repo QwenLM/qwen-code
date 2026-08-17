@@ -585,6 +585,43 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
+    it('replays daemon media references without embedding base64', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-media-ref', 'user', {
+          message: { role: 'user', parts: [{ text: 'describe this' }] },
+          systemPayload: {
+            displayText: 'describe this',
+            hookContext: '',
+            mediaReferences: [
+              {
+                type: 'image',
+                mediaId: 'media-1',
+                mimeType: 'image/png',
+                size: 3,
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'describe this' },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            mediaId: 'media-1',
+            mimeType: 'image/png',
+            size: 3,
+          },
+        },
+      ]);
+    });
+
     it('replaces text parts with displayText while preserving image parts', () => {
       // displayText must replace all model-facing text while the image part
       // survives (the previous early-return path dropped it).
@@ -866,6 +903,116 @@ describe('createTranscriptReplayMachine', () => {
         },
       ]);
     });
+  });
+
+  it('replays media references from a mid-turn user record', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mid-turn-media', 'user', {
+        subtype: 'mid_turn_user_message',
+        message: { role: 'user', parts: [{ text: 'inspect image' }] },
+        systemPayload: {
+          displayText: 'inspect image',
+          mediaReferences: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'inspect image' },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'image',
+          mediaId: 'media-1',
+          mimeType: 'image/png',
+          size: 3,
+        },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
+  it('replays an image-only mid-turn record without its synthetic prefix', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mid-turn-image-only', 'user', {
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '[User message received during tool execution]: ' }],
+        },
+        systemPayload: {
+          displayText: '',
+          mediaReferences: [
+            {
+              type: 'image',
+              mediaId: 'media-only',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'image',
+          mediaId: 'media-only',
+          mimeType: 'image/png',
+          size: 3,
+        },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
+  it('falls back to inline parts for an image-only mid-turn record without references', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mid-turn-inline-image-only', 'user', {
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [{ inlineData: { data: 'AQID', mimeType: 'image/png' } }],
+        },
+        systemPayload: { displayText: '' },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
   });
 
   it('projects ordered message parts with source metadata', () => {

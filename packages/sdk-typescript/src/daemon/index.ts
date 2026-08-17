@@ -702,6 +702,8 @@ export type {
   PermissionOutcomeSelected,
   PermissionResponse,
   PromptContentBlock,
+  DaemonSessionMediaData,
+  DaemonSessionMediaReference,
   PromptResult,
   PromptTextContent,
   SetModelResult,
