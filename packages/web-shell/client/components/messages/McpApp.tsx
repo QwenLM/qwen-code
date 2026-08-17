@@ -110,6 +110,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   const theme = useTheme();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
+  const mountGenerationRef = useRef(0);
   const displayRef = useRef(display);
   const themeRef = useRef(theme);
   displayRef.current = display;
@@ -136,6 +137,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     setError(undefined);
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
+    const generation = ++mountGenerationRef.current;
     let initialized = false;
     const current = displayRef.current;
     const bridge = new AppBridge(
@@ -197,7 +199,12 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     return () => {
       bridgeRef.current = null;
       const unload = () => {
-        iframe.removeAttribute('src');
+        // Compare against later effect runs so a superseded teardown
+        // does not blank the iframe the next mount already owns.
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- live generation, not a stale copy
+        if (mountGenerationRef.current === generation) {
+          iframe.removeAttribute('src');
+        }
         void bridge.close().catch(() => {});
       };
       if (initialized) {

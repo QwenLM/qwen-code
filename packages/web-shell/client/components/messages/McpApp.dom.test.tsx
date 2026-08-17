@@ -66,7 +66,8 @@ beforeEach(() => {
   appBridgeMocks.sendSandboxResourceReady.mockClear();
   appBridgeMocks.sendToolInput.mockClear();
   appBridgeMocks.sendToolResult.mockClear();
-  appBridgeMocks.teardownResource.mockClear();
+  appBridgeMocks.teardownResource.mockReset();
+  appBridgeMocks.teardownResource.mockImplementation(() => Promise.resolve());
 });
 
 function appDisplay(overrides: Partial<McpAppDisplay> = {}): McpAppDisplay {
@@ -263,5 +264,52 @@ describe('McpApp host lifetime', () => {
     expect(removeAttribute).toHaveBeenCalledWith('src');
     expect(appBridgeMocks.close).toHaveBeenCalled();
     entry?.container.remove();
+  });
+
+  it('does not blank the live iframe when a superseded teardown settles', async () => {
+    let resolveTeardown: (() => void) | undefined;
+    appBridgeMocks.teardownResource.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveTeardown = resolve;
+        }),
+    );
+
+    const { container, rerender } = renderApp(appDisplay());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      appBridgeMocks.last?.oninitialized?.();
+      await Promise.resolve();
+    });
+
+    const iframe = container.querySelector('iframe');
+    expect(iframe?.getAttribute('src')).toContain('/mcp-app-sandbox');
+
+    rerender(
+      <McpApp
+        display={appDisplay({
+          toolResult: { content: [{ type: 'text', text: 'updated' }] },
+        })}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(appBridgeMocks.constructed).toBe(2);
+    expect(iframe?.getAttribute('src')).toContain('/mcp-app-sandbox');
+
+    await act(async () => {
+      resolveTeardown?.();
+      await Promise.resolve();
+    });
+
+    expect(iframe?.getAttribute('src')).toContain('/mcp-app-sandbox');
   });
 });
