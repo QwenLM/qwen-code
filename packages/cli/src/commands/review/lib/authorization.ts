@@ -128,6 +128,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
       ok: true,
       why: 'the user asked for this review to be published',
       recordedSeverityFloor: recordedSeverityFloor({
+        pr: req.pr,
         defaultSeverityFloor: req.defaultSeverityFloor,
         skillArgs: req.skillArgs,
       }),
@@ -249,15 +250,22 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
  * resolving it at `submit` alone made them describe two different reviews
  * whenever the override fired.
  *
- * Returns the floor only when the record is readable AND carries an
- * operator decision (`severityFloorSource` of `explicit`/`configured`);
- * every failure mode — no record, unreadable, no decision — returns
- * undefined and leaves the caller's state value standing, the same
- * fail-open direction enforcement itself takes. The path rule is the
- * gate's own: the caller-supplied seam is honoured only when no session id
- * is present.
+ * Returns the floor only when the record is readable, carries an operator
+ * decision (`severityFloorSource` of `explicit`/`configured`), AND names
+ * the same pull request the caller is composing or posting — the record is
+ * last-writer-wins (`writeSkillArgs` truncates), so a later `/review` of a
+ * DIFFERENT PR overwrites it, and an unbound recovery would apply PR B's
+ * floor to PR A's publish. The `--comment` authorisation binds
+ * `authorisedPr === req.pr` for exactly this reason; the floor recovery
+ * holds the same record to the same bar. Every failure mode — no record,
+ * unreadable, no decision, another PR's record — returns undefined and
+ * leaves the caller's state value standing, the same fail-open direction
+ * enforcement itself takes. The path rule is the gate's own: the
+ * caller-supplied seam is honoured only when no session id is present.
  */
 export function recordedSeverityFloor(opts: {
+  /** The pull request the caller is composing or posting for. */
+  pr: number;
   defaultSeverityFloor?: string;
   skillArgs?: string;
 }): 'critical' | 'suggestion' | 'auto' | undefined {
@@ -269,6 +277,10 @@ export function recordedSeverityFloor(opts: {
     const verdict = parseReviewArgs(readFileSync(path, 'utf8'), {
       severityFloor: opts.defaultSeverityFloor,
     });
+    const t = verdict.target;
+    const recordedPr =
+      t.type === 'pr-number' || t.type === 'pr-url' ? t.number : undefined;
+    if (recordedPr !== opts.pr) return undefined;
     return verdict.severityFloorSource === 'default'
       ? undefined
       : verdict.severityFloor;

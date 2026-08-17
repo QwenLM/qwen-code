@@ -206,6 +206,19 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     } as never);
     expect(verdict.ok).toBe(true);
     expect(verdict.recordedSeverityFloor).toBe('critical');
+
+    // Bound to the PR: the record is last-writer-wins across /review
+    // invocations, so another PR's record must recover nothing — unbound,
+    // PR 999's floor would ride into PR 123's publish.
+    const otherArgs = join(dir, 'ua-other-args.txt');
+    writeFileSync(otherArgs, '999 --severity-floor critical\n');
+    const other = reviewWriteAuthorization({
+      userAuthorized: true,
+      skillArgs: otherArgs,
+      pr: 123,
+    } as never);
+    expect(other.ok).toBe(true);
+    expect(other.recordedSeverityFloor).toBeUndefined();
   });
 
   it('binds the repo of a URL-shaped authorisation', () => {
@@ -729,6 +742,34 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('the review.severityFloor setting reaches enforcement through the handler', async () => {
+    // The setting→opts hop is the residual wiring leg: the end-to-end floor
+    // test drives runSubmit directly with the opt, so dropping the
+    // handler's `defaultSeverityFloor: review.severityFloor` line left the
+    // suite green while production ignored the configured floor.
+    reviewSettingsMock.mockReturnValue({
+      attribution: true,
+      severityFloor: 'critical',
+    });
+    const review = file('handler-floor.json', {
+      ...REVIEW,
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+    await submitCommand.handler?.(
+      args({
+        review,
+        skillArgs: file('handler-floor-args.txt', '6771 --comment'),
+      }) as never,
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(1);
+    expect(sent.body).toContain('floor enforcement');
+  });
+
   it('without the flag or the setting the handler refuses — and workspace settings cannot supply it', async () => {
     // The mock answers a flag-less loadSettings call with a polluted view
     // that carries comment:true; the handler's skipWorkspaceSettings flag
@@ -1206,6 +1247,41 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
     expect(sent.comments).toHaveLength(1);
     expect(sent.body).toContain('floor enforcement');
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('using the recorded'),
+      ),
+    ).toBe(true);
+  });
+
+  it('overrides in BOTH directions — a recorded posture-off outranks a drifted critical', () => {
+    // Direction-independence: an enforcement-direction-only condition would
+    // let a drifted state 'critical' stand over the operator's recorded
+    // `--severity-floor suggestion`, silently inverting a posture-off
+    // decision — findings the operator explicitly chose to post inline
+    // would be withheld.
+    const review = file('floor-reverse.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, severityFloor: 'critical' },
+      comments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+      ],
+    });
+
+    runSubmit(
+      args({
+        review,
+        skillArgs: file(
+          'floor-reverse-args.txt',
+          '6771 --comment --severity-floor suggestion',
+        ),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.comments).toHaveLength(2);
+    expect(sent.body).not.toContain('floor enforcement');
     expect(
       writeStderrSpy.mock.calls.some((c) =>
         String(c[0]).includes('using the recorded'),

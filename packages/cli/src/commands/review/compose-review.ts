@@ -3163,12 +3163,35 @@ export const composeReviewCommand: CommandModule = {
     // keeps this boundary's archived composed JSON and terminal verdict
     // describing the same review the posted body describes. Resolving the
     // record at submit alone split the two: the archive kept the state's
-    // transcription while the post obeyed the record. Every failure mode of
-    // the recovery returns undefined and leaves the state's value standing.
-    const recorded = recordedSeverityFloor({
-      defaultSeverityFloor: operatorReviewSettings().severityFloor,
-      skillArgs,
-    });
+    // transcription while the post obeyed the record. The recovery is BOUND
+    // to the PR this compose is for (the plan's own number — the same
+    // tolerant read `prevRoundFor` applies): the record is last-writer-wins
+    // across `/review` invocations, and an unbound read would apply another
+    // PR's floor to this one. No plan PR — a local target — recovers
+    // nothing; every failure mode returns undefined and leaves the state's
+    // value standing.
+    const planPr = (() => {
+      try {
+        if (!parsed.planPath) return undefined;
+        const plan = JSON.parse(readFileSync(parsed.planPath, 'utf8')) as {
+          prNumber?: unknown;
+        };
+        const n = plan?.prNumber;
+        if (typeof n === 'number' && Number.isInteger(n) && n > 0) return n;
+        if (typeof n === 'string' && /^\d+$/.test(n)) return Number(n);
+        return undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const recorded =
+      planPr === undefined
+        ? undefined
+        : recordedSeverityFloor({
+            pr: planPr,
+            defaultSeverityFloor: operatorReviewSettings().severityFloor,
+            skillArgs,
+          });
     if (recorded !== undefined && parsed.severityFloor !== recorded) {
       writeStderrLine(
         `Severity floor: using the recorded ${JSON.stringify(recorded)} ` +

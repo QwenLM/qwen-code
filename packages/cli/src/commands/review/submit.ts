@@ -506,14 +506,16 @@ export function runSubmit(
   };
 
   // The operator's floor, from the CLI's verbatim record — never only the
-  // state's transcription of it. The gate above already re-parsed the
-  // recorded arguments (explicit flag beats the configured setting beats
-  // `auto`); the state field is a model-written copy of that same policy,
-  // and a copy that can drift must not be what decides whether enforcement
-  // stands down. Recorded value wins whenever the record was parsed; the
-  // `--user-authorized` short-circuit and test paths carry none and leave
-  // the state's value in place — the same fail-open the enforcement itself
-  // applies.
+  // state's transcription of it. The gate re-parsed the recorded arguments
+  // (explicit flag beats the configured setting beats `auto`) on BOTH of
+  // its paths — the `--comment` binding and, best-effort, the
+  // `--user-authorized` branch, whose sanctioned report-first flow carries
+  // a parseable record on disk. The state field is a model-written copy of
+  // that same policy, and a copy that can drift must not decide whether
+  // enforcement stands down. The recorded value wins whenever the recovery
+  // yields one; when it yields nothing — no record, unreadable, no floor
+  // decision in it, or a record naming another PR — the state's value
+  // stands, the same fail-open the enforcement itself applies.
   if (
     auth.recordedSeverityFloor !== undefined &&
     payload.state != null &&
