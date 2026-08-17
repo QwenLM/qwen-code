@@ -35,6 +35,29 @@ import {
   AGENT_PLUGIN_SCHEMA,
 } from './agent-plugins-v1/index.js';
 
+// Hoist a shared mock for EXTENSIONS so tests can spy without exporting
+// the private logger from extensionManager.ts.
+const { mockExtMgrDebugLogger } = vi.hoisted(() => ({
+  mockExtMgrDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (namespace: string) =>
+      namespace === 'EXTENSIONS'
+        ? mockExtMgrDebugLogger
+        : actual.createDebugLogger(namespace),
+  };
+});
+
 const mockGit = {
   clone: vi.fn(),
   getRemotes: vi.fn(),
@@ -453,7 +476,7 @@ describe('extension tests', () => {
       ]);
     });
 
-    it('loads a link-mode extension whose manifest and hooks are shared symlinks', async () => {
+    it.runIf(process.platform !== 'win32')('loads a link-mode extension whose manifest and hooks are shared symlinks', async () => {
       // A link install reads the user's own dev tree, where the manifest/hooks
       // files may be symlinks into a shared monorepo location. Those must
       // load (base behavior), not be silently dropped by the symlink guard
@@ -479,6 +502,8 @@ describe('extension tests', () => {
 
       const sourcePath = path.join(tempWorkspaceDir, 'linked-qwen-devdir');
       fs.mkdirSync(sourcePath, { recursive: true });
+      // The surrounding it.runIf skips on Windows — symlinkSync needs
+      // SeCreateSymbolicLinkPrivilege default CI runners don't have.
       fs.symlinkSync(
         path.join(sharedDir, 'qwen-extension.json'),
         path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
@@ -500,15 +525,10 @@ describe('extension tests', () => {
       expect(linked.hooks?.['PreToolUse']).toHaveLength(1);
     });
 
-    // Link-mode + literal `..` traversal must NOT load the outside file.
-    // Pre-fix joined the path to an absolute before readExtraJsonFile, and
-    // that absolute branch skips confinement when trustSymlinks=true —
-    // letting "../shared/hooks.json" reach a file outside the dev tree
-    // while the sibling lspServers path already enforced the contract
-    // (LspConfigLoader passes raw). Post-fix passes the raw relative string
-    // so readExtraJsonFile's relative-branch `..` rejection applies
-    // uniformly with lspServers.
-    it('link-mode install refuses to load a ../hooks.json outside the dev tree', async () => {
+    // Link-mode is the developer's own dev tree — literal `..` to a
+    // sibling monorepo file is honored (strict-mode `..` rejection is
+    // covered in path-confinement).
+    it('link-mode install loads hooks via ../shared/hooks.json from a sibling monorepo dir', async () => {
       const sharedDir = path.join(tempWorkspaceDir, 'outside-hooks-r7');
       fs.mkdirSync(sharedDir, { recursive: true });
       fs.writeFileSync(
@@ -525,7 +545,7 @@ describe('extension tests', () => {
       fs.writeFileSync(
         path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
         JSON.stringify({
-          name: 'escape-attempt',
+          name: 'sibling-monorepo',
           version: '1.0.0',
           hooks: `../${path.basename(sharedDir)}/hooks.json`,
         }),
@@ -537,13 +557,12 @@ describe('extension tests', () => {
         async () => {},
       );
       expect(linked.path).toBe(sourcePath);
-      // The referenced path is kept on the config (so the runtime knows what
-      // the author intended), but the hooks file itself was not loaded —
-      // escape refusal means `extension.hooks` stays unset.
+      // The `..` reference reaches the sibling monorepo hooks file —
+      // it loads the same way an absolute path to the same file would.
       expect(linked.config.hooks).toBe(
         `../${path.basename(sharedDir)}/hooks.json`,
       );
-      expect(linked.hooks).toBeUndefined();
+      expect(linked.hooks?.['PreToolUse']).toHaveLength(1);
     });
 
     it.each([undefined, 42, ''])(
@@ -3858,6 +3877,123 @@ describe('extension tests', () => {
 
       expect(extensions.some((e) => e.name === 'malicious')).toBe(false);
       fs.rmSync(secretDir, { recursive: true, force: true });
+    });
+    // config.hooks fallback ternary (extensionManager.ts:1532). Mutation:
+    // change the default 'hooks/hooks.json' to 'WRONG' → hooks undefined.
+    it('falls back to hooks/hooks.json when config.hooks string is missing', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'fallback-hooks-config');
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'fallback-hooks-config',
+          version: '1.0.0',
+          hooks: 'hooks/does-not-exist.json',
+        }),
+      );
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'echo from-default' }],
+            },
+          ],
+        }),
+        'utf-8',
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe('echo from-default');
+    });
+
+    // config.hooks string warn (extensionManager.ts:1524). Mutation:
+    // comment out the debugLogger.warn(...) body → captured warn count 0.
+    it('warns when config.hooks string points to a missing file', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'dangling-hooks-config');
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'dangling-hooks-config',
+          version: '1.0.0',
+          hooks: 'hooks/this-file-is-missing.json',
+        }),
+      );
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'echo from-default' }],
+            },
+          ],
+        }),
+        'utf-8',
+      );
+
+      const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
+      try {
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+        const matching = messages.find((m) =>
+          m.includes('hooks/this-file-is-missing.json'),
+        );
+        expect(matching).toBeDefined();
+        expect(matching).toMatch(/was not found/);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // Total-loss: config.hooks missing AND no co-shipped default. The
+    // warn is hoisted out of the outer existsSync gate so it still fires.
+    // Mutation: re-nest the warn inside the outer if → no warn captured.
+    it('warns on a missing config.hooks even with no default hooks/hooks.json', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'total-loss-hooks');
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'total-loss-hooks',
+          version: '1.0.0',
+          hooks: 'hooks/missing-no-default.json',
+        }),
+      );
+      // No hooks/ directory written — no co-shipped default.
+
+      const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
+      try {
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+        const matching = messages.find((m) =>
+          m.includes('hooks/missing-no-default.json'),
+        );
+        expect(matching).toBeDefined();
+        expect(matching).toMatch(/was not found/);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 

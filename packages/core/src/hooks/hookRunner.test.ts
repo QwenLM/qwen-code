@@ -902,6 +902,166 @@ describe('HookRunner', () => {
       expect(command).toContain('/test/project');
     });
 
+    // Chained-replace offset baseline: thread geminiExpanded into the
+    // second callback so the scanner reads the post-first-replace string.
+    // Mutation: revert both callbacks to close over `command` → bare cwd.
+    it('expands both project-dir placeholders with correct region state (powershell)', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        shell: 'powershell',
+        command:
+          'Write-Output $GEMINI_PROJECT_DIR"$CLAUDE_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: "/te'st/project" });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      // $CLAUDE in the post-GEMINI string sits in in-double → bare cwd.
+      expect(spawnCall[1][2]).toBe(
+        "Write-Output '/te''st/project'\"/te'st/project",
+      );
+    });
+
+    // $() sub-expression opens a fresh region; inner " must not close
+    // outer ". Mutation: drop the $( open / ) close branches → placeholder
+    // lands in outside, single-quote-wrapped.
+    it('keeps the outer state across a $(...) sub-expression with an inner quoted placeholder', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        shell: 'powershell',
+        command: '& "Today: $(Get-Content "$CLAUDE_PROJECT_DIR/x.json")"',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe(
+        '& "Today: $(Get-Content "/test/project/x.json")"',
+      );
+    });
+
+    // ) inside a quoted $() body is data; only unquoted ) pops.
+    // Mutation: drop state==='outside' guard on ) → phantom in-double,
+    // cwd renders bare with parse error on the '.
+    it('does not pop the $() body on a quoted paren', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        shell: 'powershell',
+        command: 'Get-ChildItem $(Join-Path "a)b")$CLAUDE_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: "/te'st/project" });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe(
+        "Get-ChildItem $(Join-Path \"a)b\")'/te''st/project'",
+      );
+    });
+
+    // Backtick is literal inside single quotes. Mutation: unconditional
+    // ` ch === '\`' ` skip → closing `'` eaten, placeholder bare.
+    it('keeps a single-quoted string ending in backtick closed', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        shell: 'powershell',
+        command: "Write-Output 'a`'$CLAUDE_PROJECT_DIR",
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: "/te'st/project" });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe(
+        "Write-Output 'a`''/te''st/project'",
+      );
+    });
+
+    // $( inside single quotes is literal text. Mutation: drop the
+    // state !== 'in-single' guard on the $( branch → placeholder wrapped.
+    it('keeps $() literal inside a single-quoted string', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        shell: 'powershell',
+        command: "Write-Output 'pre $($CLAUDE_PROJECT_DIR) post'",
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: "/te'st/project" });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+    expect(spawnCall[1][2]).toBe(
+      "Write-Output 'pre $(/te''st/project) post'",
+    );
+  });
+
+  // Nested $() — quoteStack must pop LIFO so the placeholder after the
+  // outer ) lands in outside (single-quote wrap).
+  it('keeps the outer state across nested $() sub-expressions', async () => {
+    const mockProcess = createMockProcess(0, 'result');
+    mockSpawn.mockImplementation(() => mockProcess);
+
+    const hookConfig: HookConfig = {
+      type: HookType.Command,
+      shell: 'powershell',
+      command: '$(Write-Output $(Get-Date))$CLAUDE_PROJECT_DIR',
+      source: HooksConfigSource.Project,
+    };
+    const input = createMockInput({ cwd: '/te\'st/project' });
+
+    await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+    const spawnCall = mockSpawn.mock.calls[0];
+    expect(spawnCall[1][2]).toBe(
+      "$(Write-Output $(Get-Date))'/te''st/project'",
+    );
+  });
+
+  // Plain grouping parens inside a single $() body must not pop the
+  // substitution — the inner ) decrements parenDepth, only the outer
+  // ) pops the $().
+  it('keeps the $() open across plain grouping parens', async () => {
+    const mockProcess = createMockProcess(0, 'result');
+    mockSpawn.mockImplementation(() => mockProcess);
+
+    const hookConfig: HookConfig = {
+      type: HookType.Command,
+      shell: 'powershell',
+      command: '$(Get-ChildItem (Resolve-Path .))$CLAUDE_PROJECT_DIR',
+      source: HooksConfigSource.Project,
+    };
+    const input = createMockInput({ cwd: '/te\'st/project' });
+
+    await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+    const spawnCall = mockSpawn.mock.calls[0];
+    expect(spawnCall[1][2]).toBe(
+      "$(Get-ChildItem (Resolve-Path .))'/te''st/project'",
+    );
+  });
+
     it('should not modify command without placeholders', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -921,24 +1081,38 @@ describe('HookRunner', () => {
     });
 
     // Pin the escapeShellArg-generated-quote path (unquoted placeholder
-    // at command start). The cmd-fallback path produces
-    // `["-NoProfile","-Command","& '/test/project'/scripts/x.cmd"]`;
-    // explicit powershell raises the bare-quoted config error.
+    // at command start). Mock getShellConfiguration to force the
+    // powershell fallback on every platform — without it the assertion
+    // is host-dependent (real powershell.exe only when ComSpec points at it).
     it('cmd-fallback: unquoted placeholder gets the call-operator prefix', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
-      const hookConfig: HookConfig = {
-        type: HookType.Command,
-        command: '$CLAUDE_PROJECT_DIR/scripts/x.cmd',
-        source: HooksConfigSource.Project,
-      };
-      const input = createMockInput({ cwd: '/test/project' });
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
-      const spawnCall = mockSpawn.mock.calls[0];
-      // The cmd-fallback path: ["-NoProfile", "-Command", "<expanded>"]
-      expect(spawnCall[1][0]).toBe('-NoProfile');
-      expect(spawnCall[1][1]).toBe('-Command');
-      expect(spawnCall[1][2]).toBe("& '/test/project'/scripts/x.cmd");
+      const fallbackSpy = vi
+        .spyOn(shellUtils, 'getShellConfiguration')
+        .mockReturnValue({
+          executable: 'powershell',
+          argsPrefix: ['-NoProfile', '-Command'],
+          shell: 'powershell',
+        });
+      try {
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command: '$CLAUDE_PROJECT_DIR/scripts/x.cmd',
+          source: HooksConfigSource.Project,
+        };
+        const input = createMockInput({ cwd: '/test/project' });
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          input,
+        );
+        const spawnCall = mockSpawn.mock.calls[0];
+        expect(spawnCall[1][0]).toBe('-NoProfile');
+        expect(spawnCall[1][1]).toBe('-Command');
+        expect(spawnCall[1][2]).toBe("& '/test/project'/scripts/x.cmd");
+      } finally {
+        fallbackSpy.mockRestore();
+      }
     });
 
     it('explicit powershell: unquoted bare-path placeholder is rejected', async () => {
@@ -1040,10 +1214,87 @@ describe('HookRunner', () => {
         command: "'Get-Content $CLAUDE_PROJECT_DIR/x.json'",
         source: HooksConfigSource.Project,
       };
+      const input = createMockInput({ cwd: "/te'st/project" });
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe("& 'Get-Content /te''st/project/x.json'");
+    });
+
+    // Here-string body quotes must not toggle the outer region for a
+    // placeholder after the closing delimiter.
+    it('keeps the region state across a here-string body with embedded quotes', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command:
+          "$block = @'\nit's \"quoted\" text\n'@\nWrite-Output $CLAUDE_PROJECT_DIR",
+        source: HooksConfigSource.Project,
+      };
       const input = createMockInput({ cwd: '/test/project' });
       await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
       const spawnCall = mockSpawn.mock.calls[0];
-      expect(spawnCall[1][2]).toBe("& 'Get-Content /test/project/x.json'");
+      expect(spawnCall[1][2]).toBe(
+        "$block = @'\nit's \"quoted\" text\n'@\nWrite-Output '/test/project'",
+      );
+    });
+
+    // Here-string close anchored to line start. The body has `''@`
+    // (escape for literal `'`) on a non-line-start position; a bare
+    // indexOf would close there prematurely. Mutation: revert to bare
+    // indexOf → placeholder misclassified.
+    it("anchors the here-string close to line start across a body with ''@ escape", async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command:
+          "$block = @'\ndata ''@token\n'@\nWrite-Output $CLAUDE_PROJECT_DIR",
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe(
+        "$block = @'\ndata ''@token\n'@\nWrite-Output '/test/project'",
+      );
+    });
+
+    // # comment runs to end of line — quote chars inside must not toggle
+    // the region for a placeholder on a later line.
+    it('keeps the region state across a # comment with an embedded quote', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'Write-Output "sync start" # don\'t remove\n$CLAUDE_PROJECT_DIR/x.cmd',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+      const spawnCall = mockSpawn.mock.calls[0];
+      // outside region → single-quote wrap; no leading-quoted path so no `& `.
+      expect(spawnCall[1][2]).toBe(
+        'Write-Output "sync start" # don\'t remove\n\'/test/project\'/x.cmd',
+      );
+    });
+
+    // Backtick-escaped " inside the author's double-quoted string must
+    // not toggle the region — leaves us OUTSIDE → single-quote wrap.
+    it('escapes a placeholder after a backtick-escaped quote (cmd-fallback)', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: '"PREFIX`" END" $CLAUDE_PROJECT_DIR/suffix',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][2]).toBe(
+        '& "PREFIX`" END" \'/test/project\'/suffix',
+      );
     });
   });
 

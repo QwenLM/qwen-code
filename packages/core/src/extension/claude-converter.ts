@@ -411,6 +411,21 @@ export function normalizeMcpServers(
 }
 
 /**
+ * Validates the top-level mcpServers field is an object container (not
+ * array / null / scalar) and returns it narrowed for normalizeMcpServers.
+ */
+export function assertMcpServersContainer(
+  value: unknown,
+  errorMessage: string,
+): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(errorMessage);
+  }
+  return value as Record<string, unknown>;
+}
+
+/**
  * Converts a Claude plugin config to Qwen Code format.
  * @param claudeConfig Claude plugin configuration
  * @returns Qwen ExtensionConfig
@@ -431,20 +446,17 @@ export function convertClaudeToQwenConfig(
       debugLogger.warn(
         `[Claude Converter] MCP servers path not yet supported: ${claudeConfig.mcpServers}`,
       );
-    } else if (
-      typeof claudeConfig.mcpServers !== 'object' ||
-      claudeConfig.mcpServers === null ||
-      Array.isArray(claudeConfig.mcpServers)
-    ) {
-      // Same diagnostic the Qoder resolver throws for the same shape.
-      throw new Error(
+    } else {
+      const servers = assertMcpServersContainer(
+        claudeConfig.mcpServers,
         'Invalid MCP configuration: mcpServers must be an object',
       );
-    } else {
-      mcpServers = normalizeMcpServers(
-        claudeConfig.mcpServers as Record<string, unknown>,
-        stripAnsiAndControl(claudeConfig.name),
-      );
+      if (servers) {
+        mcpServers = normalizeMcpServers(
+          servers,
+          stripAnsiAndControl(claudeConfig.name),
+        );
+      }
     }
   }
 
@@ -765,8 +777,9 @@ export async function convertClaudePluginStandalone(
       >;
     } else if (mcp) {
       // Authoring slip: server map at top level instead of under
-      // `mcpServers`. Warn so the "no servers imported" investigation has
-      // a trail.
+      // mcpServers. Debug-only warn so the "no servers imported"
+      // investigation has a trail (matches the qoder converter's
+      // loadMcpServersFile convention for the same typo-wrapper case).
       debugLogger.warn(
         `.mcp.json at ${sanitizeForError(path.join(extensionDir, '.mcp.json'))} has no valid "mcpServers" object; skipping.`,
       );
@@ -1137,10 +1150,21 @@ async function resolvePluginSource(
           ? `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`
           : `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
     );
-    // `./`, `sub/..`, `a/b/../..` all normalize to the clone root; the
-    // git-subdir contract requires an actual subdirectory, so reject any
-    // value that resolves to the root itself.
+    // Reject any value that resolves to the clone root itself, including
+    // the case where the subdir's symlink target IS the root (realpath
+    // collapses to pluginDir even though the lexical name is a subdir).
     if (subDir === path.resolve(pluginDir)) {
+      throw new Error(
+        `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`,
+      );
+    }
+    let realSubDir: string;
+    try {
+      realSubDir = fs.realpathSync(subDir);
+    } catch {
+      realSubDir = subDir;
+    }
+    if (realSubDir === fs.realpathSync(pluginDir)) {
       throw new Error(
         `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`,
       );

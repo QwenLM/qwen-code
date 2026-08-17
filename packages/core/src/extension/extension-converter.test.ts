@@ -517,11 +517,12 @@ describe('convertCompatibleExtension', () => {
     expect(spy).toHaveBeenCalledWith(root, 'selected', policy, signal);
     spy.mockRestore();
     // The spy wraps without replacing the implementation, so the real
-    // conversion ran and wrote a temp dir — clean it up too. Capture the
-    // awaited result (with the actual `convertedDir` field) rather than
-    // reading from the spy: spy.mockRestore() clears mock.results, and the
-    // spy wraps an async function so results[0].value is a Promise that
-    // resolves to { config, convertedDir, externalContent }.
-    trackConvertedDir(result as unknown as { convertedDir: string });
+    // conversion ran and wrote a temp dir — clean it up too. capture the
+    // awaited result (with the actual `extensionDir` field from
+    // convertCompatibleExtension) rather than reading from the spy:
+    // spy.mockRestore() clears mock.results, and the spy wraps an async
+    // function so results[0].value is a Promise that resolves to
+    // { extensionDir, originSource, externalContent }.
+    trackConvertedDir(result);
   });
 });

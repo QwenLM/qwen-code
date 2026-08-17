@@ -23,7 +23,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
-    // R7-16 — the Gemini hooks probe calls statSync().isFile() to reject
+    // The Gemini hooks probe calls statSync().isFile() to reject
     // directory-valued hooks/hooks.json. Tests mock this directly.
     statSync: vi.fn(),
     // The symlink-confinement guard (realPathWithin) resolves both the config
@@ -97,7 +97,7 @@ describe('convertGeminiToQwenConfig', () => {
       JSON.stringify({ name: 'x', version: '1.0.0' }),
     );
     // Manifest exists; hooks/hooks.json also exists as a regular file
-    // (R7-16 isRegularFile probe shares the statSync mock with existsSync).
+    // (The isRegularFile probe shares the statSync mock with existsSync).
     vi.mocked(fs.existsSync).mockImplementation(
       (p: unknown) =>
         String(p).endsWith('gemini-extension.json') ||
@@ -154,6 +154,65 @@ describe('convertGeminiToQwenConfig', () => {
     const result = convertGeminiToQwenConfig(mockDir);
 
     expect(result.hooks).toBeUndefined();
+  });
+
+  it('omits hooks when hooks/hooks.json is a directory, not a file', () => {
+    const mockDir = '/mock/extension/dir';
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({ name: 'x', version: '1.0.0' }),
+    );
+    // hooks/hooks.json exists but resolves to a directory — the
+    // isRegularFile probe must reject it so the runtime doesn't try to
+    // read a directory as JSON.
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p: unknown) =>
+        String(p).endsWith('gemini-extension.json') ||
+        String(p).endsWith(path.join('hooks', 'hooks.json')),
+    );
+    vi.mocked(fs.statSync).mockReturnValue({
+      isFile: () => false,
+      isDirectory: () => true,
+    } as fs.Stats);
+
+    const result = convertGeminiToQwenConfig(mockDir);
+
+    expect(result.hooks).toBeUndefined();
+  });
+
+  // Pin the top-level mcpServers container-shape guard — array / scalar
+  // would otherwise install with zero servers or surface an opaque TypeError.
+  it.each([
+    ['array', '[]'],
+    ['scalar number', '42'],
+  ])('throws when top-level mcpServers is a %s', (_label, raw) => {
+    const mockDir = '/mock/extension/dir';
+    const geminiConfig = {
+      name: 'gemini-shape-extension',
+      version: '1.0.0',
+      mcpServers: JSON.parse(raw) as unknown,
+    };
+
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(geminiConfig));
+
+    expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
+      /Invalid MCP configuration: mcpServers must be an object/,
+    );
+  });
+
+  // Gemini treats mcpServers: null as absent (diverges from
+  // Claude/Qoder, which throw).
+  it('treats top-level mcpServers: null as absent (Gemini design choice)', () => {
+    const mockDir = '/mock/extension/dir';
+    const geminiConfig = {
+      name: 'null-mcp-extension',
+      version: '1.0.0',
+      mcpServers: null,
+    };
+
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(geminiConfig));
+
+    const result = convertGeminiToQwenConfig(mockDir);
+    expect(result.mcpServers).toBeUndefined();
   });
 
   it('should throw error for missing name', () => {

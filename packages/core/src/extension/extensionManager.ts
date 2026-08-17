@@ -1383,10 +1383,9 @@ export class ExtensionManager {
 
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
-    // A link-mode install reads the user's own dev tree through a symlink; its
-    // manifest/hooks files may themselves be symlinks (monorepo sharing). Trust
-    // that source: skip the symlink-escape rejection for it, but keep refusing
-    // a literal `..` traversal and all untrusted install types.
+    // Link-mode reads the user's own dev tree; manifest/hooks may be
+    // symlinks (monorepo) and `..` may point at a sibling file. Trust
+    // it: skip symlink-escape rejection and honor `..`.
     const trustSymlinks = installMetadata?.type === 'link';
 
     if (
@@ -1510,25 +1509,26 @@ export class ExtensionManager {
           configHooksPath = null;
         }
 
+        // Warn when the user-set hooks path is missing — independent of
+        // whether a default hooks/hooks.json exists (without this, a
+        // typo + no co-shipped default fails silently).
+        if (
+          typeof config.hooks === 'string' &&
+          configHooksPath &&
+          !fs.existsSync(configHooksPath)
+        ) {
+          debugLogger.warn(
+            `Referenced hooks path "${stripAnsiAndControl(config.hooks)}" was not found; falling back to hooks/hooks.json.`,
+          );
+        }
+
         if (
           fs.existsSync(hooksJsonPath) ||
           (configHooksPath && fs.existsSync(configHooksPath))
         ) {
-          // Warn when the user-set hooks path is missing but the default
-          // hooks/hooks.json exists; otherwise the fallback happens silently
-          // and a typo or packaging miss produces no diagnostic.
-          if (
-            typeof config.hooks === 'string' &&
-            configHooksPath &&
-            !fs.existsSync(configHooksPath)
-          ) {
-            debugLogger.warn(
-              `Referenced hooks path "${stripAnsiAndControl(config.hooks)}" was not found; falling back to hooks/hooks.json.`,
-            );
-          }
-          // Pass raw config.hooks (not the pre-joined absolute) so
-          // readExtraJsonFile's relative branch enforces `..` rejection —
-          // its absolute branch skips confinement when trustSymlinks is set.
+          // Pass raw config.hooks (not the pre-joined absolute) so the
+          // relative-branch confinement check applies uniformly to both
+          // strict-mode (rejects `..`) and link-mode (honors `..`).
           const rawHooksFileRef =
             configHooksPath &&
             typeof config.hooks === 'string' &&
@@ -1536,10 +1536,6 @@ export class ExtensionManager {
               ? config.hooks
               : 'hooks/hooks.json';
 
-          // readExtraJsonFile tolerantly reads a subsidiary hooks file
-          // (missing/unparseable/non-object/escaping → warn + null) and
-          // confines both the config path and the default hooks/hooks.json
-          // against symlink escapes.
           const parsedHooks = readExtraJsonFile(
             effectiveExtensionPath,
             rawHooksFileRef,

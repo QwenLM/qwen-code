@@ -18,6 +18,7 @@ import {
   readExtensionManifest,
   readExtraJsonFile,
   resolvePluginRelativeFile,
+  type ExtraJsonNullReason,
 } from './path-confinement.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -59,22 +60,55 @@ function loadQoderConfig(extensionDir: string): QoderPluginConfig {
   };
 }
 
+// Maps a readExtraJsonFile rejection to the throw message an author of
+// an explicit mcpServers reference will see.
+function explicitMcpFailureMessage(
+  reason: ExtraJsonNullReason,
+  safePath: string,
+  cause?: unknown,
+): string {
+  switch (reason) {
+    case 'missing':
+      return `Invalid Qoder MCP configuration at ${safePath}: file does not exist`;
+    case 'parse-error':
+      return `Invalid Qoder MCP configuration at ${safePath}: JSON parse failed (${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))})`;
+    case 'non-object-body':
+      return `Invalid Qoder MCP configuration at ${safePath}: top-level body is not a JSON object`;
+    case 'absolute-symlink-escape':
+      return `Invalid Qoder MCP configuration at ${safePath}: absolute path resolves through a symlink outside the extension`;
+    case 'absolute-outside':
+      return `Invalid Qoder MCP configuration at ${safePath}: absolute path is outside the extension directory`;
+    case 'confinement-threw':
+      return `Invalid Qoder MCP configuration at ${safePath}: ${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))}`;
+  }
+}
+
 function loadMcpServersFile(
   extensionDir: string,
   relativePath: string,
   requireWrapper: boolean,
 ): Record<string, MCPServerConfig> | undefined {
   // requireWrapper=false → author's explicit reference; a defective file
-  // throws a precise error rather than silently installing zero servers.
+  // throws a precise error naming the actual failure mode.
   // requireWrapper=true → auto-detected `.mcp.json` fallback; tolerated.
-  const parsed = readExtraJsonFile(extensionDir, relativePath);
+  const parsed = readExtraJsonFile(
+    extensionDir,
+    relativePath,
+    false,
+    requireWrapper
+      ? null
+      : (_reason, ctx) => {
+          const safePath = stripAnsiAndControl(relativePath);
+          throw new Error(
+            explicitMcpFailureMessage(
+              _reason,
+              safePath,
+              ctx.cause,
+            ),
+          );
+        },
+  );
   if (!parsed) {
-    if (!requireWrapper) {
-      const safePath = stripAnsiAndControl(relativePath);
-      throw new Error(
-        `Invalid Qoder MCP configuration at ${safePath}: file could not be read`,
-      );
-    }
     return undefined;
   }
   const safeMcpPath = stripAnsiAndControl(relativePath);
@@ -90,6 +124,10 @@ function loadMcpServersFile(
     servers === null ||
     Array.isArray(servers)
   ) {
+    // Typo-wrapper in auto-detected `.mcp.json` installs with zero
+    // servers and emits only a debug-only warn (matches the sibling
+    // claude converter's auto-detect convention at
+    // convertClaudePluginStandalone).
     debugLogger.warn(
       `Invalid Qoder MCP configuration at ${safeMcpPath}: expected an "mcpServers" object`,
     );

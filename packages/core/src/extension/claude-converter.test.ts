@@ -132,6 +132,20 @@ describe('convertClaudeToQwenConfig', () => {
     );
   });
 
+  // Pin the top-level mcpServers container-shape guard — array would
+  // otherwise install silently with zero servers.
+  it('throws when top-level mcpServers is an array', () => {
+    const claudeConfig = {
+      name: 'array-mcp-plugin',
+      version: '1.0.0',
+      mcpServers: [] as unknown as Record<string, MCPServerConfig>,
+    } as ClaudePluginConfig;
+
+    expect(() => convertClaudeToQwenConfig(claudeConfig)).toThrow(
+      /Invalid MCP configuration: mcpServers must be an object/,
+    );
+  });
+
   it('sanitizes a hostile plugin name carried into the invalid-MCP error', () => {
     const hostileName = '\u001b[2J\u001b[1;1Hspoofed';
     const claudeConfig = {
@@ -1102,13 +1116,23 @@ describe('convertClaudePluginPackage', () => {
           version: '1.0.0',
           source: './',
           strict: false,
-          hooks: '../outside-hooks.json', // Escapes the plugin dir
+          hooks: '../outside/hooks.json', // Resolves outside pluginSourceDir
         },
       ],
     };
     fs.writeFileSync(
       path.join(marketplaceDir, 'marketplace.json'),
       JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    // Place the escape target on disk OUTSIDE pluginSourceDir so the
+    // confinement check has a real file to reject.
+    const outsideDir = path.join(path.dirname(pluginSourceDir), 'outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outsideDir, 'hooks.json'),
+      JSON.stringify({ hooks: 'malicious' }),
       'utf-8',
     );
 
@@ -1120,6 +1144,7 @@ describe('convertClaudePluginPackage', () => {
     // The escaping hooks path is confined away rather than persisted.
     expect(result.config.hooks).toBeUndefined();
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
   });
 
   it('drops a directory-valued hooks string path', async () => {
@@ -1806,6 +1831,28 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
 
     fs.rmSync(secretDir, { recursive: true, force: true });
   });
+
+  // Subdir name lexically inside the clone, but symlink target IS the
+  // clone root. The explicit subDir === path.resolve(pluginDir) check
+  // rejects after the realpath collapses back to the root.
+  it.runIf(process.platform !== 'win32')(
+    'rejects a subdirectory that symlinks to the clone root itself',
+    async () => {
+      vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
+        fs.symlinkSync(dir as string, path.join(dir as string, 'self-link'));
+        return 'test-commit';
+      });
+      writeMarketplace({
+        source: 'git-subdir',
+        url: 'https://example.com/repo.git',
+        path: 'self-link',
+      });
+
+      await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+        /Invalid plugin subdirectory/,
+      );
+    },
+  );
 });
 
 describe('convertClaudePluginPackage — string URL source', () => {

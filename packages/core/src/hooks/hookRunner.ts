@@ -860,8 +860,89 @@ export class HookRunner {
         offset: number,
       ): string => {
         let state: 'outside' | 'in-double' | 'in-single' = 'outside';
+        // $() sub-expression opens a fresh region; inner quotes do not
+        // affect the outer region. We also track plain ( / ) groupings so
+        // a $(Get-Foo (Get-Bar)) does not pop on the inner paren.
+        let substitutionDepth = 0;
+        let parenDepth = 0;
+        const quoteStack: Array<'outside' | 'in-double' | 'in-single'> = [];
         for (let i = 0; i < offset; i++) {
           const ch = command[i];
+          // Backtick is literal inside single quotes; skipping would
+          // swallow a real closing `'`.
+          if (state !== 'in-single' && ch === '`') {
+            i++;
+            continue;
+          }
+          // $( opens a fresh region (outside or in-double); literal in
+          // single quotes. Save the outer state so ) can restore it.
+          if (
+            state !== 'in-single' &&
+            ch === '$' &&
+            command[i + 1] === '('
+          ) {
+            quoteStack.push(state);
+            state = 'outside';
+            substitutionDepth++;
+            parenDepth++;
+            i++; // skip `(`
+            continue;
+          }
+          // ( inside $() is a grouping paren — track so ) does not pop.
+          if (
+            ch === '(' &&
+            substitutionDepth > 0 &&
+            state === 'outside'
+          ) {
+            parenDepth++;
+            continue;
+          }
+          // ) only closes when unquoted; closing the last grouping pops
+          // the $() and restores the pre-$( state.
+          if (ch === ')' && parenDepth > 0 && state === 'outside') {
+            parenDepth--;
+            if (parenDepth === 0 && substitutionDepth > 0) {
+              substitutionDepth--;
+              state = quoteStack.pop()!;
+            }
+            continue;
+          }
+          // # comment (when outside quotes) runs to end of line; quote
+          // chars inside must not toggle state.
+          if (state === 'outside' && ch === '#') {
+            while (i < offset && command[i] !== '\n' && command[i] !== '\r') {
+              i++;
+            }
+            continue;
+          }
+          // PowerShell here-string: `@'...'@` / `@"..."@`. Body quotes
+          // are data; only the closing `'@` / `"@` at line start exits.
+          if (state === 'outside' && ch === '@' && i + 1 < offset) {
+            const open = command[i + 1];
+            if (open === "'" || open === '"') {
+              const closing = open === "'" ? "'@" : '"@';
+              const bodyStart = i + 2;
+              let j = bodyStart;
+              let closeIdx = -1;
+              while (j < offset) {
+                const k = command.indexOf(closing, j);
+                if (k === -1 || k >= offset) break;
+                if (
+                  k === bodyStart ||
+                  command[k - 1] === '\n' ||
+                  command[k - 1] === '\r'
+                ) {
+                  closeIdx = k;
+                  break;
+                }
+                j = k + 1;
+              }
+              if (closeIdx !== -1) {
+                i = closeIdx + 1;
+                continue;
+              }
+            }
+          }
           if (state === 'outside') {
             if (ch === '"') state = 'in-double';
             else if (ch === "'") state = 'in-single';
@@ -875,13 +956,20 @@ export class HookRunner {
         if (state === 'in-single') return singleQuotedCwd;
         return escapedCwd;
       };
-      return command
-        .replace(/\$GEMINI_PROJECT_DIR/g, (match, offset) =>
+      // Feed the first replace's result into the second so the
+      // quote-region scanner reads the post-first-replace string —
+      // otherwise the offset walker skips characters after the first
+      // replacement shrinks the string.
+      const geminiExpanded = command.replace(
+        /\$GEMINI_PROJECT_DIR/g,
+        (match, offset) =>
           replaceWithContext(command, match, offset as number),
-        )
-        .replace(/\$CLAUDE_PROJECT_DIR/g, (match, offset) =>
-          replaceWithContext(command, match, offset as number),
-        );
+      );
+      return geminiExpanded.replace(
+        /\$CLAUDE_PROJECT_DIR/g,
+        (match, offset) =>
+          replaceWithContext(geminiExpanded, match, offset as number),
+      );
     }
     return command
       .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)

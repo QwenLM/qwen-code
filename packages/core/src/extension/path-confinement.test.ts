@@ -355,24 +355,47 @@ describe('readExtraJsonFile', () => {
   it('reads a symlinked auxiliary file when trustSymlinks is set', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+    const siblingName = path.basename(outside);
     try {
       const secret = path.join(outside, 'hooks.json');
       fs.writeFileSync(secret, JSON.stringify({ hooks: {} }), 'utf-8');
       fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
-      // Link mode follows the user's own symlinks (relative and default-route
-      // absolute paths alike), but still refuses a literal `..` traversal.
-      // (The default strict rejection is covered by 'returns null for a symlink
-      // escaping the extension'.)
+      // Link mode follows user's own symlinks AND literal `..` — both
+      // reach the developer's own data. Strict-mode `..` rejection is
+      // covered by 'returns null for a relative path escaping the extension'.
       expect(readExtraJsonFile(dir, 'hooks.json', true)).toEqual({
         hooks: {},
       });
       expect(
         readExtraJsonFile(dir, path.join(outside, 'hooks.json'), true),
       ).toEqual({ hooks: {} });
-      expect(readExtraJsonFile(dir, '../outside/hooks.json', true)).toBeNull();
+      expect(
+        readExtraJsonFile(dir, path.join('..', siblingName, 'hooks.json'), true),
+      ).toEqual({ hooks: {} });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null (missing) for a link-mode .. path that points at no file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      // No sibling fixture — `..` resolves to a non-existent path.
+      // Link-mode honors `..` and falls through to missing-file
+      // (no warn). Strict-mode rejects before the existsSync probe —
+      // onNull distinguishes: link-mode → 'missing', strict-mode →
+      // 'confinement-threw'.
+      const reasons: string[] = [];
+      readExtraJsonFile(
+        dir,
+        '../no-such-sibling/hooks.json',
+        true,
+        (reason) => reasons.push(reason),
+      );
+      expect(reasons).toEqual(['missing']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

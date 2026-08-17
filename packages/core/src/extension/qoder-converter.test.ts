@@ -13,7 +13,29 @@ import {
   convertQoderPlugin,
   QODER_PLUGIN_MANIFEST,
 } from './qoder-converter.js';
-import { debugLogger } from '../utils/debugLogger.js';
+
+// Hoist a shared mock for QODER_CONVERTER so tests can spy without
+// exporting the private logger from qoder-converter.ts.
+const { mockQoderDebugLogger } = vi.hoisted(() => ({
+  mockQoderDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (namespace: string) =>
+      namespace === 'QODER_CONVERTER'
+        ? mockQoderDebugLogger
+        : actual.createDebugLogger(namespace),
+  };
+});
 
 describe('convertQoderPlugin', () => {
   let root: string;
@@ -353,53 +375,41 @@ describe('convertQoderPlugin', () => {
     },
   );
 
-  // Restore the two warn-path sanitization pins that the collapsed
-  // .each deleted. The defects and no-object branches now log via
-  // debugLogger.warn instead of throwing, so the regression coverage shifts
-  // from "match the throw message" to "capture the warn call". Without
-  // these, a future edit interpolating raw fileRef/relativePath re-opens
-  // the control-byte diagnostic-injection class this test family was
-  // written to prevent.
+  // Pin control-byte sanitization on the throw path. A raw fileRef
+  // in the message would re-open the diagnostic-injection class.
   it.skipIf(process.platform === 'win32')(
-    'sanitizes control sequences in the qoder mcpServers-object warn',
+    'sanitizes control sequences in the qoder mcpServers-object throw',
     async () => {
       const mcpFile = 'no-object\u001b[2J.json';
       writeManifest({ name: 'sample-qoder-plugin', mcpServers: mcpFile });
-      // File exists with an object body but no usable mcpServers wrapper
-      // (the qoder loadMcpServersFile branch that warns at
-      // qoder-converter.ts:87).
+      // Valid object without mcpServers wrapper → normalizeMcpServers throws.
       fs.writeFileSync(
         path.join(root, mcpFile),
         JSON.stringify({ notServers: 'x' }),
         'utf-8',
       );
-      const warnSpy = vi.spyOn(debugLogger, 'warn');
-      await convertQoderPlugin(root);
-      const messages = warnSpy.mock.calls.map((c) => String(c[0]));
-      const matching = messages.find((m) =>
-        m.includes(`Invalid Qoder MCP configuration at ${mcpFile}`),
+      const rejected = await convertQoderPlugin(root).catch((error) => error);
+      expect(rejected).toBeInstanceOf(Error);
+      expect((rejected as Error).message).toMatch(
+        /server entries must be JSON objects/,
       );
-      expect(matching).toBeDefined();
-      expect(matching).not.toContain('\u001b');
-      warnSpy.mockRestore();
+      expect((rejected as Error).message).not.toContain('\u001b');
     },
   );
 
   it.skipIf(process.platform === 'win32')(
-    'sanitizes control sequences in the readExtraJsonFile non-object warn',
+    'sanitizes control sequences in the readExtraJsonFile non-object throw',
     async () => {
       const mcpFile = 'array\u001b[31m.json';
       writeManifest({ name: 'sample-qoder-plugin', mcpServers: mcpFile });
-      // File parses to an array (not an object) — readExtraJsonFile warns
-      // with the fileRef; the path must be sanitized.
+      // Array body → non-object-body rejection.
       fs.writeFileSync(path.join(root, mcpFile), '[1, 2, 3]', 'utf-8');
-      const warnSpy = vi.spyOn(debugLogger, 'warn');
-      await convertQoderPlugin(root);
-      const messages = warnSpy.mock.calls.map((c) => String(c[0]));
-      const matching = messages.find((m) => m.includes(`Invalid ${mcpFile}`));
-      expect(matching).toBeDefined();
-      expect(matching).not.toContain('\u001b');
-      warnSpy.mockRestore();
+      const rejected = await convertQoderPlugin(root).catch((error) => error);
+      expect(rejected).toBeInstanceOf(Error);
+      expect((rejected as Error).message).toMatch(
+        /top-level body is not a JSON object/,
+      );
+      expect((rejected as Error).message).not.toContain('\u001b');
     },
   );
 
@@ -605,5 +615,121 @@ describe('convertQoderPlugin', () => {
 
     expect(result.config.contextFileName).toBeUndefined();
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  // Pin the precise throw message for each readExtraJsonFile rejection —
+  // without these the converter collapses every failure into "file could
+  // not be read", and diagnosis requires running the extension by hand.
+
+  it('throws "file does not exist" when explicit mcpServers string points at a missing file', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: 'mcp/does-not-exist.json',
+    });
+
+    await expect(convertQoderPlugin(root)).rejects.toThrow(
+      /Invalid Qoder MCP configuration at mcp\/does-not-exist\.json: file does not exist/,
+    );
+  });
+
+  it('throws with JSON parse detail when explicit mcpServers string points at an unparseable file', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: 'mcp/broken.json',
+    });
+    fs.mkdirSync(path.join(root, 'mcp'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'mcp', 'broken.json'), '{invalid', 'utf-8');
+
+    await expect(convertQoderPlugin(root)).rejects.toThrow(
+      /Invalid Qoder MCP configuration at mcp\/broken\.json: JSON parse failed/,
+    );
+  });
+
+  it('throws "top-level body is not a JSON object" when explicit mcpServers string points at an array body', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: 'mcp/array.json',
+    });
+    fs.mkdirSync(path.join(root, 'mcp'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'mcp', 'array.json'), '[1, 2, 3]', 'utf-8');
+
+    await expect(convertQoderPlugin(root)).rejects.toThrow(
+      /Invalid Qoder MCP configuration at mcp\/array\.json: top-level body is not a JSON object/,
+    );
+  });
+
+  // Win32 skip matches the path-confinement.test.ts convention
+  // (dev-mode symlinks need elevated privileges).
+
+  it.runIf(process.platform !== 'win32')(
+    'throws "resolves through a symlink outside" when explicit mcpServers absolute path is a symlink escape',
+    async () => {
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-out-'));
+      try {
+        const outside = path.join(outsideDir, 'mcp.json');
+        fs.writeFileSync(outside, JSON.stringify({ a: 1 }), 'utf-8');
+        const inside = path.join(root, 'linked.json');
+        fs.symlinkSync(outside, inside);
+
+        writeManifest({
+          name: 'sample-qoder-plugin',
+          mcpServers: inside,
+        });
+
+        await expect(convertQoderPlugin(root)).rejects.toThrow(
+          /Invalid Qoder MCP configuration at .+: absolute path resolves through a symlink outside the extension/,
+        );
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'throws "absolute path is outside" when explicit mcpServers absolute path is a plain outside file',
+    async () => {
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-out-'));
+      try {
+        const outside = path.join(outsideDir, 'mcp.json');
+        // Outside target must exist so the assertion hits the absolute-outside branch.
+        fs.writeFileSync(outside, JSON.stringify({ a: 1 }), 'utf-8');
+
+        writeManifest({
+          name: 'sample-qoder-plugin',
+          mcpServers: outside,
+        });
+
+        await expect(convertQoderPlugin(root)).rejects.toThrow(
+          /Invalid Qoder MCP configuration at .+: absolute path is outside the extension directory/,
+        );
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('throws "escapes the extension" when explicit mcpServers relative path uses ..', async () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-out-'));
+    try {
+      // Escape target must exist so the assertion hits the confinement branch.
+      fs.writeFileSync(
+        path.join(outsideDir, 'mcp.json'),
+        JSON.stringify({ a: 1 }),
+        'utf-8',
+      );
+
+      writeManifest({
+        name: 'sample-qoder-plugin',
+        // Strict mode `..` → resolvePathWithin throws → caught as
+        // confinement-threw → embedded in the explicit-mcp throw message.
+        mcpServers: path.join('..', path.basename(outsideDir), 'mcp.json'),
+      });
+
+      await expect(convertQoderPlugin(root)).rejects.toThrow(
+        /Invalid Qoder MCP configuration at .*: .*escapes the extension directory/,
+      );
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 });

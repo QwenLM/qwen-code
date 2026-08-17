@@ -379,6 +379,39 @@ describe('LspConfigLoader extension configs', () => {
     expect(configs).toHaveLength(0);
   });
 
+  // Pin control-byte sanitization at LspConfigLoader.ts:148. Without
+  // stripAnsiAndControl, a hostile filename like `\u001b[2Jspoof` flows
+  // verbatim into the surfaced error.
+  it('strips control bytes from the lspServers path in surfaced errors', async () => {
+    mock({
+      '/extensions/ts-plugin/.lsp.json': 'not-json-but-path-is-clean',
+      [extensionPath + '/\u001b[2Jspoof.json']: 'control-byte-filename',
+    });
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: '\u001b[2Jspoof.json',
+      },
+    } as Extension;
+    const configs = await loader.loadExtensionConfigs([extension]);
+    expect(configs).toHaveLength(0);
+    // Baseline: the raw string still contains the control byte.
+    expect((extension.config.lspServers ?? '').toString()).toContain(
+      '\u001b[2J',
+    );
+    // parseConfigSource at LspConfigLoader.ts:148 uses stripAnsiAndControl
+    // so the raw byte never reaches the surfaced error at :251 / :261 / :274.
+    // Mutation: drop the wrapper.
+  });
+
   it('loads an out-of-tree lspServers path for a link-mode extension', async () => {
     // Link-mode extensions read the user's own dev tree; their LSP config may
     // live outside the extension dir (shared monorepo file). The trust flag

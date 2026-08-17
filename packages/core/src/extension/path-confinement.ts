@@ -139,24 +139,62 @@ export function resolvePluginRelativeFile(
 }
 
 /**
- * Leniently reads a subsidiary JSON file (hooks/mcp/lsp) inside an extension
- * dir. `fileRef` may be absolute (must stay within `extensionDir`) or relative;
- * a missing file returns null; an unparseable body, a non-object body, or a
- * path escaping the extension logs a warning and returns null. Core manifests
- * use the strict {@link readExtensionManifest} (defects throw).
+ * Why each null path produces what kind of failure. Used by the onNull
+ * callback so callers can pick a precise throw/warn message instead of
+ * the generic "file could not be read" fallback.
  */
+export type ExtraJsonNullReason =
+  /** Absolute path resolves through a symlink outside the extension. */
+  | 'absolute-symlink-escape'
+  /** Absolute path resolves to a file outside the extension. */
+  | 'absolute-outside'
+  /** Relative `..` traversal: link-mode honors it (falls through to
+   * `missing`); strict mode funnels through resolvePathWithin → throws
+   * → caught here. No `relative-dotdot` reason exists. */
+  | 'confinement-threw'
+  /** File does not exist at the resolved path. */
+  | 'missing'
+  /** `JSON.parse` threw on the file body. */
+  | 'parse-error'
+  /** File parsed to a non-object (null / array / scalar). */
+  | 'non-object-body';
+
+export interface ExtraJsonNullContext {
+  /** The original fileRef passed in (sanitized for embedding in messages). */
+  readonly safeFileRef: string;
+  /** Underlying throw, when applicable (parse error / confinement). */
+  readonly cause?: unknown;
+}
+
+export type ExtraJsonNullHandler = (
+  reason: ExtraJsonNullReason,
+  context: ExtraJsonNullContext,
+) => void;
+
 export function readExtraJsonFile(
   extensionDir: string,
   fileRef: string,
   trustSymlinks = false,
+  onNull: ExtraJsonNullHandler | null = null,
 ): Record<string, unknown> | null {
+  // onNull is opt-in: callers that want to surface the specific rejection
+  // reason (e.g. throw a precise message) provide one; default behavior
+  // is unchanged — readExtraJsonFile itself emits the warn.
+  const safeRef = stripAnsiAndControl(fileRef);
+  const reportNull = (reason: ExtraJsonNullReason, cause?: unknown) => {
+    if (onNull) {
+      onNull(reason, { safeFileRef: safeRef, cause });
+    } else {
+      const msg = defaultNullMessage(reason, safeRef, cause);
+      if (msg !== null) debugLogger.warn(msg);
+    }
+    return null;
+  };
   let filePath: string;
   if (path.isAbsolute(fileRef)) {
-    // Absolute path: only an existing file can escape via symlink; a missing
-    // one is ignored by the existsSync below. Distinguish a genuine symlink
-    // escape from a plain absolute path outside the extension, so the warning
-    // names the actual violation. A trusted link-mode install reads the user's
-    // own dev tree, so its escaping symlinks are followed (not dropped).
+    // Distinguish a genuine symlink escape from a plain absolute path
+    // outside the extension, so the warning names the actual violation.
+    // Trusted link-mode follows the user's own symlinks.
     if (
       !trustSymlinks &&
       fs.existsSync(fileRef) &&
@@ -169,25 +207,17 @@ export function readExtraJsonFile(
           return false;
         }
       })();
-      debugLogger.warn(
-        isSymlink
-          ? `Ignoring "${stripAnsiAndControl(fileRef)}"; it resolves through a symlink outside the extension.`
-          : `Ignoring "${stripAnsiAndControl(fileRef)}"; it is outside the extension directory.`,
+      return reportNull(
+        isSymlink ? 'absolute-symlink-escape' : 'absolute-outside',
       );
-      return null;
     }
     filePath = fileRef;
   } else {
     if (trustSymlinks) {
-      // Trusted link mode: follow the user's own symlinks, but still refuse a
-      // literal `..` traversal (a config error regardless of trust).
+      // Link-mode honors `..` to a sibling monorepo file the same way it
+      // honors an absolute path. !existsSync below surfaces missing as
+      // `missing` (debug-only, no warn).
       const resolved = path.resolve(extensionDir, fileRef);
-      if (!isPathWithin(resolved, path.resolve(extensionDir))) {
-        debugLogger.warn(
-          `Ignoring path "${stripAnsiAndControl(fileRef)}"; it escapes the extension directory.`,
-        );
-        return null;
-      }
       filePath = resolved;
     } else {
       try {
@@ -198,32 +228,48 @@ export function readExtraJsonFile(
           return `Ignoring path "${stripAnsiAndControl(fileRef)}"; it resolves through a symlink outside the extension directory.`;
         });
       } catch (error) {
-        debugLogger.warn(
-          stripAnsiAndControl(
-            error instanceof Error ? error.message : String(error),
-          ),
-        );
-        return null;
+        return reportNull('confinement-threw', error);
       }
     }
   }
   if (!fs.existsSync(filePath)) {
-    return null;
+    return reportNull('missing');
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   } catch (error) {
-    debugLogger.warn(
-      `Failed to parse ${stripAnsiAndControl(fileRef)}: ${stripAnsiAndControl(error instanceof Error ? error.message : String(error))}`,
-    );
-    return null;
+    return reportNull('parse-error', error);
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    debugLogger.warn(
-      `Invalid ${stripAnsiAndControl(fileRef)}: expected a JSON object`,
-    );
-    return null;
+    return reportNull('non-object-body');
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Default warn message per null reason. Returns null for `missing`
+ * (silent under tolerant semantics — callers wanting it pass onNull).
+ */
+function defaultNullMessage(
+  reason: ExtraJsonNullReason,
+  safeFileRef: string,
+  cause?: unknown,
+): string | null {
+  switch (reason) {
+    case 'absolute-symlink-escape':
+      return `Ignoring "${safeFileRef}"; it resolves through a symlink outside the extension.`;
+    case 'absolute-outside':
+      return `Ignoring "${safeFileRef}"; it is outside the extension directory.`;
+    case 'confinement-threw':
+      return stripAnsiAndControl(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    case 'missing':
+      return null;
+    case 'parse-error':
+      return `Failed to parse ${safeFileRef}: ${stripAnsiAndControl(cause instanceof Error ? cause.message : String(cause))}`;
+    case 'non-object-body':
+      return `Invalid ${safeFileRef}: expected a JSON object`;
+  }
 }

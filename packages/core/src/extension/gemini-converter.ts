@@ -21,7 +21,11 @@ import {
   readExtensionManifest,
   realPathWithin,
 } from './path-confinement.js';
-import { isRegularFile, normalizeMcpServers } from './claude-converter.js';
+import {
+  isRegularFile,
+  normalizeMcpServers,
+  assertMcpServersContainer,
+} from './claude-converter.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
@@ -61,11 +65,18 @@ export function convertGeminiToQwenConfig(
 
   const settings: ExtensionSetting[] | undefined = geminiConfig.settings;
 
-  // Server entries are validated/normalized through the shared helper so a
-  // non-object entry throws a precise error instead of a bare deref TypeError.
-  const mcpServers = geminiConfig.mcpServers
+  // Container must be an object (array / scalar would install zero
+  // servers silently); null treated as absent.
+  const validatedServers =
+    geminiConfig.mcpServers == null
+      ? undefined
+      : assertMcpServersContainer(
+          geminiConfig.mcpServers,
+          'Invalid MCP configuration: mcpServers must be an object',
+        );
+  const mcpServers = validatedServers
     ? normalizeMcpServers(
-        geminiConfig.mcpServers,
+        validatedServers,
         path.join(extensionDir, 'gemini-extension.json'),
       )
     : undefined;
