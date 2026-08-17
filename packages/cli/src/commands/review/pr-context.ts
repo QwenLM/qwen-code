@@ -14,6 +14,7 @@
 // comments, and issue comments.
 
 import type { CommandModule } from 'yargs';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   mkdirSync,
   readFileSync,
@@ -895,8 +896,74 @@ export function persistRecoveredLedger(
   }
 }
 
-/** Render the previous round's ledger for the context file. */
-export function renderLedgerSection(ledger: Ledger): string {
+/**
+ * Whether the recovered anchor may scope this round, and the routing that
+ * follows from it — computed here, for the reason `renderLedgerSection`
+ * records.
+ *
+ * The ADMISSIBLE branch keeps the routing wording verbatim: every clause in it
+ * is one a mutation check found deletable while the suite stayed green (the
+ * antecedent that says what to pass, the command that takes the flag, what
+ * that command does with it, and the pre-condition that stops a
+ * deterministically-refused anchor being retried). The gate clause is the only
+ * part that changed — from an instruction to compare, into the comparison's
+ * result.
+ *
+ * Both branches name the identities involved, because a round that silently
+ * declines an anchor is indistinguishable from one that never had it, and the
+ * difference is what a maintainer asking "why is it still reviewing the full
+ * diff?" needs to see.
+ */
+function anchorRuling(
+  ledger: Ledger,
+  running: string,
+  code: (v: string) => string,
+): string {
+  if (certifierMatchesRound(ledger.model, running)) {
+    return (
+      `The reviewed-at sha is the incremental anchor Step 1's ` +
+      `recovered-anchor check reads from the side file, and the \`model\` ` +
+      `beside it IS the identity running this review ` +
+      `(\`${code(running)}\`) — the same-model contract HOLDS, ruled here ` +
+      `rather than left for you to compare. So: when Step 1's ` +
+      `recovered-anchor check rules a re-run admissible, pass it as ` +
+      `\`--since <sha>\` on a \`fetch-pr\` re-run, which validates it ` +
+      `against the fetched history and scopes the diff and plan; never run ` +
+      `git against an anchor yourself.`
+    );
+  }
+  const certifier = ledger.model?.trim()
+    ? `\`${code(ledger.model.trim())}\``
+    : 'nothing — the marker predates the field, which counts as a mismatch';
+  const runner =
+    running !== '' ? `\`${code(running)}\`` : 'an unpublished identity';
+  return (
+    `**Do NOT pass the reviewed-at sha as \`--since\`, and do not run git ` +
+    `against it yourself.** It was certified by ${certifier}, and this ` +
+    `review runs as ${runner}: "clean up to that sha" is the recorded ` +
+    `identity's verdict, so scoping to it would carry this round past code ` +
+    `the current one never reviewed. Review the FULL range. The findings ` +
+    `below are still owed their rulings — the work list carries across ` +
+    `models, only the anchor does not.`
+  );
+}
+
+/**
+ * Render the previous round's ledger for the context file.
+ *
+ * `running` is the identity THIS round runs under (`roundModelIdFrom`). The
+ * same-model gate is ruled HERE rather than described for the orchestrator to
+ * apply, because the two strings are not comparable in prompt text: the
+ * marker's `model` is the provider-qualified identity the CLI wrote, while
+ * `{{model}}` — the only model value a skill body can interpolate — is
+ * `config.getModel()`, the bare id. Told to compare them, an orchestrator
+ * either finds them never equal (the recovery path silently never engages,
+ * which is this feature's whole payoff lost) or matches them loosely, which
+ * accepts another provider's same-named model and re-opens the scope-skip the
+ * digest exists to close. So the comparison happens in the process that holds
+ * both values, and what reaches the model is a verdict, not two operands.
+ */
+export function renderLedgerSection(ledger: Ledger, running: string): string {
   // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
   // newline would break the table structure (and could forge rows), so both are
   // neutralised before interpolation. The location cell is rendered inside a
@@ -919,7 +986,7 @@ export function renderLedgerSection(ledger: Ledger): string {
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — when Step 1's recovered-anchor check rules a re-run admissible, pass it as \`--since <sha>\` on a \`fetch-pr\` re-run, which validates it against the fetched history and scopes the diff and plan; never run git against an anchor yourself. Pass it only when the \`model\` beside it matches the model running THIS review — an absent \`model\` counts as a mismatch, on markers written before the field: "clean up to that sha" is the recorded model's verdict, and another model's anchor would scope this round past code it never reviewed.` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
@@ -1019,7 +1086,7 @@ export function buildMarkdown(
   // applicable to the current diff"). Empty bodies and "LGTM" templates are
   // filtered to keep the section signal-rich.
   if (prevLedger) {
-    parts.push(renderLedgerSection(prevLedger));
+    parts.push(renderLedgerSection(prevLedger, roundModelIdFrom(process.env)));
   }
 
   const meaningfulReviews = reviews
