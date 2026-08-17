@@ -334,6 +334,375 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('42');
   });
 
+  it('hydrates media references in a replay snapshot', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          clientId: 'client-1',
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: {
+                    type: 'image',
+                    mediaId: 'media-1',
+                    mimeType: 'image/png',
+                    size: 3,
+                  },
+                },
+              },
+            },
+            {
+              id: 2,
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'image',
+                  mediaId: 'media-1',
+                  mimeType: 'image/png',
+                  size: 3,
+                },
+              },
+            },
+          ],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/media/media-1')) {
+        return new Response(Uint8Array.from([1, 2, 3]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/transcript')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          hasMore: false,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'image',
+                  mediaId: 'media-1',
+                  mimeType: 'image/png',
+                  size: 3,
+                },
+              },
+            },
+          ],
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+
+    expect(session.replaySnapshot.compactedReplay[0]?.data).toEqual({
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      },
+    });
+    expect(session.replaySnapshot.compactedReplay[1]?.data).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+    });
+    const page = await session.getTranscriptPage();
+    expect(page.events[0]?.data).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+    });
+    expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/media-1')),
+    ).toHaveLength(1);
+  });
+
+  it('keeps a visible placeholder when replay media is unavailable', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          clientId: 'client-1',
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'image',
+                  mediaId: 'missing-media',
+                  mimeType: 'image/png',
+                  size: 3,
+                },
+              },
+            },
+          ],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/media/missing-media')) {
+        return jsonResponse(410, { error: 'gone' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+
+    expect(session.replaySnapshot.compactedReplay[0]?.data).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: {
+        type: 'text',
+        text: '[Attached media is no longer available]',
+      },
+    });
+    const hydrateBlock = (
+      session as unknown as {
+        hydrateBlock(block: unknown): Promise<unknown>;
+      }
+    ).hydrateBlock.bind(session);
+    await hydrateBlock({
+      type: 'image',
+      mediaId: 'missing-media',
+      mimeType: 'image/png',
+      size: 3,
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/missing-media')),
+    ).toHaveLength(2);
+  });
+
+  it('keeps replay media references retryable after a transient media failure', async () => {
+    let mediaRequests = 0;
+    const reference = {
+      type: 'image',
+      mediaId: 'flaky-media',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          clientId: 'client-1',
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: reference,
+                },
+              },
+            },
+            {
+              id: 2,
+              v: 1,
+              type: 'mid_turn_message_injected',
+              data: {
+                sessionId: 's-1',
+                messages: [''],
+                items: [{ content: [reference] }],
+              },
+            },
+          ],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/media/flaky-media')) {
+        mediaRequests += 1;
+        if (mediaRequests === 1) {
+          return jsonResponse(500, { error: 'boom' });
+        }
+        return new Response(Uint8Array.from([1, 2, 3]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/transcript')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          hasMore: false,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: reference,
+              },
+            },
+          ],
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+
+    // A transient failure must keep the reference (and its mediaId) in the
+    // snapshot so a later hydration pass can retry instead of pinning the
+    // permanent placeholder for the client's lifetime.
+    expect(session.replaySnapshot.compactedReplay[0]?.data).toEqual({
+      update: { sessionUpdate: 'user_message_chunk', content: reference },
+    });
+    expect(session.replaySnapshot.compactedReplay[1]?.data).toMatchObject({
+      items: [{ content: [reference] }],
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/flaky-media')),
+    ).toHaveLength(1);
+
+    const page = await session.getTranscriptPage();
+    expect(page.events[0]?.data).toEqual({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/flaky-media')),
+    ).toHaveLength(2);
+  });
+
+  it('evicts least-recently-used media when the cache byte cap is exceeded', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.includes('/session/s-1/media/')) {
+        return new Response(Uint8Array.from([1]), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+    const hydrateBlock = (
+      session as unknown as {
+        hydrateBlock(block: unknown): Promise<unknown>;
+      }
+    ).hydrateBlock.bind(session);
+
+    for (let index = 0; index < 4; index += 1) {
+      await hydrateBlock({
+        type: 'image',
+        mediaId: `media-${index}`,
+        mimeType: 'image/png',
+        size: 8 * 1024 * 1024,
+      });
+    }
+    await hydrateBlock({
+      type: 'image',
+      mediaId: 'media-0',
+      mimeType: 'image/png',
+      size: 8 * 1024 * 1024,
+    });
+    await hydrateBlock({
+      type: 'image',
+      mediaId: 'media-4',
+      mimeType: 'image/png',
+      size: 8 * 1024 * 1024,
+    });
+    await hydrateBlock({
+      type: 'image',
+      mediaId: 'media-1',
+      mimeType: 'image/png',
+      size: 8 * 1024 * 1024,
+    });
+
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/media-0')),
+    ).toHaveLength(1);
+    expect(
+      calls.filter((call) => call.url.endsWith('/media/media-1')),
+    ).toHaveLength(2);
+  });
+
+  it('uploads session media through the authenticated session route', async () => {
+    const reference = {
+      type: 'image' as const,
+      mediaId: 'media-1',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const { fetch, calls } = recordingFetch((req) =>
+      req.method === 'POST'
+        ? jsonResponse(201, reference)
+        : jsonResponse(500, { error: `unexpected ${req.url}` }),
+    );
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.uploadMedia(new Blob([Uint8Array.of(1, 2, 3)]), 'image/png'),
+    ).resolves.toEqual(reference);
+    expect(calls[0]).toMatchObject({
+      method: 'POST',
+      headers: expect.objectContaining({
+        'content-type': 'image/png',
+        'x-qwen-client-id': 'client-1',
+      }),
+    });
+    expect(calls[0]?.url).toContain('/session/s-1/media');
+  });
+
+  it('removes session media through the authenticated session route', async () => {
+    const { fetch, calls } = recordingFetch((req) =>
+      req.method === 'DELETE'
+        ? jsonResponse(200, { removed: true })
+        : jsonResponse(500, { error: `unexpected ${req.url}` }),
+    );
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.removeMedia('media-1')).resolves.toBe(true);
+    expect(calls[0]).toMatchObject({
+      method: 'DELETE',
+      headers: expect.objectContaining({ 'x-qwen-client-id': 'client-1' }),
+    });
+    expect(calls[0]?.url).toContain('/session/s-1/media/media-1');
+  });
+
   it('loads restored prompt activity from hasActivePrompt responses', async () => {
     const { fetch } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
@@ -715,6 +1084,86 @@ describe('DaemonSessionClient', () => {
     );
     expect(calls[0]?.method).toBe('GET');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('hydrates media references in pending and mid-turn snapshots', async () => {
+    const reference = {
+      type: 'image' as const,
+      mediaId: 'media-1',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/pending-prompts')) {
+        return jsonResponse(200, {
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'look',
+              state: 'queued',
+              queuedAt: 1,
+              content: [reference],
+            },
+          ],
+        });
+      }
+      if (req.url.endsWith('/mid-turn-messages')) {
+        return jsonResponse(200, {
+          messages: [
+            { messageId: 'mid-1', text: 'look', content: [reference] },
+          ],
+          settledMessageIds: [],
+          promotedMessageIds: [],
+        });
+      }
+      if (requestPathEndsWith(req, '/events')) {
+        return sseResponse(
+          `id: 1\nevent: mid_turn_message_injected\ndata: ${JSON.stringify({
+            id: 1,
+            v: 1,
+            type: 'mid_turn_message_injected',
+            data: {
+              sessionId: 's-1',
+              messages: ['look'],
+              messageIds: ['mid-1'],
+              items: [{ content: [reference] }],
+            },
+          })}\n\n`,
+        );
+      }
+      if (req.url.endsWith('/media/media-1')) {
+        return new Response(Uint8Array.of(1, 2, 3), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const image = { type: 'image', data: 'AQID', mimeType: 'image/png' };
+
+    await expect(session.getPendingPrompts()).resolves.toMatchObject({
+      pendingPrompts: [{ content: [image] }],
+    });
+    await expect(session.getMidTurnMessages()).resolves.toMatchObject({
+      messages: [{ content: [image] }],
+    });
+    const events = [];
+    for await (const event of session.events()) events.push(event);
+    expect(events).toMatchObject([
+      {
+        type: 'mid_turn_message_injected',
+        data: { items: [{ content: [image] }] },
+      },
+    ]);
   });
 
   it('forwards pending prompt removals with encoded ids and clientId', async () => {
@@ -2216,6 +2665,85 @@ describe('DaemonSessionClient clientId self-heal', () => {
     const resumeReq = calls.find((c) => c.url.endsWith('/session/s-1/resume'));
     expect(resumeReq?.headers['x-qwen-client-id']).toBeUndefined();
     expect(resumeReq?.body).toBe(JSON.stringify({ cwd: '/work/a' }));
+  });
+
+  it('re-registers and retries media upload, removal, and hydration', async () => {
+    let resumeCalls = 0;
+    const attempts = new Map<string, number>();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls += 1;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: `client-${resumeCalls + 1}`,
+          state: {},
+        });
+      }
+      const operation = `${req.method} ${new URL(req.url).pathname}`;
+      const attempt = (attempts.get(operation) ?? 0) + 1;
+      attempts.set(operation, attempt);
+      if (attempt === 1) return invalidClientIdResponse();
+      if (req.method === 'POST') {
+        return jsonResponse(201, {
+          type: 'image',
+          mediaId: 'media-uploaded',
+          mimeType: 'image/png',
+          size: 3,
+        });
+      }
+      if (req.method === 'DELETE') {
+        return jsonResponse(200, { removed: true });
+      }
+      if (req.method === 'GET') {
+        return new Response(Uint8Array.of(1, 2, 3), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+
+    await expect(
+      session.uploadMedia(new Blob([Uint8Array.of(1, 2, 3)]), 'image/png'),
+    ).resolves.toMatchObject({ mediaId: 'media-uploaded' });
+    await expect(session.removeMedia('media-uploaded')).resolves.toBe(true);
+    const hydrateBlock = (
+      session as unknown as {
+        hydrateBlock(block: unknown): Promise<unknown>;
+      }
+    ).hydrateBlock.bind(session);
+    await expect(
+      hydrateBlock({
+        type: 'image',
+        mediaId: 'media-read',
+        mimeType: 'image/png',
+        size: 3,
+      }),
+    ).resolves.toEqual({
+      type: 'image',
+      data: 'AQID',
+      mimeType: 'image/png',
+    });
+
+    expect(resumeCalls).toBe(3);
+    expect(session.clientId).toBe('client-4');
+    expect(
+      calls
+        .filter((call) => !call.url.endsWith('/resume'))
+        .map((call) => call.headers['x-qwen-client-id']),
+    ).toEqual([
+      'client-1',
+      'client-2',
+      'client-2',
+      'client-3',
+      'client-3',
+      'client-4',
+    ]);
   });
 
   it('re-registers and retries once on the non-blocking prompt path', async () => {

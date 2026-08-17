@@ -1562,9 +1562,10 @@ export class LiveSessionCoordinator {
     if (!sessionClosed) return;
     if (removeFreshTranscript) {
       try {
-        await new SessionService(runtime.workspaceCwd).removeSession(
-          session.sessionId,
-        );
+        const transcriptRemoved = await new SessionService(
+          runtime.workspaceCwd,
+        ).removeSession(session.sessionId);
+        if (transcriptRemoved) bridge.markSessionCatalogChanged();
       } catch {
         /* preserve the original setup failure */
       }
