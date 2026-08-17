@@ -407,7 +407,9 @@ function normalizeUnrecognizedEvent(
       ...base,
       type: 'debug',
       debugReason: 'unrecognized_event',
-      text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+      text: capDetails(
+        `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+      ),
     },
   ];
 }
@@ -767,7 +769,9 @@ function normalizeSessionUpdate(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `session_update: ${stringifyRedactedJson(event.data)}`,
+        text: capDetails(
+          `session_update: ${stringifyRedactedJson(event.data)}`,
+        ),
       },
     ];
   }
@@ -1260,7 +1264,9 @@ function normalizePermissionRequest(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        text: capDetails(
+          `permission_request: ${stringifyRedactedJson(event.data)}`,
+        ),
       },
     ];
   }
@@ -1272,7 +1278,9 @@ function normalizePermissionRequest(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        text: capDetails(
+          `permission_request: ${stringifyRedactedJson(event.data)}`,
+        ),
       },
     ];
   }
@@ -1306,7 +1314,7 @@ function normalizePermissionResolved(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+        text: capDetails(`${event.type}: ${stringifyRedactedJson(event.data)}`),
       },
     ];
   }

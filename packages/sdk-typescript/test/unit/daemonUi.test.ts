@@ -2681,6 +2681,40 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(text.endsWith('... [truncated]')).toBe(true);
   });
 
+  it('caps the embedded payload of the sibling debug-block paths too', () => {
+    // The one-block-per-frame accumulation hazard is not specific to the
+    // unrecognized session_update branch: every debug path that embeds the
+    // raw payload must stay capped, or a high-frequency frame taking any
+    // sibling path reproduces the same unbounded-growth OOM.
+    const large = 'x'.repeat(100_000);
+    const expectCapped = (events: ReturnType<typeof normalizeDaemonEvent>) => {
+      expect(events).toHaveLength(1);
+      const text = (events[0] as { text?: string }).text ?? '';
+      expect(text.length).toBeLessThanOrEqual(4096 + '... [truncated]'.length);
+      expect(text.endsWith('... [truncated]')).toBe(true);
+    };
+
+    // Top-level unrecognized event type.
+    expectCapped(
+      normalizeDaemonEvent(envelopeOf('some_future_event', { payload: large })),
+    );
+    // session_update with a non-record payload (no usable update record).
+    expectCapped(normalizeDaemonEvent(envelopeOf('session_update', large)));
+    // permission_request with a non-record payload and one without requestId.
+    expectCapped(normalizeDaemonEvent(envelopeOf('permission_request', large)));
+    expectCapped(
+      normalizeDaemonEvent(
+        envelopeOf('permission_request', { payload: large }),
+      ),
+    );
+    // permission_resolved without requestId.
+    expectCapped(
+      normalizeDaemonEvent(
+        envelopeOf('permission_resolved', { payload: large }),
+      ),
+    );
+  });
+
   it('classifies a session_update with no usable discriminator as malformed', () => {
     // `getSessionUpdatePayload` accepts any record, so these reach the default
     // branch with `kind === undefined`. They are broken frames, not kinds from
