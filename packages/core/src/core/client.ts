@@ -133,7 +133,11 @@ import {
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage, getErrorType } from '../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorType,
+  UnauthorizedError,
+} from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import {
   flatMapTextParts,
@@ -328,6 +332,10 @@ export class GeminiClient {
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
   private readonly settledSteerInputs = new WeakSet<SteerInput>();
+  private readonly interactionStartTypeByOwner = new WeakMap<
+    object,
+    SendMessageType
+  >();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -2178,7 +2186,16 @@ export class GeminiClient {
       ) {
         return;
       }
-      if (status === 'ok' && this.config.getJsonSchema?.()) {
+      const interactionStartType =
+        this.interactionStartTypeByOwner.get(interactionOwner);
+      const ownsStructuredOutputContract =
+        interactionStartType === SendMessageType.UserQuery ||
+        interactionStartType === SendMessageType.Retry;
+      if (
+        status === 'ok' &&
+        ownsStructuredOutputContract &&
+        this.config.getJsonSchema?.()
+      ) {
         endInteractionSpan('error', {
           promptId: prompt_id,
           errorMessage: 'model did not produce structured output',
@@ -2425,6 +2442,12 @@ export class GeminiClient {
       interactionOwner = getActiveInteractionSpan(prompt_id);
       if (
         interactionOwner &&
+        !this.interactionStartTypeByOwner.has(interactionOwner)
+      ) {
+        this.interactionStartTypeByOwner.set(interactionOwner, messageType);
+      }
+      if (
+        interactionOwner &&
         messageType === SendMessageType.UserQuery &&
         typeof options?.submittedPrompt === 'string'
       ) {
@@ -2438,6 +2461,7 @@ export class GeminiClient {
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
+    let userPromptSubmitFailureMessage = 'UserPromptSubmit hook failed';
     try {
       hooksEnabled = !this.config.getDisableAllHooks();
       messageBus = this.config.getMessageBus();
@@ -2488,6 +2512,7 @@ export class GeminiClient {
           hookOutput?.shouldStopExecution()
         ) {
           if (goalPermit) {
+            userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
             if (!runtime || !goalTurnKey) {
               throw new Error('Goal turn admission is unavailable');
@@ -2544,7 +2569,7 @@ export class GeminiClient {
     } catch (error) {
       endCurrentInteraction(
         signal.aborted ? 'cancelled' : 'error',
-        signal.aborted ? undefined : 'UserPromptSubmit hook failed',
+        signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
@@ -3406,23 +3431,28 @@ export class GeminiClient {
           if (event.type === GeminiEventType.Error) {
             this.forceFullIdeContext = true;
             if (arenaAgentClient) {
-              const errorMsg =
-                event.value instanceof Error
-                  ? event.value.message
-                  : 'Unknown error';
-              await arenaAgentClient.reportError(errorMsg);
+              const status = event.value.error?.status;
+              const arenaError =
+                status === 401 || status === 403
+                  ? 'Authentication failed'
+                  : status === 429
+                    ? 'Rate limit exceeded'
+                    : status !== undefined && status >= 500
+                      ? 'Provider service unavailable'
+                      : status !== undefined
+                        ? `API request failed (${status})`
+                        : 'Provider request failed';
+              try {
+                await arenaAgentClient.reportError(arenaError);
+              } catch {
+                this.config
+                  .getDebugLogger()
+                  .warn('Failed to report Arena provider error');
+              }
             }
             this.lastApiCompletionTimestamp = Date.now();
             // Sanitize: do not pass raw API error messages to span status.
-            const errMsg =
-              event.value instanceof Error ? '[API error]' : 'unknown error';
-            endCurrentInteraction(
-              'error',
-              errMsg,
-              event.value instanceof Error
-                ? getErrorType(event.value)
-                : 'api_error',
-            );
+            endCurrentInteraction('error', 'unknown error', 'api_error');
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3973,6 +4003,21 @@ export class GeminiClient {
     } catch (error) {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
+      }
+      if (
+        error instanceof UnauthorizedError &&
+        messageType !== SendMessageType.Hook &&
+        messageType !== SendMessageType.Steer
+      ) {
+        try {
+          await this.config
+            .getArenaAgentClient()
+            ?.reportError('Authentication failed');
+        } catch {
+          this.config
+            .getDebugLogger()
+            .warn('Failed to report Arena authentication error');
+        }
       }
       throw error;
     } finally {

@@ -57,6 +57,10 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
+import {
+  parseBranchCheckpointPayload,
+  resolveBranchPoints,
+} from './branch-points.js';
 export {
   buildApiHistoryFromConversation,
   type BuildApiHistoryOptions,
@@ -72,6 +76,19 @@ export {
 } from './session-resume-token-counts.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+export class BranchPointInvalidError extends Error {
+  constructor(readonly recordId: string) {
+    super(`Invalid or inactive branch point: ${recordId}`);
+    this.name = 'BranchPointInvalidError';
+  }
+}
+
+export interface ForkSessionOptions {
+  atRecordId?: string;
+  title?: string;
+  source?: { sourceType: string; sourceId?: string };
+}
 
 /**
  * Session item for list display.
@@ -283,55 +300,144 @@ const MAX_PROMPT_SCAN_LINES = 10;
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
-async function copyFileHistoryBackups(
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.promises.access(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function fsyncPath(filePath: string): Promise<void> {
+  const handle = await fs.promises.open(filePath, 'r');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function fsyncDirectoryBestEffort(directory: string): Promise<void> {
+  try {
+    await fsyncPath(directory);
+  } catch (error) {
+    if (process.platform !== 'win32') throw error;
+  }
+}
+
+function validatedBackupPath(directory: string, name: string): string {
+  if (name.length === 0 || path.basename(name) !== name) {
+    throw new Error(`Invalid file-history backup name: ${name}`);
+  }
+  const resolvedDirectory = path.resolve(directory);
+  const resolved = path.resolve(directory, name);
+  if (path.dirname(resolved) !== resolvedDirectory) {
+    throw new Error(`File-history backup escapes its directory: ${name}`);
+  }
+  return resolved;
+}
+
+async function copyFileHistoryBackupsToStaging(
   sourceSessionId: string,
-  targetSessionId: string,
-): Promise<void> {
-  const fsPromises = await import('node:fs/promises');
+  targetDirectory: string,
+  backupNames: ReadonlySet<string>,
+  onMissing: (name: string) => void,
+): Promise<Set<string>> {
+  const copiedNames = new Set<string>();
+  if (backupNames.size === 0) return copiedNames;
   const sourceDir = path.join(
     Storage.getGlobalQwenDir(),
     FILE_HISTORY_DIR,
     sourceSessionId,
   );
-  const targetDir = path.join(
-    Storage.getGlobalQwenDir(),
-    FILE_HISTORY_DIR,
-    targetSessionId,
-  );
-
-  let entries: string[];
-  try {
-    entries = await fsPromises.readdir(sourceDir);
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
-    debugLogger.warn(`copyFileHistoryBackups: readdir failed: ${e}`);
-    return;
-  }
-  if (entries.length === 0) return;
-
-  try {
-    await fsPromises.mkdir(targetDir, { recursive: true });
-  } catch (e) {
-    debugLogger.warn(`copyFileHistoryBackups: mkdir failed: ${e}`);
-    return;
-  }
-  await Promise.all(
-    entries.map(async (name) => {
-      const src = path.join(sourceDir, name);
-      const dst = path.join(targetDir, name);
-      try {
-        await fsPromises.link(src, dst);
-      } catch {
-        try {
-          await fsPromises.copyFile(src, dst);
-        } catch (copyErr) {
-          debugLogger.warn(
-            `copyFileHistoryBackups: failed to copy ${name}: ${copyErr}`,
-          );
-        }
+  const copyBuffer = Buffer.alloc(64 * 1024);
+  let stagingCreated = false;
+  const ensureStaging = async () => {
+    if (stagingCreated) return;
+    await fs.promises.mkdir(targetDirectory, {
+      recursive: false,
+      mode: 0o700,
+    });
+    stagingCreated = true;
+  };
+  for (const name of backupNames) {
+    const source = validatedBackupPath(sourceDir, name);
+    const target = validatedBackupPath(targetDirectory, name);
+    let sourceHandle: fs.promises.FileHandle;
+    try {
+      sourceHandle = await fs.promises.open(
+        source,
+        fs.constants.O_RDONLY |
+          (process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW),
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') {
+        onMissing(name);
+        continue;
       }
-    }),
-  );
+      throw error;
+    }
+    try {
+      const sourceStat = await sourceHandle.stat();
+      let pathStat: fs.Stats;
+      try {
+        pathStat = await fs.promises.lstat(source);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        onMissing(name);
+        continue;
+      }
+      if (
+        !sourceStat.isFile() ||
+        !pathStat.isFile() ||
+        sourceStat.dev !== pathStat.dev ||
+        sourceStat.ino !== pathStat.ino
+      ) {
+        onMissing(name);
+        continue;
+      }
+
+      await ensureStaging();
+      const targetHandle = await fs.promises.open(target, 'wx', 0o600);
+      try {
+        let sourceOffset = 0;
+        while (true) {
+          const { bytesRead } = await sourceHandle.read(
+            copyBuffer,
+            0,
+            copyBuffer.length,
+            sourceOffset,
+          );
+          if (bytesRead === 0) break;
+          let written = 0;
+          while (written < bytesRead) {
+            const result = await targetHandle.write(
+              copyBuffer,
+              written,
+              bytesRead - written,
+              null,
+            );
+            if (result.bytesWritten === 0) {
+              throw new Error(`Failed to copy file-history backup: ${name}`);
+            }
+            written += result.bytesWritten;
+          }
+          sourceOffset += bytesRead;
+        }
+        await targetHandle.chmod(sourceStat.mode & 0o7777);
+        await targetHandle.sync();
+      } finally {
+        await targetHandle.close();
+      }
+      copiedNames.add(name);
+    } finally {
+      await sourceHandle.close();
+    }
+  }
+  return copiedNames;
 }
 
 /**
@@ -1383,7 +1489,7 @@ export class SessionService {
     }
 
     const lastMessage = messages[messages.length - 1];
-    stats ??= fs.statSync(filePath);
+    stats ??= await fs.promises.stat(filePath);
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,
@@ -1689,20 +1795,19 @@ export class SessionService {
    * @param titleSource Where the title came from. Defaults to `'manual'` so
    *   existing callers are unchanged — pass `'auto'` only for titles produced
    *   by the auto-title generator.
+   * @param archiveState Which session store to rename. Defaults to active.
    * @returns true if renamed successfully, false if session not found
-   * @remarks Only checks active sessions. Use `getSessionLocation()` or
-   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async renameSession(
     sessionId: string,
     title: string,
     titleSource: TitleSource = 'manual',
+    archiveState: SessionArchiveState = 'active',
   ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
 
     try {
       // Verify the file exists and belongs to this project
@@ -1771,9 +1876,7 @@ export class SessionService {
   async forkSession(
     sourceSessionId: string,
     newSessionId: string,
-    options: {
-      source?: { sourceType: string; sourceId?: string };
-    } = {},
+    options: ForkSessionOptions = {},
   ): Promise<{ filePath: string; copiedCount: number }> {
     if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
       throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
@@ -1803,13 +1906,43 @@ export class SessionService {
       );
     }
 
-    // Copy only the active branch. Rewind leaves old records in the JSONL as
-    // abandoned parentUuid branches; copying raw records would resurrect them.
-    const { messages: activeMessages } = this.reconstructHistory(records);
-    const sourceRecords = includeActiveSideArtifactRecords(
-      records,
+    const { messages: currentActiveMessages } =
+      this.reconstructHistory(records);
+    let boundedRecords = records;
+    let activeMessages = currentActiveMessages;
+    if (options.atRecordId !== undefined) {
+      const point = resolveBranchPoints(currentActiveMessages).get(
+        options.atRecordId,
+      );
+      if (!point) throw new BranchPointInvalidError(options.atRecordId);
+      // The active chain merges duplicate uuids first-wins, so a checkpoint
+      // line repeated by a crash-retry still resolves above. Bound the raw
+      // prefix at the first occurrence: that is where the logical checkpoint
+      // committed, and anything written after it must not leak into the fork.
+      const matchingIndex = records.findIndex(
+        (record) => record.uuid === options.atRecordId,
+      );
+      if (matchingIndex < 0) {
+        throw new BranchPointInvalidError(options.atRecordId);
+      }
+      boundedRecords = records.slice(0, matchingIndex + 1);
+      activeMessages = this.reconstructHistory(boundedRecords, {
+        leafUuid: options.atRecordId,
+      }).messages;
+      if (activeMessages.at(-1)?.uuid !== options.atRecordId) {
+        throw new BranchPointInvalidError(options.atRecordId);
+      }
+    }
+
+    // Copy only the selected active branch. Rewind leaves old records in the
+    // JSONL as abandoned parentUuid branches; copying raw records would
+    // resurrect them. The raw input is physically bounded first so side
+    // artifacts after a historical checkpoint cannot leak into the fork.
+    const preFilterRecords = includeActiveSideArtifactRecords(
+      boundedRecords,
       activeMessages,
-    ).filter(
+    );
+    const sourceRecords = preFilterRecords.filter(
       // A fork is a fresh top-level session with its own creation metadata.
       // Inheriting either record would falsely attribute the fork to the
       // source session's parent or creator.
@@ -1848,22 +1981,58 @@ export class SessionService {
       : undefined;
     let prevUuid: string | null = sourceRecord?.uuid ?? null;
     const remappedArtifactIds = new Map<string, string>();
+    const retainedUuids = new Set(sourceRecords.map((record) => record.uuid));
+    // Map filtered record UUIDs to their nearest retained predecessor so
+    // checkpoint boundaries that pointed at a filtered creation/title record
+    // are remapped rather than widened to the whole chain.
+    const nearestRetainedPredecessor = new Map<string, string | null>();
+    {
+      let lastRetained: string | null = null;
+      for (const record of preFilterRecords) {
+        if (
+          retainedUuids.has(record.uuid) &&
+          !isSessionArtifactRecord(record)
+        ) {
+          lastRetained = record.uuid;
+        } else {
+          nearestRetainedPredecessor.set(record.uuid, lastRetained);
+        }
+      }
+    }
     const forked: ChatRecord[] = [
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
         const isArtifactRecord = isSessionArtifactRecord(record);
-        const systemPayload = remapSystemPayloadForFork(
+        let systemPayload = remapSystemPayloadForFork(
           record,
           sourceSessionId,
           newSessionId,
           remappedArtifactIds,
         );
+        if (record.subtype === 'branch_checkpoint') {
+          const checkpoint = parseBranchCheckpointPayload(systemPayload);
+          if (checkpoint) {
+            let boundary = checkpoint.startExclusiveRecordUuid;
+            if (boundary !== null && !retainedUuids.has(boundary)) {
+              boundary = nearestRetainedPredecessor.get(boundary) ?? null;
+            }
+            systemPayload = {
+              ...checkpoint,
+              startExclusiveRecordUuid: boundary,
+            };
+          }
+        }
         const next: ChatRecord = {
           ...record,
           sessionId: newSessionId,
           cwd: this.projectRoot,
           systemPayload,
-          parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
+          parentUuid:
+            isArtifactRecord &&
+            record.parentUuid !== null &&
+            retainedUuids.has(record.parentUuid)
+              ? record.parentUuid
+              : prevUuid,
           forkedFrom: {
             sessionId: sourceSessionId,
             messageUuid: record.uuid,
@@ -1881,7 +2050,10 @@ export class SessionService {
     // records may still point at the source session's prompt ids. Remap and
     // top up snapshots explicitly so /branch sessions expose /rewind/snapshots
     // immediately after they become live.
-    const sourceSession = await this.loadSession(sourceSessionId);
+    const sourceSession =
+      options.atRecordId === undefined
+        ? await this.loadSession(sourceSessionId)
+        : undefined;
     const existingSnapshotPromptIds =
       collectFileHistorySnapshotPromptIds(forked);
     const remappedSnapshots = sourceSession?.fileHistorySnapshots
@@ -1904,50 +2076,144 @@ export class SessionService {
         },
       };
       forked.push(snapshotRecord);
+      prevUuid = snapshotRecord.uuid;
     }
 
-    fs.mkdirSync(chatsDir, { recursive: true });
+    if (options.title !== undefined) {
+      const titleRecord: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid: prevUuid,
+        sessionId: newSessionId,
+        type: 'system',
+        subtype: 'custom_title',
+        timestamp: new Date().toISOString(),
+        cwd: this.projectRoot,
+        version: records[0].version,
+        systemPayload: {
+          customTitle: options.title,
+          titleSource: 'manual',
+        },
+      };
+      forked.push(titleRecord);
+      prevUuid = titleRecord.uuid;
+    }
+
+    const validateTargetBranchPoint = () => {
+      if (options.atRecordId === undefined) return;
+      const targetActive = this.reconstructHistory(forked).messages;
+      if (!resolveBranchPoints(targetActive).has(options.atRecordId)) {
+        throw new BranchPointInvalidError(options.atRecordId);
+      }
+    };
+    validateTargetBranchPoint();
+
     const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
+    const operationId = randomUUID();
+    const stagedTranscriptPath = path.join(
+      chatsDir,
+      `.${newSessionId}.${operationId}.tmp`,
+    );
+    const backupRoot = path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR);
+    const stagedBackupPath = path.join(
+      backupRoot,
+      `.${newSessionId}.${operationId}.tmp`,
+    );
+    const targetBackupPath = path.join(backupRoot, newSessionId);
+    const backupNames = collectReferencedFileHistoryBackupNames(forked);
 
-    // Exclusive create: one syscall that both asserts "file doesn't exist"
-    // and opens for writing, eliminating the TOCTOU window between a
-    // separate existsSync check and writeFileSync. Also guarantees we
-    // never silently overwrite an existing session file.
-    let fd: number;
+    await Promise.all([
+      fs.promises.mkdir(chatsDir, { recursive: true }),
+      fs.promises.mkdir(backupRoot, { recursive: true, mode: 0o700 }),
+    ]);
+
+    let backupPublished = false;
+    let committed = false;
     try {
-      fd = fs.openSync(targetPath, 'wx', 0o600);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error(`Target session file already exists: ${newSessionId}`);
+      if (
+        (await pathExists(targetPath)) ||
+        (await pathExists(targetBackupPath))
+      ) {
+        throw new Error(`Target session already exists: ${newSessionId}`);
       }
-      throw err;
-    }
-    let targetComplete = false;
-    try {
+
+      const stagedHandle = await fs.promises.open(
+        stagedTranscriptPath,
+        'wx',
+        0o600,
+      );
       try {
-        fs.writeFileSync(fd, body, { encoding: 'utf8' });
+        await stagedHandle.writeFile(body, { encoding: 'utf8' });
+        await stagedHandle.sync();
       } finally {
-        fs.closeSync(fd);
+        await stagedHandle.close();
       }
 
-      await copyFileHistoryBackups(sourceSessionId, newSessionId);
-      targetComplete = true;
+      if (backupNames.size > 0) {
+        const copiedBackupNames = await copyFileHistoryBackupsToStaging(
+          sourceSessionId,
+          stagedBackupPath,
+          backupNames,
+          (name) => {
+            this.warn(
+              `branch ${newSessionId} omitted missing file-history backup ${name}; rewind data for that snapshot is unavailable`,
+            );
+          },
+        );
+        if (copiedBackupNames.size > 0) {
+          if (await pathExists(targetBackupPath)) {
+            throw new Error(`Target session already exists: ${newSessionId}`);
+          }
+          await fs.promises.rename(stagedBackupPath, targetBackupPath);
+          backupPublished = true;
+        }
+      }
+
+      try {
+        await fs.promises.link(stagedTranscriptPath, targetPath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') {
+          throw new Error(`Target session already exists: ${newSessionId}`);
+        }
+        if (await pathExists(targetPath)) {
+          throw new Error(`Target session already exists: ${newSessionId}`);
+        }
+        await fs.promises.rename(stagedTranscriptPath, targetPath);
+      }
+      committed = true;
+      try {
+        await fsyncDirectoryBestEffort(chatsDir);
+      } catch (error) {
+        this.warn(
+          `branch committed session=${newSessionId} but final durability confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
-      if (!targetComplete) {
-        try {
-          this.removeFileIfExists(targetPath);
-        } catch (cleanupError) {
-          this.warn(
-            `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
-          );
+      const cleanupFailures: string[] = [];
+      await fs.promises.unlink(stagedTranscriptPath).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          cleanupFailures.push(`transcript staging: ${String(error)}`);
         }
-        try {
-          this.removeFileHistoryBackups(newSessionId);
-        } catch (cleanupError) {
-          this.warn(
-            `forkSession: failed to clean up file history for incomplete target ${newSessionId}: ${cleanupError}`,
-          );
-        }
+      });
+      await fs.promises
+        .rm(stagedBackupPath, { recursive: true, force: true })
+        .catch((error) => {
+          cleanupFailures.push(`backup staging: ${String(error)}`);
+        });
+      if (!committed && backupPublished) {
+        await fs.promises
+          .rm(targetBackupPath, {
+            recursive: true,
+            force: true,
+          })
+          .catch((error) => {
+            cleanupFailures.push(`published backup: ${String(error)}`);
+          });
+      }
+      if (cleanupFailures.length > 0) {
+        this.warn(
+          `branch cleanup incomplete session=${newSessionId}: ${cleanupFailures.join('; ')}`,
+        );
       }
     }
 
@@ -2103,18 +2369,12 @@ export class SessionService {
       filesProcessed++;
 
       const filePath = path.join(chatsDir, name);
-
-      // Cheap tail-read to extract the title before doing any project-
-      // filter work. Saves a per-file jsonl.readLines on the common
-      // case where most sessions don't share this prefix.
       const titleInfo = this.readSessionTitleInfoFromFile(filePath);
       if (!titleInfo.title) continue;
-      const normalizedTitle = titleInfo.title.toLowerCase().trim();
-      if (!normalizedTitle.startsWith(normalizedPrefix)) continue;
+      if (!titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)) {
+        continue;
+      }
 
-      // Project filter — same semantics as findSessionsByTitle: scope
-      // collisions to the current project so a fork in another project
-      // can't make this one bump unnecessarily.
       try {
         const records = await jsonl.readLines<ChatRecord>(filePath, 1);
         if (records.length === 0) continue;
@@ -2129,7 +2389,6 @@ export class SessionService {
       } catch {
         continue;
       }
-
       titles.push(titleInfo.title);
     }
 
@@ -2313,6 +2572,47 @@ function collectFileHistorySnapshotPromptIds(
     }
   }
   return ids;
+}
+
+function collectReferencedFileHistoryBackupNames(
+  records: readonly ChatRecord[],
+): Set<string> {
+  const names = new Set<string>();
+  for (const record of records) {
+    if (
+      record.type !== 'system' ||
+      record.subtype !== 'file_history_snapshot' ||
+      !record.systemPayload
+    ) {
+      continue;
+    }
+    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
+    if (!Array.isArray(payload.snapshots)) continue;
+    for (const snapshot of payload.snapshots) {
+      if (
+        !snapshot ||
+        typeof snapshot !== 'object' ||
+        !snapshot.trackedFileBackups ||
+        typeof snapshot.trackedFileBackups !== 'object'
+      ) {
+        continue;
+      }
+      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+        if (
+          backup &&
+          backup.failed !== true &&
+          typeof backup.backupFileName === 'string' &&
+          backup.backupFileName.length > 0 &&
+          backup.backupFileName !== '.' &&
+          backup.backupFileName !== '..' &&
+          path.basename(backup.backupFileName) === backup.backupFileName
+        ) {
+          names.add(backup.backupFileName);
+        }
+      }
+    }
+  }
+  return names;
 }
 
 /**

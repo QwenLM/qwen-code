@@ -630,6 +630,11 @@ export interface DaemonStatusReport {
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
+    acpPreAttachMaxFramesPerStream?: number | null;
+    acpPreAttachMaxFramesPerConnection?: number | null;
+    acpPreAttachMaxFramesGlobal?: number | null;
+    acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+    acpPreAttachMaxPayloadBytesGlobal?: number | null;
     compactedReplayMaxBytes: number;
     maxJournalEvents: number;
     maxJournalBytes: number;
@@ -725,6 +730,16 @@ export interface DaemonStatusReport {
         sseStreams: number;
         wsStreams: number;
         pendingClientRequests: number;
+        preAttach?: {
+          bufferedConnectionFrames: number;
+          bufferedSessionFrames: number;
+          pendingDeliveryFrames: number;
+          usedFrames: number;
+          usedBytes: number;
+          highWaterFrames: number;
+          highWaterBytes: number;
+          guardFailures: number;
+        };
       };
     };
     rateLimit: {
@@ -866,7 +881,26 @@ export interface DaemonStatusReport {
   /** Present only when requested with `detail=full`. */
   full?: {
     sessions: DaemonStatusReportSession[];
-    acpConnections: Array<Record<string, unknown>>;
+    /** Additive; absent when reading full status from an older daemon. */
+    acpMounts?: Array<{
+      workspaceId: string | null;
+      primary: boolean;
+      connectionCount: number;
+      wsStreams: number;
+      preAttachGuardFailures: number;
+    }>;
+    acpConnections: Array<{
+      connectionIdPrefix?: string;
+      workspaceId?: string | null;
+      workspaceCwd?: string;
+      primary?: boolean;
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+      [key: string]: unknown;
+    }>;
     workspace: Record<string, DaemonStatusReportSection>;
     auth: {
       supportedDeviceFlowProviders: string[];
@@ -998,10 +1032,32 @@ export interface BranchSessionRequest {
   name?: string;
 }
 
-export interface DaemonBranchedSession extends DaemonRestoredSession {
+export interface HistoricalBranchSessionRequest extends BranchSessionRequest {
+  atRecordId: string;
+}
+
+export type DaemonBranchSessionRequest =
+  | BranchSessionRequest
+  | HistoricalBranchSessionRequest;
+
+export interface DaemonBranchPoint {
+  assistantRecordUuid: string;
+  checkpointUuid: string;
+}
+
+export interface DaemonPersistedBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }
+
+export interface DaemonBranchedSession
+  extends DaemonRestoredSession,
+    DaemonPersistedBranchedSession {}
+
+export type DaemonBranchSessionResult =
+  | DaemonBranchedSession
+  | DaemonPersistedBranchedSession;
 
 export interface SideTaskSessionRequest {
   name?: string;
@@ -1242,6 +1298,25 @@ export interface DaemonSessionListPage {
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
+}
+
+export interface DaemonSessionCatalogVersion {
+  generation: string;
+  revision: number;
+}
+
+export interface DaemonSessionLiveState {
+  sessionId: string;
+  clientCount: number;
+  hasActivePrompt: boolean;
+  isWaitingForPermission: boolean;
+  isWaitingForUserQuestion: boolean;
+}
+
+export interface DaemonWorkspaceSessionLiveState {
+  v: 1;
+  catalogVersion: DaemonSessionCatalogVersion;
+  sessions: DaemonSessionLiveState[];
 }
 
 export interface DaemonWorkspaceSessionInfo {
@@ -2625,6 +2700,20 @@ export interface DaemonToolToggleResult {
 
 export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
 
+export interface DaemonSkillToggleMutationSkill {
+  name: string;
+  enabled: boolean;
+}
+
+export interface DaemonSkillToggleMutation {
+  id: string;
+  kind: 'skill_toggle';
+  skills: DaemonSkillToggleMutationSkill[];
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
 export interface DaemonSkillToggleResult {
   skillName: string;
   enabled: boolean;
@@ -3090,11 +3179,14 @@ export interface DaemonRemoveMidTurnMessageResult {
 
 /**
  * One entry still waiting in the daemon's mid-turn queue (projection of the
- * bridge's `MidTurnQueueEntry`). The queue is session-global.
+ * bridge's `MidTurnQueueEntry`). The queue is session-global. `content` carries
+ * any image blocks attached to the message, so a refreshed client
+ * can rebuild its queued row with the attachments intact.
  */
 export interface DaemonMidTurnMessageSummary {
   messageId: string;
   text: string;
+  content?: PromptContentBlock[];
 }
 
 /**
@@ -3116,11 +3208,14 @@ export interface DaemonMidTurnMessagesResult {
 /**
  * One entry in the daemon's pending prompt queue. The `state` is
  * `'running'` for the currently dispatching prompt and `'queued'`
- * for prompts waiting in the FIFO.
+ * for prompts waiting in the FIFO. `content` carries any image blocks attached
+ * to the prompt, so a refreshed client can restore
+ * the full payload (text + images) instead of just the text.
  */
 export interface DaemonPendingPromptSummary {
   promptId: string;
   text: string;
+  content?: PromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
   originatorClientId?: string;
@@ -3797,6 +3892,18 @@ export interface PromptTextContent {
   text: string;
 }
 
+export type DaemonSessionMediaReference = Record<string, unknown> & {
+  type: 'image';
+  mediaId: string;
+  mimeType: string;
+  size: number;
+};
+
+export interface DaemonSessionMediaData {
+  data: string;
+  mimeType: string;
+}
+
 /**
  * The set of content blocks the daemon's prompt route accepts. The full ACP
  * `ContentBlock` union is wider; SDK clients can pass any of those shapes
@@ -3807,6 +3914,7 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 

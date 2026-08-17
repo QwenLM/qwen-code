@@ -247,6 +247,7 @@ export {
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
+export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,
@@ -295,6 +296,7 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
+export * from './services/session-registry.js';
 export * from './services/sessionService.js';
 export {
   collectSessionTurnState,
@@ -390,6 +392,7 @@ export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
+export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -587,6 +590,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/rateLimit.js';
@@ -602,6 +606,7 @@ export {
   preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
+export * from './utils/process-liveness.js';
 export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';

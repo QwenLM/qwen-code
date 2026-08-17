@@ -11,6 +11,7 @@ import type {
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -23,6 +24,17 @@ import {
   createReplayCumulativeUsage,
   replayTranscriptRecordPage,
 } from './history-replay-page.js';
+
+const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
+vi.mock(
+  '../../utils/tool-result-boundary-diagnostics.js',
+  async (original) => ({
+    ...(await original<
+      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeAcpToolResultProjection: observeAcpProjectionMock,
+  }),
+);
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TIMESTAMP = '2026-07-12T00:00:00.000Z';
@@ -54,6 +66,19 @@ function userRecord(): ChatRecord {
     message: {
       role: 'user',
       parts: [{ text: 'hello' }],
+    },
+  };
+}
+
+function assistantRecord(): ChatRecord {
+  return {
+    ...userRecord(),
+    uuid: 'assistant-record',
+    parentUuid: 'user-record',
+    type: 'assistant',
+    message: {
+      role: 'model',
+      parts: [{ text: 'answer' }],
     },
   };
 }
@@ -227,6 +252,7 @@ describe('history replay page', () => {
   });
 
   it('lifts record timestamps for bulk replay callers', async () => {
+    observeAcpProjectionMock.mockClear();
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,
       records: [userRecord()],
@@ -239,6 +265,72 @@ describe('history replay page', () => {
         timestamp: Date.parse(TIMESTAMP),
       }),
     ]);
+    const deliveredUpdate = result.updates[0];
+    const projectionCall = observeAcpProjectionMock.mock.calls.find(
+      ([, , sessionId]) => sessionId === SESSION_ID,
+    );
+    expect(projectionCall?.[3]).toBe(deliveredUpdate);
+  });
+
+  it('attaches the checkpoint only to the final chunk of a multi-chunk Assistant record', async () => {
+    // One assistant record replays as text/thought/text. The checkpoint
+    // marks the END of the record, so only the last visible assistant
+    // chunk may expose the branch point.
+    const multiChunk: ChatRecord = {
+      ...assistantRecord(),
+      message: {
+        role: 'model',
+        parts: [
+          { text: 'first part' },
+          { text: 'thinking', thought: true },
+          { text: 'last part' },
+        ],
+      },
+    };
+
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [multiChunk],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const readBranchRecordId = (update: SessionUpdate): string | undefined => {
+      const meta = (update as { _meta?: Record<string, unknown> })._meta;
+      const transcript =
+        meta && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      const branchRecordId = transcript?.['branchRecordId'];
+      return typeof branchRecordId === 'string' ? branchRecordId : undefined;
+    };
+
+    const decorated = result.updates.filter(
+      (update) => readBranchRecordId(update) !== undefined,
+    );
+    expect(decorated).toHaveLength(1);
+    expect(decorated[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'last part' },
+    });
+
+    const thoughtChunk = result.updates.find(
+      (update) => update.sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtChunk).toBeDefined();
+    expect(readBranchRecordId(thoughtChunk!)).toBeUndefined();
+    const firstChunk = result.updates.find(
+      (update) =>
+        update.sessionUpdate === 'agent_message_chunk' &&
+        (update as { content?: { text?: string } }).content?.text ===
+          'first part',
+    );
+    expect(firstChunk).toBeDefined();
+    expect(readBranchRecordId(firstChunk!)).toBeUndefined();
   });
 
   it('fails incrementally before collecting an update above the count limit', async () => {

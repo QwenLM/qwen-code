@@ -978,14 +978,14 @@
 
 .gitBranchIcon {
   display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
+  width: var(--git-branch-icon-size, 16px);
+  height: var(--git-branch-icon-size, 16px);
+  flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchIcon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--git-branch-icon-size, 16px);
+  height: var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchText {
@@ -1006,17 +1006,17 @@
 .gitBranchIconWrap {
   position: relative;
   display: inline-flex;
-  flex: 0 0 16px;
+  flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 /* Compact (icon-only) chip: a single severity dot on the branch icon so the
    working-tree state is still glanceable without the text + inline indicators. */
 .gitBranchBadgeDot {
   position: absolute;
-  top: -2px;
-  right: -3px;
-  width: 7px;
-  height: 7px;
+  top: var(--git-branch-badge-offset, -2px);
+  right: var(--git-branch-badge-offset, -3px);
+  width: var(--git-branch-badge-size, 7px);
+  height: var(--git-branch-badge-size, 7px);
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
@@ -1937,6 +1937,69 @@
 .imageRemove:disabled {
   cursor: default;
   opacity: 0;
+}
+
+.files {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px 0 0;
+  flex-wrap: wrap;
+}
+
+.fileChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--chat-editor-text-primary);
+}
+
+.fileChipIcon {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-secondary, currentColor);
+}
+
+.fileChipName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipSize {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-secondary, currentColor);
+  opacity: 0.75;
+}
+
+.fileChipRemove {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+  background: transparent;
+  color: var(--error-color);
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0;
+}
+
+.fileChipRemove:not(:disabled):hover {
+  background: var(--error-color);
+  color: var(--chat-editor-text-primary);
+}
+
+.fileChipRemove:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .searchPanel {

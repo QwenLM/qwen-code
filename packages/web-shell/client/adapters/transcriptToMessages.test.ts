@@ -29,6 +29,69 @@ function textBlock(
   };
 }
 
+describe('Assistant branch anchors', () => {
+  it('preserves the checkpoint on the rendered Assistant message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'answer', 1, false, {
+        branchRecordId: 'checkpoint-1',
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      branchRecordId: 'checkpoint-1',
+    });
+  });
+
+  it('does not anchor an insight-only block onto the previous reply', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'first answer',
+    });
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    expect(messages.some((message) => message.role === 'insight_ready')).toBe(
+      true,
+    );
+    expect(messages.some((message) => 'branchRecordId' in message)).toBe(false);
+  });
+
+  it("anchors a checkpoint onto the insight block's own text segment", () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'first answer', 1),
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}} done',
+        2,
+        false,
+        { branchRecordId: 'checkpoint-2' },
+      ),
+    ]);
+
+    expect(messages[0]).not.toHaveProperty('branchRecordId');
+    const anchored = messages.find(
+      (message) => message.role === 'assistant' && message.content === 'done',
+    );
+    expect(anchored).toMatchObject({
+      role: 'assistant',
+      content: 'done',
+      branchRecordId: 'checkpoint-2',
+    });
+  });
+});
+
 function statusBlock(
   id: string,
   text: string,
@@ -137,6 +200,21 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'user',
       content: 'scheduled prompt',
       source: 'cron',
+    });
+  });
+
+  it('preserves user file attachment metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this', 1, false, {
+        files: [{ name: 'app.log', mimeType: 'text/plain' }],
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this',
+      files: [{ name: 'app.log', mimeType: 'text/plain' }],
     });
   });
 
@@ -448,28 +526,169 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('localizes structured mid-turn inserted status blocks', () => {
-    const messages = transcriptBlocksToDaemonMessages(
-      [
-        statusBlock('mid-1', 'Inserted message: hello', 1, {
-          source: 'mid_turn_message_injected',
-          data: { sessionId: 's1', messages: ['你好'] },
-        }),
-      ],
-      {
-        labels: {
-          midTurnInserted: (message) => `已插入消息：${message}`,
-        },
-      },
-    );
+  it('shows structured mid-turn inserted text without a status prefix', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '你好', 1, {
+        source: 'mid_turn_message_injected',
+        data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
 
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '已插入消息：你好',
+        content: '你好',
         source: 'mid_turn_message_injected',
         data: { sessionId: 's1', messages: ['你好'] },
       }),
+    ]);
+  });
+
+  it('extracts images from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'look at this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['look at this'],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'look at this',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('shows the degraded-media notice when the echo text is empty', () => {
+    // When the stored media is gone at drain, the daemon echoes an empty
+    // messages array whose items carry only the placeholder text block; the
+    // notice must be surfaced instead of rendering an empty bubble.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [''],
+          messageIds: ['mid-gone'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'text',
+                  text: '[Attached media is no longer available]',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: '[Attached media is no longer available]',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that look like status noise', () => {
+    // User content that merely starts like a filtered status line must not be
+    // dropped by the noise filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'Model switched: check this too', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['Model switched: check this too'],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'Model switched: check this too',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that start like plan JSON', () => {
+    // User content starting with the plan projection shape must not be
+    // misrendered as a plan card (which also drops the attached images).
+    const planLikeText =
+      'plan: {"sessionUpdate":"plan","entries":[{"content":"step"}]}';
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', planLikeText, 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [planLikeText],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: planLikeText,
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('keeps replayed mid-turn user blocks as inserted messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('mid-1', 'user', 'with image', 1, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+      textBlock('mid-2', 'user', 'text only', 2, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'system',
+        content: 'with image',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      },
+      {
+        role: 'system',
+        content: 'text only',
+        source: 'mid_turn_message_injected',
+      },
     ]);
   });
 
