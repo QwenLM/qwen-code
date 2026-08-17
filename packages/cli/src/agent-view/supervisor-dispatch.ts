@@ -185,6 +185,9 @@ function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {
   return buildCurrentQwenCliArgv([
     '--session-id',
     sessionId,
-    ...(prompt ? ['--prompt-interactive', prompt] : []),
+    // Attached-value form: a bare token after the flag would be re-parsed
+    // by yargs when the prompt starts with '-', turning e.g. '-y' into
+    // flags instead of prompt text.
+    ...(prompt ? [`--prompt-interactive=${prompt}`] : []),
   ]);
 }

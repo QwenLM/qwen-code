@@ -95,6 +95,39 @@ export async function readAgentViewRosterForWrite(
   return normalizeRoster(raw);
 }
 
+/**
+ * Like readAgentViewRosterForWrite, but corrupt or non-object content is a
+ * hard error instead of an empty roster: callers making safety decisions
+ * (e.g. the hibernation pin check) must fail closed when the file exists
+ * but its pins cannot be read.
+ */
+export async function readAgentViewRosterStrict(
+  options: StoreOptions = {},
+): Promise<AgentViewRosterFile> {
+  const rosterPath = getAgentViewStorePaths(options).rosterPath;
+  let text: string;
+  try {
+    text = await fs.readFile(rosterPath, 'utf8');
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return normalizeRoster(undefined);
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Agent View roster at ${rosterPath} is corrupt.`, {
+      cause: error,
+    });
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`Agent View roster at ${rosterPath} is not a JSON object.`);
+  }
+  return normalizeRoster(parsed);
+}
+
 export async function writeAgentViewRoster(
   roster: AgentViewRosterFile,
   options: StoreOptions = {},
@@ -192,14 +225,19 @@ export async function writeAgentViewSessionState(
   state: AgentViewSessionStateFile,
   options: StoreOptions = {},
 ): Promise<void> {
-  const paths = getAgentViewSessionPaths(state.sessionId, options);
-  const existing = await readJsonRecordForWrite(paths.statePath);
-  await writeJsonFile(paths.statePath, {
-    ...existing,
-    ...state,
-    schemaVersion: 1,
+  // Serialize with the per-session queue: an unqueued full-snapshot write
+  // landing after a queued verdict patch would re-assert stale fields over
+  // it.
+  return mutateAgentViewState(state.sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(state.sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.statePath);
+    await writeJsonFile(paths.statePath, {
+      ...existing,
+      ...state,
+      schemaVersion: 1,
+    });
+    await fs.mkdir(paths.tmpDir, { recursive: true });
   });
-  await fs.mkdir(paths.tmpDir, { recursive: true });
 }
 
 /**
@@ -385,6 +423,28 @@ export async function patchAgentViewActivityIf(
     });
   });
   return applied;
+}
+
+/**
+ * Drops the persisted pids once a terminal exit verdict is authoritative:
+ * stale pids may be reused by unrelated processes, and leaving them makes
+ * later liveness probes and signaling paths target the wrong process.
+ */
+export async function clearAgentViewWorkerPids(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<void> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  await withMutationQueue(workerMutationQueues, paths.workerPath, async () => {
+    const existing = await readJsonRecordForWrite(paths.workerPath);
+    if (existing === undefined) {
+      return;
+    }
+    const next: JsonRecord = { ...existing };
+    delete next['hostPid'];
+    delete next['workerPid'];
+    await writeJsonFile(paths.workerPath, { ...next, schemaVersion: 1 });
+  });
 }
 
 export function digestAgentViewWorkerToken(token: string): string {

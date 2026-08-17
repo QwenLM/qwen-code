@@ -192,9 +192,18 @@ function deriveRuntimeState(
 function deriveInputState(
   activity: AgentViewActivityFile | undefined,
 ): AgentViewInputState {
+  // The explicit structured kind a worker reported is authoritative; the
+  // waitingFor text rules only infer a kind the worker did not state. A
+  // soft question without a waitingFor phrase must stay answerable.
+  const inputKind = activity?.inputKind;
+  if (inputKind === 'soft') {
+    return 'soft_question';
+  }
   const waitingFor = activity?.waitingFor?.toLowerCase();
-  if (!waitingFor) return 'none';
-  if (activity?.inputKind === 'soft' || waitingFor === 'response') {
+  if (!waitingFor) {
+    return inputKind === 'blocking' ? 'confirmation' : 'none';
+  }
+  if (inputKind !== 'blocking' && waitingFor === 'response') {
     return 'soft_question';
   }
   if (waitingFor.includes('permission') || waitingFor.includes('approval')) {
@@ -206,9 +215,7 @@ function deriveInputState(
   if (waitingFor.includes('confirm')) {
     return 'confirmation';
   }
-  return activity?.inputKind === 'blocking'
-    ? 'confirmation'
-    : 'external_dialog';
+  return inputKind === 'blocking' ? 'confirmation' : 'external_dialog';
 }
 
 function deriveRecoverability(

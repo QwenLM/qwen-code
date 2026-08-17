@@ -182,8 +182,9 @@ describe('Agent View supervisor process helpers', () => {
       argv: expect.arrayContaining([
         '--session-id',
         sessionId,
-        '--prompt-interactive',
-        'write tests',
+        // Attached-value form: a bare token would be re-parsed by yargs
+        // when the prompt starts with '-'.
+        '--prompt-interactive=write tests',
       ]),
     });
     await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
@@ -240,8 +241,7 @@ describe('Agent View supervisor process helpers', () => {
       expect.arrayContaining([
         '--session-id',
         sessionId,
-        '--prompt-interactive',
-        'write tests',
+        '--prompt-interactive=write tests',
       ]),
     );
 
@@ -2398,7 +2398,7 @@ describe('Agent View supervisor process helpers', () => {
       await vi.advanceTimersByTimeAsync(10_000);
       // The fallback verifies the worker record BEFORE signaling: the
       // respawn rewrote it with fresh pids, so the stored pids this stop
-      // captured are stale and receive no fallback signal at all.
+      // captured receive no fallback signal at all.
       await vi.waitFor(() =>
         expect(
           readAgentViewSessionState(result.sessionId, { globalDir }),
@@ -2410,7 +2410,11 @@ describe('Agent View supervisor process helpers', () => {
       const signalled = killSpy.mock.calls
         .filter(([, signal]) => signal === 'SIGTERM')
         .map(([pid]) => pid);
-      expect(signalled).not.toContain(999_999_001);
+      // The respawn itself signalled the stopped session's straggler pids
+      // before launching the replacement…
+      expect(signalled).toContain(999_999_001);
+      expect(signalled).toContain(999_999_002);
+      // …but never the replacement worker's pids…
       expect(signalled).not.toContain(999_999_003);
       expect(signalled).not.toContain(999_999_004);
       // …and did not flip the respawned session back to stopped.

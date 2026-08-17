@@ -68,6 +68,13 @@ export interface AgentViewLaunchFile {
   [key: string]: unknown;
   schemaVersion: 1;
   sessionId: string;
+  /**
+   * The spelling-preserving id passed to --resume. The store canonicalizes
+   * sessionIds for directory naming, but the native session store keeps the
+   * original spelling; resuming with a rewritten id fails on
+   * case-sensitive filesystems.
+   */
+  resumeSessionId?: string;
   argv: string[];
   env: Record<string, string>;
   entrypoint: string;
