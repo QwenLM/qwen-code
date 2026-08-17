@@ -624,6 +624,10 @@ export class ExtensionStore {
           policy.artifactGeneration = targetSnapshot.generation + 1;
         } else {
           const initial = input.initialActivation!;
+          const rules = findLegacyRules(
+            snapshot.legacyProjectionRemainder ?? {},
+            input.identity.name,
+          );
           targetSnapshot.extensions[input.identity.id] = {
             name: input.identity.name,
             artifactGeneration: targetSnapshot.generation + 1,
@@ -636,8 +640,13 @@ export class ExtensionStore {
                       'enabled',
                   }
                 : {},
+            ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
           };
         }
+        this.updateLegacyProjectionRemainder(
+          targetSnapshot,
+          targetSnapshot.legacyProjectionRemainder ?? {},
+        );
       } else if (input.operation === 'uninstall') {
         delete targetSnapshot.extensions[input.identity.id];
       } else {
@@ -932,10 +941,38 @@ export class ExtensionStore {
       throw new Error('At least one extension identity is required.');
     }
     return await this.withLock(async () => {
-      const snapshot =
-        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const existing = await this.readSnapshotUnlocked();
+      const snapshot = existing ?? this.emptySnapshot();
       const legacy = await this.readLegacyProjection();
-      const policies = identities.map((identity) => {
+      let legacyForImport = legacy;
+      let legacyForRemainder = legacy;
+      if (
+        existing &&
+        existing.legacyProjectionHash !== projectionHash(legacy)
+      ) {
+        if (await this.legacyProjectionIsNewerThanState()) {
+          for (const policy of Object.values(snapshot.extensions)) {
+            const { rules } = this.importLegacyProjection(
+              findLegacyRules(legacy, policy.name),
+              policy,
+            );
+            if (rules.length > 0) {
+              policy.legacyPathRules = [...rules];
+            } else {
+              delete policy.legacyPathRules;
+            }
+          }
+          legacyForRemainder = this.reconcileLegacyProjectionRemainder(
+            snapshot,
+            legacy,
+          );
+        } else {
+          legacyForImport = snapshot.legacyProjectionRemainder ?? {};
+          legacyForRemainder = snapshot.legacyProjectionRemainder ?? {};
+        }
+      }
+      const policies: ExtensionPolicy[] = [];
+      for (const identity of identities) {
         let policy = snapshot.extensions[identity.id];
         if (!policy) {
           const nameConflict = Object.entries(snapshot.extensions).find(
@@ -948,7 +985,7 @@ export class ExtensionStore {
               `Extension name "${identity.name}" conflicts with an existing policy.`,
             );
           }
-          const rules = findLegacyRules(legacy, identity.name);
+          const rules = findLegacyRules(legacyForImport, identity.name);
           policy = {
             name: identity.name,
             declarationOnly: true,
@@ -957,16 +994,23 @@ export class ExtensionStore {
             ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
           };
           snapshot.extensions[identity.id] = policy;
+        } else if (
+          !policy.declarationOnly &&
+          policy.artifactGeneration !== undefined &&
+          !(await this.pathExists(path.join(this.extensionsDir, policy.name)))
+        ) {
+          delete policy.artifactGeneration;
+          policy.declarationOnly = true;
         }
         if (policy.name !== identity.name) {
           throw new ExtensionConflictError(
             `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
           );
         }
-        return policy;
-      });
+        policies.push(policy);
+      }
       for (const policy of policies) update(policy);
-      this.updateLegacyProjectionRemainder(snapshot, legacy);
+      this.updateLegacyProjectionRemainder(snapshot, legacyForRemainder);
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
       return snapshot;
