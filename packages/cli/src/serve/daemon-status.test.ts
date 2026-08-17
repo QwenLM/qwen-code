@@ -990,6 +990,88 @@ describe('buildDaemonStatusResponse', () => {
     ]);
   });
 
+  it('aggregates an internal runtime without exposing its workspace path', async () => {
+    const internalCwd = '/private/conversations-runtime';
+    const primaryBridge = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      lastActivityAt: null,
+      pendingPromptTotal: 0,
+      activePromptCount: 1,
+    } as unknown as AcpSessionBridge;
+    const internalBridge = {
+      getDaemonStatusSnapshot: () => ({
+        ...BASE_BRIDGE_SNAPSHOT,
+        limits: { ...BASE_BRIDGE_SNAPSHOT.limits, maxSessions: 10 },
+        sessionCount: 8,
+        channelLive: false,
+        sessions: [
+          {
+            sessionId: 'internal-session',
+            workspaceCwd: internalCwd,
+            createdAt: '2026-08-14T00:00:00.000Z',
+            clientCount: 1,
+            subscriberCount: 0,
+            attachCount: 1,
+            pendingPromptCount: 0,
+            pendingPermissionCount: 0,
+            hasActivePrompt: false,
+            lastEventId: 0,
+            maxJournalEvents: 10_000,
+            maxJournalBytes: 8 * 1024 * 1024,
+          },
+        ],
+      }),
+      lastActivityAt: null,
+      pendingPromptTotal: 2,
+      activePromptCount: 3,
+    } as unknown as AcpSessionBridge;
+    const primary = {
+      workspaceId: 'primary',
+      workspaceCwd: BASE_WORKSPACE,
+      primary: true,
+      trusted: true,
+      bridge: primaryBridge,
+    };
+    const internal = {
+      workspaceId: 'internal',
+      workspaceCwd: internalCwd,
+      primary: false,
+      trusted: true,
+      provenance: 'live-conversation' as const,
+      bridge: internalBridge,
+    };
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary,
+      list: () => [primary],
+      listAll: () => [primary, internal],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.sessions.active).toBe(8);
+    expect(response.runtime.activity.activePrompts).toBe(4);
+    expect(response.runtime.activity.queuedPrompts).toBe(2);
+    expect(response.workspaces).toBeUndefined();
+    expect(JSON.stringify(response.issues)).not.toContain(internalCwd);
+    expect(response.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'session_capacity_high',
+          message: expect.stringContaining('internal runtime'),
+        }),
+        expect.objectContaining({
+          code: 'acp_channel_down',
+          message: expect.stringContaining('internal runtime'),
+        }),
+      ]),
+    );
+
+    const full = await buildDaemonStatusResponse('full', options);
+    expect(JSON.stringify(full.full?.sessions)).not.toContain(internalCwd);
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
