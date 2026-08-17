@@ -396,6 +396,23 @@ export interface WorkflowAgentOpts {
   isolation?: 'worktree' | 'remote';
   agentType?: string;
   /**
+   * Pin this agent to an EXISTING, caller-owned git worktree of the current
+   * repository — the same contract as `AgentTool`'s `working_dir`, and
+   * validated by the same check. The runtime neither creates nor removes the
+   * directory; it only rebinds the subagent Config's cwd surfaces, so the
+   * agent's file / shell / search tools resolve inside it.
+   *
+   * `isolation: 'worktree'` is not a substitute and the two are mutually
+   * exclusive: isolation CREATES a worktree from the current tree and refuses
+   * to run when the parent tree is dirty — which is the opposite of pinning an
+   * agent to a directory whose uncommitted state is the whole point (a review
+   * worktree, a scratch checkout a prior step provisioned).
+   *
+   * It is a cwd pin, not a filesystem sandbox: an explicit absolute path can
+   * still reach outside it.
+   */
+  workingDir?: string;
+  /**
    * P-stall: per-call stall-watchdog timeout in milliseconds. The dispatch
    * is aborted + retried (up to 3 attempts) after this many ms of no
    * subagent progress (with no tool in flight). Defaults to 60_000 (env
@@ -1348,7 +1365,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs'];
+      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1377,6 +1394,34 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
             "Known modes are: 'worktree', 'remote'."
           );
+        }
+        // NOTE: this init script is a host-side template literal — no
+        // backticks anywhere below, in code or comments.
+        //
+        // A non-number stallMs is silently dropped downstream and the
+        // default watchdog applies, contradicting "0 disables the watchdog"
+        // — refuse it loudly like the other option gates.
+        if (agentOpts.stallMs !== undefined && (typeof agentOpts.stallMs !== 'number' || !Number.isFinite(agentOpts.stallMs))) {
+          throw new Error("agent({stallMs}): must be a finite number of milliseconds (0 disables the watchdog).");
+        }
+        // workingDir pins the agent to a worktree the CALLER already owns;
+        // isolation creates and reaps one. Asking for both is a contradiction
+        // about who owns the directory's lifetime, so name it here rather than
+        // silently letting one win.
+        if (agentOpts.workingDir !== undefined) {
+          if (typeof agentOpts.workingDir !== 'string' || agentOpts.workingDir.trim().length === 0) {
+            throw new Error(
+              "agent({workingDir}): must be a non-empty string naming an existing " +
+              "git worktree of this repository."
+            );
+          }
+          if (agentOpts.isolation !== undefined) {
+            throw new Error(
+              "agent({workingDir, isolation}): incompatible options. workingDir " +
+              "pins the agent to a worktree you already own; isolation creates " +
+              "a fresh one and removes it afterwards. Pass one."
+            );
+          }
         }
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (__b.lastPhase() !== agentOpts.phase) {

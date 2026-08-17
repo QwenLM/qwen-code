@@ -31,6 +31,7 @@ import {
 } from './findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
+import { isSameFile } from './lib/same-file.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict extends ComposeReviewResult {
@@ -119,14 +120,6 @@ function rejectSymlinkPath(root: string, path: string, label: string): void {
       throw new Error(`${label} must not traverse a symbolic link.`);
     }
   }
-}
-
-function sameFile(left: string, right: string): boolean {
-  if (left === right) return true;
-  if (!existsSync(left) || !existsSync(right)) return false;
-  const leftStat = statSync(left);
-  const rightStat = statSync(right);
-  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
 
 function readText(path: string, label: string): string {
@@ -349,7 +342,7 @@ export function saveReviewArtifact(
     ['composed input', composedPath],
     ['Markdown report', reportPath],
   ] as const) {
-    if (sameFile(outputPath, inputPath)) {
+    if (isSameFile(outputPath, inputPath)) {
       throw new Error(`Output must not overwrite the ${label}.`);
     }
   }

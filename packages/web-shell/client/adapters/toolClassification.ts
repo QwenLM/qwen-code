@@ -50,6 +50,7 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     name === 'agent' && tool.parentToolCallId === undefined;
   const defaultsToBackground =
     isTopLevelQwenAgent &&
+    args !== undefined &&
     args?.run_in_background === undefined &&
     args?.working_dir === undefined &&
     args?.name === undefined &&

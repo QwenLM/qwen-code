@@ -23,7 +23,13 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
+import {
+  clearReviewWorktreeLease,
+  isReviewLeaseFile,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+  reviewLeasePath,
+} from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
@@ -387,15 +393,53 @@ export function runCleanup(target: string): void {
   // much still there — the two streams contradicting each other, and the stdout
   // half being the one a script reads.
   let failedAny = false;
+  // The lease guards the worktree and branch, so it releases once THOSE steps
+  // are done: a side file that will not delete (EACCES on a read-only entry,
+  // a Windows file handle) must not keep the lock held — a leftover lease
+  // refuses every later fetch-pr of this PR and skips every later cleanup,
+  // and nothing sweeps a finished session's lease automatically.
+  let failedDestruction = false;
 
   // --- Worktree + branch (only for PR targets) -------------------------
   const prMatch = /^pr-(\d+)$/.exec(target);
   if (prMatch) {
     const prNumber = prMatch[1];
 
+    // The lease is also a lock (#9205). The worktree path, the side files,
+    // and the fetch report carrying the audit window are all fixed per PR
+    // number, so cleaning while ANOTHER session reviews the same PR deletes
+    // its worktree, diff, and plan mid-run — and audits ITS window against
+    // receipts it never wrote. Skip the whole target: worktree, siblings,
+    // branch, side files, audit, and the lease itself all belong to the
+    // holder until its own cleanup releases them.
+    const holder = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holder)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — another review session ` +
+          `(session ${holder.sessionId}) still holds the worktree lease at ` +
+          `${reviewLeasePath(process.cwd(), target)}. Its own cleanup ` +
+          `releases the lease when it finishes; if that session is gone, ` +
+          `delete the lease file and re-run to force cleanup.`,
+      );
+      return;
+    }
+
     // Before the sweep below deletes the fetch report (the audit window's
     // carrier), check the PR for writes that bypassed `qwen review submit`.
     auditPrWrites(target, prNumber);
+
+    // The audit is network-bound (seconds) — a lease can appear during it (a
+    // review that started after the gate above read none). Re-check before
+    // destroying anything and take the same skip path (#9205).
+    const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — a review session ` +
+          `(session ${holderAfterAudit.sessionId}) acquired the lease ` +
+          `during the audit; its own cleanup releases it.`,
+      );
+      return;
+    }
 
     // Report what actually happened, in both directions. Announcing "Removed …"
     // off a path that is still on disk is a lie; saying nothing at all when we
@@ -409,6 +453,7 @@ export function runCleanup(target: string): void {
       } else if (existed) {
         writeStderrLine(`Failed to remove ${label} ${path}: ${reason}`);
         failedAny = true;
+        failedDestruction = true;
       }
     };
 
@@ -455,6 +500,7 @@ export function runCleanup(target: string): void {
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
         failedAny = true;
+        failedDestruction = true;
       }
     }
   }
@@ -517,6 +563,14 @@ export function runCleanup(target: string): void {
   }
 
   for (const file of tmpEntries) {
+    // The lease doubles as the review's lock (#9205), so live PR leases must
+    // not be swept. Skip only the real lease shape (…-pr-<n>.json), not the
+    // bare prefix: a file-review target named "lease" flattens to this same
+    // prefix, and its OWN side files still need removal — nothing else removes
+    // them. Lease removal itself belongs to clearReviewWorktreeLease below.
+    if (isReviewLeaseFile(file)) {
+      continue;
+    }
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
     if (preserved.has(file)) {
@@ -541,7 +595,7 @@ export function runCleanup(target: string): void {
     }
   }
 
-  if (!failedAny) {
+  if (!failedDestruction) {
     clearReviewWorktreeLease(process.cwd(), target);
   }
 
