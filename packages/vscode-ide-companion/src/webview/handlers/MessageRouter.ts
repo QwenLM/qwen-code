@@ -74,6 +74,11 @@ export class MessageRouter {
       sendToWebView,
       () => {
         const snapshot = snapshotSettingsForRollback();
+        if (snapshot === null) {
+          throw new Error(
+            'Could not read saved model providers; aborting to protect the existing configuration.',
+          );
+        }
         const modelProviders = snapshot?.['modelProviders'];
         return modelProviders && typeof modelProviders === 'object'
           ? (modelProviders as Record<string, unknown>)

@@ -454,6 +454,46 @@ describe('applyProviderInstallPlan', () => {
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
   });
 
+  it('keeps the active region when a shared persisted credential is unchanged', async () => {
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const sharedKey = 'unchanged-shared-key';
+    const chinaModels = buildProviderTemplate(kimiProvider, chinaUrl);
+    const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...chinaModels, ...intlModels],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === `env.${KIMI_API_ENV_KEY}`) return sharedKey;
+      if (key === 'model.name') return 'kimi-k3';
+      if (key === 'model.baseUrl') return intlUrl;
+      return '';
+    });
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: chinaUrl,
+      apiKey: sharedKey,
+      modelIds: chinaModels.map((model) => model.id),
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[KIMI_API_ENV_KEY];
+    }
+
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
+  });
+
   it('selects the installed region for an id-only shared-key selection', async () => {
     const chinaUrl = 'https://api.moonshot.cn/v1';
     const intlUrl = 'https://api.moonshot.ai/v1';

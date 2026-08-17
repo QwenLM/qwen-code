@@ -1001,12 +1001,11 @@ export function buildProviderSetupInputs(
     const selectedModel =
       helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) ===
       selectedEndpoint;
-    const selectedByEditableFreeForm =
-      provider.baseUrl !== undefined || requestedIds.has(preserved.id);
-    const shouldPreserve =
-      selectedModel &&
-      !defaultIds.has(preserved.id) &&
-      (!hasExplicitModelIds || selectedByEditableFreeForm);
+    // The serve catalog does not expose existingConfig, so Web Shell and SDK
+    // callers cannot seed and round-trip a free-form provider's saved IDs.
+    // Treat this route as merge-only; seeded CLI/ACP/VS flows remain the
+    // authoritative replacement surfaces.
+    const shouldPreserve = selectedModel && !defaultIds.has(preserved.id);
     return shouldPreserve ? [preserved] : [];
   });
   return {

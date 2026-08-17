@@ -460,22 +460,26 @@ export function useProviderUpdates(
         const defaultIds = getDefaultModelIds(providerCfg, resolved);
         const builtInIds = new Set(defaultIds);
         const installedOwnedModels = readInstalledModels(settings, providerCfg);
-        const customModels = installedOwnedModels
-          .filter(
-            (model) =>
-              !providerCfg.mergeModelsByIdentity ||
-              normalizeBaseUrlForMatching(model.baseUrl) ===
-                normalizeBaseUrlForMatching(resolved),
-          )
-          .filter((model) => !builtInIds.has(model.id));
+        const selectedEndpoint = normalizeBaseUrlForMatching(resolved);
+        const preservedModels = installedOwnedModels.filter((model) => {
+          const belongsToSelectedEndpoint =
+            normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
+          if (providerCfg.mergeModelsByIdentity) {
+            return belongsToSelectedEndpoint && !builtInIds.has(model.id);
+          }
+          // Non-merge providers replace every owned model in one patch. Keep
+          // exact sibling-endpoint entries (including built-ins) and only
+          // replace the selected endpoint's built-in template.
+          return !belongsToSelectedEndpoint || !builtInIds.has(model.id);
+        });
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
           modelIds: defaultIds,
-          prebuiltModels: [
-            ...buildProviderTemplate(providerCfg, resolved),
-            ...customModels,
-          ],
+          prebuiltModels: buildProviderTemplate(providerCfg, resolved),
+          ...(preservedModels.length > 0
+            ? { preserveModels: preservedModels }
+            : {}),
         });
         installPlan.providerState![
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
@@ -487,10 +491,10 @@ export function useProviderUpdates(
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
-          // A merge provider owns several endpoints under one authType; only
-          // the endpoint being updated can be the live session's provider, so
+          // An array-base provider owns several endpoints under one authType;
+          // only the endpoint being updated can be the live session's provider, so
           // a sibling endpoint must not trigger a mid-session re-auth.
-          (!providerCfg.mergeModelsByIdentity ||
+          (!Array.isArray(providerCfg.baseUrl) ||
             !activeConfig?.baseUrl ||
             normalizeBaseUrlForMatching(activeConfig.baseUrl) ===
               normalizeBaseUrlForMatching(resolved)) &&

@@ -19,6 +19,7 @@ import {
   computeModelListVersion,
   deepseekProvider,
   kimiProvider,
+  minimaxProvider,
   KIMI_API_ENV_KEY,
   KIMI_CODE_ENV_KEY,
   PROVIDER_METADATA_NS,
@@ -567,6 +568,58 @@ describe('useProviderUpdates', () => {
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
     // The live session sits on the sibling Coding Plan endpoint; updating the
     // API endpoint must not re-auth (and rebuild) the untouched session.
+    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('preserves sibling endpoints for non-merge array providers', async () => {
+    const intlUrl = 'https://api.minimax.io/v1';
+    const chinaUrl = 'https://api.minimaxi.com/v1';
+    const intlTemplate = buildProviderTemplate(minimaxProvider, intlUrl);
+    const chinaTemplate = buildProviderTemplate(minimaxProvider, chinaUrl);
+    const metadataKey = 'minimax';
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      metadataKey
+    ] = { baseUrl: chinaUrl, version: 'old-version-hash' };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...intlTemplate, ...chinaTemplate],
+    };
+    mockConfig.getModel.mockReturnValue('MiniMax-M3');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: intlUrl,
+      apiKeyEnvKey: 'MINIMAX_API_KEY',
+    });
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+    const reloaded =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
+        AuthType.USE_OPENAI
+      ];
+    expect(
+      reloaded.filter(
+        (model: { baseUrl?: string }) => model.baseUrl === intlUrl,
+      ),
+    ).toHaveLength(intlTemplate.length);
+    expect(
+      reloaded.filter(
+        (model: { baseUrl?: string }) => model.baseUrl === chinaUrl,
+      ),
+    ).toHaveLength(chinaTemplate.length);
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 

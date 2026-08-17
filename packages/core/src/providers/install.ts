@@ -185,6 +185,7 @@ export async function applyProviderInstallPlan(
   // (an EACCES from persist vs a refreshAuth rejection look identical
   // otherwise — eight steps, one anonymous error).
   let currentStep = 'init';
+  const overwrittenEnvKeys = new Set<string>();
 
   try {
     // backup() inside the try so a failure here (e.g. structuredClone on a
@@ -214,6 +215,9 @@ export async function applyProviderInstallPlan(
         shadowedEnvKeys.push(key);
       }
       previousEnvValues.set(key, previous);
+      if (settings.getValue(`env.${key}`) !== value) {
+        overwrittenEnvKeys.add(key);
+      }
       settings.setValue(`env.${key}`, value);
       process.env[key] = value;
     }
@@ -278,7 +282,6 @@ export async function applyProviderInstallPlan(
       const installedModels = (plan.modelProviders ?? []).flatMap(
         (patch) => patch.models,
       );
-      const overwrittenEnvKeys = new Set(Object.keys(plan.env ?? {}));
       const offeredModels = retainAcrossEndpoints.length
         ? (updatedModelProviders[plan.authType] ?? []).filter((model) => {
             // A sibling that shares a credential being replaced by this plan

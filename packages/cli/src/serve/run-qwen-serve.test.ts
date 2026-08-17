@@ -297,6 +297,40 @@ describe('buildProviderSetupInputs', () => {
 
     expect(inputs.preserveModels).toEqual([secondModel]);
   });
+
+  it('merges unseeded custom-provider reconnects without deleting omitted models', () => {
+    const baseUrl = 'https://llm.internal.example/v1';
+    const envKey = qwenCore.generateCustomEnvKey(
+      qwenCore.AuthType.USE_OPENAI,
+      baseUrl,
+    );
+    const existingModels = ['a', 'b', 'c'].map((id) => ({
+      id,
+      baseUrl,
+      envKey,
+      generationConfig: { contextWindowSize: 12345 },
+    }));
+
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-custom',
+        baseUrl,
+        modelIds: ['a'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+
+    expect(inputs.modelIds).toEqual(['a']);
+    expect(inputs.preserveModels).toEqual(existingModels);
+  });
 });
 
 describe('createBoundChannelDeliveryHandler', () => {

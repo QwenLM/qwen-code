@@ -70,4 +70,16 @@ describe('MessageRouter', () => {
     expect(getModelProviders).toEqual(expect.any(Function));
     expect(getModelProviders()).toBe(modelProviders);
   });
+
+  it('fails closed when saved provider settings cannot be read', () => {
+    mocks.snapshotSettingsForRollback.mockReturnValue(null);
+
+    new MessageRouter({} as never, {} as never, null, vi.fn());
+
+    const getModelProviders = mocks.AuthMessageHandler.mock.calls[0]?.[4];
+    expect(getModelProviders).toEqual(expect.any(Function));
+    expect(() => getModelProviders()).toThrow(
+      /aborting to protect the existing configuration/,
+    );
+  });
 });
