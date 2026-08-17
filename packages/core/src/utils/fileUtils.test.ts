@@ -1196,6 +1196,58 @@ describe('fileUtils', () => {
       expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
+    it('keeps provider-unsupported images inline for the vision bridge', async () => {
+      const heicPath = path.join(tempRootDir, 'photo.heic');
+      const bytes = Buffer.from('heic bytes for bridge');
+      actualNodeFs.writeFileSync(heicPath, bytes);
+      mockMimeGetType.mockReturnValue('image/heic');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        heicPath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/heic',
+          displayName: 'photo.heic',
+        },
+      });
+    });
+
+    it('keeps undecodable images inline for the vision bridge', async () => {
+      const corruptPath = path.join(tempRootDir, 'corrupt.png');
+      const bytes = Buffer.from('not a png');
+      actualNodeFs.writeFileSync(corruptPath, bytes);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        corruptPath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/png',
+          displayName: 'corrupt.png',
+        },
+      });
+    });
+
     it('should process an image file', async () => {
       await sharp({
         create: {

@@ -1520,8 +1520,9 @@ export async function processSingleFileContent(
               // whole request with a 400 that aborts the session. Omit the
               // image and stay in-band instead (#9291).
               if (
-                error.code === 'decode_failed' ||
-                error.code === 'unsupported_image'
+                (error.code === 'decode_failed' ||
+                  error.code === 'unsupported_image') &&
+                !preserveUnsupportedImage
               ) {
                 const notice =
                   `Image ${relativePathForDisplay} could not be decoded ` +
@@ -1542,7 +1543,10 @@ export async function processSingleFileContent(
             }
           }
         }
-        if (!PROVIDER_SAFE_IMAGE_MIME_TYPES.has(mediaMimeType)) {
+        if (
+          !PROVIDER_SAFE_IMAGE_MIME_TYPES.has(mediaMimeType) &&
+          !preserveUnsupportedImage
+        ) {
           // The overview renderer never ran for this MIME, and providers
           // reject media they cannot consume with a request-validation 400
           // that aborts the whole session (image/heic on Responses-compatible
@@ -1575,15 +1579,17 @@ export async function processSingleFileContent(
                 .metadata();
             } catch {
               signal?.throwIfAborted();
-              const notice =
-                `Image ${relativePathForDisplay} could not be decoded ` +
-                '(corrupt or unsupported encoding), so its data was omitted ' +
-                'from the model request. Ask the user for a readable PNG, ' +
-                'JPEG, WebP, or GIF version if the image content matters.';
-              return {
-                llmContent: notice,
-                returnDisplay: `Omitted undecodable image: ${relativePathForDisplay}`,
-              };
+              if (!preserveUnsupportedImage) {
+                const notice =
+                  `Image ${relativePathForDisplay} could not be decoded ` +
+                  '(corrupt or unsupported encoding), so its data was omitted ' +
+                  'from the model request. Ask the user for a readable PNG, ' +
+                  'JPEG, WebP, or GIF version if the image content matters.';
+                return {
+                  llmContent: notice,
+                  returnDisplay: `Omitted undecodable image: ${relativePathForDisplay}`,
+                };
+              }
             }
           }
         }
