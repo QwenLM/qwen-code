@@ -64,7 +64,7 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
  * It does NOT scale with the estimate: proportional tokenizer error
  * (real tokenizers vary ±30% and under-count CJK-dense content) can still
  * push `prompt + max_tokens` over the window, in which case the backend
- * rejects the request with a 400 and compression fails safely.
+ * rejects the request with a 400 that propagates to the caller.
  */
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
 
