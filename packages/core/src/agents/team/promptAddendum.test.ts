@@ -43,14 +43,15 @@ describe('buildTeammatePromptAddendum', () => {
   // text, and the pin is on the wording, not the wrap points.
   const flatten = (prompt: string) => prompt.replace(/\s+/g, ' ');
 
-  it('tells ordinary teammates their final answer is delivered automatically', () => {
+  it('tells ordinary teammates their last text output is delivered automatically', () => {
     const prompt = flatten(
       buildTeammatePromptAddendum('worker', 'team', 'leader'),
     );
 
     expect(prompt).toContain(
-      'the runtime forwards your final answer to the leader automatically',
+      'the runtime forwards the last text you emitted to the leader automatically',
     );
+    expect(prompt).toContain('end your turn with your report');
     // Explicit reporting arrives sooner; automatic forwarding fires again only
     // when non-empty round text follows it.
     expect(prompt).toContain('call send_message(to: "leader"');
@@ -63,7 +64,7 @@ describe('buildTeammatePromptAddendum', () => {
     expect(prompt).not.toContain('without an explicit report');
   });
 
-  it('tells plan-required teammates their final answer is delivered automatically', () => {
+  it('tells plan-required teammates their last text output is delivered automatically', () => {
     const prompt = flatten(
       buildTeammatePromptAddendum('planner', 'team', 'leader', {
         planModeRequired: true,
@@ -71,8 +72,9 @@ describe('buildTeammatePromptAddendum', () => {
     );
 
     expect(prompt).toContain(
-      'the runtime forwards your final answer to the leader automatically',
+      'the runtime forwards the last text you emitted to the leader automatically',
     );
+    expect(prompt).toContain('end your turn with your report');
     expect(prompt).toContain('call send_message(to: "leader"');
     expect(prompt).toContain('earlier additionally delivers it sooner');
     expect(prompt).not.toContain('without an explicit report');

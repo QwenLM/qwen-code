@@ -72,7 +72,7 @@ describe('TeamCreateTool', () => {
     // And it states what the leader ACTUALLY receives on idle, so the
     // gap cannot silently grow back in the other direction.
     expect(description.replace(/\s+/g, ' ')).toContain(
-      "the runtime forwards that teammate's final answer to you automatically",
+      "the runtime forwards that teammate's final text output of the turn to you automatically",
     );
     expect(description.replace(/\s+/g, ' ')).toContain(
       'if they also called send_message earlier, that earlier report is delivered too',

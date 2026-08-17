@@ -13,8 +13,8 @@
  */
 
 const FINAL_ANSWER_FORWARDING_NOTE = [
-  '   When your turn ends, the runtime forwards your final answer to the',
-  '   leader automatically, so make your final answer your report. Calling',
+  '   When your turn ends, the runtime forwards the last text you emitted to',
+  '   the leader automatically, so end your turn with your report. Calling',
   '   send_message(to: "leader") earlier additionally delivers it sooner.',
 ];
 
