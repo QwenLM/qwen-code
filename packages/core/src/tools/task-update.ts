@@ -539,8 +539,12 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       teamManager &&
       task.status === 'in_progress' &&
       persistedOwner &&
-      // Leader-owned tasks need no delivery: the leader is the session
-      // making the call and sees the task on its next listing.
+      // Leader-owned tasks need no delivery: the leader has no backend
+      // agent handle to receive a dispatch prompt, so nothing can be
+      // delivered; the exclusion keeps a leader's self-assignment from
+      // surfacing a dispatch failure. When a teammate assigns to the
+      // leader the update persists with a plain success and the leader
+      // sees the task on its next task_list (no notification path).
       persistedOwner !== LEADER_NAME &&
       persistedOwner !== teammateCallerName &&
       (persistedOwner !== existingOwner || statusBecameInProgress)
