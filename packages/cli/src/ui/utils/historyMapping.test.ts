@@ -594,6 +594,43 @@ describe('computeApiTruncationIndex', () => {
       // …and a later rewind target is not shifted one turn late.
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
     });
+
+    it('pins the exact-match collision corner as a loud block, not silent loss', () => {
+      // Known limitation, documented next to the exclusion in
+      // historyMapping.ts: microcompaction never rewrites text parts, so a
+      // genuine prompt whose entire text equals a generated placeholder is
+      // indistinguishable from a cleared media-only entry. It is excluded
+      // from the API prompt count, so every later rewind target returns
+      // -1 — AppContainer turns that into a loud "Cannot rewind to a turn
+      // that was compressed" abort. This pins the fail-safe shape: a
+      // visible error, never silent history loss. A durable fix needs a
+      // structural sentinel on cleared parts (persisted-format change, out
+      // of scope here) and would update this expectation.
+      const exactPlaceholderText = '[Old inline media cleared: image/png]';
+      const collidingPrompt: Content = {
+        role: 'user',
+        parts: [{ text: exactPlaceholderText } as Part],
+      };
+      const ui: HistoryItem[] = [
+        userItem(1, exactPlaceholderText),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        collidingPrompt,
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Rewinding to the colliding turn itself still works via the
+      // uiUserTurnCount === 0 shortcut…
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(1);
+      // …while every later target fails loud (-1) instead of truncating
+      // against a misaligned prompt count.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    });
   });
 
   describe('mid-turn user messages (notification type)', () => {

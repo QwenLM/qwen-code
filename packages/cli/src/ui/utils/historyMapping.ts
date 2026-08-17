@@ -70,6 +70,19 @@ function isUserTextContent(content: Content): boolean {
   // mixes placeholders with real prompt text still counts (it IS a real
   // turn).
   //
+  // Known limitation (exact-match collision): a genuine prompt whose ENTIRE
+  // text equals a generated placeholder shape is indistinguishable from a
+  // cleared media-only entry once serialized — both carry the identical
+  // text. Such a prompt is excluded here, leaving the API prompt count one
+  // behind the UI turn count, so every later rewind target returns -1 and
+  // AppContainer surfaces a loud "Cannot rewind to a turn that was
+  // compressed" abort (rewinding to the colliding turn itself still works
+  // via the uiUserTurnCount === 0 shortcut). This fails safe — a visible
+  // error, never silent history loss. Disambiguating it durably needs a
+  // structural sentinel on cleared parts, which changes the persisted API
+  // history shape and is out of scope for this fix; see the pinned test in
+  // historyMapping.test.ts.
+  //
   // The ACP session's private `#isUserTextContent`
   // (packages/cli/src/acp-integration/session/Session.ts) deliberately
   // keeps the bare text-presence check (`'text' in part && part.text`),
