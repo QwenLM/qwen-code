@@ -43,6 +43,7 @@ import {
   type ServeAppLifecycle,
 } from './serve-app-lifecycle.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import { tagListener } from './local-control/index.js';
 import {
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
   registerChannelWorkerPromptAuthorization,
@@ -642,6 +643,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_live_state',
   'workspace_session_metadata',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
@@ -702,6 +704,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
+      f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_metadata' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
@@ -758,6 +761,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_live_state',
   'workspace_session_metadata',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
@@ -1290,6 +1294,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  let catalogRevision = 0;
+  const catalogGeneration = `server-fake-catalog-gen-${Math.random()
+    .toString(36)
+    .slice(2)}`;
   const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
   const setSessionWorktreeCalls: Array<{
     sessionId: string;
@@ -2096,6 +2104,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listWorkspaceSessions(workspaceCwd) {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
+    },
+    getSessionCatalogVersion() {
+      return { generation: catalogGeneration, revision: catalogRevision };
+    },
+    markSessionCatalogChanged() {
+      catalogRevision += 1;
     },
     getSessionSummary(sessionId) {
       summaryCalls.push(sessionId);
@@ -18204,6 +18218,64 @@ describe('createServeApp', () => {
       expect(meta).not.toHaveProperty('availableSkillDetails');
       expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
     });
+
+    it('rolls back a non-attached side task (kill, remove, catalog mark) when the generation closes mid-create', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge();
+      bridge.createSideTaskSession = vi.fn(async () => {
+        // The runtime generation closes between create and the post-create
+        // assertion — the route must roll the fresh side task back.
+        generationGuard.close();
+        return {
+          sessionId: 'side-task-rollback',
+          workspaceCwd: WS_BOUND,
+          attached: false,
+          clientId: 'client-side-task',
+          state: {},
+          liveJournal: [],
+        };
+      });
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'side-task-rollback-ws',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+      const revisionBefore = bridge.getSessionCatalogVersion().revision;
+      const removeSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue(true);
+
+      try {
+        const res = await request(app)
+          .post('/session/source-session/side-task')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'follow-up' });
+
+        expect(res.status).toBe(503);
+        expect(res.body.code).toBe('workspace_runtime_unavailable');
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'side-task-rollback',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
+        expect(removeSpy).toHaveBeenCalledWith('side-task-rollback');
+        // Rolling the fresh side task out of the catalog must advance the
+        // catalog clock for version-watching clients.
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBefore + 1,
+        );
+      } finally {
+        removeSpy.mockRestore();
+      }
+    });
   });
 
   describe('POST /session/:id/fork', () => {
@@ -24053,6 +24125,7 @@ describe('createServeApp', () => {
         });
 
         try {
+          const versionBefore = secondaryBridge.getSessionCatalogVersion();
           const res = await auth(
             request(app).patch(
               `/workspaces/ws-secondary/session/${sessionId}/metadata`,
@@ -24066,6 +24139,11 @@ describe('createServeApp', () => {
           expect(await fsp.readFile(filePath, 'utf8')).toContain(
             'Persisted rename',
           );
+          // A persisted rename changes what the catalog serves, so it must
+          // advance the same revision the live rename path marks.
+          expect(
+            secondaryBridge.getSessionCatalogVersion().revision,
+          ).toBeGreaterThan(versionBefore.revision);
         } finally {
           await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
         }
@@ -24093,6 +24171,7 @@ describe('createServeApp', () => {
         ).send({ displayName: 'Rename' });
 
       try {
+        const versionBefore = secondaryBridge.getSessionCatalogVersion();
         expect((await patchMetadata()).status).toBe(404);
 
         const chatsDir = path.join(
@@ -24123,6 +24202,11 @@ describe('createServeApp', () => {
           code: 'session_conflict',
           sessionId,
         });
+        // Neither the 404 nor the 409 path renames anything, so neither may
+        // advance the catalog revision.
+        expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(
+          versionBefore.revision,
+        );
       } finally {
         await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
       }
@@ -24370,6 +24454,28 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
+    });
+
+    it('requires the listener-scoped credential for LAN health checks', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' });
+      const server = createServer(app);
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const port = (server.address() as AddressInfo).port;
+      tagListener(server, {
+        kind: 'local-control',
+        authority: `127.0.0.1:${port}`,
+        origin: `http://127.0.0.1:${port}`,
+      });
+      try {
+        const res = await request(server)
+          .get('/health?deep=1')
+          .set('Host', `127.0.0.1:${port}`);
+        expect(res.status).toBe(401);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
     });
 
     it('gates /health behind bearer auth when --require-auth is set on loopback (#4175 PR 15)', async () => {
