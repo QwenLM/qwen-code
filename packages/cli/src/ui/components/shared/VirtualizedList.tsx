@@ -951,15 +951,18 @@ function VirtualizedList<T>(
   ]);
 
   // The host passes `containerHeight` as the *maximum* viewport height (the
-  // room available between the header and the composer). Pinning the root box
-  // to that height unconditionally left a tall empty gap below short content
-  // and pushed the composer far down the screen — the legacy <Static> path
-  // instead grows with its content. Collapse to `totalHeight` whenever the
-  // content fits so the composer sits right beneath the conversation. A
-  // caller can request one full-height measurement pass while content changes
-  // shape under a stable item key; otherwise a stale cached total can clip
-  // the new content before it is measured. The root collapses again after the
-  // measurement so short content does not leave a gap above the composer.
+  // room available between the header and the composer). While the list is
+  // not bottom-aligned, collapse to `totalHeight` whenever the content fits:
+  // pinning the root box to the full height unconditionally would leave a
+  // tall empty gap below short content and push the composer far down the
+  // screen, while the legacy <Static> path grows with its content. While a
+  // bottom-stuck conversation has room to spare (#9300), keep the full
+  // `containerHeight` instead so `bottomAlignGap` can push it down: the
+  // blank rows render ABOVE the content and the latest message sits right
+  // above the composer. A caller can request one full-height measurement
+  // pass while content changes shape under a stable item key; otherwise a
+  // stale cached total can clip the new content before it is measured. The
+  // collapse/bottom-align rule above applies again after the measurement.
   // `scrollableContainerHeight` (the scroll math) still uses the full
   // `containerHeight`, so scrolling is unaffected.
   const rootHeight =

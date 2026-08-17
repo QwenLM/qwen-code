@@ -145,7 +145,7 @@ describe('<VirtualizedList />', () => {
     expect(frame.endsWith('item-19')).toBe(true);
   });
 
-  it('collapses a short bottom-stuck list below the container height', async () => {
+  it('bottom-aligns a short bottom-stuck list within the container height', async () => {
     const { lastFrame, rerender } = render(
       <VirtualizedList<Item>
         data={makeItems(5)}
@@ -273,7 +273,7 @@ describe('<VirtualizedList />', () => {
     expect(lastFrame() ?? '').toContain('thinking line 29');
   });
 
-  it('collapses after measuring changed content at full viewport height', async () => {
+  it('bottom-aligns changed content after measuring it at full viewport height', async () => {
     const liveItems = [{ id: -1, label: 'live' }];
 
     const { frames, lastFrame, rerender } = render(
@@ -1150,8 +1150,10 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     // window (the assertions above also hold for a blank frame).
     expect(lines.some((l) => l.includes('Thought for 1m 41s'))).toBe(true);
     // Bottom-aligned (#9300): the released height becomes blank space at the
-    // TOP, and the collapsed summary sits at the bottom (last row is content,
-    // not a gap between content and the composer).
+    // TOP, and the collapsed summary sits at the bottom of the full 40-row
+    // container (last row is content, not a gap between content and the
+    // composer).
+    expect(lines.length).toBe(40);
     expect(lines[lines.length - 1]!.trim()).not.toBe('');
   });
 
