@@ -535,8 +535,10 @@ describe('qwen-autofix workflow', () => {
     // caught, not just a removed constant.
     expect(reviewScanJob).toContain('.startedAt // $cut) > $cut');
     // Round is the max across markers so a terminal handoff marker is honored
-    // regardless of its timestamp.
-    expect(reviewScanJob).toContain('map(.round) | max // 0');
+    // regardless of its timestamp; the fallback is the window's SEED (0 unless
+    // '@qwen-code /takeover from N' anchored this window at N), never a
+    // hardcoded 0.
+    expect(reviewScanJob).toContain('map(.round) | max // $start');
     // Never fall back to the mutable head commit date for the pre-first-eval
     // floor (a base-sync HEAD would recreate feedback burial); use the immutable
     // createdAt, or an empty floor if the metadata query failed.
@@ -2997,7 +2999,7 @@ describe('qwen-autofix workflow', () => {
     )?.[1];
     expect(markersProgram).toBeTruthy();
     const roundProgram = reviewScanJob.match(
-      /ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}" '([\s\S]*?)' <<< "\$\{MARKERS\}"\)"/,
+      /ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}" --argjson start "\$\{ROUND_START\}" '([\s\S]*?)' <<< "\$\{MARKERS\}"\)"/,
     )?.[1];
     expect(roundProgram).toBeTruthy();
     const pageOne = JSON.stringify([
@@ -3032,7 +3034,7 @@ describe('qwen-autofix workflow', () => {
     expect(markers.split('\n')).toHaveLength(1);
     const round = execFileSync(
       'jq',
-      ['-r', '--arg', 'key', 'none', roundProgram],
+      ['-r', '--arg', 'key', 'none', '--argjson', 'start', '0', roundProgram],
       { encoding: 'utf8', input: markers },
     ).trim();
     expect(round).toBe('7'); // max round crosses the page boundary
@@ -4201,6 +4203,105 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_REARM_KEY');
   });
 
+  it('behaviorally seeds the round counter from the window anchor and only from it', () => {
+    // '@qwen-code /takeover from N' rides as its OWN marker on the engage
+    // ack, never as a field inside '<!-- takeover-ack engaged -->' — that
+    // literal is matched with jq contains(), closing '-->' included, at four
+    // sites here and three in qwen-fleet-shepherd.yml, and a field would
+    // silently break all seven. Replay the scan's real trio to prove the
+    // marker survives alongside the untouched ack, and that the seed is
+    // scoped exactly like the window key it is read from.
+    const trio = reviewScanJob.match(
+      /(MARKERS="\$\(jq -c[\s\S]*?ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}"[^\n]*)/,
+    )?.[1];
+    expect(trio).toBeTruthy();
+    const BOT = 'qwen-code-dev-bot';
+    const roundOf = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-seed-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -uo pipefail\nWORKDIR='${dir}'\n${trio.replace(/\n {12}/g, '\n')}\nprintf '\\n%s' "$ROUND"`,
+          ],
+          { env: { ...process.env, AUTOFIX_BOT: BOT }, encoding: 'utf8' },
+        )
+          .split('\n')
+          .at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const ack = (at, seed) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `🤝 …\n<!-- takeover-ack engaged -->${seed === undefined ? '' : `\n<!-- autofix-round-start ${seed} -->`}`,
+    });
+    const evalMarker = (at, round, win) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${at} acted=true round=${round} win=${win} -->`,
+    });
+    const K1 = '2026-08-03T00:00:00Z';
+    const K0 = '2026-08-01T00:00:00Z';
+    // The whole point: a PR taken over at round 3 starts there, so with
+    // CRITICAL_ONLY_AFTER_ROUND=5 the brake is two managed rounds away
+    // instead of five.
+    expect(roundOf([ack(K1, 3)])).toBe('3');
+    // Real markers outrank the seed as soon as one exists — the seed is a
+    // FLOOR for an empty window, not an offset added to every round.
+    expect(
+      roundOf([ack(K1, 3), evalMarker('2026-08-04T00:00:00Z', 4, K1)]),
+    ).toBe('4');
+    // Window scoping, in both directions. A superseded window's seed cannot
+    // leak forward…
+    expect(roundOf([ack(K0, 7), ack(K1, 3)])).toBe('3');
+    // …and a bare re-arm (no marker) drops the seed to 0, which is what
+    // per-window scoping MEANS: re-arming a late-stage PR reopens the
+    // suggestion valve unless the number is supplied again.
+    expect(roundOf([ack(K0, 7), ack(K1)])).toBe('0');
+    // Unseeded acks behave exactly as before this feature existed.
+    expect(roundOf([ack(K1)])).toBe('0');
+    expect(roundOf([])).toBe('0');
+    // Trust boundary: the seed is read from the bot-authored comment whose
+    // created_at IS the window key. Both halves of that predicate carry
+    // weight, so both are exercised against a payload that would otherwise
+    // park the PR at its round cap. The stranger here posts AT the window
+    // key — GitHub stamps created_at to the second, so a comment landing in
+    // the same second as the engage ack is a real collision and the author
+    // filter is the only thing that rejects it. (Dating the impostor
+    // anywhere else tests the key check twice and the author check not at
+    // all: with the author filter deleted such a case still passes.)
+    expect(
+      roundOf([
+        ack(K1),
+        {
+          user: { login: 'mallory' },
+          created_at: K1,
+          body: 'lgtm <!-- autofix-round-start 99 -->',
+        },
+      ]),
+    ).toBe('0');
+    expect(
+      roundOf([
+        ack(K1),
+        {
+          user: { login: BOT },
+          created_at: '2026-08-05T00:00:00Z',
+          body: 'report <!-- autofix-round-start 99 -->',
+        },
+      ]),
+    ).toBe('0');
+    // Shape gate: the marker reader takes 1-2 digits, so a longer number is
+    // not silently truncated to its first two digits.
+    expect(roundOf([ack(K1, 100)])).toBe('0');
+    // The ack literal the other seven read sites match must survive verbatim
+    // next to the seed marker.
+    expect(ack(K1, 3).body).toContain('<!-- takeover-ack engaged -->');
+  });
+
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
     // Extract the forced-PR classifier VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
@@ -5124,7 +5225,7 @@ exit 1
           'bash',
           [
             '-c',
-            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$CMD_PR"`,
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$CMD_PR"`,
           ],
           {
             env: {
@@ -5231,6 +5332,97 @@ exit 1
         headRepo: 'human-a/qwen-code',
       }),
     ).toBe('add|7165');
+  });
+
+  it('behaviorally parses the takeover round seed and keeps every other body closed', () => {
+    // '@qwen-code /takeover from N' is the ONE parameterized command form, so
+    // it is also the one place a value is read out of a comment body. Replay
+    // the issue_comment branch VERBATIM (drift fails) and pin both halves:
+    // the literal prefix must still match TAKEOVER_COMMAND byte-for-byte, and
+    // the tail must be a bounded integer. Everything else — a prefixed body, a
+    // 'stop from N' hybrid, double spaces, a 3-digit number, a shell/command
+    // substitution payload — must fail CLOSED to "not an exact command", which
+    // is the property the constants-only discipline bought in the first place.
+    const sanitize = routeStep.match(
+      /(sanitize_number\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const cmdBranch = routeStep.match(
+      /(if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then[\s\S]*?\n {14}fi)/,
+    )?.[1];
+    expect(sanitize).toBeTruthy();
+    expect(cmdBranch).toBeTruthy();
+    const seedOf = (body) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-from-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nif [[ "$*" == *"/pulls/"* ]]; then printf '%s' 'QwenLM/qwen-code'; else printf '%s' 'write'; fi\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        // TAKEOVER_FROM is echoed through sanitize_number exactly as the
+        // route step's own output line does, so a value that survives the
+        // parser but not the re-validation shows up here as empty.
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$(sanitize_number "$TAKEOVER_FROM")"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              COMMENT_BODY: body,
+              SENDER_LOGIN: 'maintainer-b',
+              COMMENT_PR_AUTHOR: 'human-a',
+              HAS_PR_URL: 'url',
+              ISSUE_STATE: 'open',
+              ISSUE_NUMBER: '7165',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        ).split('\n');
+        return out.at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Seeded engagement, including surrounding whitespace (the body is
+    // trimmed before matching) and the two-digit upper end.
+    expect(seedOf('@qwen-code /takeover from 3')).toBe('add|3');
+    expect(seedOf('  @qwen-code /takeover from 12  ')).toBe('add|12');
+    expect(seedOf('@qwen-code /takeover from 99')).toBe('add|99');
+    // 'from 0' is the explicit no-seed spelling: it must engage exactly like
+    // the bare command rather than being rejected, so a maintainer who types
+    // it gets management, not silence.
+    expect(seedOf('@qwen-code /takeover from 0')).toBe('add|0');
+    // The unparameterized forms are untouched.
+    expect(seedOf('@qwen-code /takeover')).toBe('add|');
+    expect(seedOf('@qwen-code /takeover stop')).toBe('remove|');
+    // Fail-closed set. 'stop from 3' is the interesting one: it must NOT
+    // release (the exact-'stop' match misses) and must NOT engage (the
+    // prefix is not TAKEOVER_COMMAND) — an ambiguous body does nothing.
+    for (const body of [
+      '@qwen-code /takeover stop from 3',
+      '@qwen-code /takeover from 100',
+      '@qwen-code /takeover from 3x',
+      '@qwen-code /takeover from -1',
+      '@qwen-code /takeover from',
+      '@qwen-code /takeover  from 3',
+      '@qwen-code /takeoverfrom 3',
+      'please @qwen-code /takeover from 3',
+      '@qwen-code /takeover from 3 please',
+      '@qwen-code /takeover from 3; rm -rf /',
+      '@qwen-code /takeover from $(id)',
+      '@qwen-code /takeover from `id`',
+    ]) {
+      expect(seedOf(body)).toBe('|');
+    }
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
@@ -7671,12 +7863,12 @@ exit 1
       /(GROWTH_CLAUSE_EN="the PR's diff grew[\s\S]*?CAUSE_ZH="\$\{ROUNDS_CLAUSE_ZH\}"\n\s+fi)/,
     )?.[1];
     expect(causeBlock).toBeTruthy();
-    const causeFor = (rounds, growth, growthSrc, growthTest) =>
+    const causeFor = (rounds, growth, growthSrc, growthTest, seed = '') =>
       execFileSync(
         'bash',
         [
           '-c',
-          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\nTAKEOVER_COMMAND='@qwen-code /takeover'\n${seed}\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
         ],
         { encoding: 'utf8' },
       ).split('\n');
@@ -7694,6 +7886,26 @@ exit 1
     expect(both[0]).toContain('rounds are complete and');
     expect(both[0]).toContain('src 900 / test 20');
     expect(both[1]).toContain('轮次，且');
+    // A SEEDED window must not claim five completed rounds: this PR reached
+    // the threshold from `@qwen-code /takeover from 3` plus two managed
+    // rounds, and the audit record has to say so or a maintainer reading
+    // "5 change-producing rounds are complete" on a twice-run PR cannot tell
+    // the brake from a misfire. An UNSET seed (every ordinary PR, and the
+    // roundsOnly case above) must keep the plain wording — `!= '0'` without
+    // the :-0 default renders the seeded text for everyone.
+    const seeded = causeFor(
+      'true',
+      'false',
+      0,
+      0,
+      'LIVE_ROUND_START=3\nROUND=5',
+    );
+    expect(seeded[0]).toContain('seeded at round 3');
+    expect(seeded[0]).toContain('@qwen-code /takeover from 3');
+    expect(seeded[0]).toContain('plus 2 change-producing round(s) since');
+    expect(seeded[0]).not.toBe('5 change-producing rounds are complete');
+    expect(seeded[1]).toContain('从第 3 轮起算');
+    expect(seeded[1]).toContain('又完成 2 个产生改动的轮次');
 
     // The batch-budget sentence must describe the policy actually in force:
     // the OVER_BUDGET census only builds spans in round-brake territory, so
