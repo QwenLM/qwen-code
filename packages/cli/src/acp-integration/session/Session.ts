@@ -261,6 +261,7 @@ import {
   insertAfterFunctionResponses,
   normalizePartList,
 } from '../../utils/nonInteractiveHelpers.js';
+import { TranscriptUpdateIdentityProjector } from './transcript-update-identity.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -1759,6 +1760,8 @@ export class Session implements SessionContext {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
+  private readonly transcriptUpdateIdentity =
+    new TranscriptUpdateIdentityProjector();
   private liveScreenContextTool?: CaptureScreenContextTool;
   private liveTaskTools: readonly LiveTaskTool[] = [];
   private liveSpeakToUserTool?: SpeakToUserTool;
@@ -6024,7 +6027,10 @@ export class Session implements SessionContext {
     observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update: projectedUpdate,
+      update: this.transcriptUpdateIdentity.project(
+        projectedUpdate,
+        promptIdContext.getStore(),
+      ),
     };
 
     if (update.sessionUpdate === 'plan') {

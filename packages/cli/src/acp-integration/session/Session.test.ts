@@ -199,6 +199,17 @@ function chatRecord(overrides: Record<string, unknown>): ChatRecord {
   } as ChatRecord;
 }
 
+function expectedLiveTranscriptMeta(
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ...extra,
+    qwenTranscript: {
+      segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
+    },
+  };
+}
+
 describe('computeInitialTurnFromHistory', () => {
   it('uses the largest numeric prompt id suffix for the current session', () => {
     expect(
@@ -968,6 +979,33 @@ describe('Session', () => {
       .mocked(mockClient.sessionUpdate)
       .mock.calls.at(-1)?.[0]?.update;
     expect(replayDelivered).toBe(replayUpdate);
+  });
+
+  it('stamps live ACP text deltas with one prompt-scoped segment identity', async () => {
+    await core.promptIdContext.run('test-session-id########1', async () => {
+      await session.sendUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'first ' },
+      });
+      await session.sendUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'second' },
+      });
+    });
+
+    const updates = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.map(([params]) => params.update);
+    const segmentIds = updates.map(
+      (update) =>
+        (
+          update._meta as
+            | { qwenTranscript?: { segmentId?: string } }
+            | undefined
+        )?.qwenTranscript?.segmentId,
+    );
+    expect(segmentIds[0]).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(segmentIds[1]).toBe(segmentIds[0]);
   });
 
   describe('active work holds', () => {
@@ -9965,6 +10003,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -9995,6 +10034,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -10104,6 +10144,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -10379,6 +10420,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -10391,6 +10433,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -12343,6 +12386,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -12561,6 +12605,7 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -15610,7 +15655,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Already compressed.' },
-            _meta: { source: 'slash_command' },
+            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
           },
         });
         expect(
@@ -15654,7 +15699,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Review complete.' },
-            _meta: { source: 'slash_command' },
+            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
           },
         });
         expect(finishedSpy).toHaveBeenCalledTimes(1);
@@ -15710,7 +15755,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Side answer.' },
-            _meta: { source: 'slash_command' },
+            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
           },
         });
       });
@@ -15860,7 +15905,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Compressing context...' },
-            _meta: { source: 'slash_command' },
+            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
           },
         });
         expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
@@ -15868,7 +15913,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Context compressed.' },
-            _meta: { source: 'slash_command' },
+            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
           },
         });
       });
@@ -20943,6 +20988,7 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: expectedLiveTranscriptMeta(),
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
@@ -20991,6 +21037,7 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: expectedLiveTranscriptMeta(),
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',

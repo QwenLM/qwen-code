@@ -1,0 +1,5 @@
+{
+  "roles": ["user", "thinking", "assistant", "tool_group"],
+  "requiredCapabilities": ["copy", "edit-user-message", "open-file"],
+  "identityFields": ["renderedItemId", "sourceBlockIds", "sourceToolCallIds"]
+}

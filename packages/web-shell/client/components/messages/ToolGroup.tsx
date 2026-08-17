@@ -62,7 +62,10 @@ import {
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptRenderMode,
+  type TranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
@@ -178,6 +181,17 @@ export function extractDiff(tool: ACPToolCall): string {
     if (diffBlock && diffBlock.type === 'diff') {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
+  }
+
+  const previewPatch = tool.args?.patch;
+  if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
+  const previewNewText = tool.args?.newText;
+  if (typeof previewNewText === 'string') {
+    const previewOldText = tool.args?.oldText;
+    return buildUnifiedDiff(
+      typeof previewOldText === 'string' ? previewOldText : '',
+      previewNewText,
+    );
   }
 
   return '';
@@ -1045,7 +1059,7 @@ const SESSION_LINK_RE = /\[([^\]]+)\]\(qwen-session:\/\/([^)]+)\)/g;
 
 function renderWithSessionLinks(
   text: string,
-  renderMode: 'interactive' | 'readonly',
+  renderMode: TranscriptRenderMode,
 ): ReactNode {
   if (!text || !text.includes('qwen-session://')) return text;
   const parts: ReactNode[] = [];
@@ -1058,7 +1072,7 @@ function renderWithSessionLinks(
     }
     const sessionId = match[2];
     parts.push(
-      renderMode === 'readonly' ? (
+      renderMode !== 'interactive' ? (
         <span key={match.index} style={{ textDecoration: 'underline' }}>
           {match[1]}
         </span>
@@ -1515,18 +1529,24 @@ function ThoughtLine({
   generateContent?: SessionContentGenerator;
 }) {
   const { language, t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const [expanded, setExpanded] = useState(false);
+  const showContent = documentMode || expanded;
   return (
     <div className={styles.chatSummaryThought}>
       <div
         className={`${styles.chatSummaryThoughtHeader}${
-          expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
+          showContent ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
         }`}
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
+        role={documentMode ? undefined : 'button'}
+        tabIndex={documentMode ? undefined : 0}
+        aria-expanded={documentMode ? undefined : expanded}
+        onClick={() => {
+          if (!documentMode) setExpanded((value) => !value);
+        }}
         onKeyDown={(event) => {
+          if (documentMode) return;
           // Only the container itself toggles; keys pressed inside nested
           // controls (the translate button) keep their own behavior.
           if (event.target !== event.currentTarget) return;
@@ -1554,14 +1574,14 @@ function ThoughtLine({
         )}
         <span
           className={
-            expanded
+            showContent
               ? styles.chatSummaryThoughtChevronDown
               : styles.chatSummaryThoughtChevronRight
           }
           aria-hidden="true"
         />
       </div>
-      {expanded && (
+      {showContent && (
         <div className={styles.chatSummaryThoughtContent}>
           <Markdown content={content} source="thinking" />
         </div>
@@ -1579,12 +1599,15 @@ export const ToolGroup = memo(function ToolGroup({
   generateContent,
 }: ToolGroupProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
+  const showGroupContent = documentMode || chatExpanded;
   const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveAgents(tools);
   const activeTool =
@@ -1646,6 +1669,7 @@ export const ToolGroup = memo(function ToolGroup({
           type="button"
           className={styles.chatSummary}
           onClick={() => {
+            if (documentMode) return;
             if (singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
@@ -1656,11 +1680,13 @@ export const ToolGroup = memo(function ToolGroup({
             }
             setChatExpanded((value) => !value);
           }}
-          aria-expanded={opensToolDetails ? undefined : chatExpanded}
+          aria-expanded={
+            documentMode || opensToolDetails ? undefined : chatExpanded
+          }
           title={
             opensToolDetails
               ? undefined
-              : chatExpanded
+              : showGroupContent
                 ? t('tool.collapseHint')
                 : t('tool.expand')
           }
@@ -1694,14 +1720,16 @@ export const ToolGroup = memo(function ToolGroup({
           </span>
           <span
             className={
-              chatExpanded ? styles.chatChevronDown : styles.chatChevronRight
+              showGroupContent
+                ? styles.chatChevronDown
+                : styles.chatChevronRight
             }
             aria-hidden="true"
           />
         </button>
         <div
           className={
-            chatExpanded
+            showGroupContent
               ? styles.chatSummaryContentClip
               : `${styles.chatSummaryContentClip} ${styles.chatSummaryContentCollapsed}`
           }
@@ -1727,7 +1755,9 @@ export const ToolGroup = memo(function ToolGroup({
                     approval={pendingApproval}
                     workspaceCwd={workspaceCwd}
                     summaryOnly={!singleTool || compactToolLines}
-                    forceExpanded={!!singleTool && !compactToolLines}
+                    forceExpanded={
+                      documentMode || (!!singleTool && !compactToolLines)
+                    }
                     hideHeader={!!singleTool && !compactToolLines}
                   />
                 </Fragment>
@@ -1761,6 +1791,7 @@ export const ToolGroup = memo(function ToolGroup({
           tool={tool}
           approval={pendingApproval}
           workspaceCwd={workspaceCwd}
+          forceExpanded={documentMode}
         />
       ))}
     </div>

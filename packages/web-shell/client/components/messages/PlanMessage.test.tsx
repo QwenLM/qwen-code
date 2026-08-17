@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import type { TodoItem } from '../../adapters/types';
 
 // PlanMessage's expanded list reads TodoTimelineContext and (via TodoFullList)
@@ -44,6 +45,7 @@ function renderPlan(
   id: string,
   todos: TodoItem[],
   timeline?: Map<string, unknown>,
+  documentMode = false,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -51,9 +53,13 @@ function renderPlan(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TodoTimelineContext.Provider value={timeline ?? new Map()}>
-          <PlanMessage id={id} todos={todos} />
-        </TodoTimelineContext.Provider>
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+            <PlanMessage id={id} todos={todos} />
+          </TodoTimelineContext.Provider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -92,6 +98,14 @@ describe('PlanMessage', () => {
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).toContain('Third task');
     expect(container.textContent).toContain('▾');
+  });
+
+  it('renders the complete plan without controls in document mode', () => {
+    const container = renderPlan('p1', TODOS, undefined, true);
+    expect(container.textContent).toContain('First task');
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).toContain('Third task');
+    expect(container.querySelector('button')).toBeNull();
   });
 
   it('shows the plan-keyed diff when a timeline is present', () => {

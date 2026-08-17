@@ -151,6 +151,8 @@ export function resolveFenceLanguage(
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
 const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp|bmp);base64,/i;
+const SAFE_DOCUMENT_IMAGE_DATA_URI =
+  /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}$/i;
 
 export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
@@ -161,10 +163,14 @@ export function isSafeHref(url: string | undefined): boolean {
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
-export function isSafeImageSrc(url: string | undefined): boolean {
+export function isSafeImageSrc(
+  url: string | undefined,
+  documentMode = false,
+): boolean {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
+  if (documentMode) return SAFE_DOCUMENT_IMAGE_DATA_URI.test(trimmed);
   if (trimmed.startsWith('#')) return true;
   if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
   if (SAFE_IMAGE_DATA_URI.test(trimmed)) return true;
@@ -174,12 +180,17 @@ export function isSafeImageSrc(url: string | undefined): boolean {
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
-let lastMermaidTheme: string | undefined;
+let lastMermaidConfigKey: string | undefined;
+let mermaidRenderQueue: Promise<void> = Promise.resolve();
 let mermaidRenderId = 0;
+const MAX_MERMAID_TEXT_CHARS = 50_000;
+const MAX_MERMAID_EDGES = 500;
+const MERMAID_RENDER_TIMEOUT_MS = 10_000;
 
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
   const appTheme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
@@ -267,47 +278,73 @@ function MermaidBlock({ code }: { code: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    let timedOut = false;
     setSvg(null);
     setError(null);
+    const renderTimeout = documentMode
+      ? setTimeout(() => {
+          timedOut = true;
+          if (!cancelled) setError('Mermaid render timed out');
+        }, MERMAID_RENDER_TIMEOUT_MS)
+      : undefined;
     const timer = setTimeout(() => {
-      import('mermaid').then(async (mod) => {
-        if (cancelled) return;
-        const mermaid = mod.default;
-        if (lastMermaidTheme !== mermaidTheme) {
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: mermaidTheme,
-            securityLevel: 'strict',
-            suppressErrorRendering: true,
-            flowchart: {
-              wrappingWidth: 300,
-              useMaxWidth: false,
-            },
+      import('mermaid')
+        .then(async (mod) => {
+          if (cancelled || timedOut) return;
+          const mermaid = mod.default;
+          const configKey = `${mermaidTheme}:${documentMode ? 'document' : 'runtime'}`;
+          const render = mermaidRenderQueue.then(async () => {
+            if (cancelled || timedOut)
+              throw new Error('Mermaid render skipped');
+            if (lastMermaidConfigKey !== configKey) {
+              mermaid.initialize({
+                startOnLoad: false,
+                theme: mermaidTheme,
+                securityLevel: 'strict',
+                suppressErrorRendering: true,
+                ...(documentMode
+                  ? {
+                      maxTextSize: MAX_MERMAID_TEXT_CHARS,
+                      maxEdges: MAX_MERMAID_EDGES,
+                    }
+                  : {}),
+                flowchart: {
+                  wrappingWidth: 300,
+                  useMaxWidth: false,
+                },
+              });
+              lastMermaidConfigKey = configKey;
+            }
+            const id = `mermaid-${++mermaidRenderId}`;
+            return mermaid.render(id, code.trim());
           });
-          lastMermaidTheme = mermaidTheme;
-        }
-        try {
-          const id = `mermaid-${++mermaidRenderId}`;
-          const { svg } = await mermaid.render(id, code.trim());
+          mermaidRenderQueue = render.then(
+            () => undefined,
+            () => undefined,
+          );
+          const { svg } = await render;
           // No additional sanitization needed: securityLevel:'strict' uses
           // DOMPurify internally to sanitize SVG output.
-          if (!cancelled) {
+          if (!cancelled && !timedOut) {
+            if (renderTimeout !== undefined) clearTimeout(renderTimeout);
             setSvg(svg);
           }
-        } catch (error: unknown) {
-          if (!cancelled) {
+        })
+        .catch((error: unknown) => {
+          if (!cancelled && !timedOut) {
+            if (renderTimeout !== undefined) clearTimeout(renderTimeout);
             setError(
               error instanceof Error ? error.message : 'Mermaid render failed',
             );
           }
-        }
-      });
+        });
     }, 150);
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      if (renderTimeout !== undefined) clearTimeout(renderTimeout);
     };
-  }, [code, mermaidTheme]);
+  }, [code, documentMode, mermaidTheme]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(
@@ -423,6 +460,7 @@ function CodeBlock({
 }) {
   const { t } = useI18n();
   const appTheme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -438,6 +476,7 @@ function CodeBlock({
     // repeatedly tokenizes its entire contents and can dominate rendering for
     // long responses; the settled render below highlights the final text once.
     if (
+      documentMode ||
       isStreaming ||
       lang === 'mermaid' ||
       resolvedLang === 'text' ||
@@ -488,7 +527,7 @@ function CodeBlock({
     return () => {
       cancelled = true;
     };
-  }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
+  }, [code, documentMode, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(
@@ -512,7 +551,7 @@ function CodeBlock({
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {!isStreaming && html !== null ? (
+      {!documentMode && !isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
@@ -711,7 +750,7 @@ function MarkdownLink({
   const renderMode = useTranscriptRenderMode();
   const openExternalLink = useExternalLinkOpener();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
-    if (renderMode === 'readonly') {
+    if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
     }
     const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
@@ -747,7 +786,10 @@ function MarkdownLink({
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
-  const safeSrc = isSafeImageSrc(src) ? src : undefined;
+  const renderMode = useTranscriptRenderMode();
+  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
+    ? src
+    : undefined;
   return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
 }
 
@@ -891,6 +933,7 @@ export const Markdown = memo(function Markdown({
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
@@ -924,7 +967,10 @@ export const Markdown = memo(function Markdown({
     };
   }, [components, effectiveTableMode, sourceComponents]);
   const chart =
-    source === 'assistant' && !sourceComponents?.code && !sourceComponents?.pre
+    !documentMode &&
+    source === 'assistant' &&
+    !sourceComponents?.code &&
+    !sourceComponents?.pre
       ? (sourceMarkdown?.chart ??
         (sourceMarkdown?.renderCodeBlock
           ? undefined

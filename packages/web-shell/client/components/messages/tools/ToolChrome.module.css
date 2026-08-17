@@ -600,6 +600,11 @@
   overflow-y: auto;
 }
 
+:global([data-transcript-render-mode='document']) .expandedOutput {
+  max-height: none;
+  overflow-y: visible;
+}
+
 .expandedEdit {
   margin: 0;
 }

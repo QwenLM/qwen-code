@@ -1,0 +1,10 @@
+{
+  "kinds": ["user", "thought", "assistant", "tool"],
+  "sourceRecordIds": [
+    ["user-1"],
+    ["assistant-1"],
+    ["assistant-1"],
+    ["tool-start", "tool-result"]
+  ],
+  "rawFreeToolResult": "Visible summary\nVisible notice"
+}

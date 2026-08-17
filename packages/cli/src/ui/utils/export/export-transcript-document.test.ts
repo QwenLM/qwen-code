@@ -1,0 +1,1362 @@
+import { describe, expect, it } from 'vitest';
+import {
+  EXPORT_TRANSCRIPT_LIMITS_V1,
+  ExportTranscriptDocumentError,
+  assertExportTranscriptDocumentV1,
+  classifyPermissionResolutionForExport,
+  createExportTranscriptDocumentV1,
+  exportDocumentToTranscriptBlocks,
+} from './export-transcript-document.js';
+
+const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
+
+function record(
+  uuid: string,
+  parentUuid: string | null,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    uuid,
+    parentUuid,
+    sessionId: 'raw-session-id',
+    timestamp: '2026-08-16T00:00:00.000Z',
+    cwd: '/Users/tester/project',
+    version: 'test',
+    type: 'user',
+    message: { role: 'user', parts: [{ text: uuid }] },
+    ...overrides,
+  };
+}
+
+const sessionData = {
+  startTime: '2026-08-16T00:00:00.000Z',
+  metadata: {
+    sessionId: `session-${CANARY}`,
+    startTime: '2026-08-16T00:00:00.000Z',
+    exportTime: '2026-08-16T01:00:00.000Z',
+    cwd: '/Users/tester/project',
+    gitRepo: 'qwen-code',
+    gitBranch: 'feat/transcript',
+    model: 'qwen-test',
+    channel: 'cli',
+    promptCount: 1,
+    totalTokens: 12,
+    filesWritten: 1,
+    linesAdded: 2,
+    linesRemoved: 0,
+    uniqueFiles: [`/Users/tester/${CANARY}.ts`],
+  },
+};
+
+describe('ExportTranscriptDocumentV1', () => {
+  it('projects records through an explicit allowlist without raw leakage', () => {
+    const records = [
+      record('user-1', null, {
+        message: { role: 'user', parts: [{ text: 'Read the file' }] },
+      }),
+      record('tool-start', 'user-1', {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'read-1',
+                name: 'read_file',
+                args: {
+                  path: '/Users/tester/visible.ts',
+                  credential: CANARY,
+                },
+              },
+            },
+          ],
+        },
+      }),
+      record('tool-result', 'tool-start', {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'read-1',
+                name: 'read_file',
+                response: { output: CANARY },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'read-1',
+          resultDisplay: {
+            type: 'vision_bridge_notice',
+            summary: 'Safe visible result at /Users/tester',
+            notice: 'One page converted from C:\\Users\\tester directory.',
+          },
+        },
+      }),
+      record('internal', 'tool-result', {
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { title: CANARY },
+      }),
+    ];
+
+    const document = createExportTranscriptDocumentV1(records, sessionData, {
+      rendererVersion: '0.21.11-test.1',
+      exportedAt: '2026-08-16T01:00:00.000Z',
+      title: 'Synthetic transcript',
+    });
+    const serialized = JSON.stringify(document);
+
+    expect(serialized).not.toContain(CANARY);
+    expect(serialized).not.toContain('/Users/tester');
+    expect(serialized).not.toContain('raw-session-id');
+    expect(serialized).not.toContain('user-1');
+    expect(serialized).not.toContain('read-1');
+    expect(serialized).not.toMatch(/"(?:rawInput|rawOutput|toolCall)"/);
+    expect(document.metadata).toMatchObject({
+      projectName: 'project',
+      repository: 'qwen-code',
+      complete: true,
+      truncated: false,
+    });
+    expect(document.metadata).not.toHaveProperty('uniqueFiles');
+    expect(document.blocks.every((block) => block.createdAt === 0)).toBe(true);
+    expect(
+      document.blocks.find((block) => block.kind === 'tool'),
+    ).toMatchObject({
+      preview: { kind: 'file_read', path: 'visible.ts' },
+      resultPreview: {
+        kind: 'text',
+        text: 'Safe visible result at [home]\nOne page converted from [home] directory.',
+      },
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'record_internal_excluded',
+      severity: 'info',
+      count: 1,
+    });
+    expect(exportDocumentToTranscriptBlocks(document)).toBe(document.blocks);
+  });
+
+  it('redacts home paths from visible text without corrupting image data', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('visible-paths', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: [
+                  'Unix /Users/alice/private.txt',
+                  'Windows C:\\Users\\alice\\private.txt',
+                  'URI file:///Users/alice/private.txt',
+                  'Windows URI file:///C:/Users/alice/private.txt',
+                  '![safe](data:image/png;base64,/home/AA)',
+                ].join('\n'),
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).toContain('Unix [home]/private.txt');
+    expect(text).toContain('Windows [home]\\private.txt');
+    expect(text).toContain('URI file://[home]/private.txt');
+    expect(text).toContain('Windows URI file://[home]/private.txt');
+    expect(text).toContain('data:image/png;base64,/home/AA');
+    expect(text).not.toContain('/Users/alice');
+    expect(text).not.toContain('C:\\Users\\alice');
+  });
+
+  it('degrades a completed tool when its safe result preview is unavailable', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('tool-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'large-result',
+                  name: 'read_file',
+                  args: { path: 'large.txt' },
+                },
+              },
+            ],
+          },
+        }),
+        record('tool-result', 'tool-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'large-result',
+                  name: 'read_file',
+                  response: { output: 'x'.repeat(100_001) },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'large-result',
+            resultDisplay: 'x'.repeat(100_001),
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+
+    expect(tool?.resultPreview).toEqual({
+      kind: 'text',
+      text: '[tool result omitted from export]',
+    });
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'tool_result_presentation_missing',
+      severity: 'error',
+      count: 1,
+    });
+  });
+
+  it('rewrites todo, plan, dependency, and delegation references opaquely', () => {
+    const nativeTodoId = `todo-${CANARY}`;
+    const nativeDependencyId = `dependency-${CANARY}`;
+    const nativePlanId = `plan-${CANARY}`;
+    const nativeParentDelegationId = `parent-${CANARY}`;
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('todo-tool', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'todo-call',
+                  name: 'todo_write',
+                  args: {
+                    entries: [
+                      {
+                        content: 'Safe todo',
+                        status: 'completed',
+                        _meta: {
+                          qwenTodo: {
+                            id: nativeTodoId,
+                            blockedBy: [nativeDependencyId],
+                          },
+                        },
+                      },
+                    ],
+                    plan: { id: nativePlanId, revision: 1 },
+                  },
+                },
+              },
+            ],
+          },
+        }),
+        record('todo-result', 'todo-tool', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'todo-call',
+                  name: 'todo_write',
+                  response: { output: 'Todo completed' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'todo-call',
+            resultDisplay: {
+              type: 'todo_list',
+              planId: nativePlanId,
+              todos: [
+                {
+                  id: nativeTodoId,
+                  content: 'Safe todo',
+                  status: 'completed',
+                  blockedBy: [nativeDependencyId],
+                },
+              ],
+            },
+          },
+        }),
+        record('delegation-tool', 'todo-result', {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'delegation-call',
+                  name: 'Task',
+                  args: {
+                    agentName: 'reviewer',
+                    task: 'Review safely',
+                    parentDelegationId: nativeParentDelegationId,
+                  },
+                },
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const serialized = JSON.stringify(document);
+    const todoTool = document.blocks.find(
+      (block) =>
+        block.kind === 'tool' && block.resultPreview?.kind === 'todo_list',
+    );
+    const delegationTool = document.blocks.find(
+      (block) =>
+        block.kind === 'tool' && block.preview.kind === 'subagent_delegation',
+    );
+
+    expect(serialized).not.toContain(CANARY);
+    expect(todoTool?.kind).toBe('tool');
+    expect(delegationTool?.kind).toBe('tool');
+    if (todoTool?.kind !== 'tool' || delegationTool?.kind !== 'tool') {
+      throw new Error('Expected projected tool blocks.');
+    }
+    expect(todoTool.resultPreview).toMatchObject({
+      kind: 'todo_list',
+      entries: [
+        {
+          id: expect.stringMatching(/^todo-/),
+          blockedBy: [expect.stringMatching(/^todo-/)],
+        },
+      ],
+      planId: expect.stringMatching(/^plan-/),
+    });
+    expect(delegationTool.preview).toMatchObject({
+      kind: 'subagent_delegation',
+      parentDelegationId: expect.stringMatching(/^tool-call-/),
+    });
+  });
+
+  it('exports a truncated todo preview without widening the schema', () => {
+    const entries = Array.from({ length: 1_001 }, (_, index) => ({
+      content: `Task ${index}`,
+      status: 'pending',
+    }));
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('todo-tool', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'todo-call',
+                  name: 'todo_write',
+                  args: {
+                    entries,
+                  },
+                },
+              },
+            ],
+          },
+        }),
+        record('todo-result', 'todo-tool', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'todo-call',
+                  name: 'todo_write',
+                  response: { output: 'Todo list saved' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'todo-call',
+            resultDisplay: { type: 'todo_list', todos: entries },
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const tool = document.blocks.find(
+      (block) =>
+        block.kind === 'tool' && block.resultPreview?.kind === 'todo_list',
+    );
+    if (tool?.kind !== 'tool' || tool.resultPreview?.kind !== 'todo_list') {
+      throw new Error('Expected a projected todo result.');
+    }
+
+    expect(tool.resultPreview).toMatchObject({
+      kind: 'todo_list',
+      truncated: true,
+    });
+    expect(tool.resultPreview.entries).toHaveLength(1_000);
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'todo_preview_truncated',
+      severity: 'warning',
+      count: 1,
+    });
+    const validationCandidate = {
+      ...document,
+      blocks: document.blocks.map((block) =>
+        block === tool ? { ...block, preview: tool.resultPreview } : block,
+      ),
+    };
+    expect(() =>
+      assertExportTranscriptDocumentV1(validationCandidate),
+    ).not.toThrow();
+  });
+
+  it('reduces permission outcomes to safe terminal states', () => {
+    const nativeOptionId = `allow-${CANARY}`;
+    const options = [
+      {
+        optionId: nativeOptionId,
+        label: 'Allow once',
+        raw: { kind: 'allow_once', credential: CANARY },
+      },
+    ];
+
+    const approved = classifyPermissionResolutionForExport(
+      `selected:${nativeOptionId}`,
+      options,
+    );
+    const unknown = classifyPermissionResolutionForExport(
+      `selected:missing-${CANARY}`,
+      options,
+    );
+
+    expect(approved).toEqual({ value: 'approved', lossy: false });
+    expect(unknown).toEqual({ value: 'resolved', lossy: true });
+    expect(JSON.stringify({ approved, unknown })).not.toContain(CANARY);
+  });
+
+  it('marks visible text budget degradation before rendering', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('user-large', null),
+        record('large', 'user-large', {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'edit-large',
+                  name: 'edit',
+                  args: {
+                    path: '/Users/tester/large.ts',
+                    oldText: '中'.repeat(150_000),
+                    newText: 'small',
+                  },
+                },
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'text_budget_exceeded' }),
+      ]),
+    );
+
+    const records = Array.from({ length: 100 }, (_, index) => {
+      const assistant = index % 2 === 1;
+      return record(`budget-${index}`, index ? `budget-${index - 1}` : null, {
+        type: assistant ? 'assistant' : 'user',
+        message: {
+          role: assistant ? 'model' : 'user',
+          parts: [{ text: 'x'.repeat(100_000) }],
+        },
+      });
+    });
+    const globallyBounded = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+
+    expect(globallyBounded.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(
+      new TextEncoder().encode(
+        globallyBounded.blocks
+          .map((block) => ('text' in block ? block.text : ''))
+          .join(''),
+      ).byteLength,
+    ).toBeLessThanOrEqual(EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes);
+  });
+
+  it('marks sanitized metadata URLs as incomplete without leaking secrets', () => {
+    const document = createExportTranscriptDocumentV1(
+      [record('user-url', null)],
+      {
+        ...sessionData,
+        metadata: {
+          ...sessionData.metadata,
+          gitRepo:
+            'https://alice:password@example.com/qwen-code?token=secret#fragment',
+        },
+      },
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const serialized = JSON.stringify(document);
+
+    expect(document.metadata).toMatchObject({
+      repository: 'https://example.com/qwen-code',
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'url_sanitized',
+      severity: 'warning',
+      count: 1,
+    });
+    expect(serialized).not.toContain('alice');
+    expect(serialized).not.toContain('password');
+    expect(serialized).not.toContain('secret');
+  });
+
+  it('marks array truncation before rendering', () => {
+    const questions = Array.from(
+      { length: EXPORT_TRANSCRIPT_LIMITS_V1.maxArrayLength + 1 },
+      (_, index) => ({ question: `Question ${index}`, options: [] }),
+    );
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('question-tool', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'question-1',
+                  name: 'ask_user_question',
+                  args: { questions },
+                },
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+
+    expect(tool?.preview.kind).toBe('ask_user_question');
+    expect(
+      tool?.preview.kind === 'ask_user_question'
+        ? tool.preview.questions.length
+        : 0,
+    ).toBe(EXPORT_TRANSCRIPT_LIMITS_V1.maxArrayLength);
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'array_budget_exceeded',
+      severity: 'warning',
+      count: 1,
+    });
+  });
+
+  it('sanitizes active Markdown links without changing code examples', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('markdown-links', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: [
+                  '[safe](https://example.com/path)',
+                  '[credential](https://alice:password@example.com/private?CHAT_TRANSCRIPT_URL_CANARY#fragment)',
+                  '[unsafe](javascript:CHAT_TRANSCRIPT_URL_CANARY)',
+                  '<https://bob:password@example.com/autolink?CHAT_TRANSCRIPT_URL_CANARY>',
+                  'https://carol:password@example.com/bare?CHAT_TRANSCRIPT_URL_CANARY#fragment',
+                  '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
+                  '```text',
+                  'https://erin:password@example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
+                  '```',
+                ].join('\n'),
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).toContain('[safe](https://example.com/path)');
+    expect(text).toContain('[credential](https://example.com/private)');
+    expect(text).toContain('<https://example.com/autolink>');
+    expect(text).toContain('https://example.com/bare');
+    expect(text).toContain(
+      '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
+    );
+    expect(text).toContain(
+      'https://erin:password@example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
+    );
+    expect(text).not.toContain('javascript:');
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toEqual(
+      expect.arrayContaining([
+        { code: 'url_rejected', severity: 'warning', count: 1 },
+        { code: 'url_sanitized', severity: 'warning', count: 3 },
+      ]),
+    );
+  });
+
+  it('preserves Markdown-like syntax inside structured code fields', () => {
+    const code = [
+      "const endpoint = 'https://example.com/api?mode=test#fragment';",
+      "const literal = '![not-an-image](https://example.com/image.png)';",
+    ].join('\n');
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('code-tool', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'code-1',
+                  name: 'exec_code',
+                  args: { language: 'typescript', code },
+                },
+              },
+            ],
+          },
+        }),
+        record('code-result', 'code-tool', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'code-1',
+                  name: 'exec_code',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'code-1',
+            resultDisplay: {
+              type: 'vision_bridge_notice',
+              summary: 'Execution complete',
+              notice: 'No output.',
+            },
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+
+    expect(tool?.preview).toEqual({
+      kind: 'code_block',
+      language: 'typescript',
+      code,
+    });
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+  });
+
+  it('freezes rich rendering after 100 tasks while preserving safe source', () => {
+    const content = Array.from(
+      { length: EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks + 1 },
+      (_, index) => `\`\`\`mermaid\ngraph TD; A${index}-->B${index}\n\`\`\``,
+    ).join('\n');
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('rich-user', null, {
+          message: { role: 'user', parts: [{ text: content }] },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+
+    const block = document.blocks[0];
+    expect(block?.kind).toBe('user');
+    expect(block && 'text' in block ? block.text : '').toContain(
+      '```text [source fallback: mermaid]',
+    );
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'rich_render_budget_exceeded',
+      severity: 'warning',
+      count: 1,
+    });
+  });
+
+  it('budgets image-generation thumbnails as raster data, not visible text', () => {
+    const thumbnailData = 'A'.repeat(600 * 1024);
+    const thumbnailUrl = `data:IMAGE/PNG;base64,${thumbnailData}`;
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('image-tool', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'image-1',
+                  name: 'dalle3_generate',
+                  args: { prompt: 'A safe image', thumbnailUrl },
+                },
+              },
+            ],
+          },
+        }),
+        record('image-result', 'image-tool', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'image-1',
+                  name: 'dalle3_generate',
+                  response: { output: 'Generated image' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'image-1',
+            resultDisplay: 'Generated image',
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+
+    expect(tool?.preview).toMatchObject({
+      kind: 'image_generation',
+      thumbnailUrl: `data:image/png;base64,${thumbnailData}`,
+    });
+    expect(JSON.stringify(document)).not.toContain('data:IMAGE/PNG');
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'text_budget_exceeded' }),
+      ]),
+    );
+  });
+
+  it('rejects home paths in validated visible text without inspecting raster data', () => {
+    const envelope = {
+      schemaVersion: 1,
+      rendererVersion: '0.21.11-test.1',
+      diagnostics: [],
+      metadata: {
+        exportedAt: '2026-08-16T01:00:00.000Z',
+        complete: true,
+        truncated: false,
+      },
+    };
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...envelope,
+        blocks: [
+          {
+            id: 'user-home-path',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Leaked /Users/alice/private.txt',
+            streaming: false,
+          },
+        ],
+      }),
+    ).toThrowError('home_path_forbidden');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...envelope,
+        blocks: [
+          {
+            id: 'user-raster-data',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Safe image',
+            streaming: false,
+            images: [{ data: '/home/AA', mimeType: 'image/png' }],
+          },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects schema widening and floating renderer versions', () => {
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: 'latest',
+        blocks: [],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError(ExportTranscriptDocumentError);
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+        widened: true,
+      }),
+    ).toThrowError('additional_property');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'duplicate',
+            kind: 'prompt_cancelled',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+          },
+          {
+            id: 'duplicate',
+            kind: 'prompt_cancelled',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('duplicate_block_id');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'permission-safe',
+            kind: 'permission',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            requestId: 'permission-1',
+            title: 'Allow read?',
+            options: [
+              { optionId: 'permission-option-1', label: 'Allow', raw: null },
+            ],
+            preview: { kind: 'generic' },
+            resolved: `selected:${CANARY}`,
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_block');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'tool-safe',
+            kind: 'tool',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            toolCallId: 'read-1',
+            title: 'Read failed',
+            status: 'failed',
+            preview: { kind: 'file_read', path: 'index.ts' },
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_block');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'tool-safe',
+            kind: 'tool',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            toolCallId: 'read-1',
+            title: 'Read completed',
+            status: 'completed',
+            preview: { kind: 'file_read', path: 'index.ts' },
+            resultPreview: { kind: 'generic', summary: '   ' },
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_block');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'tool-safe',
+            kind: 'tool',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            toolCallId: 'read-1',
+            title: 'Read',
+            status: 'completed',
+            preview: {
+              kind: 'file_read',
+              path: 'index.ts',
+              credential: CANARY,
+            },
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('additional_property');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'error-safe',
+            kind: 'error',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Failed safely',
+            errorKind: `unknown-${CANARY}`,
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_block');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'image-safe',
+            kind: 'tool',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            toolCallId: 'image-1',
+            title: 'Generate image',
+            status: 'cancelled',
+            preview: {
+              kind: 'image_generation',
+              prompt: 'A safe image',
+              thumbnailUrl: 'data:IMAGE/PNG;base64,iVBORw0KGgo=',
+            },
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_block');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'user-safe',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Hello',
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('additional_property');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'user-safe',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: '![remote](https://example.invalid/track.png)',
+            streaming: false,
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_markdown_image');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'user-safe',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: '[credential](https://alice:password@example.com/path?token=canary)',
+            streaming: false,
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_markdown_url');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+          repository: 'https://secret@example.com/qwen-code?token=canary',
+        },
+      }),
+    ).toThrowError('invalid_metadata');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [],
+        diagnostics: [{ code: 'url_sanitized', severity: 'warning', count: 1 }],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: false,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_metadata_state');
+  });
+
+  it('rejects cyclic envelopes before recursive field validation', () => {
+    const document = createExportTranscriptDocumentV1([], sessionData, {
+      rendererVersion: '0.21.11-test.1',
+      exportedAt: '2026-08-16T01:00:00.000Z',
+    });
+    const cyclic = structuredClone(document) as unknown as Record<
+      string,
+      unknown
+    >;
+    cyclic['metadata'] = cyclic;
+
+    expect(() => assertExportTranscriptDocumentV1(cyclic)).toThrowError(
+      expect.objectContaining({ code: 'cyclic_envelope' }),
+    );
+  });
+
+  it('rejects object property floods before field validation', () => {
+    const document = createExportTranscriptDocumentV1([], sessionData, {
+      rendererVersion: '0.21.11-test.1',
+      exportedAt: '2026-08-16T01:00:00.000Z',
+    });
+    const metadata = Object.fromEntries(
+      Array.from(
+        { length: EXPORT_TRANSCRIPT_LIMITS_V1.maxObjectProperties + 1 },
+        (_, index) => [`extra-${index}`, index],
+      ),
+    );
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({ ...document, metadata }),
+    ).toThrowError(
+      expect.objectContaining({ code: 'object_property_budget_exceeded' }),
+    );
+  });
+
+  it('applies the structured raster policy to Markdown images', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('markdown-images', null, {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: [
+                  '![remote](https://example.invalid/track.png)',
+                  '![svg](data:image/svg+xml;base64,PHN2Zy8+)',
+                  '![safe](data:image/png;base64,iVBORw0KGgo=)',
+                  '![animated reference][animated-gif]',
+                  '[animated-gif]: data:image/gif;base64,LAAs',
+                  '![remote reference][tracker]',
+                  '[tracker]: https://example.invalid/reference.png',
+                  '<img src="https://example.invalid/html.png">',
+                  '`![inline code](https://example.invalid/inline-code.png)`',
+                  '```md',
+                  '![fenced code](https://example.invalid/fenced-code.png)',
+                  '```',
+                  '    ![indented code](https://example.invalid/indented-code.png)',
+                  '\\![escaped image](https://example.invalid/escaped-image.png)',
+                  '\\\\![even escape](https://example.invalid/even-escape.png)',
+                  '\\\\\\![odd escape](https://example.invalid/odd-escape.png)',
+                ].join('\n'),
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).not.toContain('track.png');
+    expect(text).not.toContain('<img');
+    expect(text).toContain('inline-code.png');
+    expect(text).toContain('fenced-code.png');
+    expect(text).toContain('indented-code.png');
+    expect(text).toContain('escaped-image.png');
+    expect(text).not.toContain('even-escape.png');
+    expect(text).toContain('odd-escape.png');
+    expect(text).not.toContain('image/svg+xml');
+    expect(text).toContain('data:image/png;base64,iVBORw0KGgo=');
+    expect(text).not.toContain('![animated reference](');
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'markdown_image_rejected',
+      severity: 'warning',
+      count: 6,
+    });
+  });
+
+  it('accepts a static GIF whose compressed payload contains descriptor bytes', () => {
+    const staticGif =
+      'R0lGODlhCAAIAPUAAAAAABUAAAAcABoLGwAgAAAxAAA+AB0oGQMbN2UcGEM1AGsnJwBFCQBzBRhNIh9XOmFBNxAATBg5XTUTZGcTT1IsTT56RlVlQk1teGhrZ4I8XVqhUX2Vczl0hklUgmGRkm2Co22uwIiBg5KSkpmljZWEoq2IuYWzqYi/rJm7oJ+1uJ67vbi5u7i8u8Cxl8WSqciitLP2utzFs7WU2NCgwtOZ7vas/73Ow7T32Lf938bRxNHgz8vf69js7gAAAAAAACH5BAAAAAAALAAAAAAIAAgAAAY6wJ0u1+PJaDaW6oaLsWa1UOm0QrleMNEHNDKlSCOIxoPZcDIdSmIxuVgekooiEGE0HIjBoQAgGAQAQQA7';
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'user-safe',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Static GIF',
+            streaming: false,
+            images: [{ data: staticGif, mimeType: 'image/gif' }],
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it('freezes every V1 limit in one shared constant', () => {
+    expect(EXPORT_TRANSCRIPT_LIMITS_V1).toEqual({
+      maxBlocks: 1_000,
+      maxTextBytes: 400 * 1024,
+      maxVisibleTextBytes: 8 * 1024 * 1024,
+      maxRasterBytes: 8 * 1024 * 1024,
+      maxTotalRasterBytes: 16 * 1024 * 1024,
+      maxEnvelopeBytes: 32 * 1024 * 1024,
+      maxObjectDepth: 16,
+      maxObjectProperties: 1_000,
+      maxArrayLength: 1_000,
+      maxRichRenderTasks: 100,
+    });
+  });
+});

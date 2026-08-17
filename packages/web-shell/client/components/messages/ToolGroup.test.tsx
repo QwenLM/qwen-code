@@ -86,6 +86,7 @@ function renderToolGroup(
     isStreaming?: boolean;
     beforeToolCallId?: string;
   }>,
+  renderMode: 'interactive' | 'readonly' | 'document' = 'interactive',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -93,9 +94,11 @@ function renderToolGroup(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <WebShellCustomizationProvider value={customization}>
-          <ToolGroup tools={tools} thoughts={thoughts} />
-        </WebShellCustomizationProvider>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <WebShellCustomizationProvider value={customization}>
+            <ToolGroup tools={tools} thoughts={thoughts} />
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -616,6 +619,29 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('keeps grouped tools and thoughts fully expanded in document mode', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'shell-1',
+          rawOutput: 'first document output',
+        }),
+        makeTool({
+          callId: 'shell-2',
+          rawOutput: 'second document output',
+        }),
+      ],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+    );
+
+    expect(container.textContent).toContain('first document output');
+    expect(container.textContent).toContain('second document output');
+    expect(container.textContent).toContain('document thought');
+    expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+  });
+
   it('renders the aggregate summary for a multi-tool group', () => {
     const container = renderToolGroup([
       makeTool({
@@ -1699,5 +1725,20 @@ describe('tool output logic', () => {
     expect(buildUnifiedDiff('same\nold', 'same\nnew')).toBe(
       ' same\n-old\n+new',
     );
+  });
+
+  it('uses a typed file-diff preview without raw output', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+        }),
+      ),
+    ).toContain('DOCUMENT_DIFF_DETAIL');
   });
 });

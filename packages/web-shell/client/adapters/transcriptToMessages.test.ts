@@ -174,6 +174,7 @@ function toolBlock(
     toolName: overrides.toolName ?? 'Read',
     toolKind: overrides.toolKind,
     preview: overrides.preview ?? { kind: 'generic' },
+    resultPreview: overrides.resultPreview,
     rawInput: overrides.rawInput,
     rawOutput: overrides.rawOutput,
     content: overrides.content,
@@ -1043,6 +1044,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('uses source-local insight text IDs for identity probes', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock(
+          'insight-1',
+          'assistant',
+          'before {"insight_ready":{"path":"/tmp/report.md"}} middle {"insight_error":{"error":"boom"}} after',
+          1,
+        ),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(
+      messages
+        .filter((message) => message.role === 'assistant')
+        .map((message) => message.id),
+    ).toEqual(['insight-1-t-0', 'insight-1-t-1', 'insight-1-t-2']);
+  });
+
   it('keeps malformed insight JSON as assistant text', () => {
     const content = 'before {"insight_ready": bad} after';
     const messages = transcriptBlocksToDaemonMessages([
@@ -1807,21 +1828,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
   });
 
   it('appends shell output to preceding tool_group', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      toolBlock('t1', 'tc1', 'completed', 1, {
-        toolName: 'bash',
-        toolKind: 'execute',
-      }),
-      shellBlock('sh1', 'output text', 2),
-    ]);
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('t1', 'tc1', 'completed', 1, {
+          toolName: 'bash',
+          toolKind: 'execute',
+        }),
+        shellBlock('sh1', 'output text', 2),
+      ],
+      { includeSourceIdentity: true },
+    );
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
+      sourceBlockIds: ['t1', 'sh1'],
       tools: [
         {
           callId: 'tc1',
           rawOutput: 'output text',
+          sourceBlockIds: ['t1', 'sh1'],
         },
       ],
     });
@@ -2122,6 +2148,423 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'assistant',
       content: 'let me run that done',
     });
+  });
+
+  it('renders typed todo results after raw fields are removed', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('todo-typed', 'todo-call', 'completed', 1, {
+          toolName: 'todo_write',
+          preview: {
+            kind: 'todo_list',
+            entries: [
+              {
+                id: 'implement',
+                content: 'Implement contract',
+                status: 'completed',
+                blockedBy: ['audit'],
+              },
+            ],
+            planId: 'plan-1',
+            revision: 2,
+          },
+          resultPreview: {
+            kind: 'todo_list',
+            entries: [
+              {
+                id: 'implement',
+                content: 'Implement contract',
+                status: 'completed',
+                blockedBy: ['audit'],
+              },
+            ],
+            planId: 'plan-1',
+            revision: 2,
+          },
+          rawInput: undefined,
+          rawOutput: undefined,
+          content: undefined,
+        }),
+      ],
+      { includeSourceIdentity: true, safeToolProjection: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        sourceBlockIds: ['todo-typed'],
+        tools: [
+          {
+            callId: 'todo-call',
+            sourceBlockIds: ['todo-typed'],
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Implement contract',
+                  status: 'completed',
+                },
+              ],
+              plan: { id: 'plan-1', revision: 2 },
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves typed file diff previews after raw fields are removed', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('diff-typed', 'diff-call', 'completed', 1, {
+          toolName: 'edit',
+          preview: {
+            kind: 'file_diff',
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+          resultPreview: { kind: 'text', text: 'Diff completed' },
+          rawInput: undefined,
+          rawOutput: undefined,
+          content: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      args: {
+        path: 'document.ts',
+        oldText: 'old content',
+        newText: 'DOCUMENT_DIFF_DETAIL',
+      },
+      rawOutput: 'Diff completed',
+    });
+  });
+
+  it('keeps raw tool data authoritative in the default projection', () => {
+    const rawInput = {
+      file_path: 'src/generated.ts',
+      content: 'RAW_INPUT_CONTENT\nSECOND_LINE\n',
+    };
+    const rawOutput = {
+      returnDisplay: 'RAW_RESULT',
+      audit: 'KEEP_ME',
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('write-raw', 'write-call', 'completed', 1, {
+        toolName: 'write_file',
+        rawInput,
+        rawOutput,
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'PREVIEW_NEW_TEXT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual(rawInput);
+    expect(tool?.rawOutput).toEqual(rawOutput);
+  });
+
+  it('does not inspect typed projections in the default projection', () => {
+    const malformedTypedBlock = {
+      ...toolBlock('write-malformed', 'write-call', 'completed', 1, {
+        toolName: 'write_file',
+        rawInput: { content: 'RAW_INPUT' },
+        rawOutput: 'RAW_OUTPUT',
+      }),
+      preview: { kind: 'todo_list' },
+      resultPreview: { kind: 'todo_list' },
+    } as unknown as DaemonToolTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([malformedTypedBlock]);
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual({ content: 'RAW_INPUT' });
+    expect(tool?.rawOutput).toBe('RAW_OUTPUT');
+  });
+
+  it('does not consume typed tool projections in the default projection', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('write-preview-only', 'write-call', 'completed', 1, {
+        toolName: 'write_file',
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toBeUndefined();
+    expect(tool?.rawOutput).toBeUndefined();
+  });
+
+  it('does not replace raw tool data with completion previews', () => {
+    const rawInput = {
+      file_path: 'src/generated.ts',
+      content: 'RAW_START_CONTENT\n',
+    };
+    const rawOutput = { audit: 'RAW_START_RESULT' };
+    const blocks = [
+      toolBlock('write-start', 'write-call', 'in_progress', 1, {
+        toolName: 'write_file',
+        rawInput,
+        rawOutput,
+      }),
+      toolBlock('write-complete', 'write-call', 'completed', 2, {
+        toolName: 'write_file',
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_COMPLETION_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_COMPLETION_RESULT' },
+      }),
+    ];
+
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual(rawInput);
+    expect(tool?.rawOutput).toEqual(rawOutput);
+  });
+
+  it('uses completion previews when multi-block safe projection is explicit', () => {
+    const blocks = [
+      toolBlock('write-start', 'write-call', 'in_progress', 1, {
+        toolName: 'write_file',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: 'RAW_START_CONTENT\n',
+        },
+        rawOutput: { audit: 'RAW_START_RESULT' },
+      }),
+      toolBlock('write-complete', 'write-call', 'completed', 2, {
+        toolName: 'write_file',
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_COMPLETION_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_COMPLETION_RESULT' },
+      }),
+    ];
+
+    const messages = transcriptBlocksToDaemonMessages(blocks, {
+      safeToolProjection: true,
+    });
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_COMPLETION_CONTENT\n',
+    });
+    expect(tool?.rawOutput).toBe('SAFE_COMPLETION_RESULT');
+  });
+
+  it('uses typed tool projections when safe projection is explicit', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('write-safe', 'write-call', 'completed', 1, {
+          toolName: 'write_file',
+          rawInput: {
+            file_path: 'src/generated.ts',
+            content: 'RAW_INPUT_CONTENT\n',
+          },
+          rawOutput: { audit: 'DO_NOT_EXPORT' },
+          preview: {
+            kind: 'file_diff',
+            path: 'src/generated.ts',
+            newText: 'SAFE_CONTENT\n',
+          },
+          resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_CONTENT\n',
+    });
+    expect(tool?.rawOutput).toBe('SAFE_RESULT');
+  });
+
+  it('never falls back to raw tool data in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('raw-only', 'raw-only-call', 'completed', 1, {
+          toolName: 'custom_tool',
+          rawInput: { secret: 'RAW_INPUT' },
+          rawOutput: { secret: 'RAW_OUTPUT' },
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'RAW_CONTENT' },
+            },
+          ],
+          preview: { kind: 'generic' },
+          resultPreview: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.args).toBeUndefined();
+    expect(tool?.rawOutput).toBeUndefined();
+    expect(tool?.content).toBeUndefined();
+  });
+
+  it('renders resolved permission history from safe identity fields', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'permission-safe',
+          kind: 'permission',
+          requestId: 'request-safe',
+          title: 'Allow file read?',
+          options: [{ optionId: 'reject', label: 'Reject', raw: null }],
+          preview: { kind: 'file_read', path: 'src/index.ts' },
+          toolCallId: 'read-safe',
+          toolName: 'read',
+          toolKind: 'read',
+          resolved: 'rejected',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      { includeSourceIdentity: true, safeToolProjection: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        sourceBlockIds: ['permission-safe'],
+        tools: [
+          {
+            callId: 'read-safe',
+            toolName: 'read',
+            status: 'failed',
+            args: { path: 'src/index.ts' },
+          },
+        ],
+      },
+    ]);
+
+    const neutral = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'permission-neutral',
+          kind: 'permission',
+          requestId: 'request-neutral',
+          title: 'Permission resolved',
+          options: [],
+          preview: { kind: 'file_read', path: 'src/index.ts' },
+          toolCallId: 'read-neutral',
+          toolName: 'read',
+          resolved: 'resolved',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      { safeToolProjection: true },
+    );
+    expect(neutral).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [{ callId: 'read-neutral', status: 'completed' }],
+      },
+    ]);
+
+    const runtimeNeutral = transcriptBlocksToDaemonMessages([
+      {
+        id: 'permission-neutral-runtime',
+        kind: 'permission',
+        requestId: 'request-neutral-runtime',
+        title: 'Permission resolved',
+        options: [],
+        preview: { kind: 'file_read', path: 'src/index.ts' },
+        toolCallId: 'read-neutral-runtime',
+        toolName: 'read',
+        resolved: 'resolved',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+    expect(runtimeNeutral).toEqual([]);
+  });
+
+  it('retains every source block when assistant blocks merge', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        textBlock('assistant-a', 'assistant', 'A', 1),
+        textBlock('assistant-b', 'assistant', 'B', 2),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'AB',
+        sourceBlockIds: ['assistant-a', 'assistant-b'],
+      },
+    ]);
+  });
+
+  it('retains nested subagent sources on the top-level rendered item', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-block', 'agent-call', 'completed', 1, {
+          toolName: 'agent',
+        }),
+        textBlock('agent-text', 'assistant', 'Subagent result', 2, false, {
+          parentToolCallId: 'agent-call',
+        }),
+        toolBlock('agent-child-tool', 'child-call', 'completed', 3, {
+          toolName: 'read',
+          parentToolCallId: 'agent-call',
+        }),
+      ],
+      { includeSourceIdentity: true },
+    );
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        sourceBlockIds: ['agent-block', 'agent-text', 'agent-child-tool'],
+        tools: [
+          {
+            callId: 'agent-call',
+            sourceBlockIds: ['agent-block', 'agent-text', 'agent-child-tool'],
+            subTools: [
+              {
+                callId: 'child-call',
+                sourceBlockIds: ['agent-child-tool'],
+              },
+            ],
+          },
+        ],
+      },
+    ]);
   });
 
   it('does not synthesize a generic tool card for AskUserQuestion permissions', () => {

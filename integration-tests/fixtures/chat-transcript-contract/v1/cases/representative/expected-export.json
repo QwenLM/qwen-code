@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "forbiddenFields": [
+    "rawInput",
+    "rawOutput",
+    "toolCall",
+    "details",
+    "locations",
+    "sourceRecordIds",
+    "sessionId",
+    "sessionLabel"
+  ],
+  "expectedToolResult": "Visible summary\nVisible notice",
+  "timestamps": 0
+}

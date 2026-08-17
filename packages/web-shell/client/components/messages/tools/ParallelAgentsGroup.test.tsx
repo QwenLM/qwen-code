@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { SubagentDetailsProvider } from '../../../subagentDetailsContext';
+import { TranscriptRenderModeProvider } from '../../../transcriptRenderMode';
 
 const { ParallelAgentsGroup } = await import('./ParallelAgentsGroup');
 
@@ -94,6 +95,41 @@ function groupSummary(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('ParallelAgentsGroup activity rendering', () => {
+  it('renders every agent detail without toggles in document mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TranscriptRenderModeProvider value="document">
+            <ParallelAgentsGroup
+              agents={[
+                agent({
+                  callId: 'document-agent',
+                  args: { description: 'Document agent' },
+                  subTools: [
+                    {
+                      callId: 'document-read',
+                      toolName: 'Read',
+                      status: 'completed',
+                      title: 'Document subtool detail',
+                    },
+                  ],
+                }),
+              ]}
+            />
+          </TranscriptRenderModeProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(1);
+    expect(container.textContent).toContain('Document subtool detail');
+    expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+  });
+
   it('renders stable active, completed, and failed activity rows without a timeline', () => {
     const container = renderExpandedGroup([
       agent({ callId: 'active', status: 'pending' }),

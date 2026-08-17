@@ -76,6 +76,12 @@
   overflow-y: auto;
 }
 
+:global([data-transcript-render-mode='document']) .stream,
+:global([data-transcript-render-mode='document']) .scrollWindow {
+  max-height: none;
+  overflow-y: visible;
+}
+
 /* Compact live stream: 5-line window pinned to the tail via JS. */
 .streamCollapsed {
   max-height: calc(5 * 1.6em);

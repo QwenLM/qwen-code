@@ -4,6 +4,7 @@ import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
+import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
 import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
@@ -115,6 +116,8 @@ export function ParallelAgentsGroup({
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const subagentDetails = useSubagentDetails();
   const [groupExpanded, setGroupExpanded] = useState(false);
   const [automaticCollapseAnimating, setAutomaticCollapseAnimating] =
@@ -357,7 +360,7 @@ export function ParallelAgentsGroup({
   ).length;
   const total = agents.length;
 
-  const showGroup = groupExpanded || !!approvalAgent;
+  const showGroup = documentMode || groupExpanded || !!approvalAgent;
   const renderGroup = showGroup || automaticCollapseAnimating;
   const automaticCollapseClosing =
     automaticCollapseAnimating && !hasApprovalAgent;
@@ -369,6 +372,7 @@ export function ParallelAgentsGroup({
         ref={summaryRef}
         className={styles.summary}
         onClick={() => {
+          if (documentMode) return;
           if (automaticCollapseClosing) return;
           clearTimeout(autoCollapseTimerRef.current);
           autoCollapseTimerRef.current = undefined;
@@ -384,8 +388,14 @@ export function ParallelAgentsGroup({
           setGroupExpanded((value) => !value);
         }}
         aria-disabled={automaticCollapseClosing || undefined}
-        aria-expanded={showGroup}
-        title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
+        aria-expanded={documentMode ? undefined : showGroup}
+        title={
+          documentMode
+            ? undefined
+            : showGroup
+              ? t('tool.collapseHint')
+              : t('tool.expand')
+        }
       >
         <span className={styles.summaryIcon} aria-hidden="true">
           <ToolGroupIcon />
@@ -450,7 +460,8 @@ export function ParallelAgentsGroup({
                       : rowStatus === 'failed'
                         ? t('subagent.failed')
                         : t('subagent.completed');
-                  const isExpanded = expandedId === agent.callId;
+                  const isExpanded =
+                    documentMode || expandedId === agent.callId;
                   const localizedAgentType = localizeAgentTypeName(
                     agentType,
                     t,
@@ -467,14 +478,23 @@ export function ParallelAgentsGroup({
                             : styles.row
                         }
                         data-agent-status={rowStatus}
-                        data-detail-mode={subagentDetails ? 'panel' : 'inline'}
-                        aria-expanded={subagentDetails ? undefined : isExpanded}
+                        data-detail-mode={
+                          subagentDetails && !documentMode ? 'panel' : 'inline'
+                        }
+                        aria-expanded={
+                          subagentDetails || documentMode
+                            ? undefined
+                            : isExpanded
+                        }
                         title={
-                          subagentDetails
-                            ? t('planExecution.openDetails')
-                            : t('subagent.toggleStream')
+                          documentMode
+                            ? undefined
+                            : subagentDetails
+                              ? t('planExecution.openDetails')
+                              : t('subagent.toggleStream')
                         }
                         onClick={() => {
+                          if (documentMode) return;
                           if (subagentDetails) subagentDetails.onOpen(agent);
                           else setExpandedId(isExpanded ? null : agent.callId);
                         }}
@@ -523,9 +543,13 @@ export function ParallelAgentsGroup({
                           aria-hidden="true"
                         />
                       </button>
-                      {!subagentDetails && isExpanded && (
+                      {(!subagentDetails || documentMode) && isExpanded && (
                         <div className={styles.detail}>
-                          <SubAgentPanel tool={agent} hideHeader />
+                          <SubAgentPanel
+                            tool={agent}
+                            hideHeader
+                            defaultExpanded={documentMode}
+                          />
                         </div>
                       )}
                     </div>

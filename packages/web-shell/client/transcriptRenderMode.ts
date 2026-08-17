@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react';
 
-export type TranscriptRenderMode = 'interactive' | 'readonly';
+export type TranscriptRenderMode = 'interactive' | 'readonly' | 'document';
 
 const TranscriptRenderModeContext =
   createContext<TranscriptRenderMode>('interactive');
