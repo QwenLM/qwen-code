@@ -182,6 +182,73 @@ describe('repo-context providers and trust boundary', () => {
     expect(readJson(planPath)).not.toHaveProperty('repositoryContext');
   });
 
+  it('fails actionably when the worktree vanished mid-review (#9205)', () => {
+    // A concurrent same-PR cleanup (or any delete) removes the worktree a
+    // review is running on; the bare `ENOENT … lstat` realpathSync produced
+    // named neither the cause nor the remedy.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: join(root, 'missing-worktree'),
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow(
+      'is missing — recreate the review worktree ' +
+        '(for PR targets: re-run `qwen review fetch-pr`)',
+    );
+  });
+
+  it('keeps the precise error for a worktree path that is not a directory', () => {
+    // A regular file at --worktree is NOT a missing worktree: converting it
+    // to the "missing" remedy would point at a fix that cannot help.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    const notADirectory = join(root, 'worktree-file');
+    write(notADirectory, 'not a directory\n');
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: notADirectory,
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow('worktree is not a directory');
+  });
+
+  // Windows/libuv maps a regular file as an intermediate path component
+  // to ENOENT, never ENOTDIR — see the measured record in
+  // serve/fs/paths.ts — so the kernel shape this pins is POSIX-only.
+  it.skipIf(process.platform === 'win32')(
+    'rethrows ENOTDIR when a regular file is an intermediate path component',
+    () => {
+      // `--worktree <file>/subdir` is a malformed argument, not a missing
+      // worktree: the "re-run fetch-pr" remedy cannot fix it, and absorbing
+      // ENOTDIR into the missing-worktree message would lose the diagnosis
+      // that names the real cause.
+      const root = temp();
+      const planPath = planAt(root, { files: [] });
+      const blocker = join(root, 'blocker');
+      write(blocker, 'not a directory\n');
+      expect(() =>
+        runRepoContext(
+          {
+            plan: planPath,
+            worktree: join(blocker, 'wt'),
+            out: join(root, 'context.json'),
+          },
+          [],
+        ),
+      ).toThrow('ENOTDIR');
+    },
+  );
+
   it('passes sorted unique changed paths and local identity to a provider', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
@@ -827,6 +894,30 @@ describe('repo-context providers and trust boundary', () => {
       ]),
     ).toThrow();
     expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects an --out whose canonical identity equals an absent --plan', () => {
+    // The hardened absent-side semantics, untested by the alias cases above
+    // (which all compare two EXISTING paths): neither file is on disk yet,
+    // but --out is spelled through a symlinked directory component, so its
+    // canonical identity is the plan's. A revert to the old local sameFile —
+    // false whenever a side is absent — passes green and re-opens the
+    // overwrite this guard closes.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    mkdirSync(join(root, 'real'));
+    symlinkSync(join(root, 'real'), join(root, 'link'));
+    expect(() =>
+      runRepoContext(
+        {
+          plan: join(root, 'real/plan.json'),
+          worktree,
+          out: join(root, 'link/plan.json'),
+        },
+        [{ provide: () => context() }],
+      ),
+    ).toThrow('--out must differ');
   });
 
   it('rejects invalid provider output', () => {
