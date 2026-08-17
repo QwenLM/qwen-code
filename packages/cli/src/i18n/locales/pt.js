@@ -54,7 +54,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to view transcript': 'para ver a transcrição',
+  'to expand details': 'para expandir os detalhes',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -248,9 +248,6 @@ export default {
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
   Transcript: 'Transcrição',
-  'to close': 'para fechar',
-  'to scroll': 'para rolar',
-  'Failed to render transcript.': 'Falha ao renderizar a transcrição.',
   'Read {{count}} file': 'Leu {{count}} arquivo',
   'Read {{count}} files': 'Leu {{count}} arquivos',
   'Reading {{count}} file': 'Lendo {{count}} arquivo',
@@ -805,8 +802,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with original user prompt text.':
-    'A entrada para o comando é JSON com o texto original do prompt do usuário.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
@@ -1000,6 +997,14 @@ export default {
     'Já gerando resumo, aguarde a conclusão da solicitação anterior',
   'No conversation found to summarize.':
     'Nenhuma conversa encontrada para resumir.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'O caminho do resumo já existe e não é um resumo gerado: {{path}}',
+  'Summary path must be within the project root.':
+    'O caminho do resumo deve estar dentro da raiz do projeto.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'O caminho do resumo resolve para um diretório existente: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'O caminho do resumo termina com um separador, mas é um arquivo existente: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Falha ao gerar resumo do contexto do projeto: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1559,7 +1564,16 @@ export default {
     'Agente em segundo plano precisa de aprovação',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
   Running: 'Em execução',
+  Pausing: 'Pausando',
   Paused: 'Pausado',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'A pausa é cooperativa; o trabalho em andamento pode terminar antes que o fluxo de trabalho seja pausado. Uma chamada de agente aguardando aprovação de ferramenta mantém a execução neste estado e continua contando para o limite de tempo ativo até que a aprovação seja respondida.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausado: nenhum novo agente será iniciado; o código do script entre chamadas de agente continua em execução. Pressione p para retomar. /clear, /branch e a troca de sessão cancelam execuções pausadas.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'A pausa/retomada foi rejeitada; o estado do fluxo de trabalho mudou. Tente novamente.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Dica: use `/workflows p <runId>` ou Tarefas em segundo plano + p para pausar/retomar cooperativamente; use `/workflows <runId>` para ver detalhes.',
   Completed: 'Concluído',
   Failed: 'Falhou',
   Stopped: 'Parado',
@@ -1966,6 +1980,18 @@ export default {
   'not updatable': 'não atualizável',
   'Ask a quick side question without affecting the main conversation':
     'Fazer uma pergunta rápida paralela sem afetar a conversa principal',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Obter uma segunda opinião sobre a conversa atual de um modelo revisor',
+  'Consulting advisor...': 'Consultando o assessor...',
+  'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
+  'No conversation context available for /advisor':
+    'Nenhum contexto de conversa disponível para /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Foco muito longo (máx. {{max}} caracteres)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Outra operação está em andamento, aguarde a conclusão antes de executar /advisor',
+  'No response received.': 'Nenhuma resposta recebida.',
+  'No model configured.': 'Nenhum modelo configurado.',
   'Manage Arena sessions': 'Gerenciar sessões da Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Iniciar uma sessão da Arena com vários modelos competindo na mesma tarefa',
@@ -2227,4 +2253,64 @@ export default {
     'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e inicie uma nova sessão para retomar a gravação. Consulte o log de depuração para obter detalhes.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e execute `/clear` para iniciar uma nova sessão gravada. Consulte o log de depuração para obter detalhes.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Gerenciar as habilidades automáticas do projeto com base no uso recente.',
+  'Show project auto-skill lifecycle status.':
+    'Mostrar o status do ciclo de vida das habilidades automáticas do projeto.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Executar a manutenção do ciclo de vida das habilidades automáticas do projeto.',
+  'Restore an archived project auto-skill.':
+    'Restaurar uma habilidade automática arquivada do projeto.',
+  'Auto-skill curator': 'Gerenciador de habilidades automáticas',
+  'Last run: {{time}}': 'Última execução: {{time}}',
+  'Active: {{count}}': 'Ativas: {{count}}',
+  'Stale: {{count}}': 'Inativas: {{count}}',
+  'Archived: {{count}}': 'Arquivadas: {{count}}',
+  'Stale skills:': 'Habilidades inativas:',
+  'Pinned skills:': 'Habilidades fixadas:',
+  'Archived skills:': 'Habilidades arquivadas:',
+  'Dry run complete.': 'Simulação concluída.',
+  'Curator run complete.': 'Execução do gerenciador concluída.',
+  'Checked: {{count}}': 'Verificadas: {{count}}',
+  'First observed: {{count}}': 'Observadas pela primeira vez: {{count}}',
+  'Marked stale: {{count}}': 'Marcadas como inativas: {{count}}',
+  'Reactivated: {{count}}': 'Reativadas: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Colisões de arquivamento ignoradas: {{count}}',
+  'Archive candidates:': 'Candidatas ao arquivamento:',
+  'Skipped archive collisions:': 'Colisões de arquivamento ignoradas:',
+  'Skipped rename errors: {{count}}':
+    'Erros de renomeação ignorados: {{count}}',
+  'Skipped rename errors:': 'Erros de renomeação ignorados:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Seriam arquivadas',
+  Archived: 'Arquivadas',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Falha ao ler o status do gerenciador de habilidades automáticas: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Uso: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Falha ao executar o gerenciador de habilidades automáticas: {{message}}',
+  'Usage: /curator restore <directory>': 'Uso: /curator restore <diretório>',
+  'Restored auto-skill: {{name}}': 'Habilidade automática restaurada: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Falha ao restaurar a habilidade automática: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Excluir uma habilidade automática da manutenção automática.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Retornar uma habilidade automática fixada à manutenção automática.',
+  'Usage: /curator pin <directory>': 'Uso: /curator pin <diretório>',
+  'Usage: /curator unpin <directory>': 'Uso: /curator unpin <diretório>',
+  'Pinned auto-skill: {{name}}': 'Habilidade automática fixada: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Habilidade automática desafixada: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Falha ao atualizar a fixação da habilidade automática: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'As alterações do gerenciador de habilidades automáticas estão desativadas no modo seguro.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
+  'Kept model as {{model}}': 'Modelo mantido como {{model}}',
 };

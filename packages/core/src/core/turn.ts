@@ -17,6 +17,7 @@ import { FinishReason } from './genai-compat.js';
 import type {
   ToolCallConfirmationDetails,
   ToolArtifact,
+  ToolResultBoundaryArtifact,
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
@@ -25,6 +26,7 @@ import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
+  getErrorStatus,
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
@@ -36,6 +38,11 @@ import {
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type {
+  GoalSnapshotV2,
+  GoalStateCause,
+  GoalTurnPermit,
+} from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
@@ -70,6 +77,7 @@ export enum GeminiEventType {
   HookSystemMessage = 'hook_system_message',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
+  GoalState = 'goal_state',
   ActiveGoal = 'active_goal',
   /** The system switched to a fallback model after the primary (or prior
    *  fallback) exhausted retries on a capacity/availability error. */
@@ -130,7 +138,14 @@ export interface ToolCallRequestInfo {
   response_id?: string;
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
+  goalContext?: GoalTurnPermit;
 }
+
+export type ToolExecutionStatus =
+  | 'not_started'
+  | 'success'
+  | 'error'
+  | 'cancelled';
 
 export interface ToolCallResponseInfo {
   callId: string;
@@ -138,10 +153,14 @@ export interface ToolCallResponseInfo {
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
+  executionStatus?: ToolExecutionStatus;
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
+  terminateTurn?: boolean;
+  visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
+  boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {
@@ -224,6 +243,7 @@ export function createDuplicateProviderToolCallResponse(
     resultDisplay: message,
     error: new Error(message),
     errorType: ToolErrorType.EXECUTION_FAILED,
+    executionStatus: 'not_started',
   };
 }
 
@@ -268,9 +288,21 @@ export interface ServerToolCallConfirmationDetails {
   details: ToolCallConfirmationDetails;
 }
 
+export type ServerGeminiContentPart =
+  | { text: string }
+  | {
+      inlineData: {
+        data: string;
+        mimeType: string;
+        displayName?: string;
+      };
+    };
+
 export type ServerGeminiContentEvent = {
   type: GeminiEventType.Content;
   value: string;
+  /** Ordered display parts, present only when the chunk contains an image. */
+  parts?: ServerGeminiContentPart[];
 };
 
 export type ServerGeminiThoughtEvent = {
@@ -345,8 +377,12 @@ export type CompactionTriggerReason =
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
+  /** Whether newTokenCount ultimately came from a local estimate. */
+  newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
+  /** Set when the compaction model was swapped for the main model at runtime. */
+  warning?: string;
 }
 
 export type ServerGeminiChatCompressedEvent = {
@@ -410,8 +446,15 @@ export type ServerGeminiActiveGoalEvent = {
   value: ActiveGoal | null;
 };
 
+export type ServerGeminiGoalStateEvent = {
+  type: GeminiEventType.GoalState;
+  value: GoalSnapshotV2;
+  cause?: GoalStateCause;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
+  | ServerGeminiGoalStateEvent
   | ServerGeminiActiveGoalEvent
   | ServerGeminiChatCompressedEvent
   | ServerGeminiCitationEvent
@@ -432,17 +475,55 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiSessionTokenLimitExceededEvent
   | ServerGeminiRetryEvent;
 
+function getDisplayContentParts(
+  response: GenerateContentResponse,
+): ServerGeminiContentPart[] {
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  const displayParts: ServerGeminiContentPart[] = [];
+
+  for (const part of parts) {
+    if (part.thought) {
+      continue;
+    }
+    if (typeof part.text === 'string' && part.text.length > 0) {
+      displayParts.push({ text: part.text });
+    }
+    const inlineData = part.inlineData;
+    if (
+      inlineData?.mimeType?.trim().toLowerCase().startsWith('image/') &&
+      typeof inlineData.data === 'string' &&
+      inlineData.data.length > 0
+    ) {
+      displayParts.push({
+        inlineData: {
+          data: inlineData.data,
+          mimeType: inlineData.mimeType,
+          ...(typeof inlineData.displayName === 'string'
+            ? { displayName: inlineData.displayName }
+            : {}),
+        },
+      });
+    }
+  }
+
+  return displayParts;
+}
+
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
   private pendingCitations = new Set<string>();
   finishReason: FinishReason | undefined = undefined;
   private currentResponseId?: string;
+  private readonly goalContext?: GoalTurnPermit;
 
   constructor(
     private readonly chat: GeminiChat,
     private readonly prompt_id: string,
-  ) {}
+    goalContext?: GoalTurnPermit,
+  ) {
+    this.goalContext = goalContext ? { ...goalContext } : undefined;
+  }
   // The run method yields simpler events suitable for server logic
   async *run(
     model: string,
@@ -461,6 +542,7 @@ export class Turn {
           },
         },
         this.prompt_id,
+        this.goalContext,
       );
 
       for await (const streamEvent of responseStream) {
@@ -532,9 +614,15 @@ export class Turn {
           };
         }
 
-        const text = getResponseText(resp);
-        if (text) {
-          yield { type: GeminiEventType.Content, value: text };
+        const text = getResponseText(resp) ?? '';
+        const displayParts = getDisplayContentParts(resp);
+        const hasImage = displayParts.some((part) => 'inlineData' in part);
+        if (text || hasImage) {
+          yield {
+            type: GeminiEventType.Content,
+            value: text,
+            ...(hasImage ? { parts: displayParts } : {}),
+          };
         }
 
         // Handle function calls (requesting tool execution)
@@ -588,6 +676,7 @@ export class Turn {
         return;
       }
 
+      const originalStatus = getErrorStatus(e);
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
         throw error;
@@ -615,16 +704,9 @@ export class Turn {
         'Turn.run-sendMessageStream',
         { contextAlreadySummarized: true },
       );
-      const status =
-        typeof error === 'object' &&
-        error !== null &&
-        'status' in error &&
-        typeof (error as { status: unknown }).status === 'number'
-          ? (error as { status: number }).status
-          : undefined;
       const structuredError: StructuredError = {
         message: getErrorMessage(error),
-        status,
+        status: getErrorStatus(error) ?? originalStatus,
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
       yield { type: GeminiEventType.Error, value: { error: structuredError } };
@@ -650,6 +732,7 @@ export class Turn {
       isClientInitiated: false,
       prompt_id: this.prompt_id,
       response_id: this.currentResponseId,
+      ...(this.goalContext ? { goalContext: { ...this.goalContext } } : {}),
     };
 
     this.pendingToolCalls.push(toolCallRequest);

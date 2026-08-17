@@ -33,8 +33,8 @@ import { homedir } from 'node:os';
  * means users get the exact surface we tested; a new upstream release
  * can't silently drift our hardcoded schemas or break the download.
  *
- * To bump: update this, re-run `scripts/sync-computer-use-schemas.ts`
- * against the new binary, sync the new assets to OSS via
+ * To bump: update this and re-run `scripts/sync-computer-use-schemas.ts`
+ * against the new binary, then sync the new assets to OSS via
  * `scripts/sync-cua-driver-to-oss.ts`, then smoke-test on macOS.
  */
 export const CUA_DRIVER_VERSION = '0.5.2';

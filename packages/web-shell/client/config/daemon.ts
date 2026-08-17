@@ -47,11 +47,9 @@ export function getDaemonToken(): string | undefined {
   const fromUrl =
     fromHash || new URLSearchParams(window.location.search).get('token') || '';
   if (fromUrl) {
-    // Persist per-tab so the token survives a page refresh (#7301):
-    // removeDaemonTokenFromUrl() deliberately strips it from the URL for
-    // history hygiene, which previously left a refreshed page with no
-    // credential at all. sessionStorage (not localStorage) keeps the token
-    // scoped to this tab and cleared when the tab closes.
+    // Persist per-tab so the token survives navigations that do not carry it.
+    // sessionStorage (not localStorage) keeps the token scoped to this tab and
+    // cleared when the tab closes.
     persistDaemonToken(fromUrl);
     cachedDaemonToken = fromUrl;
     return cachedDaemonToken;

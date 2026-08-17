@@ -23,9 +23,11 @@ import type {
   Config,
   McpToolProgressData,
   FileDiff,
+  TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
+  isTerminalImageDisplay,
   isVisionBridgeNoticeDisplay,
   ToolNames,
   ToolNamesMigration,
@@ -55,6 +57,8 @@ import {
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { TerminalImage } from '../TerminalImage.js';
+import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -172,6 +176,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
+  | { type: 'image'; data: TerminalImageDisplay }
   | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
@@ -183,6 +188,10 @@ const useResultDisplayRenderer = (
   React.useMemo(() => {
     if (!resultDisplay) {
       return { type: 'none' };
+    }
+
+    if (isTerminalImageDisplay(resultDisplay)) {
+      return { type: 'image', data: resultDisplay };
     }
 
     // Check for TodoResultDisplay
@@ -686,6 +695,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  confirmationDetails,
+  images,
+  omittedImageCount,
+  visionBridgeNotice,
   detailedDisplay,
   status,
   availableTerminalHeight,
@@ -766,6 +779,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  const inlineImageHeight =
+    availableHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableHeight / (images.length + 1)))
+      : availableHeight;
   // Cap inline shell output. Applies to both the streaming ANSI display and
   // the completed string display (shell.ts emits the final result as a plain
   // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
@@ -802,7 +819,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // §4.9: in transcript full-detail mode, collapsible tools (read/search/list)
+  // §4.9: in full-detail mode, collapsible tools (read/search/list)
   // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
   // from the persisted functionResponse. Only a non-empty string detail
   // qualifies; everything else (and all main-view rendering) keeps the summary.
@@ -827,11 +844,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
     ? resultDisplay
     : undefined;
-  const visionBridgeNoticeText = visionBridgeNoticeDisplay
-    ? sanitizeTerminalText(
-        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
-      )
-    : undefined;
+  const visionBridgeNoticeText = [
+    visionBridgeNoticeDisplay
+      ? formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay)
+      : undefined,
+    visionBridgeNotice,
+  ]
+    .filter((notice): notice is string => notice !== undefined)
+    .map((notice) => sanitizeTerminalText(notice))
+    .join('\n');
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay
     : visionBridgeNoticeDisplay
@@ -871,6 +892,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           status={status}
           description={description}
           emphasis={emphasis}
+          hideDescription={
+            status === ToolCallStatus.Confirming &&
+            confirmationDetails?.type === 'info' &&
+            confirmationDetails.renderPromptAsPlainText === true &&
+            isDescriptionRepeatedInPrompt(
+              description,
+              confirmationDetails.prompt,
+            )
+          }
         />
         {shouldShowFocusHint && (
           <Box marginLeft={1} flexShrink={0}>
@@ -941,6 +971,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 )}
               </>
             )}
+            {effectiveDisplayRenderer.type === 'image' && config && (
+              <TerminalImage
+                data={effectiveDisplayRenderer.data}
+                config={config}
+                contentWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+              />
+            )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
@@ -950,6 +988,26 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
           </Box>
+        </Box>
+      )}
+      {((images?.length ?? 0) > 0 ||
+        (omittedImageCount !== undefined && omittedImageCount > 0)) && (
+        <Box
+          paddingLeft={STATUS_INDICATOR_WIDTH}
+          width="100%"
+          flexDirection="column"
+        >
+          {images?.map((image, index) => (
+            <TerminalImage
+              key={index}
+              image={image}
+              contentWidth={innerWidth}
+              availableTerminalHeight={inlineImageHeight}
+            />
+          ))}
+          {omittedImageCount !== undefined && omittedImageCount > 0 && (
+            <Text dimColor>{formatInlineImageOverflow(omittedImageCount)}</Text>
+          )}
         </Box>
       )}
       {isThisShellFocused && config && (
@@ -964,17 +1022,53 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   );
 };
 
+function isDescriptionRepeatedInPrompt(
+  description: string,
+  prompt: string,
+): boolean {
+  try {
+    const parsed: unknown = JSON.parse(description);
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed)
+    ) {
+      return false;
+    }
+    const values = Object.values(parsed);
+    if (
+      values.length === 0 ||
+      !values.every((value): value is string => typeof value === 'string')
+    ) {
+      return false;
+    }
+    const promptValues = prompt.split('\n').flatMap((line) => {
+      try {
+        const value: unknown = JSON.parse(line);
+        return typeof value === 'string' ? [value] : [];
+      } catch {
+        return [];
+      }
+    });
+    return values.every((value) => promptValues.includes(value));
+  } catch {
+    return false;
+  }
+}
+
 type ToolInfo = {
   name: string;
   description: string;
   status: ToolCallStatus;
   emphasis: TextEmphasis;
+  hideDescription?: boolean;
 };
 const ToolInfo: React.FC<ToolInfo> = ({
   name,
   description,
   status,
   emphasis,
+  hideDescription,
 }) => {
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
@@ -995,8 +1089,13 @@ const ToolInfo: React.FC<ToolInfo> = ({
       <Text wrap="wrap" strikethrough={status === ToolCallStatus.Canceled}>
         <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
-        </Text>{' '}
-        <Text color={theme.text.secondary}>{description}</Text>
+        </Text>
+        {!hideDescription && (
+          <>
+            {' '}
+            <Text color={theme.text.secondary}>{description}</Text>
+          </>
+        )}
       </Text>
     </Box>
   );

@@ -13,8 +13,9 @@
  * the most common default.
  *
  * Note: Only HTTP and HTTPS proxies are supported. SOCKS proxies (socks://,
- * socks4://, socks5://) are NOT supported because the underlying undici library
- * does not support them. See: https://github.com/nodejs/undici/issues/2224
+ * socks4://, socks4a://, socks5://, socks5h://) are NOT supported because the
+ * underlying undici library does not support them.
+ * See: https://github.com/nodejs/undici/issues/2224
  *
  * @param proxyUrl - The proxy URL to normalize
  * @returns The normalized proxy URL with protocol prefix, or undefined if input is undefined/empty
@@ -38,8 +39,19 @@ export function normalizeProxyUrl(
     return trimmed;
   }
 
-  // Reject SOCKS proxies - undici does not support them
-  if (/^socks[45]?:\/\//i.test(trimmed)) {
+  // Reject SOCKS proxies - undici does not support them.
+  //
+  // Any scheme in the socks family is matched, not just socks/socks4/socks5.
+  // The `socks5h` and `socks4a` variants -- which ask the proxy to resolve
+  // hostnames, and are what curl, proxychains and most tunnels emit -- were
+  // missed by the narrower test, so `HTTPS_PROXY=socks5h://127.0.0.1:1080`
+  // fell through to the http:// prefix below and produced
+  // `http://socks5h://127.0.0.1:1080`. That parses as the host `socks5h` on
+  // port 80, so the user saw an ENOTFOUND for a nonexistent host instead of
+  // the actionable message this guard exists to give. A scheme starting with
+  // `socks` is always a SOCKS proxy, and prefixing http:// to one is never
+  // the right answer.
+  if (/^socks[a-z0-9]*:\/\//i.test(trimmed)) {
     throw new Error(
       `SOCKS proxy is not supported. The underlying HTTP client (undici) only supports HTTP and HTTPS proxies. ` +
         `Please use an HTTP/HTTPS proxy instead, or set up a SOCKS-to-HTTP proxy converter. ` +

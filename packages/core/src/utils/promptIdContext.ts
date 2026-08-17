@@ -7,3 +7,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const promptIdContext = new AsyncLocalStorage<string>();
+export const todoWorkChainContext = new AsyncLocalStorage<string>();

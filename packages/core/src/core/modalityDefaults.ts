@@ -112,3 +112,34 @@ export function defaultModalities(model: string): InputModalities {
   }
   return {};
 }
+
+/**
+ * True for wire model ids in the qwen family: any `qwen*` id plus
+ * `coder-model`, the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
+ * config/models.ts, aliased to a Qwen 3.6 Plus hybrid), which doesn't
+ * start with `qwen` but is the most common hybrid-thinking model for
+ * first-time users. Shared by the pipeline's disable/tool-choice gates
+ * and the DashScope provider's effort mapping so the family fact lives
+ * in one place.
+ */
+export function isQwenFamilyWireModel(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  const normalized = model.toLowerCase();
+  return normalized.startsWith('qwen') || normalized === 'coder-model';
+}
+
+/**
+ * True for the qwen3.8-max wire model family — the only family that
+ * reads the tiered `reasoning_effort` field directly. Prefix-matched so
+ * dated snapshots and `-latest` aliases are covered, consistent with the
+ * family pattern in MODALITY_PATTERNS above. Older qwen hybrids expose
+ * only the on/off `enable_thinking` switch instead.
+ */
+export function isTieredEffortWireModel(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  return model.toLowerCase().startsWith('qwen3.8-max');
+}

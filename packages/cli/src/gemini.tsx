@@ -21,12 +21,22 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
+import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
+import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
@@ -81,7 +91,8 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
-import { writeStderrLine } from './utils/stdioHelpers.js';
+import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 import {
@@ -166,6 +177,62 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
+import {
+  handleUncaughtException,
+  isExpectedPtyRaceError,
+} from './utils/uncaught-exception-handler.js';
+
+let uncaughtExceptionHandler: ((error: unknown) => void) | undefined;
+
+export function setupUncaughtExceptionHandler(config: Config) {
+  // runCliEntryPoint() registered the basic handleUncaughtException at startup,
+  // before the session ID existed. Replace it now: two listeners conflict — the
+  // first calls process.exit(1) so the second never runs — and the basic one
+  // lacks the debug-log write and the alternate-screen handling below. Also drop
+  // any handler a previous call installed so exactly one listener is ever active.
+  process.removeListener('uncaughtException', handleUncaughtException);
+  if (uncaughtExceptionHandler) {
+    process.removeListener('uncaughtException', uncaughtExceptionHandler);
+  }
+  uncaughtExceptionHandler = (rawError) => {
+    if (isExpectedPtyRaceError(rawError)) {
+      return;
+    }
+    const error =
+      rawError instanceof Error ? rawError : new Error(String(rawError));
+    const timestamp = new Date().toISOString();
+    const line = `${timestamp} [ERROR] [STARTUP] [UNCAUGHT_EXCEPTION] ${error.message}\n${error.stack ?? ''}\n`;
+    // debugLogger.error() uses async fs.appendFile — the write would be
+    // abandoned by the process.exit() below. Write synchronously instead.
+    let logged = false;
+    try {
+      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.appendFileSync(logPath, line, 'utf8');
+      logged = true;
+    } catch {
+      // Best-effort: if the debug dir doesn't exist yet or the disk is
+      // full, the stderr output below is the fallback record.
+    }
+    // In VP / alternate-screen mode, stderr is written to the alternate
+    // buffer which is discarded on teardown. Leave the alternate screen
+    // *before* writing the error so the user actually sees it. Guard on
+    // isTTY: with stdout redirected to a file the escapes would corrupt it.
+    if (process.stdout.isTTY) {
+      try {
+        process.stdout.write('\x1b[?1049l'); // leave alternate screen
+        process.stdout.write('\x1b[?25h'); // show cursor
+      } catch {
+        // stdout may be broken; the debug log above is the primary record.
+      }
+    }
+    writeStderrLineSafe(
+      `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
+    );
+    process.exit(1);
+  };
+  process.on('uncaughtException', uncaughtExceptionHandler);
+}
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -191,7 +258,9 @@ ${reason.stack}`
 }
 
 function getSignalExitCode(signal: NodeJS.Signals): number {
-  return signal === 'SIGINT' ? 130 : 143;
+  if (signal === 'SIGINT') return 130;
+  if (signal === 'SIGHUP') return 129;
+  return 143;
 }
 
 // A real SIGINT only reaches the process-level handler while raw mode is
@@ -241,6 +310,9 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   const handleSigterm = () => {
     beginExit('SIGTERM');
   };
+  const handleSighup = () => {
+    beginExit('SIGHUP');
+  };
   const handleSigint = () => {
     if (cleanupStarted) {
       return;
@@ -260,10 +332,12 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
   process.on('SIGTERM', handleSigterm);
   process.on('SIGINT', handleSigint);
+  process.on('SIGHUP', handleSighup);
 
   return () => {
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
+    process.removeListener('SIGHUP', handleSighup);
   };
 }
 
@@ -289,6 +363,18 @@ export async function main() {
 
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  const privateExternalToolGuard =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
+    EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  const privateExternalToolGuardProvider =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV] ===
+    EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -300,12 +386,30 @@ export async function main() {
 
   markAcpStartup('argsParseStart');
   let argv = await parseArguments();
+  // The full yargs `serve` handler captures and deletes this credential while
+  // parsing the subcommand. Other CLI/ACP paths do not use it, so scrub any
+  // ambient value immediately after argument parsing and before Config,
+  // hooks, MCP servers, or tools can initialize.
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
-      ? { [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability }
+      ? {
+          [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(privateExternalToolGuard
+            ? {
+                [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+                ...(privateExternalToolGuardProvider
+                  ? {
+                      [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
+                        privateExternalToolGuardProvider,
+                    }
+                  : {}),
+              }
+            : {}),
+        }
       : undefined;
 
   if (
@@ -579,6 +683,23 @@ export async function main() {
     }
   }
 
+  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV] === '1') {
+    // A daemon-spawned ACP child hosts sessions for arbitrary workspaces.
+    // Loader vars from the daemon's launch environment were only needed to
+    // boot this process (e.g. the dev harness tsx loader); left in
+    // process.env they propagate into every session subprocess — shell
+    // tool, MCP servers, hooks — and hijack module resolution across
+    // workspace boundaries. The gate is the daemon stamp: direct ACP
+    // integrations (editor companions) spawn the same --acp command line
+    // but host the user's own session, where an exported
+    // NODE_OPTIONS=--max-old-space-size is expected to reach tool
+    // subprocesses. Placement is after the relaunch/sandbox handoff: those
+    // respawn this process with process.env and still need the loader to
+    // boot, and the respawned child re-runs this scrub itself. Only the
+    // final process (no relaunch) reaches here.
+    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
+  }
+
   // When --worktree is going to chdir us into a worktree below, resolve
   // any relative-path argv fields to absolute paths now — BEFORE the
   // chdir. Otherwise downstream `fs.existsSync('./mcp.json')` calls in
@@ -750,6 +871,16 @@ export async function main() {
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 
+    const nonInteractiveHousekeeping =
+      !config.isInteractive() || config.getExperimentalZedIntegration()
+        ? await import('./utils/housekeeping/scheduler.js')
+        : undefined;
+    if (nonInteractiveHousekeeping) {
+      registerCleanup(() =>
+        nonInteractiveHousekeeping.stopNonInteractiveOpenAILogHousekeeping(),
+      );
+    }
+
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
@@ -859,6 +990,11 @@ export async function main() {
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
+    // Install the uncaughtException handler once the session ID is known.
+    // Before this point VP mode is not active, so Node's default stderr
+    // output is visible and sufficient.
+    setupUncaughtExceptionHandler(config);
+
     startEarlyStartupPrefetches(config);
 
     const wasRaw = process.stdin.isRaw;
@@ -941,13 +1077,25 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
-      await runAcpAgent(config, settings, argv, {
-        privateParentCapability: isAcpMode
-          ? privateAcpParentCapability
-          : undefined,
-      });
-      // Clean up child processes and force exit, matching other non-interactive modes
-      await runExitCleanup();
+      try {
+        await runAcpAgent(config, settings, argv, {
+          privateParentCapability: isAcpMode
+            ? privateAcpParentCapability
+            : undefined,
+          externalToolGuardRequired:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          externalToolGuardProviderAttached:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuardProvider ===
+              EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
+        });
+      } finally {
+        // Clean up child processes even when ACP setup or shutdown fails.
+        await runExitCleanup();
+      }
       process.exit(0);
     }
 
@@ -1161,12 +1309,19 @@ export async function main() {
         './nonInteractive/session.js'
       );
 
-      await runNonInteractiveStreamJson(
+      nonInteractiveHousekeeping?.startNonInteractiveOpenAILogHousekeeping(
         nonInteractiveConfig,
-        trimmedInput.length > 0 ? trimmedInput : '',
         settings,
       );
-      await runExitCleanup();
+      try {
+        await runNonInteractiveStreamJson(
+          nonInteractiveConfig,
+          trimmedInput.length > 0 ? trimmedInput : '',
+          settings,
+        );
+      } finally {
+        await runExitCleanup();
+      }
       // `runNonInteractiveStreamJson` doesn't return an explicit exit
       // code yet, so a cleanup task that mutates `process.exitCode`
       // could clobber a non-zero failure signal. This is currently safe
@@ -1198,18 +1353,24 @@ export async function main() {
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
     const { runNonInteractive } = await import('./nonInteractiveCli.js');
-    const exitCode = await runNonInteractive(
+    nonInteractiveHousekeeping?.startNonInteractiveOpenAILogHousekeeping(
       nonInteractiveConfig,
       settings,
-      input,
-      prompt_id,
     );
-    // Call cleanup before process.exit, which causes cleanup to not run.
-    // Capture the exit code BEFORE cleanup so any cleanup task that
-    // mutates process.exitCode can't silently turn a structured-output
-    // failure (or other explicit non-zero return from runNonInteractive)
-    // into a zero exit.
-    await runExitCleanup();
+    let exitCode: number;
+    try {
+      exitCode = await runNonInteractive(
+        nonInteractiveConfig,
+        settings,
+        input,
+        prompt_id,
+      );
+    } finally {
+      // Call cleanup before process.exit, which causes cleanup to not run.
+      await runExitCleanup();
+    }
+    // Capture the exit code BEFORE cleanup so any cleanup task that mutates
+    // process.exitCode can't silently turn an explicit failure into success.
     process.exit(exitCode);
   }
 }

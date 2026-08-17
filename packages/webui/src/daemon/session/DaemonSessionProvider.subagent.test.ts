@@ -4,6 +4,7 @@ import { projectMainTranscriptEventsForTesting } from './DaemonSessionProvider.j
 
 describe('on-demand subagent transcript projection', () => {
   it('drops child events and bounds the root agent payload', () => {
+    const todoId = `todo-${'x'.repeat(160)}`;
     const events: DaemonUiEvent[] = [
       {
         type: 'tool.update',
@@ -13,9 +14,11 @@ describe('on-demand subagent transcript projection', () => {
         rawInput: {
           subagent_type: 'explore',
           prompt: 'p'.repeat(400),
+          todo_id: todoId,
         },
         rawOutput: {
           type: 'task_execution',
+          subagentColor: 'red',
           status: 'completed',
           terminateReason: 'max_turns',
           result: 'large result',
@@ -54,9 +57,10 @@ describe('on-demand subagent transcript projection', () => {
     expect(result[0]).toMatchObject({
       type: 'tool.update',
       toolCallId: 'agent-1',
-      rawInput: { subagent_type: 'explore' },
+      rawInput: { subagent_type: 'explore', todo_id: todoId },
       rawOutput: {
         type: 'task_execution',
+        subagentColor: 'red',
         status: 'completed',
         terminateReason: 'max_turns',
         executionSummary: {
@@ -94,6 +98,33 @@ describe('on-demand subagent transcript projection', () => {
       type: 'tool.update',
       toolCallId: 'agent-1',
       rawOutput: undefined,
+    });
+  });
+
+  it('preserves fields used to classify foreground agents', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        status: 'in_progress',
+        rawInput: {
+          description: 'Review the change',
+          prompt: 'Review the change.',
+          subagent_type: 'general-purpose',
+          run_in_background: false,
+          working_dir: '.qwen/tmp/review-pr-1',
+          name: 'reviewer',
+        },
+      },
+    ]);
+
+    expect(result).toMatchObject({
+      rawInput: {
+        run_in_background: false,
+        working_dir: '.qwen/tmp/review-pr-1',
+        name: 'reviewer',
+      },
     });
   });
 });

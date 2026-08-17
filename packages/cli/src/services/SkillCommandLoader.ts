@@ -10,6 +10,7 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -29,6 +30,27 @@ import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
+
+export async function recordAutoSkillCommandUsage(
+  config: Config | null,
+  command: SlashCommand,
+): Promise<void> {
+  const detail = command.skillDetail;
+  if (!config || detail?.level !== 'project' || !detail.filePath) {
+    return;
+  }
+  try {
+    await recordAutoSkillUsage(config.getProjectRoot(), {
+      name: detail.name,
+      level: 'project',
+      filePath: detail.filePath,
+    });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to record auto-skill command usage: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 /**
  * Loads user-level, project-level, and extension-level skills as slash
@@ -122,6 +144,7 @@ export class SkillCommandLoader implements ICommandLoader {
             name: skill.name,
             description: skill.description,
             body: skill.body,
+            filePath: skill.filePath,
             level: skill.level,
             ...(isExtension && skill.extensionName
               ? { extensionName: skill.extensionName }

@@ -10,6 +10,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionResponse,
 } from '../types.js';
 
@@ -88,6 +89,10 @@ export interface DaemonUiEventBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this event. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for events belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -127,6 +132,7 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  meta?: DaemonTextDeltaMeta;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
@@ -273,11 +279,44 @@ export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {
   modelId: string;
 }
 
+/**
+ * Why the normalizer produced a `debug` projection instead of a typed event.
+ *
+ * `unrecognized_*` means the daemon sent a frame this normalizer has no case
+ * for — expected whenever the daemon runs ahead of the client, and the payload
+ * is developer diagnostics rather than conversation content. `malformed_*`
+ * means a frame the normalizer *does* know arrived with an unusable payload,
+ * which signals an actual defect.
+ *
+ * Renderers should branch on this instead of pattern-matching the debug text:
+ * client-dispatched debug events (e.g. Web Shell's model-switch summary) carry
+ * no `debugReason` at all and must keep rendering.
+ */
+export const DAEMON_UI_DEBUG_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+  'malformed_payload',
+] as const;
+
+export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
+
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
   source?: string;
   data?: unknown;
+  /**
+   * Set only on normalizer-produced `debug` events. Absent on `status` events
+   * and on debug events dispatched by clients themselves.
+   */
+  debugReason?: DaemonUiDebugReason;
+  /**
+   * Client-dispatch opt-out: `false` inserts the status block without
+   * finalizing the active assistant/thought block, so read-only command
+   * output dispatched mid-turn does not split a streaming answer or orphan
+   * its usage frames. Daemon-emitted events leave this unset.
+   */
+  clearActiveText?: boolean;
 }
 
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
@@ -447,6 +486,7 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   key: string;
   scope: string;
   value: unknown;
+  mutation?: DaemonSkillToggleMutation;
 }
 
 export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {
@@ -795,6 +835,10 @@ export interface DaemonTranscriptBlockBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for content belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   /**
    * Same as the previous `createdAt` semantics — client-local clock at the
    * moment the block was first observed. Renamed for clarity:
@@ -821,6 +865,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   /** Images attached to this user message (base64 data URIs). */
   images?: Array<{ data: string; mimeType: string }>;
+  /**
+   * Text file attachments on this user message (display metadata only —
+   * the content rides the prompt's resource blocks and is never stored
+   * on the block). Local optimistic messages only; daemon replays carry
+   * no attachment metadata.
+   */
+  files?: Array<{ name: string; mimeType: string }>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -907,6 +958,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   errorKind?: DaemonErrorKind;
   source?: string;
   data?: unknown;
+  /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */
+  debugReason?: DaemonUiDebugReason;
 }
 
 export interface DaemonPromptCancelledTranscriptBlock
@@ -1025,6 +1078,7 @@ export interface DaemonTranscriptStore {
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
     meta?: DaemonTextDeltaMeta,
+    files?: Array<{ name: string; mimeType: string }>,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

@@ -7,9 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   DaemonMetricsRing,
-  computeCpuPercent,
   type DaemonMetricsGauges,
 } from './daemon-metrics-ring.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 
 const GAUGES: DaemonMetricsGauges = {
   cpuPercent: 12,
@@ -225,6 +225,10 @@ describe('computeCpuPercent', () => {
   it('returns 0 for a non-positive window', () => {
     expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 0, 1)).toBe(0);
     expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), -5, 1)).toBe(0);
+  });
+
+  it('returns 0 for a non-positive core count', () => {
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 1000, 0)).toBe(0);
   });
 
   it('computes a normalized, clamped windowed percent', () => {

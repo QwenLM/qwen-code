@@ -38,6 +38,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -111,6 +112,7 @@ export function useReactToolScheduler(
   config: Config,
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
+  onToolResultFullTurnModel?: (model: string) => boolean,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -204,6 +206,7 @@ export function useReactToolScheduler(
         onToolCallsUpdate: toolCallsUpdateHandler,
         getPreferredEditor,
         onEditorClose,
+        onToolResultFullTurnModel,
       }),
     [
       config,
@@ -212,6 +215,7 @@ export function useReactToolScheduler(
       toolCallsUpdateHandler,
       getPreferredEditor,
       onEditorClose,
+      onToolResultFullTurnModel,
     ],
   );
 
@@ -222,7 +226,14 @@ export function useReactToolScheduler(
       modelOverride?: string,
     ) => {
       if (!modelOverride?.endsWith('\0')) {
-        void scheduler.schedule(request, signal);
+        void scheduler.schedule(request, signal).catch((error: unknown) => {
+          if (signal.aborted) return;
+          debugLogger.error(
+            `Tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
         return;
       }
       void (async () => {
@@ -260,6 +271,7 @@ export function useReactToolScheduler(
                   resultDisplay: message,
                   error: toolError,
                   errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                  executionStatus: 'not_started',
                   contentLength: message.length,
                 },
               };
@@ -352,7 +364,11 @@ export function mapToDisplay(
       let description: string;
       let renderOutputAsMarkdown = false;
 
-      if (trackedCall.status === 'error') {
+      if (
+        trackedCall.status === 'error' ||
+        trackedCall.tool === undefined ||
+        trackedCall.invocation === undefined
+      ) {
         displayName =
           trackedCall.tool === undefined
             ? trackedCall.request.name
@@ -382,14 +398,26 @@ export function mapToDisplay(
             : undefined,
       };
 
+      const inlineImageCollection =
+        trackedCall.status === 'success' ||
+        trackedCall.status === 'error' ||
+        trackedCall.status === 'cancelled'
+          ? collectInlineImages(trackedCall.response.responseParts)
+          : null;
+
       switch (trackedCall.status) {
-        case 'success':
+        case 'success': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
             // Full detail for the Ctrl+O transcript (§4.9): derived from the
             // already-persisted functionResponse parts; NOT char-capped (the
             // bound is whatever core already applied). Consumed ONLY by the
@@ -402,26 +430,41 @@ export function mapToDisplay(
             detailedDisplay: isCollapsibleTool(displayName)
               ? getToolResponseDisplayText(trackedCall.response.responseParts)
               : undefined,
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
+              ? {
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'error':
+        case 'cancelled': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
+              ? {
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
-        case 'cancelled':
-          return {
-            ...baseDisplayProperties,
-            status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: compactToolResultDisplayForHistory(
-              trackedCall.response.resultDisplay,
-            ),
-            confirmationDetails: undefined,
-          };
+        }
         case 'awaiting_approval':
           return {
             ...baseDisplayProperties,

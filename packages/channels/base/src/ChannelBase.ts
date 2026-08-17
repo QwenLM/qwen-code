@@ -1,21 +1,31 @@
 import { basename, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
+  ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import {
@@ -28,6 +38,7 @@ import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
 import { getGlobalQwenDir } from './paths.js';
 import {
@@ -36,6 +47,7 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
+  sanitizeDisplayText,
   truncateCodePoints,
   PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
@@ -52,6 +64,7 @@ import type {
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
+  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -126,6 +139,10 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
   'i',
 );
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 type ResolvedChannelMemoryIntent =
   | ChannelMemoryIntent
   | { kind: 'list_matches'; ids: string[] }
@@ -195,6 +212,8 @@ interface ChannelMemoryRecallSelection {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /** Adapter-owned persistent state directory. */
+  stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   channelMemoryRecallObserver?: (
@@ -205,6 +224,8 @@ export interface ChannelBaseOptions {
    * events directly.
    */
   registerBridgeEvents?: boolean;
+  /** Return the active bridge recovery barrier, if recovery is in progress. */
+  bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
   observedContacts?: {
@@ -212,6 +233,8 @@ export interface ChannelBaseOptions {
       channelName: string,
       observation: ObservedChannelContactObservation,
     ): void | Promise<void>;
+    /** Read persisted observations so adapters can hydrate label caches. */
+    list?(): ObservedChannelContactGraph;
   };
 }
 
@@ -242,14 +265,25 @@ type PendingPermission = {
   sessionId: string;
   target: SessionTarget;
   request: PermissionRequestEvent['request'];
+  userInputPresented?: boolean;
+  settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
+  settled?: UserInputSettlementReason;
+  responsePromise?: Promise<boolean>;
 };
 type PermissionOption = PermissionRequestEvent['request']['options'][number];
 type PendingPermissionLookup =
   | { kind: 'found'; pending: PendingPermission }
   | { kind: 'none'; explicit: boolean }
   | { kind: 'ambiguous'; requestIds: string[] };
-type CollectBufferEntry = { text: string; envelope: Envelope };
+type CollectBufferEntry = {
+  text: string;
+  displayText: string;
+  envelope: Envelope;
+};
 type ActivePrompt = {
+  runId: string;
+  owner?: ChannelPromptOwner;
+  activeSegmentId?: string;
   cancelled: boolean;
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
@@ -270,6 +304,7 @@ type ActivePrompt = {
   messageId?: string;
   senderId?: string;
   senderName?: string;
+  metadata?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -297,6 +332,7 @@ const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
+const MAX_DISPLAY_PROJECTION_CHARS = 8000;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -327,6 +363,10 @@ function isUnattendedWebhookApprovalMode(mode: string | undefined): boolean {
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
+  /**
+   * Recovery invariant: session-resolution and prompt-capture paths must await
+   * waitForBridgeRecovery() immediately before that operation.
+   */
   protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
@@ -338,12 +378,19 @@ export abstract class ChannelBase {
   protected readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  /** Adapter-owned persistent state directory, when supplied by the runtime. */
+  protected readonly stateDir?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
     observation: ChannelMemoryRecallObservation,
   ) => void;
   private groupHistory: GroupHistoryStore;
+  // Tracks the pairing code already announced per group so repeated triggers
+  // of the same pending request (extra mentions, parallel notification lanes)
+  // post the public notification once. In-memory by design: a restart can
+  // re-post once per still-pending request, but never per trigger.
+  private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -358,6 +405,7 @@ export abstract class ChannelBase {
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
   private readonly registerBridgeEvents: boolean;
+  private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
    * Per-session generation, bumped by /clear. A queued followup turn captures the
    * generation when it enqueues and bails if /clear bumped it before the turn ran,
@@ -491,6 +539,7 @@ export abstract class ChannelBase {
       sessionId: event.sessionId,
       target,
       request: event.request,
+      settlementListeners: new Set(),
     };
     this.pendingPermissions.set(event.requestId, pending);
     const chatKey = this.permissionChatKey(target);
@@ -498,6 +547,10 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
+      const presentation = this.tryPresentUserInput(pending);
+      if (presentation && (await presentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
@@ -509,7 +562,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(target.chatId, target.threadId, text);
       }
     } catch (err) {
-      this.removePendingPermission(event.requestId);
+      this.removePendingPermission(event.requestId, 'cancelled');
       try {
         await this.bridge.respondToPermission?.(event.requestId, {
           outcome: { outcome: 'cancelled' },
@@ -521,6 +574,198 @@ export abstract class ChannelBase {
       }
       throw err;
     }
+  }
+
+  private tryPresentUserInput(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const questions = this.normalizeUserQuestions(pending);
+    const submitOptionId = this.approvalOptionId(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      !questions ||
+      !submitOptionId
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelUserInputRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      questions,
+      submitOptionId,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (response) => {
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.userInputPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        const result = await this.presentUserInputRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] user input presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private normalizeUserQuestions(
+    pending: PendingPermission,
+  ): ChannelUserQuestion[] | undefined {
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const canonical = meta?.['qwenInteractionKind'] === 'user_question';
+    const identifiedLegacy =
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const rawInput = isRecord(toolCall['rawInput'])
+      ? toolCall['rawInput']
+      : undefined;
+    const rawQuestions = canonical
+      ? meta?.['qwenQuestions']
+      : identifiedLegacy
+        ? rawInput?.['questions']
+        : undefined;
+    if (
+      !Array.isArray(rawQuestions) ||
+      rawQuestions.length < 1 ||
+      rawQuestions.length > 4
+    ) {
+      return undefined;
+    }
+
+    const questions: ChannelUserQuestion[] = [];
+    for (const [index, rawQuestion] of rawQuestions.entries()) {
+      if (!isRecord(rawQuestion)) {
+        return undefined;
+      }
+      const header = rawQuestion['header'];
+      const question = rawQuestion['question'];
+      const rawOptions = rawQuestion['options'];
+      const multiSelect = rawQuestion['multiSelect'];
+      if (
+        typeof header !== 'string' ||
+        header.trim().length === 0 ||
+        typeof question !== 'string' ||
+        question.trim().length === 0 ||
+        !Array.isArray(rawOptions) ||
+        rawOptions.length < 2 ||
+        rawOptions.length > 4 ||
+        (multiSelect !== undefined && typeof multiSelect !== 'boolean')
+      ) {
+        return undefined;
+      }
+      const options: ChannelUserQuestion['options'] = [];
+      for (const rawOption of rawOptions) {
+        if (
+          !isRecord(rawOption) ||
+          typeof rawOption['label'] !== 'string' ||
+          rawOption['label'].trim().length === 0 ||
+          typeof rawOption['description'] !== 'string'
+        ) {
+          return undefined;
+        }
+        options.push({
+          label: rawOption['label'],
+          description: rawOption['description'],
+        });
+      }
+      questions.push({
+        answerKey: String(index),
+        header,
+        question,
+        options,
+        multiSelect: multiSelect ?? false,
+      });
+    }
+    return questions;
+  }
+
+  private async respondToUserInput(
+    pending: PendingPermission,
+    response: ChannelUserInputResponse,
+  ): Promise<boolean> {
+    if (pending.responsePromise) {
+      return pending.responsePromise;
+    }
+    if (
+      this.pendingPermissions.get(pending.requestId) !== pending ||
+      !this.bridge.respondToPermission
+    ) {
+      return false;
+    }
+    pending.responsePromise = Promise.resolve()
+      .then(() => this.bridge.respondToPermission!(pending.requestId, response))
+      .then(
+        (accepted) => {
+          this.removePendingPermission(
+            pending.requestId,
+            accepted
+              ? this.userInputSettlementReason(pending, response.outcome)
+              : 'cancelled',
+          );
+          return accepted;
+        },
+        (error: unknown) => {
+          this.removePendingPermission(pending.requestId, 'cancelled');
+          throw error;
+        },
+      );
+    return pending.responsePromise;
   }
 
   private permissionTargetForEvent(
@@ -551,7 +796,14 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
-    this.removePendingPermission(event.requestId);
+    const pending = this.pendingPermissions.get(event.requestId);
+    if (!pending) {
+      return;
+    }
+    this.removePendingPermission(
+      event.requestId,
+      this.userInputSettlementReason(pending, event.outcome),
+    );
   }
 
   constructor(
@@ -564,6 +816,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
@@ -579,16 +832,20 @@ export abstract class ChannelBase {
     );
     this.loopController = options?.loopController;
     this.observedContacts = options?.observedContacts;
-
-    this.groupGate = new GroupGate(config.groupPolicy, config.groups);
-    this.dmGate = new DmGate(config.dmPolicy);
+    this.bridgeRecovery = options?.bridgeRecovery;
 
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing'
+      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
+    this.groupGate = new GroupGate(
+      config.groupPolicy,
+      config.groups,
+      pairingStore,
+    );
+    this.dmGate = new DmGate(config.dmPolicy);
     this.gate = new SenderGate(
       config.senderPolicy,
       config.allowedUsers,
@@ -639,6 +896,12 @@ export abstract class ChannelBase {
     _event: ChannelTaskLifecycleEvent,
   ): void | Promise<void> {}
 
+  protected async presentUserInputRequest(
+    _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     try {
       const result = this.onTaskLifecycle(event);
@@ -683,6 +946,13 @@ export abstract class ChannelBase {
       return;
     }
     active.cancellationEmitted = true;
+    const segment = this.closeOutputSegment(sessionId, active);
+    void this.notifyOutputSegmentEnd(
+      active.chatId,
+      sessionId,
+      segment,
+      'cancelled',
+    );
     this.emitTaskLifecycle({
       ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
       type: 'cancelled',
@@ -796,14 +1066,92 @@ export abstract class ChannelBase {
     sessionId: string,
     messageId?: string,
   ): ChannelTaskLifecycleBase {
+    const active = this.activePrompts.get(sessionId);
     return {
       channelName: this.name,
       chatId,
       sessionId,
       ...(messageId ? { messageId } : {}),
+      ...(active?.runId ? { runId: active.runId } : {}),
+      ...(active?.owner ? { owner: active.owner } : {}),
       identity: this.identity,
       memoryScope: this.memoryScope,
     };
+  }
+
+  private outputSegmentContext(
+    sessionId: string,
+    active: ActivePrompt,
+    segmentId: string,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const resolvedTarget =
+      target ??
+      (active.senderId
+        ? {
+            channelName: this.name,
+            chatId: active.chatId,
+            senderId: active.senderId,
+            ...(active.threadId ? { threadId: active.threadId } : {}),
+            ...(active.isGroup !== undefined
+              ? { isGroup: active.isGroup }
+              : {}),
+          }
+        : undefined);
+    if (
+      !active.owner ||
+      !resolvedTarget ||
+      resolvedTarget.channelName !== this.name
+    ) {
+      return undefined;
+    }
+    return {
+      channelName: this.name,
+      sessionId,
+      runId: active.runId,
+      segmentId,
+      owner: active.owner,
+      target: resolvedTarget,
+      ...(active.messageId ? { messageId: active.messageId } : {}),
+    };
+  }
+
+  private ensureOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+  ): ChannelOutputSegmentContext | undefined {
+    if (!active.owner) return undefined;
+    const segmentId = active.activeSegmentId ?? randomUUID();
+    const context = this.outputSegmentContext(sessionId, active, segmentId);
+    if (context) active.activeSegmentId = segmentId;
+    return context;
+  }
+
+  private closeOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const segmentId = active.activeSegmentId;
+    if (!segmentId) return undefined;
+    active.activeSegmentId = undefined;
+    return this.outputSegmentContext(sessionId, active, segmentId, target);
+  }
+
+  private async notifyOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext | undefined,
+    reason: ChannelOutputSegmentEndReason,
+  ): Promise<void> {
+    if (!segment) return;
+    try {
+      await this.onOutputSegmentEnd(chatId, sessionId, segment, reason);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
+      );
+    }
   }
 
   supportsProactiveSend(): boolean {
@@ -1079,13 +1427,16 @@ export abstract class ChannelBase {
     this.collectBuffers.delete(sessionId);
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
+    const coalescedDisplayText = buffer.map((b) => b.displayText).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
     this.notifyPromptBufferDrained(lastEnvelope.chatId, sessionId, buffer);
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
+      displayText: coalescedDisplayText,
       alreadyPrefixed: true,
       referencedText: undefined,
+      mentionedMemberIds: undefined,
       attachments: undefined,
       metadata: undefined,
       imageBase64: undefined,
@@ -1145,6 +1496,7 @@ export abstract class ChannelBase {
       throw new Error(`Loop ${job.id} target is no longer authorized.`);
     }
 
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       job.target.senderId,
@@ -1232,6 +1584,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1294,6 +1647,7 @@ export abstract class ChannelBase {
         heldChunks.length = 0;
         this.onResponseBoundary(job.target.chatId, sessionId);
       };
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
@@ -1303,6 +1657,7 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
+          job.prompt,
           promptState,
           job.id,
           options.timeoutMs,
@@ -1461,6 +1816,7 @@ export abstract class ChannelBase {
   ): Promise<string | undefined> {
     const target = this.resolveWebhookTaskTarget(task);
 
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       target.senderId,
@@ -1473,6 +1829,7 @@ export abstract class ChannelBase {
       },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
+    const displayText = buildChannelWebhookDisplayText(task);
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);
@@ -1545,6 +1902,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1588,6 +1946,7 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
 
@@ -1596,6 +1955,7 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
+          displayText,
           promptState,
           taskId,
           options.timeoutMs,
@@ -1700,11 +2060,12 @@ export abstract class ChannelBase {
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
+    displayText: string,
     promptState: ActivePrompt,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, {});
+    const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -1751,6 +2112,11 @@ export abstract class ChannelBase {
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
+        this.discardRetiredSession(
+          promptBridge,
+          sessionId,
+          `timed-out loop ${jobId}`,
+        );
         process.stderr.write(
           `[${this.name}] retired timed out loop ${jobId} session ${sessionId} after cancel did not settle\n`,
         );
@@ -1763,6 +2129,26 @@ export abstract class ChannelBase {
       );
     } finally {
       clearTimeout(graceTimer);
+    }
+  }
+
+  private discardRetiredSession(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    reason: string,
+  ): void {
+    const safeSessionId = sanitizeLogText(sessionId, 64);
+    const safeReason = sanitizeLogText(reason, 128);
+    try {
+      void promptBridge.discardSession?.(sessionId).catch((err) => {
+        process.stderr.write(
+          `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+      );
     }
   }
 
@@ -1816,9 +2202,22 @@ export abstract class ChannelBase {
         active.cancelled = true;
         this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  protected requestPromptRunCancellation(
+    sessionId: string,
+    runId: string,
+    reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
+  ): Promise<boolean> {
+    const active = this.activePrompts.get(sessionId);
+    if (!active || active.runId !== runId) {
+      return Promise.resolve(false);
+    }
+    return this.requestActivePromptCancellation(sessionId, reason);
   }
 
   private dropCollectBuffer(sessionId: string): void {
@@ -1958,13 +2357,28 @@ export abstract class ChannelBase {
     _chatId: string,
     _chunk: string,
     _sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): void {}
+
+  protected onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    _segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    if (reason === 'response_boundary') {
+      return this.onResponseBoundary(chatId, sessionId);
+    }
+  }
 
   /**
    * Called when the agent starts a new response segment for the same prompt.
    * Override to clear adapter-owned streaming buffers.
    */
-  protected onResponseBoundary(_chatId: string, _sessionId: string): void {}
+  protected onResponseBoundary(
+    _chatId: string,
+    _sessionId: string,
+  ): void | Promise<void> {}
 
   protected async sendResponseMessage(
     chatId: string,
@@ -1978,6 +2392,33 @@ export abstract class ChannelBase {
   }
 
   /**
+   * Adapter hook for delivery-only metadata. The response delivery path can read
+   * the active prompt while it exists; adapters must not retain its raw content.
+   */
+  protected getResponseMessageId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.messageId;
+  }
+
+  protected getResponseSenderId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.senderId;
+  }
+
+  protected getResponseMetadata(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.metadata;
+  }
+
+  /**
+   * Returns the active prompt's response thread while it remains available for
+   * adapter delivery. Falls back to the session target after prompt cleanup.
+   */
+  protected getResponseThreadId(sessionId: string): string | undefined {
+    return (
+      this.activePrompts.get(sessionId)?.threadId ??
+      this.router.getTarget(sessionId)?.threadId
+    );
+  }
+
+  /**
    * Called when the agent's full response is ready.
    * Override to customize delivery (e.g., finalize an AI card).
    * Default: sends the full response text.
@@ -1986,6 +2427,7 @@ export abstract class ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     await this.sendResponseMessage(chatId, fullText, sessionId);
   }
@@ -2069,12 +2511,16 @@ export abstract class ChannelBase {
     return live;
   }
 
-  private removePendingPermission(requestId: string): void {
+  private removePendingPermission(
+    requestId: string,
+    reason: UserInputSettlementReason = 'resolved_outside_presenter',
+  ): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) {
       return;
     }
     this.pendingPermissions.delete(requestId);
+    this.settleUserInput(pending, reason);
     const chatKey = this.permissionChatKey(pending.target);
     const requestIds = this.pendingPermissionsByChat.get(chatKey);
     if (!requestIds) {
@@ -2088,18 +2534,65 @@ export abstract class ChannelBase {
     }
   }
 
-  private removePendingPermissionsForSession(sessionId: string): void {
+  private removePendingPermissionsForSession(
+    sessionId: string,
+    reason: UserInputSettlementReason = 'cancelled',
+  ): void {
     const requestIds = Array.from(this.pendingPermissions)
       .filter(([, pending]) => pending.sessionId === sessionId)
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
-      this.removePendingPermission(requestId);
+      this.removePendingPermission(requestId, reason);
     }
   }
 
   private clearPendingPermissions(): void {
-    this.pendingPermissions.clear();
-    this.pendingPermissionsByChat.clear();
+    for (const requestId of Array.from(this.pendingPermissions.keys())) {
+      this.removePendingPermission(requestId, 'cancelled');
+    }
+  }
+
+  private settleUserInput(
+    pending: PendingPermission,
+    reason: UserInputSettlementReason,
+  ): void {
+    if (pending.settled) {
+      return;
+    }
+    pending.settled = reason;
+    const listeners = Array.from(pending.settlementListeners);
+    pending.settlementListeners.clear();
+    for (const listener of listeners) {
+      try {
+        listener(reason);
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] user input settlement listener failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+      }
+    }
+  }
+
+  private userInputSettlementReason(
+    pending: PendingPermission,
+    outcome: PermissionResolvedEvent['outcome'],
+  ): UserInputSettlementReason {
+    if (outcome?.outcome === 'cancelled') {
+      return 'cancelled';
+    }
+    if (outcome?.outcome === 'selected') {
+      const selected = pending.request.options.find(
+        (option) => option.optionId === outcome.optionId,
+      );
+      if (
+        selected?.kind === 'reject_once' ||
+        (selected?.optionId === 'cancel' &&
+          (selected as { kind?: string }).kind === undefined)
+      ) {
+        return 'cancelled';
+      }
+    }
+    return 'resolved_outside_presenter';
   }
 
   private pendingPermissionForEnvelope(
@@ -2149,6 +2642,8 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
+      (!pending.userInputPresented ||
+        pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
     );
@@ -2297,6 +2792,13 @@ export abstract class ChannelBase {
     }
 
     const { pending } = lookup;
+    if (pending.userInputPresented && decision !== 'deny') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+      );
+      return true;
+    }
     const response = (() => {
       if (decision === 'deny') {
         return this.denialResponse(pending);
@@ -2322,10 +2824,9 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = await this.bridge.respondToPermission(
-        pending.requestId,
-        response,
-      );
+      accepted = pending.userInputPresented
+        ? await this.respondToUserInput(pending, response)
+        : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
@@ -2384,7 +2885,7 @@ export abstract class ChannelBase {
             id,
             (this.sessionGenerations.get(id) ?? 0) + 1,
           );
-          this.removePendingPermissionsForSession(id);
+          this.removePendingPermissionsForSession(id, 'run_cancelled');
           // Cancel an in-flight turn (and drop its buffered follow-ups) before
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
@@ -2466,6 +2967,7 @@ export abstract class ChannelBase {
             // bumped value — reclaim it immediately.
             this.sessionGenerations.delete(id);
           }
+          this.discardRetiredSession(this.bridge, id, 'cleared');
         }
         await this.sendThreadMessage(
           envelope.chatId,
@@ -3128,9 +3630,11 @@ export abstract class ChannelBase {
       isReplyToBot: true,
     };
     return (
-      this.groupGate.check(envelope).allowed &&
+      this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      this.gate.isAllowed(normalizedTarget.senderId) &&
+      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
+        ? true
+        : this.gate.isAllowed(normalizedTarget.senderId)) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -4238,7 +4742,10 @@ export abstract class ChannelBase {
       return;
     }
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (!this.gate.isAllowed(senderId)) {
+    if (
+      this.config.groupPolicy !== 'pairing' &&
+      !this.gate.isAllowed(senderId)
+    ) {
       return;
     }
 
@@ -4267,7 +4774,17 @@ export abstract class ChannelBase {
       return [];
     }
     try {
-      return this.groupHistory.drain(this.groupHistoryKey(envelope), limit);
+      const entries = this.groupHistory.drain(
+        this.groupHistoryKey(envelope),
+        limit,
+      );
+      if (
+        this.config.groupPolicy === 'pairing' &&
+        !this.groupGate.isGroupApproved(envelope.chatId)
+      ) {
+        return [];
+      }
+      return entries;
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
@@ -4301,9 +4818,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines = entries.filter((entry) =>
-      this.gate.isAllowed(entry.senderId),
-    );
+    const lines =
+      this.config.groupPolicy === 'pairing'
+        ? entries
+        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
     if (lines.length === 0) {
       return promptText;
     }
@@ -4323,9 +4841,29 @@ export abstract class ChannelBase {
   protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
+      if (groupResult.pairing !== undefined) {
+        this.logPreflightRejected('group_pairing_required');
+        return this.onGroupPairingRequired(
+          envelope.chatId,
+          groupResult.pairing,
+          envelope.threadId,
+        )
+          .then(() => false)
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[Channel:${this.name}] group pairing notification failed: ${sanitizeLogText(
+                err instanceof Error ? err.message : String(err),
+                200,
+              )}\n`,
+            );
+            return false;
+          });
+      }
       if (groupResult.reason === 'mention_required') {
         // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
+      } else if (groupResult.reason === 'pairing_trigger_required') {
+        return false;
       } else {
         this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
       }
@@ -4338,13 +4876,18 @@ export abstract class ChannelBase {
       return false;
     }
 
+    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
-      if (result.pairingCode !== undefined) {
+      if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
         return this.onPairingRequired(
           envelope.chatId,
-          result.pairingCode,
+          result.pairing,
           envelope.threadId,
         )
           .then(() => false)
@@ -4400,7 +4943,7 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
-  private async recordObservedContact(envelope: Envelope): Promise<void> {
+  protected async recordObservedContact(envelope: Envelope): Promise<void> {
     if (!this.observedContacts) return;
     const sanitizedSenderName = envelope.senderName
       ? sanitizeSenderName(envelope.senderName)
@@ -4441,8 +4984,42 @@ export abstract class ChannelBase {
     }
   }
 
+  protected onObservedContact(_envelope: Envelope): void {}
+
+  /**
+   * Observations persisted for this channel, when a read path is configured.
+   * Adapters hydrate label caches from it after a restart so known labels are
+   * not reverted to raw IDs by the next initial write.
+   */
+  protected persistedObservedContacts():
+    | ObservedChannelContactGraph
+    | undefined {
+    const list = this.observedContacts?.list;
+    if (!list) return undefined;
+    try {
+      const graph = list();
+      return {
+        users: graph.users.filter((user) => user.channelName === this.name),
+        groups: graph.groups.filter((group) => group.channelName === this.name),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
+  }
+
+  /** Wait until the currently active bridge recovery, if any, has completed. */
+  private async waitForBridgeRecovery(): Promise<void> {
+    let completedRecovery: Promise<void> | undefined;
+    while (true) {
+      const bridgeRecovery = this.bridgeRecovery?.();
+      if (!bridgeRecovery || bridgeRecovery === completedRecovery) return;
+      await bridgeRecovery;
+      completedRecovery = bridgeRecovery;
+    }
   }
 
   /**
@@ -4453,6 +5030,7 @@ export abstract class ChannelBase {
    * already preflighted, such as during collect-buffer drain.
    */
   protected async processInbound(envelope: Envelope): Promise<void> {
+    await this.waitForBridgeRecovery();
     if (!this.preflightedEnvelopes.delete(envelope)) {
       throw new Error(
         'processInbound called without a successful preflightInbound check.',
@@ -4461,7 +5039,16 @@ export abstract class ChannelBase {
     if (this.observedContacts && !this.observedContactEnvelopes.has(envelope)) {
       this.observedContactEnvelopes.add(envelope);
       await this.recordObservedContact(envelope);
+      this.onObservedContact(envelope);
     }
+    // Adapters that never set `displayText` fall back to the raw message
+    // text; sanitize at this boundary so attacker-controlled bidi/zero-width/
+    // control chars cannot reach the session-bus echo, recorded transcript,
+    // or session previews.
+    const displayText = sanitizeDisplayText(
+      envelope.displayText ?? envelope.text,
+      MAX_DISPLAY_PROJECTION_CHARS,
+    );
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
@@ -4543,6 +5130,9 @@ export abstract class ChannelBase {
       }
     }
 
+    // Preprocessing above can await memory/command hooks; recovery may have
+    // started since the entry check. Recheck immediately before session routing.
+    await this.waitForBridgeRecovery();
     const sessionId = await this.router.resolve(
       this.name,
       envelope.senderId,
@@ -4628,6 +5218,24 @@ export abstract class ChannelBase {
         envelope.senderName || envelope.senderId || 'unknown',
       );
       promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      // Render the non-bot mention marker AFTER sanitization (like the
+      // [Replying to:] wrapper below). Inside `text` it would pass through
+      // sanitizePromptText, which strips brackets only on content <=64 chars
+      // and folds its newline — so with IDs included, the delivered format
+      // would depend on the ID list's length. IDs are platform-controlled, so
+      // neutralize them like quoted text before they bypass the sanitizer here.
+      if (envelope.mentionedMemberIds?.length) {
+        const ids = envelope.mentionedMemberIds
+          .map((id) => sanitizeQuotedText(id, 64).trim())
+          // A junk-only ID over the cap truncates to a bare '…' (not
+          // whitespace), which would advertise a phantom member — drop it
+          // like an empty ID.
+          .filter((id) => id.length > 0 && id !== '…');
+        if (ids.length > 0) {
+          const memberLabel = ids.length === 1 ? 'member' : 'members';
+          promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
+        }
+      }
     }
 
     if (envelope.referencedText) {
@@ -4706,7 +5314,17 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
-          buffer.push({ text: promptText, envelope });
+          const bufferedDisplayText =
+            (envelope.isGroup || this.config.sessionScope === 'single') &&
+            !envelope.alreadyPrefixed &&
+            !recognizedSlashCommand
+              ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
+              : displayText;
+          buffer.push({
+            text: promptText,
+            displayText: bufferedDisplayText,
+            envelope,
+          });
           try {
             this.onPromptBuffered(
               envelope.chatId,
@@ -4778,6 +5396,7 @@ export abstract class ChannelBase {
             // turn at the channel level (cancelled is already set above), so
             // the event reflects that intent, not the bridge RPC outcome.
             this.emitTaskCancellation(active, sessionId, 'steer');
+            this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
           }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
           // after the wind-down bound, this steered turn is wedged behind a hung
@@ -4931,6 +5550,11 @@ export abstract class ChannelBase {
         doneResolve = r;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
+        owner: {
+          kind: 'channel_user',
+          id: envelope.senderId,
+        },
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -4940,6 +5564,7 @@ export abstract class ChannelBase {
         messageId: envelope.messageId,
         senderId: envelope.senderId,
         senderName: envelope.senderName,
+        metadata: envelope.metadata,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only
@@ -4979,6 +5604,7 @@ export abstract class ChannelBase {
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
           hasStreamedText = true;
+          const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -4988,7 +5614,7 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(envelope.chatId, held, sessionId);
+          this.onResponseChunk(envelope.chatId, held, sessionId, segment);
           streamer?.push(held);
         }
       };
@@ -5011,9 +5637,18 @@ export abstract class ChannelBase {
         }
         heldChunks.length = 0;
         hasStreamedText = false;
-        this.onResponseBoundary(envelope.chatId, sessionId);
+        const segment = this.closeOutputSegment(sessionId, promptState);
+        void this.notifyOutputSegmentEnd(
+          envelope.chatId,
+          sessionId,
+          segment,
+          'response_boundary',
+        );
         streamer?.stop();
       };
+      // Queue wait and memory recall can outlive a bridge crash. Capture the
+      // bridge only after the latest recovery has restored session routing.
+      await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
@@ -5022,6 +5657,7 @@ export abstract class ChannelBase {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
+          displayText,
         });
 
         await this.settleCancelRequested(promptState);
@@ -5038,7 +5674,16 @@ export abstract class ChannelBase {
             }
             await streamer.flush();
           } else {
-            await this.onResponseComplete(envelope.chatId, response, sessionId);
+            const segment = this.ensureOutputSegment(sessionId, promptState);
+            await this.onResponseComplete(
+              envelope.chatId,
+              response,
+              sessionId,
+              segment,
+            );
+            if (segment && promptState.activeSegmentId === segment.segmentId) {
+              promptState.activeSegmentId = undefined;
+            }
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -5047,6 +5692,13 @@ export abstract class ChannelBase {
           await this.settleCancelRequested(promptState);
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'completed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5065,6 +5717,13 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled) {
           releaseHeldChunks();
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'failed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5082,6 +5741,9 @@ export abstract class ChannelBase {
           process.stderr.write(
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
+        }
+        if (promptState.cancelled) {
+          return;
         }
         throw err;
       } finally {
@@ -5146,6 +5808,9 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(sessionId);
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
+          const coalescedDisplayText = buffer
+            .map((b) => b.displayText)
+            .join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
           this.notifyPromptBufferDrained(
             lastEnvelope.chatId,
@@ -5156,10 +5821,12 @@ export abstract class ChannelBase {
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
+            displayText: coalescedDisplayText,
             // Coalesced text already carries each message's [sender] prefix.
             alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
+            mentionedMemberIds: undefined,
             attachments: undefined,
             metadata: undefined,
             imageBase64: undefined,
@@ -5185,22 +5852,64 @@ export abstract class ChannelBase {
     await current;
   }
 
+  private pairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    return rejected === 'sender_pending'
+      ? 'You already have a pending pairing request. It must be approved or expire before another can be created.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
+  private groupPairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    // Group variant: the DM wording would publicly attribute the mentioning
+    // member's unrelated pending request to the whole group.
+    return rejected === 'sender_pending'
+      ? 'A pairing request cannot be created right now. Another member can mention the bot to start group approval, or try again later.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
   protected async onPairingRequired(
     chatId: string,
-    code: string | null,
+    result: CreatePairingRequestResult,
     threadId?: string,
   ): Promise<void> {
-    if (code) {
+    if ('code' in result) {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        `Your pairing code is: ${code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${code}`,
+        `Your pairing code is: ${result.code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
       );
     } else {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        'Too many pending pairing requests. Please try again later.',
+        this.pairingRejectionMessage(result.rejected),
+      );
+    }
+  }
+
+  protected async onGroupPairingRequired(
+    chatId: string,
+    result: CreatePairingRequestResult,
+    threadId?: string,
+  ): Promise<void> {
+    if ('code' in result) {
+      if (this.groupPairingNotified.get(chatId) === result.code) {
+        return;
+      }
+      await this.sendThreadMessage(
+        chatId,
+        threadId,
+        `This group requires approval. Its pairing code is: ${result.code}\n\nAsk the bot operator to approve the group with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
+      );
+      this.groupPairingNotified.set(chatId, result.code);
+    } else {
+      await this.sendThreadMessage(
+        chatId,
+        threadId,
+        this.groupPairingRejectionMessage(result.rejected),
       );
     }
   }

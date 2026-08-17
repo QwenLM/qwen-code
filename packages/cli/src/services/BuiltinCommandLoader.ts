@@ -8,6 +8,7 @@ import type { ICommandLoader } from './types.js';
 import type { SlashCommand } from '../ui/commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
+import { advisorCommand } from '../ui/commands/advisor-command.js';
 import { tasksCommand } from '../ui/commands/tasksCommand.js';
 import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
@@ -24,6 +25,7 @@ import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
+import { curatorCommand } from '../ui/commands/curator-command.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { doctorCommand } from '../ui/commands/doctorCommand.js';
@@ -107,6 +109,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
 
     const allDefinitions: Array<SlashCommand | null> = [
       aboutCommand,
+      advisorCommand,
       agentsCommand,
       tasksCommand,
       // Gated behind isWorkflowsEnabled — feature flag honors
@@ -128,6 +131,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressFastCommand,
       configCommand,
       contextCommand,
+      curatorCommand,
       copyCommand,
       diffCommand,
       deleteCommand,

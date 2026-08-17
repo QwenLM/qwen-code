@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,11 +38,17 @@ describe('validateRequests', () => {
     expect(() => validateRequests([{ ...ok, anchor: '' }])).toThrow(/"anchor"/);
   });
 
-  it('rejects a non-numeric claimed line', () => {
-    expect(() => validateRequests([{ ...ok, line: '42' }])).toThrow(
-      /non-numeric "line"/,
-    );
-  });
+  it.each(['42', -1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects an invalid claimed line %s',
+    (line) => {
+      // The same rule the `findings` validator applies: the two validators in
+      // one pipeline must agree, so an entry that passes here cannot hard-fail
+      // there.
+      expect(() => validateRequests([{ ...ok, line }])).toThrow(
+        /invalid "line"/,
+      );
+    },
+  );
 
   it('names the offending index for a null element instead of crashing', () => {
     // `typeof null === 'object'`, so indexing it threw a bare TypeError that said
@@ -67,10 +73,11 @@ describe('resolve-anchors (command boundary)', () => {
     'diff --git a/src/pay.ts b/src/pay.ts',
     '--- a/src/pay.ts',
     '+++ b/src/pay.ts',
-    '@@ -10,1 +10,3 @@',
+    '@@ -10,1 +10,4 @@',
     ' function pay(amt) {',
     '+  if (amt < 0) return;',
     '+  charge(amt);',
+    '+  log("alpha bravo charlie delta echo foxtrot golf hotel india juliet");',
     '',
   ].join('\n');
 
@@ -94,8 +101,28 @@ describe('resolve-anchors (command boundary)', () => {
     return JSON.parse(readFileSync(out, 'utf8'));
   }
 
+  /** Drive the real handler and return the report plus everything on stderr. */
+  function runWithStderr(findings: unknown): {
+    report: Record<string, unknown>;
+    stderr: string;
+  } {
+    let stderr = '';
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderr +=
+          typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
+        return true;
+      });
+    try {
+      return { report: run(findings), stderr };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
   it('partitions resolved and unmatched, and reports honest stats', () => {
-    const report = run([
+    const { report: raw, stderr } = runWithStderr([
       // resolves, and corrects a miscounted line
       { id: 'a', path: 'src/pay.ts', anchor: '  charge(amt);', line: 99 },
       // multi-line, counted correctly
@@ -107,26 +134,36 @@ describe('resolve-anchors (command boundary)', () => {
       },
       // the file is not in the diff at all
       { id: 'c', path: 'src/ghost.ts', anchor: 'nope();' },
-    ]) as {
+      // a mid-line fragment of the long added line — the substring tier
+      { id: 'd', path: 'src/pay.ts', anchor: 'golf hotel india' },
+    ]);
+    const report = raw as {
       resolved: Array<Record<string, unknown>>;
       unmatched: Array<Record<string, unknown>>;
       stats: Record<string, number>;
     };
 
-    expect(report.resolved.map((r) => r['id'])).toEqual(['a', 'b']);
+    expect(report.resolved.map((r) => r['id'])).toEqual(['a', 'b', 'd']);
     expect(report.resolved[0]).toMatchObject({
       line: 12,
       claimedLine: 99,
       drift: 87,
     });
     expect(report.resolved[1]).toMatchObject({ startLine: 11, line: 12 });
+    expect(report.resolved[2]).toMatchObject({
+      line: 13,
+      tier: 'substring-added',
+    });
     expect(report.unmatched.map((r) => r['id'])).toEqual(['c']);
     expect(report.stats).toMatchObject({
-      total: 3,
-      resolved: 2,
+      total: 4,
+      resolved: 3,
       unmatched: 1,
       drifted: 1,
+      substring: 1,
     });
+    // The signal Step 7 reads to give fragment anchors a second look.
+    expect(stderr).toContain('1 matched inside a longer hunk line');
   });
 
   it('fails loudly on malformed input rather than resolving part of it', () => {

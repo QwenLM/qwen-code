@@ -4,18 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { ConfigurationError } from './config.js';
 import { runMcp } from './mcp.js';
+import { installEnvironmentProxy } from './proxy.js';
 
 try {
-  try {
-    setGlobalDispatcher(new EnvHttpProxyAgent());
-  } catch {
-    throw new ConfigurationError(
-      'Proxy environment configuration is invalid. Check HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.',
-    );
-  }
+  installEnvironmentProxy();
   await runMcp();
 } catch (error) {
   const message =

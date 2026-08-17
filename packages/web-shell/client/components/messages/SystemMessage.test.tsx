@@ -20,12 +20,12 @@ afterEach(() => {
   }
 });
 
-function render(node: ReactNode): HTMLElement {
+function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<I18nProvider language="en">{node}</I18nProvider>);
+    root.render(<I18nProvider language={language}>{node}</I18nProvider>);
   });
   mounted.push({ root, container });
   return container;
@@ -62,6 +62,292 @@ describe('SystemMessage — prompt_cancelled marker', () => {
   });
 });
 
+describe('SystemMessage — background notification label', () => {
+  it('labels background task notifications and preserves display text', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background agent "worker" completed.',
+    );
+    const icon = container.querySelector('[role="img"][data-tone="success"]');
+    expect(icon?.getAttribute('aria-label')).toBe('Background task completed');
+    expect(icon?.nextElementSibling?.textContent).toContain(
+      'Background agent "worker" completed.',
+    );
+    expect(icon?.querySelector('svg')).not.toBeNull();
+  });
+
+  it('localizes the label', () => {
+    const container = render(
+      <SystemMessage
+        content="后台代理已完成。"
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(
+      container
+        .querySelector('[role="img"][data-tone="success"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('后台任务执行完成');
+  });
+
+  it.each([
+    ['failed', '后台任务执行失败', 'error'],
+    ['cancelled', '后台任务已取消', 'neutral'],
+    ['unknown', '后台任务通知', 'neutral'],
+  ])(
+    'uses the matching label and tone for %s status',
+    (status, label, tone) => {
+      const container = render(
+        <SystemMessage
+          content="任务结果"
+          variant="info"
+          source="background_notification"
+          data={{ status }}
+        />,
+        'zh-CN',
+      );
+
+      const icon = container.querySelector(`[role="img"][data-tone="${tone}"]`);
+      expect(icon?.getAttribute('aria-label')).toBe(label);
+      expect(icon?.querySelector('svg')).not.toBeNull();
+    },
+  );
+
+  it('does not label generic system information', () => {
+    const container = render(
+      <SystemMessage content="Connected." variant="info" />,
+    );
+
+    expect(container.textContent).toBe('Connected.');
+  });
+});
+
+describe('SystemMessage — background notification i18n body', () => {
+  it('renders shell notifications with structured command via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已完成：npm test');
+    expect(container.textContent).not.toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders agent notifications with structured description via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'agent',
+          description: 'worker',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台智能体已完成：worker');
+  });
+
+  it('renders monitor notifications with the event count in English', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Monitor "logs" completed. (5 events)',
+    );
+    expect(container.textContent).not.toContain('raw daemon text');
+  });
+
+  it('renders the dropped-lines clause when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Monitor "logs" completed. (5 events, 2 lines dropped due to throttling)',
+    );
+  });
+
+  it('renders the dropped-lines clause in zh-CN when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器已完成（5 个事件，因限流丢弃 2 行）：logs',
+    );
+  });
+
+  it('renders failed monitor notifications with the event count in zh-CN', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'failed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 42,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器执行失败（42 个事件）：logs',
+    );
+  });
+
+  it('renders cancelled shell notifications via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'cancelled',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已取消：npm test');
+  });
+
+  it('renders failed agent notifications via i18n in English', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{ status: 'failed', kind: 'agent', description: 'worker' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background agent "worker" failed.',
+    );
+  });
+
+  it('falls back to raw content for unknown terminal statuses', () => {
+    const container = render(
+      <SystemMessage
+        content='Monitor "logs" timed out.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'timeout', kind: 'monitor', description: 'logs' }}
+      />,
+    );
+
+    expect(container.textContent).toContain('Monitor "logs" timed out.');
+    expect(container.textContent).not.toContain('notification.monitor.timeout');
+  });
+
+  it('falls back to raw content when structured fields are absent', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'shell' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders the fallback through Markdown so session links stay clickable', () => {
+    const seen: unknown[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener('qwen:open-session', handler);
+    const container = render(
+      <SystemMessage
+        content="Sub-session [🧵 abc12345](qwen-session://abc12345-full) completed."
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'agent' }}
+      />,
+    );
+
+    const link = container.querySelector('a[role="button"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('🧵 abc12345');
+    expect(container.textContent).not.toContain('](');
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(seen).toEqual(['abc12345-full']);
+    window.removeEventListener('qwen:open-session', handler);
+  });
+});
+
 describe('SystemMessage — goal status activation', () => {
   const content = serializeGoalStatusMessage({
     kind: 'set',
@@ -91,5 +377,67 @@ describe('SystemMessage — goal status activation', () => {
     expect(container.textContent).toContain('Ship safely');
     expect(handler).not.toHaveBeenCalled();
     window.removeEventListener('web-shell-goal-status-active', handler);
+  });
+});
+
+describe('SystemMessage — inline images', () => {
+  it('renders image thumbnails when images prop is provided', () => {
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,base64data');
+    expect(img?.className).toContain('chatImageThumb');
+  });
+
+  it('makes images clickable when onImagePreview is provided', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img?.className).toContain('chatImageThumbInteractive');
+
+    act(() => {
+      img?.click();
+    });
+
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,base64data',
+      'User uploaded image 1',
+    );
+  });
+
+  it('renders multiple images in a row', () => {
+    const container = render(
+      <SystemMessage
+        content="look at these"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[
+          { data: 'img1', mimeType: 'image/png' },
+          { data: 'img2', mimeType: 'image/jpeg' },
+        ]}
+      />,
+    );
+
+    const imgs = container.querySelectorAll('img');
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]?.getAttribute('src')).toBe('data:image/png;base64,img1');
+    expect(imgs[1]?.getAttribute('src')).toBe('data:image/jpeg;base64,img2');
   });
 });

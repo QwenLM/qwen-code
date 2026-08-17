@@ -18,6 +18,7 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { refreshMemoryInstruction } from './refresh.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -27,6 +28,37 @@ vi.mock('./indexer.js', () => ({
   rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(''),
   rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(''),
 }));
+
+vi.mock('./refresh.js', () => ({
+  refreshMemoryInstruction: vi.fn().mockResolvedValue(undefined),
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForMockCall(mock: { mock: { calls: unknown[] } }) {
+  // Wall-clock deadline, not a fixed tick count: the mock is invoked after
+  // real async work (index reads, cursor I/O), and ten zero-delay turns can
+  // elapse before that work completes on a loaded CI runner — the poll spun
+  // through its turns without waiting any actual time.
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    if (mock.mock.calls.length > 0) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('Expected mock to be called');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 describe('auto-memory extraction', () => {
   let tempDir: string;
@@ -83,6 +115,7 @@ describe('auto-memory extraction', () => {
 
     expect(first.touchedTopics).toEqual([]);
     expect(second.touchedTopics).toEqual([]);
+    expect(refreshMemoryInstruction).not.toHaveBeenCalled();
 
     const cursor = JSON.parse(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
@@ -217,6 +250,69 @@ describe('auto-memory extraction', () => {
 
       expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledTimes(1);
       expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the live instruction after touched topics are indexed', async () => {
+      const projectRebuild = deferred<string>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['project'],
+        touchedProjectScope: true,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      vi.mocked(rebuildManagedAutoMemoryIndex).mockReturnValueOnce(
+        projectRebuild.promise,
+      );
+
+      const extractPromise = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      });
+      await waitForMockCall(vi.mocked(rebuildManagedAutoMemoryIndex));
+
+      expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+
+      projectRebuild.resolve('');
+      await extractPromise;
+
+      expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'managed auto-memory extraction',
+      });
+    });
+
+    it('refreshes user-scope-only updates after the user index is rebuilt', async () => {
+      const userRebuild = deferred<string>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['user'],
+        touchedProjectScope: false,
+        touchedUserScope: true,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      vi.mocked(rebuildUserAutoMemoryIndex).mockReturnValueOnce(
+        userRebuild.promise,
+      );
+
+      const extractPromise = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      });
+      await waitForMockCall(vi.mocked(rebuildUserAutoMemoryIndex));
+
+      expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+      expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+
+      userRebuild.resolve('');
+      await extractPromise;
+
+      expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'managed auto-memory extraction',
+      });
     });
   });
 

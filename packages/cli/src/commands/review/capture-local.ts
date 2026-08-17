@@ -21,6 +21,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
@@ -30,6 +31,8 @@ import {
   stringifyPlanReport,
   type PlanReport,
 } from './lib/report.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 
 interface CaptureLocalArgs {
   out: string;
@@ -93,10 +96,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // No ref to `git show` a pre-change file out of, so per-file line counts and
     // heaviness are unavailable — same as `plan-diff`. Chunk coverage, which is
     // what the topology needs, is not.
-    ...buildPlanReport(plan, null),
+    ...buildPlanReport(plan, null, {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    }),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
-    ...(args.effort ? { effort: args.effort } : {}),
+    ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');

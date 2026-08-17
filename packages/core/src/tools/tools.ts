@@ -466,6 +466,13 @@ export type ToolArtifactKind =
   | 'notebook'
   | 'other';
 
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
+
 export type ToolArtifactStorage =
   | 'workspace'
   | 'external_url'
@@ -540,6 +547,12 @@ export interface ToolResult {
    * turns within the same agentic loop.
    */
   modelOverride?: string;
+
+  /**
+   * End the current Goal turn after recording this successful result. Only
+   * honored when the tool batch carries a Goal context; ignored otherwise.
+   */
+  terminateTurn?: boolean;
 }
 
 /**
@@ -653,6 +666,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }
@@ -711,6 +725,29 @@ export function isShellProgressData(
   );
 }
 
+export const MAX_TERMINAL_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export interface TerminalImageDisplay {
+  type: 'terminal_image';
+  filePath: string;
+  mimeType: 'image/png';
+}
+
+export function isTerminalImageDisplay(
+  display: unknown,
+): display is TerminalImageDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'terminal_image' &&
+    'filePath' in display &&
+    typeof display.filePath === 'string' &&
+    'mimeType' in display &&
+    display.mimeType === 'image/png'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
@@ -722,7 +759,8 @@ export type ToolResultDisplay =
   | AnsiOutputDisplay
   | McpToolProgressData
   | VisionBridgeNoticeDisplay
-  | ShellProgressData;
+  | ShellProgressData
+  | TerminalImageDisplay;
 
 export interface TeamResultDisplay {
   type: 'team_result';
@@ -769,10 +807,12 @@ export interface DiffStat {
 
 export interface TodoResultDisplay {
   type: 'todo_list';
+  planId?: string;
   todos: Array<{
     id: string;
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
+    blockedBy?: string[];
   }>;
 }
 
@@ -882,6 +922,8 @@ export interface ToolInfoConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   prompt: string;
+  /** Display the prompt literally instead of interpreting inline Markdown. */
+  renderPromptAsPlainText?: boolean;
   urls?: string[];
   /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
   permissionRules?: string[];

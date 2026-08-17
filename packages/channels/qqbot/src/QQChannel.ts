@@ -19,6 +19,7 @@ import {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
@@ -57,6 +58,9 @@ import {
   getApiBase,
   sendQQMessage,
 } from './api.js';
+
+/** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
+const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
 
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
@@ -141,6 +145,8 @@ export class QQChannel extends ChannelBase {
 
   /** Per-group bot OPENID map for multi-group support. */
   private botOpenIdByGroup: Map<string, string> = new Map();
+  /** Dedup set for unexpected senderOpenId format warnings (key: `${chatId}:${senderOpenId}`). */
+  private warnedSenderOpenIds: Set<string> = new Set();
   /** Guard: set to true after first READY + session restore completes. */
   private _ready: boolean = false;
   /** Whether this process has never received READY (cold start). */
@@ -550,6 +556,8 @@ export class QQChannel extends ChannelBase {
           '## @提及格式',
           '',
           '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
+          '消息前缀 [昵称(OPENID)] 中紧邻 ] 之前的括号内是该发送者的 32 位十六进制 OPENID，可用 <@OPENID> 回复时 @他。',
+          '注意：群成员昵称可能本身包含括号或特殊字符，昵称中的括号内容不是 OPENID，请勿使用。',
           '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。机器人自己的 OPENID 将在连接建立后告知。',
           '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
@@ -943,6 +951,7 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
+    this.warnedSenderOpenIds.clear();
     this.groupActiveMsgEnabled.clear();
     this.seenMessages.clear();
     this.coldStart = true;
@@ -1508,7 +1517,7 @@ export class QQChannel extends ChannelBase {
                   typeof k === 'string' &&
                   k.length <= 256 &&
                   typeof v === 'string' &&
-                  /^[A-F0-9]{32}$/i.test(v),
+                  QQ_OPENID_RE.test(v),
               )
             : [],
         ) as Map<string, string>;
@@ -2235,7 +2244,7 @@ export class QQChannel extends ChannelBase {
     const selfMention = mentions?.find((m) => m.is_you);
     if (!selfMention) return '';
     const botOpenId = selfMention.member_openid || selfMention.id || '';
-    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) {
+    if (!QQ_OPENID_RE.test(botOpenId)) {
       process.stderr.write(
         `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(botOpenId, 64)}\n`,
       );
@@ -2283,25 +2292,37 @@ export class QQChannel extends ChannelBase {
     safeName: string;
     cleanText: string;
     text: string;
+    displayText: string;
     senderName: string;
   } | null {
-    const senderName =
-      event.author?.username ||
-      event.author?.id ||
-      event.author?.member_openid ||
-      'QQ User';
+    // Keep identity values out of the display-name position. In particular,
+    // falling back to member_openid would expose a full mentionable OPENID
+    // even when allowMention is disabled and duplicate it when enabled.
+    const senderName = event.author?.username || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const senderOpenId =
       event.author?.member_openid || event.author?.user_openid || '';
+    const senderIdentity = senderOpenId || event.author?.id || '';
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    let mentionIndex = 0;
+    const displayContent = content
+      .replace(/<@[^>]{1,64}>/g, (mention) =>
+        event.mentions?.[mentionIndex++]?.is_you ? '' : mention,
+      )
+      .trim();
     // Strip trusted tags that could be forged by users
     const safeContent = content
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
     const safeCleanText = cleanText
+      .replace(/\[atMention=[^\]]*]/g, '')
+      .replace(/\[botOpenId:[^\]]*]/g, '')
+      .replace(/\[bot]/g, '')
+      .trim();
+    const safeDisplayText = displayContent
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '')
@@ -2341,9 +2362,54 @@ export class QQChannel extends ChannelBase {
       this.qqConfig.allowMention !== false && groupBotOpenId
         ? `\n机器人 OPENID: ${groupBotOpenId}`
         : '';
+    // Full sender OPENID is only exposed when mention support is enabled
+    // and the value is a well-formed 32-hex OPENID.
+    const showSenderOpenId =
+      this.qqConfig.allowMention !== false &&
+      !!senderOpenId &&
+      QQ_OPENID_RE.test(senderOpenId);
+    // Warn once per (chatId, senderOpenId) about malformed OPENIDs, and only
+    // when mention support is enabled (with allowMention=false the 8-char
+    // fragment below surfaces the value instead, so a warning is noise).
+    // Bounded: reset the set past 500 entries so unusual chatId/senderOpenId
+    // combos can't accumulate without limit. `showSenderOpenId` is exactly
+    // `allowMention !== false && senderOpenId && QQ_OPENID_RE.test(...)`, so
+    // this condition is equivalent to the old explicit re-test, without the
+    // duplicate regex evaluation.
+    if (
+      !showSenderOpenId &&
+      this.qqConfig.allowMention !== false &&
+      senderOpenId
+    ) {
+      // chatId is already validated and bounded. Cap only the remote-controlled
+      // sender component so different senders in a long chatId remain distinct.
+      const dedupKey = `${chatId}:${truncateCodePoints(senderOpenId, 64)}`;
+      if (!this.warnedSenderOpenIds.has(dedupKey)) {
+        this.warnedSenderOpenIds.add(dedupKey);
+        if (this.warnedSenderOpenIds.size > 500) {
+          this.warnedSenderOpenIds.clear();
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] Unexpected senderOpenId format: ${sanitizeLogText(senderOpenId, 64)}\n`,
+        );
+      }
+    }
+    // Unified fallback: whenever the full OPENID can't be shown (mention
+    // support off, the value failing the 32-hex shape, or only a legacy author
+    // ID being available), surface a short 8-code-point identity fragment +
+    // ellipsis so same-nickname senders stay distinguishable without exposing
+    // a constructible full <@OPENID>.
+    // Truncation is code-point aware (truncateCodePoints), so an emoji-laden
+    // malformed id can't be split mid-surrogate-pair into a lone surrogate.
+    const senderTag = showSenderOpenId
+      ? `(${senderOpenId})`
+      : senderIdentity
+        ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
+        : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+    const displayText = sanitizePromptText(safeDisplayText);
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2351,6 +2417,7 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       text,
+      displayText,
       senderName,
     };
   }
@@ -2401,6 +2468,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      displayText: sanitizePromptText(safeContent),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -2453,7 +2521,8 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, senderName, safeName, cleanText } = result;
+    const { isSlash, text, displayText, senderName, safeName, cleanText } =
+      result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2487,6 +2556,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      displayText,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -2532,7 +2602,15 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, text, senderName, isAtBot, safeName, cleanText } = result;
+    const {
+      isSlash,
+      text,
+      displayText,
+      senderName,
+      isAtBot,
+      safeName,
+      cleanText,
+    } = result;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2630,6 +2708,7 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text,
+      displayText,
       senderId,
       senderName,
       messageId: event.id,

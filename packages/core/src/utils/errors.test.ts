@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { APIUserAbortError as AnthropicAPIUserAbortError } from '@anthropic-ai/sdk';
+import { APIConnectionError, APIUserAbortError } from 'openai';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 
 describe('getErrorMessage cause unwrapping', () => {
@@ -231,6 +233,44 @@ describe('isAbortError', () => {
 
     expect(isAbortError(networkError)).toBe(false);
   });
+
+  it('should return true for the OpenAI SDK APIUserAbortError (user cancel)', () => {
+    // The OpenAI SDK is the request path for auth_type=openai; a user cancel
+    // surfaces as APIUserAbortError. It does not set `.name` (stays 'Error')
+    // and has no ABORT_ERR code, so the checks above miss it.
+    const error = new APIUserAbortError({ message: 'Request was aborted.' });
+
+    // Assert the requirement (the name-based branch can't match it) rather than
+    // the SDK internal `.name === 'Error'`, which would break if OpenAI/Anthropic
+    // ever set a name without changing the correct behavior here.
+    expect(error.name).not.toBe('AbortError');
+    expect(isAbortError(error)).toBe(true);
+  });
+
+  it('should return true for the Anthropic SDK APIUserAbortError', () => {
+    // Both SDKs this package depends on are Stainless-generated and share the
+    // abort class name, so the same check covers auth_type=anthropic. Pinned so
+    // the cross-SDK coverage is intentional rather than incidental.
+    const error = new AnthropicAPIUserAbortError({
+      message: 'Request was aborted.',
+    });
+
+    // Assert the requirement (the name-based branch can't match it) rather than
+    // the SDK internal `.name === 'Error'`, which would break if OpenAI/Anthropic
+    // ever set a name without changing the correct behavior here.
+    expect(error.name).not.toBe('AbortError');
+    expect(isAbortError(error)).toBe(true);
+  });
+
+  it('should return false for other SDK errors such as APIConnectionError', () => {
+    // Guards the abort match against being broadened (e.g. to any `API*`
+    // class): a transient connection failure must stay retryable, not be
+    // reported as a user cancellation.
+    const error = new APIConnectionError({ message: 'Connection error.' });
+
+    expect(error.constructor.name).toBe('APIConnectionError');
+    expect(isAbortError(error)).toBe(false);
+  });
 });
 
 describe('isNodeError', () => {
@@ -251,5 +291,45 @@ describe('isNodeError', () => {
     expect(isNodeError({ code: 'ENOENT' })).toBe(false);
     expect(isNodeError('string')).toBe(false);
     expect(isNodeError(null)).toBe(false);
+  });
+});
+
+describe('getErrorMessage length cap', () => {
+  // `MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH` is 1000 and is not exported; the
+  // truncated form is the first 997 characters plus an ellipsis.
+  const CAP = 1000;
+  const big = 'x'.repeat(5000);
+
+  it('caps a bare Error whose message carries a response body', () => {
+    const message = getErrorMessage(new Error(big));
+
+    expect(message).toHaveLength(CAP);
+    expect(message.endsWith('...')).toBe(true);
+  });
+
+  // The cap used to depend on things unrelated to length: the same string was
+  // capped in every other shape and uncapped only for a bare Error. Each of
+  // these is the same message reached by a different branch.
+  it.each([
+    ['bare Error', () => new Error(big)],
+    ['Error with a distinct cause', () => new Error(big, { cause: 'boom' })],
+    ['object with a message', () => ({ message: big })],
+    [
+      'object with a message and cause',
+      () => ({ message: big, cause: 'boom' }),
+    ],
+    ['object serialised as JSON', () => ({ blob: big })],
+  ])('caps %s at the same length', (_label, makeError) => {
+    expect(getErrorMessage(makeError()).length).toBeLessThanOrEqual(CAP);
+  });
+
+  // Guards against over-correcting: a message inside the limit must come back
+  // whole, with no ellipsis. Passes both before and after the change.
+  it.each([
+    ['short', 'boom'],
+    ['exactly at the cap', 'y'.repeat(CAP)],
+    ['one under the cap', 'y'.repeat(CAP - 1)],
+  ])('returns a %s message unchanged', (_label, message) => {
+    expect(getErrorMessage(new Error(message))).toBe(message);
   });
 });

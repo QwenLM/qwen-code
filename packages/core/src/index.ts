@@ -93,6 +93,7 @@ export * from './core/session-recovery.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
+export * from './core/tool-invocation-guard.js';
 export * from './core/turn.js';
 export * from './core/turn-interruption.js';
 
@@ -112,6 +113,7 @@ export * from './tools/mcp-client-manager.js';
 // Shared MCP resource content formatter (used by the `@` injection path and
 // the read_mcp_resource tool).
 export * from './tools/mcp-resource-content.js';
+export { runWithTimeout } from './tools/mcp-discovery-timeout.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
@@ -199,7 +201,10 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 // Exported for the cross-package contract test in packages/cli (see the
 // function's own doc comment) — the daemon's file-read route must resolve the
 // workspacePath this produces.
-export { buildRecordArtifactReminder } from './tools/write-file.js';
+export {
+  buildRecordArtifactReminder,
+  buildWorkspaceArtifactMetadata,
+} from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
@@ -236,7 +241,12 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export {
+  resolveSlimmingConfig,
+  type ResolvedSlimmingConfig,
+} from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
+export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,
@@ -259,26 +269,48 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
+export * from './services/tool-write-origin.js';
 export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
 } from './utils/sync-file-encoding.js';
+export {
+  CursorNotAtLineBoundaryError,
+  LargeNonUtf8TextError,
+  TextScanBudgetExceededError,
+} from './utils/read-text-range.js';
+export type { ReadTextRangeResult } from './utils/read-text-range.js';
+export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
-export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
+export {
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  GLOBAL_DUPLICATE_THRESHOLD,
+  getToolCallRepeatKey,
+  shouldHaltOnTurnToolCallCap,
+} from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
+export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
+export * from './services/session-registry.js';
 export * from './services/sessionService.js';
+export {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './services/session-turn-state.js';
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
+  findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
+  isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
+  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -289,6 +321,12 @@ export {
   SessionTranscriptTooLargeError,
 } from './services/session-transcript-reader.js';
 export type {
+  SelectiveSessionRestoreOptions,
+  SessionLiveRestoreProjection,
+  SessionRestoreProjection,
+  SessionRestoreReplayPage,
+  SessionRestoreReplaySelection,
+  SessionRuntimeResumeState,
   SessionTranscriptCursorState,
   SessionTranscriptReadPageOptions,
   SessionTranscriptRecordPage,
@@ -322,10 +360,14 @@ export type {
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
+  stripDisplayControlChars,
+  truncateNotificationLabel,
   TERMINAL_OSC_REGEX,
   TERMINAL_CSI_REGEX,
   TERMINAL_SHIFT_DCS_REGEX,
+  NOTIFICATION_LABEL_MAX_LENGTH,
 } from './utils/terminalSafe.js';
+export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
@@ -349,6 +391,7 @@ export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
+export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -445,6 +488,7 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logLoopDetected,
+  logRepeatedToolFailureGuard,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -461,6 +505,7 @@ export {
   IdeConnectionType,
   LoopDetectedEvent,
   LoopType,
+  RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
@@ -511,6 +556,7 @@ export {
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
+export * from './utils/git-branches.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
@@ -525,6 +571,7 @@ export {
 export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
+export * from './utils/tool-result-retention.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/modelId.js';
 export * from './utils/runtimeDiagnostics.js';
@@ -542,6 +589,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/rateLimit.js';
@@ -557,6 +605,7 @@ export {
   preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
+export * from './utils/process-liveness.js';
 export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
@@ -622,6 +671,13 @@ export {
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
+export {
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
+  isUserPromptSubmitContextPartText,
+  stripTrailingUserPromptSubmitContextPart,
+} from './hooks/user-prompt-submit-context.js';
+export { wrapUserPromptSubmitContext } from './utils/transcript-records.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

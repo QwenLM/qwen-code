@@ -7,12 +7,21 @@ name: 'Serve A/B'
 # the daemon analog of the web-shell visual before/after preview.
 #
 # Security model: this workflow BUILDS AND RUNS untrusted PR code, so it runs on
-# the `pull_request` trigger (fork PRs get a read-only token and NO secrets), on
-# an ephemeral runner, with `contents: read`. It produces only JSON captures +
-# a markdown body as an artifact. The privileged step that needs a write token —
-# posting the comment — lives in the separate workflow_run publisher, which
-# never checks out PR code. The daemon is driven with dummy OpenAI creds, so no
-# model is contacted and the responses are deterministic + safe to diff.
+# the `pull_request` trigger (fork PRs get a read-only token and NO secrets) and
+# with `contents: read`. It produces only JSON captures + a markdown body as an
+# artifact. The privileged step that needs a write token — posting the comment —
+# lives in the separate workflow_run publisher, which never checks out PR code.
+# The daemon is driven with dummy OpenAI creds, so no model is contacted and the
+# responses are deterministic + safe to diff.
+#
+# Runner routing: in-repo PRs, and fork PRs whose author has write access
+# (OWNER/MEMBER/COLLABORATOR association), run on the persistent ECS pool —
+# a write-access author could push the same code to this repo directly, so the
+# pool grants them nothing new, and the pre-checkout wipe below keeps one PR's
+# build from bleeding into the next. Other fork PRs stay on ephemeral hosted
+# runners. NOTE: this trigger reads its YAML from the fork, so the association
+# clause is routing convenience, not a security boundary — the boundary for
+# fork code is the repo's fork-PR workflow-approval setting.
 on:
   pull_request:
     branches:
@@ -44,9 +53,35 @@ jobs:
   ab:
     name: 'Serve A/B (ubuntu-latest, Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
+    # Same-repo PRs and fork PRs whose author has write access
+    # (OWNER/MEMBER/COLLABORATOR association) run on the persistent ECS pool;
+    # other fork PRs stay on ephemeral hosted runners. Keep in sync with
+    # ci.yml's classify_pr routing. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Wipe stale workspace before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          # The two checkouts clone into head/ and base/ subdirectories;
+          # leftovers there from a previous run on the same reusable runner
+          # could bleed into the builds and silently change the posted A/B
+          # diff. Hosted runners are ephemeral and never see this. After the
+          # ownership-restore step everything is user-owned, so no sudo.
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:

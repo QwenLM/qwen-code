@@ -4,14 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { mapToDisplay, type TrackedToolCall } from './useReactToolScheduler.js';
+import { act, renderHook } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import type { Part } from '@google/genai';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { CoreToolScheduler } from '@qwen-code/qwen-code-core';
+import {
+  mapToDisplay,
+  type TrackedToolCall,
+  useReactToolScheduler,
+} from './useReactToolScheduler.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from '../utils/inline-image-parts.js';
 
 // Build a minimal successful tracked tool call with the fields mapToDisplay's
 // success branch reads. `displayName` drives the collapsible gate.
-const makeSuccess = (displayName: string): TrackedToolCall =>
+const makeCompleted = (
+  status: 'success' | 'error' | 'cancelled',
+  displayName: string,
+  responseMedia: Part[] = [],
+): TrackedToolCall =>
   ({
-    status: 'success',
+    status,
     request: { callId: 'call-1', name: 'read_file', args: {} },
     tool: { displayName, isOutputMarkdown: false },
     invocation: { getDescription: () => 'reading' },
@@ -23,11 +36,17 @@ const makeSuccess = (displayName: string): TrackedToolCall =>
             id: 'call-1',
             name: 'read_file',
             response: { output: 'FULL FILE CONTENT' },
+            ...(responseMedia.length > 0 ? { parts: responseMedia } : {}),
           },
         },
       ],
     },
   }) as unknown as TrackedToolCall;
+
+const makeSuccess = (
+  displayName: string,
+  responseMedia: Part[] = [],
+): TrackedToolCall => makeCompleted('success', displayName, responseMedia);
 
 describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
   it('extracts detailedDisplay for a collapsible (read/search/list) tool', () => {
@@ -44,5 +63,89 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
     // (the transcript never reads it for edit/write/command/agent tools).
     const group = mapToDisplay(makeSuccess('Edit'));
     expect(group.tools[0].detailedDisplay).toBeUndefined();
+  });
+
+  it.each(['success', 'error', 'cancelled'] as const)(
+    'extracts nested inline images from %s tool response parts',
+    (status) => {
+      const group = mapToDisplay(
+        makeCompleted(status, 'Read File', [
+          {
+            inlineData: {
+              data: 'dG9vbC1pbWFnZQ==',
+              mimeType: 'image/png',
+              displayName: 'result.png',
+            },
+          },
+        ]),
+      );
+
+      expect(group.tools[0].images).toEqual([
+        {
+          data: 'dG9vbC1pbWFnZQ==',
+          mimeType: 'image/png',
+        },
+      ]);
+    },
+  );
+
+  it('caps tool images and reports the overflow count', () => {
+    const images = Array.from(
+      { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+      (_, index) => ({
+        inlineData: {
+          data: Buffer.from(`tool-image-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        },
+      }),
+    );
+
+    const tool = mapToDisplay(makeCompleted('success', 'Read File', images))
+      .tools[0];
+
+    expect(tool.images).toEqual(
+      images
+        .slice(0, MAX_INLINE_IMAGES_PER_ITEM)
+        .map((part) => part.inlineData),
+    );
+    expect(tool.omittedImageCount).toBe(2);
+  });
+});
+
+describe('useReactToolScheduler', () => {
+  it('handles a queued tool cancellation at the fire-and-forget boundary', async () => {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('Tool call cancelled while in queue.'));
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const { result } = renderHook(() =>
+      useReactToolScheduler(
+        vi.fn(),
+        { getToolRegistry: () => ({}) } as unknown as Config,
+        () => undefined,
+        vi.fn(),
+      ),
+    );
+
+    act(() => {
+      result.current[1](
+        {
+          callId: 'queued-call',
+          name: 'read_file',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'queued-prompt',
+        },
+        abortController.signal,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(scheduleSpy).toHaveBeenCalledOnce();
+    scheduleSpy.mockRestore();
   });
 });

@@ -5,7 +5,11 @@
  */
 
 import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
+import { gitEnv } from './git-branches.js';
+
+const execFileAsync = promisify(execFile);
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
@@ -160,7 +164,10 @@ export function parseGhPrList(stdout: string): GitHubPullRequest[] {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-function runGhPrList(gitRoot: string): Promise<string> {
+function runGhPrList(
+  gitRoot: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'gh',
@@ -180,6 +187,7 @@ function runGhPrList(gitRoot: string): Promise<string> {
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
+        env: gitEnv(env),
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -189,11 +197,15 @@ function runGhPrList(gitRoot: string): Promise<string> {
   });
 }
 
-function ghErrorMessage(error: unknown): string {
+function ghErrorMessage(
+  error: unknown,
+  commandLabel = 'gh pr list',
+  timeoutMs = GH_TIMEOUT_MS,
+): string {
   // A timeout kill carries an empty stderr and a "Command failed: gh pr
   // list …" message; name the timeout instead of dumping the argv.
   if ((error as { killed?: unknown } | null)?.killed === true) {
-    return `gh pr list timed out after ${GH_TIMEOUT_MS / 1000}s`;
+    return `${commandLabel} timed out after ${timeoutMs / 1000}s`;
   }
   const stderr = (error as { stderr?: unknown } | null)?.stderr;
   const raw =
@@ -209,17 +221,20 @@ function ghErrorMessage(error: unknown): string {
  * List open pull requests for the GitHub repo containing `cwd`, newest
  * `updatedAt` first. Shells out to the `gh` CLI so the user's existing
  * `gh auth` login applies; returns a discriminated union instead of throwing
- * so route layers can map each failure mode to a distinct wire code.
+ * so route layers can map each failure mode to a distinct wire code. The
+ * optional `env` supplies workspace credentials (e.g. GH_TOKEN / GH_CONFIG_DIR)
+ * while the denylist still strips repository selectors.
  */
 export async function fetchGitHubPullRequests(
   cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<FetchGitHubPullRequestsResult> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return { kind: 'not_a_repo' };
 
   let stdout: string;
   try {
-    stdout = await runGhPrList(gitRoot);
+    stdout = await runGhPrList(gitRoot, env);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
@@ -231,5 +246,118 @@ export async function fetchGitHubPullRequests(
     return { kind: 'ok', pullRequests: parseGhPrList(stdout) };
   } catch (error) {
     return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
+  }
+}
+
+// ── Create PR ──────────────────────────────────────────────
+
+export interface CreateGitHubPullRequestOptions {
+  title: string;
+  body?: string;
+  base?: string;
+  head?: string;
+}
+
+export type CreateGitHubPullRequestResult =
+  | { kind: 'ok'; url: string; number: number | null }
+  | { kind: 'not_a_repo' }
+  | { kind: 'cli_unavailable' }
+  | { kind: 'failed'; message: string; gitRoot: string };
+
+const GH_CREATE_TIMEOUT_MS = 30_000;
+
+function runGhPrCreate(
+  gitRoot: string,
+  opts: CreateGitHubPullRequestOptions,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  const args = ['pr', 'create', '--title', opts.title];
+  // Always pass --body so gh never prompts interactively for one.
+  args.push('--body', opts.body ?? '');
+  if (opts.base) args.push('--base', opts.base);
+  if (opts.head) args.push('--head', opts.head);
+  return new Promise((resolve, reject) => {
+    execFile(
+      'gh',
+      args,
+      {
+        cwd: gitRoot,
+        timeout: GH_CREATE_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: gitEnv(env),
+      },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+/**
+ * Create a pull request via `gh pr create`. Returns the PR URL on success.
+ */
+export async function createGitHubPullRequest(
+  cwd: string,
+  opts: CreateGitHubPullRequestOptions,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<CreateGitHubPullRequestResult> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return { kind: 'not_a_repo' };
+
+  let stdout: string;
+  try {
+    stdout = await runGhPrCreate(gitRoot, opts, env);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'cli_unavailable' };
+    }
+    return {
+      kind: 'failed',
+      message: ghErrorMessage(error, 'gh pr create', GH_CREATE_TIMEOUT_MS),
+      gitRoot,
+    };
+  }
+
+  // `gh pr create` outputs the PR URL on stdout.
+  const url = stdout.trim();
+  const numberMatch = /\/pull\/(\d+)/.exec(url);
+  const number = numberMatch ? parseInt(numberMatch[1], 10) : null;
+  return { kind: 'ok', url, number };
+}
+
+/**
+ * Get the default branch as a fully-qualified remote ref (e.g.
+ * "origin/main").
+ */
+export async function getDefaultBranch(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+      {
+        cwd: gitRoot,
+        timeout: 5_000,
+        encoding: 'utf8',
+        windowsHide: true,
+        env: gitEnv(env),
+      },
+    );
+    const raw = stdout.trim();
+    if (!raw) return null;
+    // Keep the fully-qualified remote ref (e.g. "origin/main"). Callers that
+    // build a log range (`<base>..HEAD`) need the remote-tracking ref so a
+    // stale local default branch doesn't pull other people's commits into the
+    // range; the PR-create path strips the prefix itself for `gh --base`.
+    return raw;
+  } catch {
+    return null;
   }
 }

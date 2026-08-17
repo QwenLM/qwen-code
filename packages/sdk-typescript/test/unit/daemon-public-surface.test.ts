@@ -19,6 +19,7 @@ import {
 // `src/daemon/index.ts` but not re-exported by the published entry"
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
+  DaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
@@ -26,6 +27,10 @@ import type {
   DaemonChannelDelivery,
   DaemonChannelNotifyRequest,
   DaemonChannelNotifyResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingSubject,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelDeliveryErrorCode,
   DaemonChannelDeliveryResultData,
   DaemonChannelDeliveryResultEvent,
@@ -74,6 +79,10 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionRecapResult,
+  DaemonSkillBatchToggleError,
+  DaemonSkillBatchToggleErrorCode,
+  DaemonSkillBatchToggleItem,
+  DaemonSkillBatchToggleResult,
   DaemonSessionRecordingDegradedData,
   DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
@@ -125,10 +134,12 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
+import { DAEMON_UI_DEBUG_REASONS } from '../../src/daemon/index.js';
 import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonUiDebugReason as DaemonEntryUiDebugReason,
 } from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
@@ -220,6 +231,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelDelivery>().not.toBeNever();
     expectTypeOf<DaemonChannelNotifyRequest>().not.toBeNever();
     expectTypeOf<DaemonChannelNotifyResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingApprovalsSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingSubject>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRevocationRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRevocationResult>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryErrorCode>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryResultData>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryResultEvent>().not.toBeNever();
@@ -285,15 +300,110 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    // Batch Skill toggle surface: type-only imports are erased at vitest
+    // runtime, so the prototype check is the fence that actually executes
+    // here; the shape assertions pin the contract for any tsc pass.
+    expect(typeof Public.DaemonClient.prototype.setWorkspaceSkillsEnabled).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setWorkspaceSkillsEnabled']>>
+    >().toEqualTypeOf<DaemonSkillBatchToggleResult>();
+    expectTypeOf<DaemonSkillBatchToggleItem>().toEqualTypeOf<{
+      skillName: string;
+      enabled: boolean;
+      changed: boolean;
+    }>();
+    expectTypeOf<DaemonSkillBatchToggleError>().toEqualTypeOf<{
+      skillName: string;
+      code: DaemonSkillBatchToggleErrorCode;
+      error: string;
+      reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
     expectTypeOf<DaemonLogMode>().not.toBeNever();
     expectTypeOf<DaemonLogHealth>().not.toBeNever();
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
-    expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
-      compactedReplayMaxBytes: number;
+    expectTypeOf<
+      DaemonStatusReport['limits']['compactedReplayMaxBytes']
+    >().toEqualTypeOf<number>();
+    expectTypeOf<
+      Pick<
+        DaemonStatusReport['limits'],
+        | 'acpPreAttachMaxFramesPerStream'
+        | 'acpPreAttachMaxFramesPerConnection'
+        | 'acpPreAttachMaxFramesGlobal'
+        | 'acpPreAttachMaxPayloadBytesPerConnection'
+        | 'acpPreAttachMaxPayloadBytesGlobal'
+      >
+    >().toEqualTypeOf<{
+      acpPreAttachMaxFramesPerStream?: number | null;
+      acpPreAttachMaxFramesPerConnection?: number | null;
+      acpPreAttachMaxFramesGlobal?: number | null;
+      acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+      acpPreAttachMaxPayloadBytesGlobal?: number | null;
     }>();
+    expectTypeOf<
+      DaemonStatusReport['limits']['acpPreAttachMaxPayloadBytesGlobal']
+    >().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<
+      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'preAttach'>
+    >().toEqualTypeOf<{
+      preAttach?: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
+    }>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      DaemonStatusReport['runtime']['transport']['acp']['preAttach']
+    >();
+    expectTypeOf<
+      Pick<
+        NonNullable<DaemonStatusReport['full']>['acpConnections'][number],
+        | 'bufferedConnectionFrames'
+        | 'bufferedSessionFrames'
+        | 'pendingDeliveryFrames'
+        | 'preAttachOwnedFrames'
+        | 'preAttachOwnedBytes'
+      >
+    >().toEqualTypeOf<{
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+    }>();
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['preAttachOwnedFrames']
+    >().toEqualTypeOf<number | undefined>();
+    const legacyAcpConnections: NonNullable<
+      DaemonStatusReport['full']
+    >['acpConnections'] = [{}];
+    expect(legacyAcpConnections).toHaveLength(1);
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['connectionIdPrefix']
+    >().toEqualTypeOf<string | undefined>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      NonNullable<DaemonStatusReport['full']>['acpMounts']
+    >();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<DaemonStatusReport['full']>['acpMounts']
+      >[number]['preAttachGuardFailures']
+    >().toEqualTypeOf<number>();
     expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
       runId?: string;
       logMode?: DaemonLogMode;
@@ -333,6 +443,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // mismatch.
     expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('restore_timeout');
   });
 });
 
@@ -431,5 +542,24 @@ describe('runtime MCP add/remove SDK types', () => {
       originatorClientId: 'client-x',
     };
     expect(res.removed).toBe(true);
+  });
+});
+
+describe('daemon UI debug-reason public surface', () => {
+  it('pins the union shipped by @qwen-code/sdk/daemon', () => {
+    // A type-only guard would not hold here: vitest transpiles through
+    // esbuild, which erases `export type` without checking it, and this
+    // package's tsconfig excludes `test/`, so nothing type-checks this file.
+    // The union therefore ships as a closed enum value — matching
+    // DAEMON_ERROR_KINDS and friends — and the runtime assertion below is
+    // what actually fails if the re-export is dropped or the members drift.
+    expect(DAEMON_UI_DEBUG_REASONS).toEqual([
+      'unrecognized_event',
+      'unrecognized_session_update',
+      'malformed_payload',
+    ]);
+    expectTypeOf<DaemonEntryUiDebugReason>().toEqualTypeOf<
+      'unrecognized_event' | 'unrecognized_session_update' | 'malformed_payload'
+    >();
   });
 });

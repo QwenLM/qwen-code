@@ -1,10 +1,16 @@
 import {
   createContext,
   useContext,
+  type CSSProperties,
   type ComponentType,
   type ReactNode,
 } from 'react';
 import type { Components, Options } from 'react-markdown';
+import type {
+  ChartRendererRegistry,
+  MarkdownChartLabelOverrides,
+} from '@datafe-open/markdown-chart';
+import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
@@ -32,6 +38,8 @@ export interface WebShellCodeBlockRenderInfo {
   code: string;
   /** True while the assistant message is still streaming partial content. */
   isStreaming: boolean;
+  /** True only when this block is the active unterminated tail fence. */
+  isIncomplete: boolean;
   source: MarkdownContentSource;
   theme: WebShellTheme;
 }
@@ -39,18 +47,34 @@ export interface WebShellCodeBlockRenderInfo {
 /**
  * Return a React node to replace the default code block rendering. Return
  * `null`, `undefined`, or `false` to decline and fall back to the built-in code
- * block renderer. Expensive renderers should debounce or defer work while
- * `info.isStreaming` is true.
+ * block renderer. Expensive renderers should defer parsing while
+ * `info.isIncomplete` is true; `info.isStreaming` describes the surrounding
+ * assistant message and may remain true after this block has closed.
  */
 export type CodeBlockRenderer = (
   info: WebShellCodeBlockRenderInfo,
 ) => ReactNode | null | undefined;
+
+export interface WebShellMarkdownChartCustomization {
+  registry: ChartRendererRegistry;
+  loadingLabel?: string;
+  labels?: MarkdownChartLabelOverrides;
+  onError?: MarkdownChartReactErrorHandler;
+  chartClassName?: string;
+  chartStyle?: CSSProperties;
+}
 
 export interface WebShellMarkdownCustomization {
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
   ) => string;
+  /**
+   * Override Web Shell's built-in Markdown chart registry or its presentation
+   * callbacks. The complete chart customization object must remain
+   * referentially stable while a chart is mounted.
+   */
+  chart?: WebShellMarkdownChartCustomization;
   renderCodeBlock?: CodeBlockRenderer;
   /**
    * Custom markdown components override Web Shell's built-ins. In particular,
@@ -91,6 +115,30 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+
+export interface WebShellChatHeaderOptions {
+  /** Built-in header actions to show. Defaults to all actions. */
+  items?: readonly WebShellChatHeaderItem[];
+}
+
+export type WebShellRightPanelItem = 'review' | 'sideTask';
+
+export interface WebShellRightPanelOptions {
+  /** Empty-state actions to show. Defaults to all actions. */
+  items?: readonly WebShellRightPanelItem[];
+}
+
+export type WebShellEnvironmentPanelItem =
+  | 'environment'
+  | 'subagents'
+  | 'backgroundTasks';
+
+export interface WebShellEnvironmentPanelOptions {
+  /** Sections to show. Defaults to all sections. */
+  items?: readonly WebShellEnvironmentPanelItem[];
+}
+
 /** Context passed to the chat header renderer. */
 export interface ChatHeaderRenderInfo {
   /** Current session id, if connected. */
@@ -99,17 +147,28 @@ export interface ChatHeaderRenderInfo {
   sessionName?: string;
   /** Workspace cwd for the current session. */
   workspaceCwd?: string;
+  /** Header actions enabled by the host. */
+  items: readonly WebShellChatHeaderItem[];
+  /** Whether the environment panel is currently open. */
+  environmentPanelOpen: boolean;
+  /** Whether the right extension panel is currently open. */
+  rightPanelOpen: boolean;
+  /** Opens or closes the environment panel. */
+  onEnvironmentPanelOpenChange: (open: boolean) => void;
+  /** Opens or closes the right extension panel. */
+  onRightPanelOpenChange: (open: boolean) => void;
 }
 
 /**
- * Custom renderer shown at the top of the chat view, above the message list.
- * Only rendered when a session is active (not in the welcome/empty state).
+ * Replaces the complete persistent chat header. Only rendered when a session
+ * is active (not in the welcome/empty state).
  */
 export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  files?: readonly { name: string; mimeType: string }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
 }
 
@@ -205,6 +264,12 @@ export type WebShellComposerTagPlacement = 'top' | 'inline';
 
 export interface WebShellComposerTagOptions {
   placement?: WebShellComposerTagPlacement;
+  /**
+   * Inline placement only: insert at the caret (default, synchronous user
+   * gestures) or append after the document end (asynchronous producers,
+   * which must not interrupt typing or steal focus).
+   */
+  position?: 'caret' | 'end';
 }
 
 export interface WebShellComposerTextOptions {
@@ -318,6 +383,9 @@ export type ComposerToolbarRightRenderer =
 export type ComposerHeaderRenderer =
   ComponentType<WebShellComposerToolbarRenderInfo>;
 
+export type ComposerFooterRenderer =
+  ComponentType<WebShellComposerToolbarRenderInfo>;
+
 // ---- Background task info (public type for footer renderer) ----
 
 interface WebShellTaskBase {
@@ -414,6 +482,12 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  /**
+   * Built-in / host @ mention providers. Split-view panes share this context
+   * so they match the main composer without ChatPane prop drilling.
+   */
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  atProviders?: readonly WebShellAtProvider[];
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
@@ -422,6 +496,7 @@ export interface WebShellCustomization {
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   renderComposerHeader?: ComposerHeaderRenderer;
+  renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**
@@ -434,6 +509,15 @@ export interface WebShellCustomization {
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: setting `false`
+   * force-disables upload even when the daemon advertises the capability,
+   * while `true`/omitted still requires the capability (and the workspace
+   * trust / qualified-route safety checks) to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

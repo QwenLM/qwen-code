@@ -12,10 +12,16 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
+  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import {
+  MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+  MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
+} from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
@@ -122,6 +128,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -190,6 +207,16 @@ describe('SettingsSchema', () => {
       expect(imageModel.showInDialog).toBe(false);
     });
 
+    it('should define the advisor model setting', () => {
+      const advisorModel = getSettingsSchema().advisorModel;
+
+      expect(advisorModel.type).toBe('string');
+      expect(advisorModel.category).toBe('Model');
+      expect(advisorModel.default).toBe('');
+      expect(advisorModel.requiresRestart).toBe(false);
+      expect(advisorModel.showInDialog).toBe(true);
+    });
+
     it('should define the built-in Explore model setting', () => {
       const exploreModel =
         getSettingsSchema().agents.properties.builtin.properties.exploreModel;
@@ -255,6 +282,15 @@ describe('SettingsSchema', () => {
         minimum: 1,
         maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
         default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      });
+    });
+
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
       });
     });
 
@@ -332,6 +368,22 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
     });
 
+    it('defines disabled skill levels as a restart-required union setting', () => {
+      const disabledLevels =
+        getSettingsSchema().skills.properties.disabledLevels;
+
+      expect(disabledLevels.type).toBe('array');
+      expect(disabledLevels.default).toBeUndefined();
+      expect(disabledLevels.requiresRestart).toBe(true);
+      expect(disabledLevels.mergeStrategy).toBe(MergeStrategy.UNION);
+      expect(disabledLevels.items?.enum).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
+    });
+
     it('should have consistent default values for boolean settings', () => {
       const checkBooleanDefaults = (schema: SettingsSchema) => {
         Object.entries(schema).forEach(([, definition]) => {
@@ -347,6 +399,17 @@ describe('SettingsSchema', () => {
       };
 
       checkBooleanDefaults(getSettingsSchema() as SettingsSchema);
+    });
+
+    it('keeps Session Workflow opt-in without requiring a restart', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWorkflow,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: true,
+      });
     });
 
     it('should have showInDialog property configured', () => {
@@ -421,9 +484,18 @@ describe('SettingsSchema', () => {
         getSettingsSchema().ui.properties.useTerminalBuffer;
       expect(useTerminalBuffer).toBeDefined();
       expect(useTerminalBuffer.type).toBe('boolean');
-      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.default).toBe(true);
       expect(useTerminalBuffer.showInDialog).toBe(true);
-      expect(useTerminalBuffer.requiresRestart).toBe(false);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
+    });
+
+    it('should have mouseTracking in ui settings', () => {
+      const mouseTracking = getSettingsSchema().ui.properties.mouseTracking;
+      expect(mouseTracking).toBeDefined();
+      expect(mouseTracking.type).toBe('boolean');
+      expect(mouseTracking.default).toBe(true);
+      expect(mouseTracking.showInDialog).toBe(true);
+      expect(mouseTracking.requiresRestart).toBe(true);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {
@@ -434,6 +506,22 @@ describe('SettingsSchema', () => {
       expect(responseTokensPerSecond.default).toBe(false);
       expect(responseTokensPerSecond.showInDialog).toBe(true);
       expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
+    it('should pin serve sub-session caps to the runtime defaults', () => {
+      const serve = getSettingsSchema().serve.properties;
+      expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+      );
+      expect(serve.maxConcurrentSubSessionsTotal.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+      );
+      // The runtime clamps the total cap to the tracked-id set size; the
+      // schema maximum must match so editors reject values that the daemon
+      // would otherwise silently clamp.
+      expect(serve.maxConcurrentSubSessionsTotal.maximum).toBe(
+        MAX_TRACKED_SPAWNED_SESSIONS,
+      );
     });
 
     it('should infer Settings type correctly', () => {

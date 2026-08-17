@@ -5,10 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
+import type {
+  DingtalkCardCallback,
+  DingtalkCardCallbackResult,
+} from './interactive-card-types.js';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -60,11 +67,13 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       }
     })();
     callback?: (msg: DWClientDownStream) => void;
+    callbacks = new Map<string, (msg: DWClientDownStream) => void>();
     disconnect = vi.fn();
     getConfig = vi.fn(() => ({ access_token: 'token' }));
     registerCallbackListener = vi.fn(
-      (_topic: string, callback: (msg: DWClientDownStream) => void) => {
-        this.callback = callback;
+      (topic: string, callback: (msg: DWClientDownStream) => void) => {
+        this.callbacks.set(topic, callback);
+        if (topic === 'robot') this.callback = callback;
       },
     );
     send = vi.fn();
@@ -90,6 +99,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
     }
   },
   TOPIC_ROBOT: 'robot',
+  TOPIC_CARD: 'card',
   EventAck: { SUCCESS: 'success' },
 }));
 
@@ -106,6 +116,8 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected config: Record<string, unknown>;
       protected name: string;
       handleInbound = vi.fn().mockResolvedValue(undefined);
+      protected preflightInbound = vi.fn().mockResolvedValue(true);
+      protected processInbound = vi.fn().mockResolvedValue(undefined);
       onSessionDied(_sessionId: string): void {}
       protected logDebugPayload(platform: string, payload: unknown): void {
         (
@@ -124,6 +136,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         _sessionId: string,
         _messageIds: string[],
       ): void {}
+      protected requestPromptRunCancellation = vi.fn().mockResolvedValue(false);
       protected supportsProactiveTarget(target: SessionTarget): boolean {
         return target.threadId === undefined;
       }
@@ -166,6 +179,7 @@ function createChannel(
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
+      interactiveCards: {},
       ...overrides,
     } as never,
     {} as never,
@@ -182,6 +196,7 @@ function latestMockClient(): Record<string, unknown> {
 
 interface MockDingtalkClient {
   callback?: (msg: DWClientDownStream) => void;
+  callbacks: Map<string, (msg: DWClientDownStream) => void>;
   disconnect: ReturnType<typeof vi.fn>;
   onDownStream(raw: string): void;
   registerCallbackListener: ReturnType<typeof vi.fn>;
@@ -240,6 +255,439 @@ it('adds outbound image instructions without replacing custom instructions', () 
   expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
 });
 
+it('validates interactive card config in the adapter', () => {
+  expect(() =>
+    createChannel({
+      interactiveCards: { questionCard: { timeoutMs: 0 } },
+    }),
+  ).toThrow('questionCard.timeoutMs');
+});
+
+it('does not initialize or subscribe to cards when configuration is omitted', () => {
+  const channel = createChannel({ interactiveCards: undefined });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+
+  expect([...client.callbacks.keys()]).toEqual(['robot']);
+  expect(
+    (
+      channel as unknown as {
+        interactionPresenter?: unknown;
+      }
+    ).interactionPresenter,
+  ).toBeUndefined();
+  expect(
+    (channel as unknown as { statusCardController?: unknown })
+      .statusCardController,
+  ).toBeUndefined();
+  expect(
+    (channel as unknown as { questionCardController?: unknown })
+      .questionCardController,
+  ).toBeUndefined();
+});
+
+function createCallbackResultChannel(
+  result: DingtalkCardCallbackResult,
+): DingtalkChannelInstance {
+  class CallbackResultChannel extends DingtalkChannel {
+    protected override routeCardCallback(): DingtalkCardCallbackResult {
+      return result;
+    }
+  }
+  return new CallbackResultChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+      interactiveCards: {},
+    } as never,
+    {} as never,
+  );
+}
+
+function stubCardFeedbackFetch(options?: { rejectDirect?: boolean }) {
+  const spy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              errcode: 0,
+              access_token: 'feedback-token',
+              expires_in: 7200,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (
+        options?.rejectDirect &&
+        url.startsWith(
+          'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+        )
+      ) {
+        return Promise.reject(new Error('direct feedback failed'));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+  const calls = (prefix: string) =>
+    spy.mock.calls.filter(([input]) => String(input).startsWith(prefix));
+  return {
+    spy,
+    directSendCalls: () =>
+      calls('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'),
+    groupSendCalls: () =>
+      calls('https://api.dingtalk.com/v1.0/robot/groupMessages/send'),
+  };
+}
+
+function dispatchCardCallback(
+  client: MockDingtalkClient,
+  data: Record<string, unknown>,
+): void {
+  client.callbacks.get('card')?.({
+    headers: { messageId: 'card-message' },
+    data: JSON.stringify(data),
+  } as DWClientDownStream);
+}
+
+it('ACKs a parsed card callback before starting asynchronous handling', async () => {
+  const events: string[] = [];
+  class CallbackTestChannel extends DingtalkChannel {
+    protected override routeCardCallback(): DingtalkCardCallbackResult {
+      return {
+        kind: 'accepted',
+        execute: async () => {
+          events.push('action');
+        },
+      };
+    }
+  }
+  const channel = new CallbackTestChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+      interactiveCards: {},
+    } as never,
+    {} as never,
+  );
+  expect(channel).toBeDefined();
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  client.send.mockImplementation(() => {
+    events.push('ack');
+  });
+
+  client.callbacks.get('card')?.({
+    headers: { messageId: 'card-message' },
+    data: JSON.stringify({
+      userId: 'owner-1',
+      value: JSON.stringify({
+        outTrackId: 'status-1',
+        actionValue: 'btn_stop',
+      }),
+    }),
+  } as DWClientDownStream);
+
+  expect(events[0]).toBe('ack');
+  await vi.waitFor(() => expect(events).toEqual(['ack', 'action']));
+  expect(client.send).toHaveBeenCalledWith('card-message', {
+    status: 'success',
+    message: 'ok',
+  });
+});
+
+it('ACKs before sending forbidden feedback to the original group', async () => {
+  createCallbackResultChannel({
+    kind: 'forbidden',
+    actorId: 'other-user',
+    target: { chatId: 'group-1', isGroup: true },
+  });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'other-user',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    await vi.waitFor(() => expect(groupSendCalls()).toHaveLength(1));
+    expect(directSendCalls()).toHaveLength(0);
+    const requestBody = JSON.parse(
+      String((groupSendCalls()[0]![1] as RequestInit).body),
+    );
+    expect(requestBody.openConversationId).toBe('group-1');
+    expect(requestBody.userIds).toBeUndefined();
+    expect(JSON.parse(requestBody.msgParam).text).toContain('任务发起人');
+    expect(JSON.parse(requestBody.msgParam).text).toContain('未生效');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('silently ACKs an ignored callback', async () => {
+  createCallbackResultChannel({ kind: 'ignored', actorId: 'owner-1' });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'owner-1',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('silently ACKs a malformed callback with a trusted actor', async () => {
+  createChannel();
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'actor-1',
+      value: JSON.stringify({ outTrackId: 'missing-action' }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('does not send feedback for a malformed callback without an actor', async () => {
+  createChannel();
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      value: JSON.stringify({ outTrackId: 'missing-action' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('logs failed direct feedback without falling back to the group', async () => {
+  createCallbackResultChannel({
+    kind: 'forbidden',
+    actorId: 'other-user',
+    target: { chatId: 'other-user', isGroup: false },
+  });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch({
+    rejectDirect: true,
+  });
+  const stderr = vi
+    .spyOn(process.stderr, 'write')
+    .mockImplementation(() => true);
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'other-user',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() =>
+      expect(
+        stderr.mock.calls.map(([text]) => String(text)).join(''),
+      ).toContain('card interaction feedback failed'),
+    );
+    expect(directSendCalls()).toHaveLength(1);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    stderr.mockRestore();
+    spy.mockRestore();
+  }
+});
+
+it('does not send feedback for an accepted callback', async () => {
+  const action = vi.fn().mockResolvedValue(undefined);
+  createCallbackResultChannel({ kind: 'accepted', execute: action });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'owner-1',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('ACKs duplicate card callbacks while executing one claimed action', async () => {
+  const action = vi.fn().mockResolvedValue(undefined);
+  const claim = vi
+    .fn()
+    .mockReturnValueOnce({ kind: 'accepted', execute: action })
+    .mockReturnValue({ kind: 'ignored', actorId: 'owner-1' });
+  class DuplicateCallbackTestChannel extends DingtalkChannel {
+    protected override routeCardCallback(): DingtalkCardCallbackResult {
+      return claim();
+    }
+  }
+  new DuplicateCallbackTestChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+      interactiveCards: {},
+    } as never,
+    {} as never,
+  );
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls } = stubCardFeedbackFetch();
+  const callbackData = JSON.stringify({
+    userId: 'owner-1',
+    value: JSON.stringify({
+      outTrackId: 'question-1',
+      actionValue: 'submit',
+    }),
+  });
+
+  try {
+    client.callbacks.get('card')?.({
+      headers: { messageId: 'card-message-1' },
+      data: callbackData,
+    } as DWClientDownStream);
+    client.callbacks.get('card')?.({
+      headers: { messageId: 'card-message-2' },
+      data: callbackData,
+    } as DWClientDownStream);
+
+    expect(client.send).toHaveBeenNthCalledWith(1, 'card-message-1', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(client.send).toHaveBeenNthCalledWith(2, 'card-message-2', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(claim).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
+    expect(directSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('routes the built-in btn_stop action to the status card controller', () => {
+  const stopResult: DingtalkCardCallbackResult = {
+    kind: 'accepted',
+    execute: vi.fn().mockResolvedValue(undefined),
+  };
+  const claimStop = vi.fn().mockReturnValue(stopResult);
+  class CallbackRoutingChannel extends DingtalkChannel {
+    route(callback: DingtalkCardCallback) {
+      return this.routeCardCallback(callback);
+    }
+  }
+  const channel = new CallbackRoutingChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    } as never,
+    {} as never,
+  );
+  Object.assign(channel, { statusCardController: { claimStop } });
+
+  expect(
+    channel.route({
+      outTrackId: 'status-1',
+      actionId: 'btn_stop',
+      actorId: 'owner-1',
+      formData: {},
+    }),
+  ).toBe(stopResult);
+  expect(claimStop).toHaveBeenCalledWith('status-1', 'owner-1');
+});
+
 it('keeps callbacks and ACKs bound to the client that received them', async () => {
   const firstIndex = dingtalkSdkMock.instances.length;
   const channel = createChannel();
@@ -274,8 +722,14 @@ it('keeps callbacks and ACKs bound to the client that received them', async () =
     data: '{}',
   } as DWClientDownStream);
 
-  expect(firstClient.registerCallbackListener).toHaveBeenCalledOnce();
-  expect(replacement.registerCallbackListener).toHaveBeenCalledOnce();
+  expect(firstClient.registerCallbackListener).toHaveBeenCalledTimes(2);
+  expect(replacement.registerCallbackListener).toHaveBeenCalledTimes(2);
+  expect(
+    firstClient.registerCallbackListener.mock.calls.map(([topic]) => topic),
+  ).toEqual(['robot', 'card']);
+  expect(
+    replacement.registerCallbackListener.mock.calls.map(([topic]) => topic),
+  ).toEqual(['robot', 'card']);
   expect(firstClient.send).toHaveBeenCalledWith('old-message', {
     status: 'success',
     message: 'ok',
@@ -333,6 +787,73 @@ function getLifecycleHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'onTaskLifecycle'
   ] as (event: ChannelTaskLifecycleEvent) => void;
+  return fn.bind(channel);
+}
+
+function getCompleteHook(
+  channel: DingtalkChannelInstance,
+): (
+  chatId: string,
+  text: string,
+  sessionId: string,
+  segment?: ChannelOutputSegmentContext,
+) => Promise<void> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onResponseComplete'
+  ] as (
+    chatId: string,
+    text: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ) => Promise<void>;
+  return fn.bind(channel);
+}
+
+function getOutputSegmentEndHook(
+  channel: DingtalkChannelInstance,
+): (
+  chatId: string,
+  sessionId: string,
+  segment: ChannelOutputSegmentContext,
+  reason: ChannelOutputSegmentEndReason,
+) => void | Promise<void> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onOutputSegmentEnd'
+  ] as (
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ) => void | Promise<void> | undefined;
+  expect(fn).toBeTypeOf('function');
+  return fn.bind(channel);
+}
+
+function getChunkHook(
+  channel: DingtalkChannelInstance,
+): (
+  chatId: string,
+  chunk: string,
+  sessionId: string,
+  segment?: ChannelOutputSegmentContext,
+) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onResponseChunk'
+  ] as (
+    chatId: string,
+    chunk: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ) => void;
+  return fn.bind(channel);
+}
+
+function getUserInputHook(
+  channel: DingtalkChannelInstance,
+): (context: ChannelUserInputRequestContext) => Promise<{ kind: string }> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'presentUserInputRequest'
+  ] as (context: ChannelUserInputRequestContext) => Promise<{ kind: string }>;
   return fn.bind(channel);
 }
 
@@ -1009,6 +1530,550 @@ describe('DingtalkChannel prompt reactions', () => {
   });
 });
 
+describe('DingtalkChannel status cards', () => {
+  it('passes the configured model to the status card controller', () => {
+    const channel = createChannel({ model: 'qwen3.7-max' });
+
+    expect(
+      (
+        channel as unknown as {
+          statusCardController?: {
+            options: { model?: string };
+          };
+        }
+      ).statusCardController?.options.model,
+    ).toBe('qwen3.7-max');
+  });
+
+  it('keeps status cards disabled when block streaming is enabled', () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+
+    expect(
+      (
+        channel as unknown as {
+          statusCardController?: unknown;
+          interactiveCardClient?: unknown;
+        }
+      ).statusCardController,
+    ).toBeUndefined();
+    expect(
+      (
+        channel as unknown as {
+          interactiveCardClient?: unknown;
+        }
+      ).interactiveCardClient,
+    ).toBeDefined();
+  });
+
+  it('starts a status card only for the matching real inbound owner', () => {
+    const channel = createChannel();
+    const registerRun = vi.fn();
+    const startStatusCard = vi.fn();
+    const appendOutput = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          registerRun: typeof registerRun;
+          startStatusCard: typeof startStatusCard;
+          appendOutput: typeof appendOutput;
+        };
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).interactionPresenter = { registerRun, startStatusCard, appendOutput };
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).inboundCardOwners.set('message-1', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid-1', isGroup: true },
+    });
+
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'other-owner' },
+    });
+    expect(registerRun).not.toHaveBeenCalled();
+    expect(startStatusCard).not.toHaveBeenCalled();
+    expect(appendOutput).not.toHaveBeenCalled();
+
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).inboundCardOwners.set('message-2', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid-1', isGroup: true },
+      sender: { senderName: 'Alice' },
+    });
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-2',
+      runId: 'run-2',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+
+    expect(registerRun).toHaveBeenCalledOnce();
+    expect(registerRun).toHaveBeenCalledWith(
+      'run-2',
+      'owner-1',
+      {
+        chatId: 'cid-1',
+        isGroup: true,
+      },
+      'session-1',
+      { senderName: 'Alice' },
+    );
+    expect(startStatusCard).toHaveBeenCalledOnce();
+    expect(startStatusCard).toHaveBeenCalledWith('run-2');
+    expect(startStatusCard.mock.invocationCallOrder[0]).toBeGreaterThan(
+      registerRun.mock.invocationCallOrder[0],
+    );
+    expect(appendOutput).not.toHaveBeenCalled();
+  });
+
+  it('captures direct-card correlation by conversation instead of delivery user', async () => {
+    const channel = createChannel();
+    const envelope: Envelope = {
+      channelName: 'dingtalk',
+      senderId: 'owner-1',
+      senderName: 'Owner',
+      chatId: 'conversation-1',
+      messageId: 'message-1',
+      text: 'hello',
+      isGroup: false,
+      isMentioned: false,
+      isReplyToBot: false,
+    };
+
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-1'),
+    ).toEqual({
+      ownerId: 'owner-1',
+      target: { chatId: 'conversation-1', isGroup: false },
+    });
+  });
+
+  it('captures the group sender for card attribution when atSender is enabled', async () => {
+    const channel = createChannel({ atSender: true });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'message-quote',
+        conversationType: '2',
+        conversationId: 'cid-quote',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'owner-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
+        text: { content: '@qwen-code What changed?' },
+      }),
+      headers: { messageId: 'message-quote' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-quote'),
+    ).toEqual({
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-quote', isGroup: true },
+      sender: { senderName: 'Alice' },
+    });
+  });
+
+  it('omits the group sender from card attribution when atSender is disabled', async () => {
+    const channel = createChannel({ atSender: false });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'message-quote',
+        conversationType: '2',
+        conversationId: 'cid-quote',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'owner-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
+        text: { content: '@qwen-code What changed?' },
+      }),
+      headers: { messageId: 'message-quote' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-quote'),
+    ).toEqual({
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-quote', isGroup: true },
+    });
+  });
+
+  it('routes the first visible chunk with its exact segment context', () => {
+    const channel = createChannel();
+    const appendOutput = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: { appendOutput: typeof appendOutput };
+      }
+    ).interactionPresenter = { appendOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    getChunkHook(channel)('cid-1', 'first', 'session-1', segment);
+
+    expect(appendOutput).toHaveBeenCalledWith(segment, 'first');
+  });
+
+  it('uses the awaited status finalization or falls back to Markdown', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const closeOutput = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    (
+      channel as unknown as {
+        interactionPresenter: { closeOutput: typeof closeOutput };
+      }
+    ).interactionPresenter = { closeOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await getCompleteHook(channel)('cid-1', 'first', 'session-1', segment);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await getCompleteHook(channel)('cid-1', 'second', 'session-1', {
+      ...segment,
+      segmentId: 'segment-2',
+    });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('uploads a final status card image before closing output', async () => {
+    const image = createTempPng();
+    const channel = createChannel({ cwd: image.dir });
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: { closeOutput: typeof closeOutput };
+      }
+    ).interactionPresenter = { closeOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                media_id: '@lAL-card-media-id',
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    try {
+      await getCompleteHook(channel)(
+        'cid-1',
+        `before\n[IMAGE: ${image.path}]\nafter`,
+        'session-1',
+        segment,
+      );
+
+      const finalText = String(closeOutput.mock.calls[0]?.[1]);
+      expect(finalText).toContain('![image](@lAL-card-media-id)');
+      expect(finalText).not.toContain('[IMAGE:');
+      expect(finalText).not.toContain(image.path);
+    } finally {
+      fetchSpy.mockRestore();
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('terminalizes the presenter when the agent response is empty', () => {
+    const channel = createChannel();
+    const terminalizeRun = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: { terminalizeRun: typeof terminalizeRun };
+        cardRunBySession: Map<string, string>;
+      }
+    ).interactionPresenter = { terminalizeRun };
+    (
+      channel as unknown as {
+        cardRunBySession: Map<string, string>;
+      }
+    ).cardRunBySession.set('session-1', 'run-1');
+
+    getLifecycleHook(channel)({
+      type: 'completed',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+
+    expect(terminalizeRun).toHaveBeenCalledWith('run-1', 'completed');
+  });
+
+  it('closes the exact output segment when that segment ends', async () => {
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: { closeOutput: typeof closeOutput };
+      }
+    ).interactionPresenter = { closeOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    await getOutputSegmentEndHook(channel)(
+      'cid-1',
+      'session-1',
+      segment,
+      'input_requested',
+    );
+
+    expect(closeOutput).toHaveBeenCalledWith(
+      'segment-1',
+      '',
+      'input_requested',
+      segment,
+    );
+  });
+
+  it('does not let a stale terminal event detach a newer session run', () => {
+    const channel = createChannel();
+    const terminalizeRun = vi.fn();
+    const maps = channel as unknown as {
+      cardRunBySession: Map<string, string>;
+      cardRuns: Map<string, unknown>;
+      interactionPresenter: { terminalizeRun: typeof terminalizeRun };
+    };
+    maps.interactionPresenter = { terminalizeRun };
+    maps.cardRunBySession.set('session-1', 'run-new');
+    maps.cardRuns.set('run-old', {});
+    maps.cardRuns.set('run-new', {});
+
+    getLifecycleHook(channel)({
+      type: 'completed',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      runId: 'run-old',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+
+    expect(terminalizeRun).toHaveBeenCalledWith('run-old', 'completed');
+    expect(maps.cardRunBySession.get('session-1')).toBe('run-new');
+    expect(maps.cardRuns.has('run-old')).toBe(false);
+    expect(maps.cardRuns.has('run-new')).toBe(true);
+  });
+});
+
+describe('DingtalkChannel question cards', () => {
+  it.each([
+    undefined,
+    { enabled: false },
+    { questionCard: { enabled: false } },
+  ])(
+    'returns unsupported without cancelling when question cards are disabled: %j',
+    async (interactiveCards) => {
+      const channel = createChannel({ interactiveCards });
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      const respond = vi.fn().mockResolvedValue(true);
+      Object.assign(channel, { sendMessage });
+      (
+        channel as unknown as {
+          cardRuns: Map<string, unknown>;
+        }
+      ).cardRuns.set('run-disabled', {
+        ownerId: 'owner-1',
+        target: { chatId: 'conversation-1', isGroup: false },
+      });
+      const context = {
+        requestId: 'request-disabled',
+        sessionId: 'session-disabled',
+        runId: 'run-disabled',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          senderId: 'owner-1',
+          chatId: 'conversation-1',
+          isGroup: false,
+        },
+        questions: [],
+        submitOptionId: 'proceed_once',
+        onSettled: () => () => {},
+        respond,
+      } as ChannelUserInputRequestContext;
+
+      await expect(getUserInputHook(channel)(context)).resolves.toEqual({
+        kind: 'unsupported',
+      });
+      expect(respond).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps question cards eligible while block streaming is enabled', () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+
+    expect(
+      (
+        channel as unknown as {
+          questionCardController?: unknown;
+        }
+      ).questionCardController,
+    ).toBeDefined();
+  });
+
+  it('presents through the matching attended run only', async () => {
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    const presentInput = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: 'presented' })
+      .mockResolvedValueOnce({ kind: 'unsupported' });
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          closeOutput: typeof closeOutput;
+          presentInput: typeof presentInput;
+        };
+        cardRuns: Map<string, unknown>;
+      }
+    ).interactionPresenter = { closeOutput, presentInput };
+    (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
+      'run-1',
+      {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      },
+    );
+    const context = {
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      precedingSegmentId: 'segment-1',
+    } as ChannelUserInputRequestContext;
+
+    await expect(getUserInputHook(channel)(context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    expect(presentInput).toHaveBeenCalledWith(context);
+    expect(closeOutput).not.toHaveBeenCalled();
+
+    await expect(
+      getUserInputHook(channel)({ ...context, runId: 'unknown' }),
+    ).resolves.toEqual({ kind: 'unsupported' });
+  });
+});
+
 describe('DingtalkChannel inbound media', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -1192,6 +2257,36 @@ describe('DingtalkChannel parsed-message logging', () => {
         isGroup: true,
       }),
     );
+  });
+
+  it('uses conversation fallback for thread scope when DingTalk has no thread id', () => {
+    const channel = createChannel({ sessionScope: 'thread' });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'thread-fallback-m1',
+        conversationType: '2',
+        conversationId: 'cid-thread-fallback',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'thread-fallback-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    const inbound = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(inbound).toMatchObject({
+      chatId: 'cid-thread-fallback',
+      isGroup: true,
+    });
+    expect(inbound).not.toHaveProperty('threadId');
   });
 
   it('logs debug payloads when enabled for the channel', () => {
@@ -1715,7 +2810,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['member-staff'],
         isMentioned: true,
       }),
     );
@@ -1780,13 +2876,14 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 2 other group members]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['user-a', 'user-b'],
         isMentioned: true,
       }),
     );
   });
 
-  it('falls back to staffId when dingtalkId is absent', () => {
+  it('uses staffId when dingtalkId is absent', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -1812,7 +2909,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]\nhello',
+        text: 'hello',
+        mentionedMemberIds: ['only-staff'],
         isMentioned: true,
       }),
     );
@@ -1844,6 +2942,9 @@ describe('DingtalkChannel sender attribution', () => {
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'hello', isMentioned: true }),
     );
+    // The guard skips collection entirely, so the key must be absent.
+    const envelope = vi.mocked(channel.handleInbound).mock.calls.at(-1)?.[0];
+    expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
   it('returns context only when text is empty after mention stripping', () => {
@@ -1872,7 +2973,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]',
+        text: '',
+        mentionedMemberIds: ['user-a'],
         isMentioned: true,
       }),
     );
@@ -1981,8 +3083,8 @@ describe('DingtalkChannel reply mentions', () => {
         String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
       );
       expect(body).toMatchObject({
-        msgtype: 'text',
-        text: { content: '@staff-1\n\nhello' },
+        msgtype: 'markdown',
+        markdown: { text: '@staff-1\n\nhello' },
         at: { atUserIds: ['staff-1'] },
       });
     } finally {
@@ -2033,8 +3135,8 @@ describe('DingtalkChannel reply mentions', () => {
     expect(
       JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
     ).toMatchObject({
-      msgtype: 'text',
-      text: { content: '@staff-1\n\nhello' },
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nhello' },
       at: { atUserIds: ['staff-1'] },
     });
   });
@@ -2100,7 +3202,7 @@ describe('DingtalkChannel reply mentions', () => {
     expect(body).not.toHaveProperty('at');
   });
 
-  it('reserves the mention prefix within the first text chunk limit', async () => {
+  it('reserves the mention prefix within the first markdown chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
     seedMentionTarget(channel, 'm1', 'staff-1');
@@ -2117,18 +3219,18 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({
-      msgtype: 'text',
+      msgtype: 'markdown',
       at: { atUserIds: ['staff-1'] },
     });
-    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
-    expect(bodies.map((body) => body.text.content.length)).toEqual([3800, 10]);
+    expect(bodies.map((body) => body.markdown.text.length)).toEqual([3800, 10]);
     expect(
       bodies
         .map((body, index) =>
           index === 0
-            ? body.text.content.slice('@staff-1\n\n'.length)
-            : body.text.content,
+            ? body.markdown.text.slice('@staff-1\n\n'.length)
+            : body.markdown.text,
         )
         .join(''),
     ).toBe(text);
@@ -2149,14 +3251,18 @@ describe('DingtalkChannel reply mentions', () => {
     const contents = fetchSpy.mock.calls.map(([, init], index) => {
       const body = JSON.parse(String((init as RequestInit).body));
       return index === 0
-        ? body.text.content.slice('@staff-1\n\n'.length)
-        : body.text.content;
+        ? body.markdown.text.slice('@staff-1\n\n'.length)
+        : body.markdown.text;
     });
-    expect(contents.join('')).toBe(text);
+    expect(contents[0]).toMatch(/^```/u);
+    expect(contents.at(-1)).toMatch(/```$/u);
+    expect(contents.join('').replace(/[`\n]/gu, '')).toBe(
+      text.replace(/[`\n]/gu, ''),
+    );
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));
-        return body.text.content.length <= 3800;
+        return body.markdown.text.length <= 3800;
       }),
     ).toBe(true);
   });
@@ -2177,9 +3283,128 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
-    expect(bodies[0].msgtype).toBe('text');
-    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[0].msgtype).toBe('markdown');
+    expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
+  });
+
+  it('keeps the mention available to the final reply after a mid-run fallback', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await (
+      channel as unknown as {
+        sendFallbackReply(
+          chatId: string,
+          text: string,
+          sessionId: string,
+        ): Promise<void>;
+      }
+    ).sendFallbackReply('cid123', 'intermediate result', 'session-1');
+    await getResponseHook(channel)('cid123', 'final answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nintermediate result' },
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nfinal answer' },
+      at: { atUserIds: ['staff-1'] },
+    });
+  });
+
+  it('keeps the final answer mention after a mid-run card fallback', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid-1');
+    seedMentionTarget(channel, 'message-1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi
+      .fn()
+      .mockRejectedValue(new Error('card unavailable'));
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
+
+    getPromptHook(channel, 'onPromptStart')('cid-1', 'session-1', 'message-1');
+    (
+      channel as unknown as { inboundCardOwners: Map<string, unknown> }
+    ).inboundCardOwners.set('message-1', {
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-1', isGroup: true },
+      sender: { senderName: 'Alice' },
+    });
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'staff-1' },
+    });
+
+    const segmentContext = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'staff-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'staff-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+    getChunkHook(channel)(
+      'cid-1',
+      'intermediate result',
+      'session-1',
+      segmentContext,
+    );
+    await getOutputSegmentEndHook(channel)(
+      'cid-1',
+      'session-1',
+      segmentContext,
+      'response_boundary',
+    );
+    await getResponseHook(channel)('cid-1', 'final answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nintermediate result' },
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nfinal answer' },
+      at: { atUserIds: ['staff-1'] },
+    });
   });
 });
 
@@ -2435,7 +3660,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     const internals = channel as unknown as {
       mentionTargets: Map<string, string>;
       sessionMentionTargets: Map<string, string>;
-      textReplySessions: Set<string>;
       bufferedMentionTargets: Set<string>;
       bufferedMentionTargetsBySession: Map<string, Set<string>>;
       onPromptBuffered(
@@ -2452,8 +3676,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     internals.onPromptBuffered('cid-123', 'session-2', 'other-1');
     internals.sessionMentionTargets.set('session-1', 'staff-active');
     internals.sessionMentionTargets.set('session-2', 'staff-other-active');
-    internals.textReplySessions.add('session-1');
-    internals.textReplySessions.add('session-2');
 
     channel.onSessionDied('session-1');
 
@@ -2465,7 +3687,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
       false,
     );
     expect(internals.sessionMentionTargets.has('session-1')).toBe(false);
-    expect(internals.textReplySessions.has('session-1')).toBe(false);
     expect(internals.mentionTargets.get('other-1')).toBe('staff-other');
     expect(internals.bufferedMentionTargets.has('other-1')).toBe(true);
     expect(internals.bufferedMentionTargetsBySession.get('session-2')).toEqual(
@@ -2474,7 +3695,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     expect(internals.sessionMentionTargets.get('session-2')).toBe(
       'staff-other-active',
     );
-    expect(internals.textReplySessions.has('session-2')).toBe(true);
   });
 });
 

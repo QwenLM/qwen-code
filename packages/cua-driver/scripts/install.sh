@@ -1,5 +1,5 @@
 #!/bin/bash
-# cua-driver installer — download and install the Rust implementation.
+# Qwen CUA Driver installer — download and install the Rust implementation.
 # Downloads the latest release from GitHub Releases and wires it into the user's PATH.
 #
 # Usage (from README + release body):
@@ -15,8 +15,8 @@
 #   --backend=swift      retired Swift backend (no-op; accepted for compat)
 #
 # Env overrides:
-#   CUA_DRIVER_RS_VERSION=0.7.0    pin a specific Rust release tag
-#   CUA_DRIVER_VERSION=0.7.0       legacy alias for CUA_DRIVER_RS_VERSION
+#   CUA_DRIVER_RS_VERSION=0.17.0   pin a specific Rust release tag
+#   CUA_DRIVER_VERSION=0.17.0      legacy alias for CUA_DRIVER_RS_VERSION
 #   CUA_DRIVER_RS_INSTALL_DIR=PATH same as --bin-dir
 #   CUA_DRIVER_BIN_DIR=PATH        legacy alias for --bin-dir
 #   CUA_DRIVER_NO_MODIFY_PATH=1    same as --no-modify-path
@@ -94,6 +94,7 @@ fi
 LOCAL_RUST_INSTALLER=""
 if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "-" && -f "${BASH_SOURCE[0]}" ]]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    # Helper lives next to this script under packages/cua-driver/scripts/.
     CANDIDATE="$SCRIPT_DIR/_install-rust.sh"
     if [[ -f "$CANDIDATE" ]]; then
         LOCAL_RUST_INSTALLER="$CANDIDATE"

@@ -13,6 +13,7 @@ import {
   type WorkspaceManagementRouteDeps,
   type WorkspaceRuntimeRemovalController,
 } from './workspace-management.js';
+import { NativeDirectoryPickerUnavailableError } from '../native-directory-picker.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -157,9 +158,370 @@ function createRemovalController(
   };
 }
 
+describe('owned workspace runtime publication', () => {
+  it('allows only the daemon-owned Live runtime to nest under the primary workspace', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test', { primary: true }),
+    ]);
+    const runtime = makeRuntime(
+      '/Users/test/Documents/Qwen Code/Conversations',
+      {
+        provenance: 'live-conversation',
+        removable: false,
+      },
+    );
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).resolves.toBe(runtime);
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+  });
+
+  it('keeps nested owned runtimes blocked for non-Live provenance', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/Users/test/nested-scratch', {
+      provenance: 'managed-scratch',
+    });
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'managed-scratch',
+        () => undefined,
+      ),
+    ).rejects.toThrow('nests with an existing workspace');
+    expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+  });
+
+  it('does not let the Live root contain an existing workspace', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test/Documents/Qwen Code/Conversations/project', {
+        primary: true,
+      }),
+    ]);
+    const runtime = makeRuntime(
+      '/Users/test/Documents/Qwen Code/Conversations',
+      {
+        provenance: 'live-conversation',
+        removable: false,
+      },
+    );
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).rejects.toThrow('nests with an existing workspace');
+    expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+  });
+
+  it('shares registry publication and runtime-added hooks', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-live', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    runtimeRemoval.runtimeAdded = vi.fn().mockResolvedValue(undefined);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        (candidate) => {
+          expect(candidate).toBe(runtime);
+        },
+      ),
+    ).resolves.toBe(runtime);
+
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+    expect(runtimeRemoval.runtimeAdded).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+  });
+
+  it('immediately disposes a candidate rejected before publication', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-invalid', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => {
+          throw new Error('ownership rejected');
+        },
+      ),
+    ).rejects.toThrow('ownership rejected');
+
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
+  it('rejects and disposes a primary owned-runtime candidate', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-primary', {
+      primary: true,
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).rejects.toThrow('Daemon-owned workspace runtime must not be primary');
+
+    expect(registry.add).not.toHaveBeenCalled();
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
+  it('disposes a candidate rejected by final pre-publication validation', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-invalid-before-publication', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    runtimeRemoval.runtimeAdded = vi.fn().mockResolvedValue(undefined);
+    const validate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('root changed before publication'));
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        validate,
+      ),
+    ).rejects.toThrow('root changed before publication');
+
+    expect(validate).toHaveBeenCalledOnce();
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.runtimeAdded).not.toHaveBeenCalled();
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
+  it('keeps a candidate unpublished and the topology lock free during final validation', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-pending-validation', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    let releaseValidation: (() => void) | undefined;
+    const validationGate = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    const validate = vi.fn(async () => validationGate);
+    const runWorkspaceTrustOperation = vi.fn(async (operation) => operation());
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval: createRemovalController(),
+      runWorkspaceTrustOperation,
+    });
+
+    const publication = handle.publishOwnedRuntime(
+      runtime.workspaceCwd,
+      'live-conversation',
+      validate,
+    );
+    await vi.waitFor(() => expect(validate).toHaveBeenCalledOnce());
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBeUndefined();
+    expect(
+      registry.getManagedByWorkspaceCwd(runtime.workspaceCwd),
+    ).toBeUndefined();
+    expect(registry.add).not.toHaveBeenCalled();
+    expect(runWorkspaceTrustOperation).not.toHaveBeenCalled();
+
+    releaseValidation?.();
+    await expect(publication).resolves.toBe(runtime);
+    expect(registry.add).toHaveBeenCalledOnce();
+    expect(runWorkspaceTrustOperation).toHaveBeenCalledTimes(1);
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+  });
+});
+
 describe('POST /workspaces', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('reserves the Conversations root and its children but allows its parent', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-conversations-reserved-'));
+    const reserved = join(parent, 'conversations');
+    const child = join(reserved, 'child');
+    const missingChild = join(reserved, 'missing');
+    const alias = join(parent, 'conversation-alias');
+    await mkdir(child, { recursive: true });
+    await symlink(reserved, alias, 'dir');
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/unrelated-primary', { primary: true }),
+        ]),
+        reservedWorkspaceRoots: [reserved],
+        runtimeRemoval: createRemovalController(),
+      });
+
+      for (const cwd of [reserved, child, missingChild, alias]) {
+        const response = await request(app)
+          .post('/workspaces')
+          .send({ cwd, persist: false });
+        expect(response.status).toBe(409);
+        expect(response.body).toMatchObject({
+          code: 'conversation_workspace_reserved',
+        });
+      }
+
+      await expect(
+        request(app).post('/workspaces').send({ cwd: parent, persist: false }),
+      ).resolves.toMatchObject({ status: 201 });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('allows scratch creation but protects existing paths in loopback development', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const mutate = vi.fn(
+        (options?: { strict?: boolean }) =>
+          (_req: Request, res: Response, next: () => void) => {
+            if (options?.strict) {
+              res.status(401).json({ code: 'token_required' });
+              return;
+            }
+            next();
+          },
+      );
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        managedScratchRoot: root,
+        runtimeRemoval: createRemovalController(),
+        mutate,
+      });
+
+      const scratch = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+      const existing = await request(app)
+        .post('/workspaces')
+        .send({ cwd: REAL_DIR });
+
+      expect(scratch.status).toBe(201);
+      expect(existing.status).toBe(401);
+      expect(mutate).toHaveBeenCalledWith();
+      expect(mutate).toHaveBeenCalledWith({ strict: true });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let the internal Conversations runtime block scratch creation', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-live-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const internal = makeRuntime(root.canonicalRoot, {
+        provenance: 'live-conversation',
+      });
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/workspace', { primary: true }),
+          internal,
+        ]),
+        managedScratchRoot: root,
+        runtimeRemoval: createRemovalController(),
+      });
+
+      const response = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+
+      expect(response.status).toBe(201);
+      expect(response.body.cwd).toMatch(/scratch-/u);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 
   it('returns 501 when createWorkspaceRuntime is not provided', async () => {
@@ -560,6 +922,53 @@ describe('POST /workspaces', () => {
     expect(deps.createWorkspaceRuntime).toHaveBeenCalledWith(REAL_DIR, {
       provenance: 'existing',
     });
+  });
+
+  it('does not expose the hidden Live runtime to workspace nesting checks', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-live-parent-'));
+    const liveRoot = join(parent, 'Documents', 'Qwen Code', 'Conversations');
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/some-other-dir', { primary: true }),
+          makeRuntime(liveRoot, {
+            provenance: 'live-conversation',
+            removable: false,
+          }),
+        ]),
+      });
+
+      const res = await request(app).post('/workspaces').send({ cwd: parent });
+
+      expect(res.status).toBe(201);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('still blocks a user workspace inside the hidden Live runtime', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-live-parent-'));
+    const liveRoot = join(parent, 'Documents', 'Qwen Code', 'Conversations');
+    const child = join(liveRoot, 'conversation');
+    try {
+      await mkdir(child, { recursive: true });
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/some-other-dir', { primary: true }),
+          makeRuntime(liveRoot, {
+            provenance: 'live-conversation',
+            removable: false,
+          }),
+        ]),
+      });
+
+      const res = await request(app).post('/workspaces').send({ cwd: child });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('workspace_nested');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 
   it('sets a display name on a process-local registration', async () => {
@@ -1009,6 +1418,37 @@ describe('POST /workspaces', () => {
     expect(add).toHaveBeenCalledWith(REAL_DIR);
   });
 
+  it('promotes a workspace that contains the hidden Live runtime', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-live-parent-'));
+    const liveRoot = join(parent, 'Documents', 'Qwen Code', 'Conversations');
+    const add = vi.fn().mockResolvedValue(true);
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/some-other-dir', { primary: true }),
+          makeRuntime(parent),
+          makeRuntime(liveRoot, {
+            provenance: 'live-conversation',
+            removable: false,
+          }),
+        ]),
+        workspaceRegistrationStore: {
+          add,
+          read: vi.fn().mockResolvedValue({ workspaces: [] }),
+        } as unknown as WorkspaceRegistrationStore,
+      });
+
+      const res = await request(app)
+        .post('/workspaces')
+        .send({ cwd: parent, persist: true });
+
+      expect(res.status).toBe(200);
+      expect(add).toHaveBeenCalledWith(parent);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('rejects persistence for the primary workspace', async () => {
     const primary = { ...makeRuntime(REAL_DIR), primary: true };
     const { app } = createApp({
@@ -1189,6 +1629,24 @@ describe('PATCH /workspaces/:workspace', () => {
     });
     expect(runtime.displayName).toBe('Payments');
     expect(setDisplayNameByIds).not.toHaveBeenCalled();
+  });
+
+  it('does not expose the internal Conversations runtime by id', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      provenance: 'live-conversation',
+      displayName: 'Live',
+    });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+    });
+
+    const res = await request(app)
+      .patch(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ displayName: 'Renamed' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+    expect(runtime.displayName).toBe('Live');
   });
 
   it('clears a workspace display name by cwd', async () => {
@@ -1410,6 +1868,25 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('workspace_mismatch');
     expect(res.body).not.toHaveProperty('workspaceCount');
+  });
+
+  it('does not expose the internal Conversations runtime by id', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      provenance: 'live-conversation',
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
   });
 
   it('returns the fast busy snapshot without disturbing runtime gates', async () => {
@@ -2004,6 +2481,56 @@ describe('persistent workspace registrations', () => {
     ]);
   });
 
+  it('keeps legacy Conversations registrations inactive and only forgets the stored record', async () => {
+    const reserved = '/reserved/qwen-code/conversations';
+    const registrationId = workspaceRegistrationId(reserved);
+    const internal = makeRuntime(reserved, {
+      provenance: 'live-conversation',
+      removable: false,
+      registrationIds: [registrationId],
+    });
+    const registry = createMockRegistry([internal]);
+    const removeById = vi.fn().mockResolvedValue(true);
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: '/primary',
+        workspaces: [reserved],
+      }),
+      removeById,
+    } as unknown as WorkspaceRegistrationStore;
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      workspaceRegistrationStore: store,
+      reservedWorkspaceRoots: [reserved],
+    });
+
+    const listed = await request(app).get('/workspace-registrations');
+    expect(listed.status).toBe(200);
+    expect(listed.body.entries).toEqual([
+      expect.objectContaining({
+        id: registrationId,
+        cwd: reserved,
+        active: false,
+        persisted: true,
+      }),
+    ]);
+
+    const removed = await request(app).delete(
+      `/workspace-registrations/${registrationId}`,
+    );
+    expect(removed.status).toBe(200);
+    expect(removed.body).toEqual({
+      removed: true,
+      active: false,
+      restartRequired: false,
+    });
+    expect(removeById).toHaveBeenCalledWith(registrationId);
+    expect(internal.registrationIds).toEqual([registrationId]);
+    expect(registry.listManaged()).toContain(internal);
+    expect(registry.syncRuntimeMetadata).not.toHaveBeenCalled();
+  });
+
   it('forgets persistence without unloading an active runtime', async () => {
     const aliasId = workspaceRegistrationId('/raw/symlink-alias');
     const active = makeRuntime(REAL_DIR, { registrationIds: [aliasId] });
@@ -2402,5 +2929,141 @@ describe('GET /workspace-path-suggestions', () => {
       .query({ prefix: '/' + 'x'.repeat(5000) });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_prefix');
+  });
+});
+
+describe('POST /workspace-directory-picker', () => {
+  it('remains available in loopback development without a configured token', async () => {
+    const mutate = vi.fn(
+      (options?: { strict?: boolean }) =>
+        (_req: Request, res: Response, next: () => void) => {
+          if (options?.strict) {
+            res.status(401).json({ code: 'token_required' });
+            return;
+          }
+          next();
+        },
+    );
+    const { app } = createApp({
+      mutate,
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body.selected).toBe(false);
+  });
+
+  it('returns the absolute path selected by the native picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/Users/me/code');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('returns selected=false when the user cancels', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: false,
+    });
+  });
+
+  it('returns 501 when the native picker is unavailable', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi
+        .fn()
+        .mockRejectedValue(new NativeDirectoryPickerUnavailableError()),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('directory_picker_unavailable');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker unavailable'),
+    );
+  });
+
+  it('returns 500 when the picker fails unexpectedly', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('directory_picker_failed');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker failed: boom'),
+    );
+  });
+
+  it('passes an abort signal to the picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/tmp');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    await request(app).post('/workspace-directory-picker');
+
+    expect(pickWorkspaceDirectory).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('does not abort the picker before it can resolve, for the body the Web Shell actually sends', async () => {
+    // A real picker resolves only after the user interacts — model that with a
+    // delay so an already-aborted signal surfaces as a rejection.
+    const pickWorkspaceDirectory = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<string | undefined>((resolve, reject) => {
+          setTimeout(() => {
+            if (signal?.aborted) {
+              reject(new Error('The operation was aborted'));
+              return;
+            }
+            resolve('/Users/me/code');
+          }, 50);
+        }),
+    );
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker').send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('still aborts a picker that is genuinely in flight when the client hangs up', async () => {
+    let observed: AbortSignal | undefined;
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn((signal?: AbortSignal) => {
+        observed = signal;
+        return new Promise<string | undefined>(() => {});
+      }),
+    });
+    const req = request(app).post('/workspace-directory-picker').send({});
+    req.end(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    req.abort();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(observed?.aborted).toBe(true);
   });
 });

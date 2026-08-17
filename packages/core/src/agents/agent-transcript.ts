@@ -37,10 +37,11 @@ import type {
   ChatRecord,
 } from '../services/chatRecordingService.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
-import type { SandboxConfig } from '../config/config.js';
+import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
-import type { FunctionDeclaration, Content } from '@google/genai';
+import type { Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 const MAX_PENDING_STREAM_BYTES = 64 * 1024;
@@ -128,6 +129,12 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /**
+   * Immutable launch-time execution policy for a restricted fork.
+   * Legacy absence allows every tool except the mandatory interaction-tool
+   * exclusion; an empty list means deny-all.
+   */
+  executionAllowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
@@ -298,17 +305,9 @@ export interface AttachJsonlOptions {
   initialUserPrompt?: string;
   /**
    * Exact bootstrap history that seeded the agent before its first runtime
-   * turn. Used by transcript-first resume to reconstruct fork constraints.
+   * turn. Used by transcript-first resume to reconstruct fork context.
    */
   bootstrapHistory?: Content[];
-  /**
-   * Immutable launch-time system instruction for fork resume.
-   */
-  bootstrapSystemInstruction?: string | Content;
-  /**
-   * Immutable launch-time tool declarations / allowlist for fork resume.
-   */
-  bootstrapTools?: Array<string | FunctionDeclaration>;
   /**
    * Launching prompt that should be treated as the first model-facing task
    * prompt during transcript-based resume. For forks this may differ from the
@@ -326,6 +325,53 @@ export interface AttachJsonlOptions {
    * branch away from any dangling tail produced by an interrupted turn.
    */
   initialParentUuid?: string | null;
+  /**
+   * 1-based attempt number when this attach resumes a transcript after a
+   * failed attempt (2+). Seeds an `agent_retry` system marker at the seam so
+   * the retry is visible on disk. Not implied by `appendToExisting` —
+   * background resume also appends without being a retry.
+   */
+  retryAttempt?: number;
+}
+
+/** Path + options pair for {@link attachJsonlTranscriptWriter}. */
+export interface AgentTranscriptAttachTarget {
+  jsonlPath: string;
+  options: AttachJsonlOptions;
+}
+
+/**
+ * Single owner of the agent-transcript attach contract: the JSONL path plus
+ * the launch metadata shared by every attach site (AgentTool's foreground
+ * and background launches, workflow dispatch, background resume). Each site
+ * layers its extras on top, so a new launch-metadata field added here lands
+ * in every transcript instead of only the sites that happened to be updated.
+ *
+ * The path follows the merged `sessionId` — the live session by default;
+ * background resume overrides it with the persisted parent session.
+ */
+export function buildAgentTranscriptAttach(
+  config: Config,
+  agentId: string,
+  extras?: Partial<AttachJsonlOptions>,
+): AgentTranscriptAttachTarget {
+  const projectRoot = config.getProjectRoot();
+  const options: AttachJsonlOptions = {
+    agentId,
+    sessionId: config.getSessionId(),
+    cwd: projectRoot,
+    version: config.getCliVersion() || 'unknown',
+    gitBranch: getCachedGitBranch(projectRoot),
+    ...extras,
+  };
+  return {
+    jsonlPath: getAgentJsonlPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      options.agentId,
+    ),
+    options,
+  };
 }
 
 export interface AttachJsonlTranscriptResult {
@@ -536,25 +582,10 @@ export function attachJsonlTranscriptWriter(
     recordUserMessage(event.text, event.kind ?? 'message');
   };
 
-  const hasBootstrapPayload =
-    options.bootstrapHistory !== undefined ||
-    options.bootstrapSystemInstruction !== undefined ||
-    options.bootstrapTools !== undefined;
-
-  if (hasBootstrapPayload) {
+  if (options.bootstrapHistory !== undefined) {
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
       history: structuredClone(options.bootstrapHistory ?? []),
-      ...(options.bootstrapSystemInstruction !== undefined
-        ? {
-            systemInstruction: structuredClone(
-              options.bootstrapSystemInstruction,
-            ),
-          }
-        : {}),
-      ...(options.bootstrapTools !== undefined
-        ? { tools: structuredClone(options.bootstrapTools) }
-        : {}),
     };
     recordSystem('agent_bootstrap', payload);
   }
@@ -567,6 +598,10 @@ export function attachJsonlTranscriptWriter(
     recordSystem('agent_launch_prompt', {
       displayText: options.launchTaskPrompt,
     });
+  }
+
+  if (options.retryAttempt !== undefined) {
+    recordSystem('agent_retry', { attempt: options.retryAttempt });
   }
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);

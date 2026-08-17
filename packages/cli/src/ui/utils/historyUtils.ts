@@ -72,6 +72,7 @@ export function isSyntheticHistoryItem(
     case 'gemini_content':
     case 'tool_group':
     case 'btw':
+    case 'advisor':
     case 'memory_saved':
     case 'about':
     case 'help':
@@ -92,6 +93,7 @@ export function isSyntheticHistoryItem(
     case 'arena_agent_complete':
     case 'arena_session_complete':
     case 'goal_status':
+    case 'goal_state':
       return false;
 
     default: {

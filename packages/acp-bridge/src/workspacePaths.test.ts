@@ -55,24 +55,27 @@ describe('canonicalizeWorkspaces', () => {
 // The single ingestion-ordering enforcement point: translation before the
 // absolute-path check, shared by all five workspace-ingestion sites.
 describe('translateAndCheckAbsoluteWorkspacePath', () => {
-  it('returns the translated mount for Windows-shaped input in a sandbox', () => {
-    vi.stubEnv('SANDBOX', 'qwen-code-sandbox-0');
-    _setSandboxMountExistsForTest((p) => p === '/c/qwen-repro');
-    try {
-      expect(translateAndCheckAbsoluteWorkspacePath('C:\\qwen-repro')).toBe(
-        '/c/qwen-repro',
-      );
-    } finally {
-      vi.unstubAllEnvs();
-      _setSandboxMountExistsForTest(undefined);
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    'returns the translated mount for Windows-shaped input in a sandbox',
+    () => {
+      vi.stubEnv('SANDBOX', 'qwen-code-sandbox-0');
+      _setSandboxMountExistsForTest((p) => p === '/c/qwen-repro');
+      try {
+        expect(translateAndCheckAbsoluteWorkspacePath('C:\\qwen-repro')).toBe(
+          '/c/qwen-repro',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+        _setSandboxMountExistsForTest(undefined);
+      }
+    },
+  );
 
   it('returns null for non-absolute input (untranslated Windows shape included)', () => {
     vi.stubEnv('SANDBOX', '');
     try {
       expect(translateAndCheckAbsoluteWorkspacePath('C:\\qwen-repro')).toBe(
-        null,
+        process.platform === 'win32' ? 'C:\\qwen-repro' : null,
       );
       expect(translateAndCheckAbsoluteWorkspacePath('relative/dir')).toBe(null);
     } finally {

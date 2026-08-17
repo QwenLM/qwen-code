@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
@@ -54,6 +55,22 @@ export function daemonObservedContactsPath(workspaceCwd: string): string {
 
 export function daemonChannelLoopPath(workspaceCwd: string): string {
   return daemonChannelStatePath(workspaceCwd, 'cron.json');
+}
+
+export function daemonChannelStateDir(
+  workspaceCwd: string,
+  channelName: string,
+): string {
+  const label =
+    channelName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 32) || 'channel';
+  const hash = createHash('sha256')
+    .update(channelName)
+    .digest('hex')
+    .slice(0, 16);
+  return daemonChannelStatePath(
+    workspaceCwd,
+    path.join('instances', `${label}-${hash}`),
+  );
 }
 
 export function channelLoopPath(): string {

@@ -4,17 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application } from 'express';
+import type { Application, RequestHandler } from 'express';
 import {
   GITHUB_PR_ERROR_MESSAGE_MAX,
   fetchGitHubPullRequests,
+  createGitHubPullRequest,
+  getDefaultBranch,
   type FetchGitHubPullRequestsResult,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwdOrFail,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 
@@ -29,6 +34,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
   deps: {
     workspaceRegistry: WorkspaceRegistry;
     sendBridgeError: SendBridgeError;
+    mutate: (opts?: { strict?: boolean }) => RequestHandler;
     /** Coalescing/refresh window for the cached PR list. Defaults to 60s. */
     cacheTtlMs?: number;
   },
@@ -51,6 +57,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
   const getPullRequests = (
     workspaceCwd: string,
+    env?: Readonly<Record<string, string | undefined>>,
   ): Promise<FetchGitHubPullRequestsResult> => {
     const now = Date.now();
     const existing = cache.get(workspaceCwd);
@@ -59,7 +66,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       (existing.settledAt === null || now - existing.settledAt < ttlMs);
     if (!fresh) {
       const entry: PrsCacheEntry = {
-        promise: fetchGitHubPullRequests(workspaceCwd),
+        promise: fetchGitHubPullRequests(workspaceCwd, env),
         settledAt: null,
       };
       cache.set(workspaceCwd, entry);
@@ -89,7 +96,10 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
     applyReadHeaders(res);
     try {
-      const result = await getPullRequests(runtime.workspaceCwd);
+      const result = await getPullRequests(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+      );
       switch (result.kind) {
         case 'ok':
           res.status(200).json({
@@ -135,6 +145,122 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
           );
       }
     } catch (err) {
+      deps.sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.post(
+    '/workspaces/:workspace/github/prs/create',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const route = 'POST /workspaces/:workspace/github/prs/create';
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
+        deps.sendBridgeError(res, err, { route });
+        return;
+      }
+
+      const body = safeBody(req);
+      const title = body['title'];
+      if (typeof title !== 'string' || !title.trim()) {
+        res.status(400).json({ error: 'title is required' });
+        return;
+      }
+      for (const field of ['body', 'base', 'head'] as const) {
+        if (body[field] !== undefined && typeof body[field] !== 'string') {
+          res.status(400).json({ error: `${field} must be a string` });
+          return;
+        }
+      }
+      const prBody =
+        typeof body['body'] === 'string' ? body['body'] : undefined;
+      const base = typeof body['base'] === 'string' ? body['base'] : undefined;
+      const head = typeof body['head'] === 'string' ? body['head'] : undefined;
+
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+
+      try {
+        const result = await createGitHubPullRequest(
+          cwd,
+          {
+            title: title.trim(),
+            body: prBody,
+            base,
+            head,
+          },
+          runtime.env.effectiveEnv,
+        );
+        switch (result.kind) {
+          case 'ok':
+            res.status(201).json({ url: result.url, number: result.number });
+            return;
+          case 'not_a_repo':
+            res.status(404).json({ error: 'not_a_git_repository' });
+            return;
+          case 'cli_unavailable':
+            res.status(502).json({
+              error: 'gh CLI not available',
+              code: 'github_cli_unavailable',
+            });
+            return;
+          case 'failed':
+            // Sanitize both the workspace cwd and the git root (gh runs at the
+            // git root, which may be a parent of the workspace) before truncating.
+            res.status(502).json({
+              error: sanitizeMessage(
+                sanitizeMessage(result.message, runtime.workspaceCwd),
+                result.gitRoot,
+              ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX),
+              code: 'github_pr_create_failed',
+            });
+            return;
+          default:
+            res.status(500).json({ error: 'unexpected result' });
+            return;
+        }
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.get('/workspaces/:workspace/github/default-branch', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/github/default-branch';
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+
+    applyReadHeaders(res);
+    try {
+      runtime.generationGuard?.assertOpen();
+      const branch = await getDefaultBranch(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+      );
+      runtime.generationGuard?.assertOpen();
+      res.status(200).json({ branch: branch ?? 'origin/main' });
+    } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       deps.sendBridgeError(res, err, { route });
     }
   });

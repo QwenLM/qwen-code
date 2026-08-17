@@ -96,6 +96,60 @@ describe('convertSchema', () => {
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
 
+    it('should keep a Draft 4 boolean exclusive limit instead of dropping it', () => {
+      expect(
+        convertSchema(
+          { type: 'number', minimum: 10, exclusiveMinimum: true },
+          'openapi_30',
+        ),
+      ).toEqual({ type: 'number', minimum: 10, exclusiveMinimum: true });
+      expect(
+        convertSchema(
+          { type: 'number', maximum: 10, exclusiveMaximum: true },
+          'openapi_30',
+        ),
+      ).toEqual({ type: 'number', maximum: 10, exclusiveMaximum: true });
+    });
+
+    it('should keep a nested Draft 4 boolean exclusive limit', () => {
+      expect(
+        convertSchema(
+          {
+            type: 'object',
+            properties: {
+              pct: { type: 'number', minimum: 0, exclusiveMinimum: true },
+            },
+          },
+          'openapi_30',
+        ),
+      ).toEqual({
+        type: 'object',
+        properties: {
+          pct: { type: 'number', minimum: 0, exclusiveMinimum: true },
+        },
+      });
+    });
+
+    it('should be idempotent for exclusive limits', () => {
+      const once = convertSchema(
+        { type: 'number', exclusiveMinimum: 10 },
+        'openapi_30',
+      );
+      expect(convertSchema(once, 'openapi_30')).toEqual(once);
+    });
+
+    // Guard against over-correcting: the numeric form must still be CONSUMED
+    // by step 3 rather than passed through, or the boolean it writes would be
+    // overwritten by the number and the output would stop being Draft 4.
+    it('should not pass a numeric exclusive limit through unconverted', () => {
+      const result = convertSchema(
+        { type: 'number', exclusiveMaximum: 5 },
+        'openapi_30',
+      );
+      expect(result['exclusiveMaximum']).toBe(true);
+      expect(result['maximum']).toBe(5);
+    });
+
     it('should convert nested objects recursively', () => {
       const input = {
         type: 'object',

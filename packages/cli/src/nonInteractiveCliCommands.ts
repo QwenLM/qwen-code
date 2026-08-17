@@ -13,6 +13,8 @@ import {
   Logger,
   uiTelemetryService,
   type Config,
+  type GoalStateCause,
+  type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
@@ -22,10 +24,14 @@ import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
-import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
   CommandKind,
+  type GoalCommandOperation,
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
@@ -56,16 +62,18 @@ function getSkillCommandName(command: SlashCommand): string {
  * - 'submit_prompt': Submits content to the model (supports all modes)
  * - 'message': Returns a single message (supports non-interactive JSON/text only)
  * - 'stream_messages': Streams multiple messages (supports ACP only)
+ * - 'goal_control': Returns the canonical Goal control result
  * - 'unsupported': Command cannot be executed in this mode
  * - 'no_command': No command was found or executed
  */
-export type NonInteractiveSlashCommandResult =
+export type NonInteractiveSlashCommandResult = (
   | {
       type: 'submit_prompt';
       content: PartListUnion;
       outputHistoryItems?: HistoryItemWithoutId[];
       /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
       modelOverride?: string;
+      refreshContextFilesOnWrite?: boolean;
     }
   | {
       type: 'message';
@@ -82,13 +90,34 @@ export type NonInteractiveSlashCommandResult =
       >;
     }
   | {
+      type: 'goal_control';
+      operation: GoalCommandOperation;
+      response: GoalStateResponse;
+      cause?: GoalStateCause;
+    }
+  | {
       type: 'unsupported';
       reason: string;
       originalType: string;
     }
   | {
       type: 'no_command';
-    };
+    }
+) & {
+  /** Present when a command was resolved and executed. */
+  resolvedCommand?: ResolvedSlashCommandInfo;
+};
+
+/**
+ * The command the processor actually resolved the input to — shadowing-aware.
+ * Callers that gate behavior on "which command ran" (e.g. the ACP recording
+ * gate for the built-in `advisor`) must use this, not the raw input token:
+ * a user-defined command named `advisor` shadows the built-in.
+ */
+export interface ResolvedSlashCommandInfo {
+  name: string;
+  kind: CommandKind;
+}
 
 /**
  * Converts a SlashCommandActionReturn to a NonInteractiveSlashCommandResult.
@@ -97,6 +126,7 @@ export type NonInteractiveSlashCommandResult =
  * - submit_prompt: Submits content to the model (all modes)
  * - message: Returns a single message (non-interactive JSON/text only)
  * - stream_messages: Streams multiple messages (ACP only)
+ * - goal_control: Returns a canonical Goal control result
  *
  * All other result types are converted to 'unsupported'.
  *
@@ -115,6 +145,9 @@ function handleCommandResult(
         ...(result.modelOverride
           ? { modelOverride: result.modelOverride }
           : {}),
+        ...(result.refreshContextFilesOnWrite
+          ? { refreshContextFilesOnWrite: true }
+          : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
@@ -130,6 +163,14 @@ function handleCommandResult(
       return {
         type: 'stream_messages',
         messages: result.messages,
+      };
+
+    case 'goal_control':
+      return {
+        type: 'goal_control',
+        operation: result.operation,
+        response: result.response,
+        ...(result.cause ? { cause: result.cause } : {}),
       };
 
     /**
@@ -326,11 +367,23 @@ async function registerModelInvocableCommands(
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
  */
+/**
+ * Session-scoped callbacks a caller can expose to the commands it runs.
+ * Only the ACP host supplies these: it keeps one long-lived session object
+ * across `/clear`, so commands that switch sessions have to be able to tell
+ * it to re-attach.
+ */
+export interface NonInteractiveSlashCommandSessionHooks {
+  /** @see CommandContext['session']['startNewSession'] */
+  startNewSession?: (sessionId: string) => void;
+}
+
 export const handleSlashCommand = async (
   rawQuery: string,
   abortController: AbortController,
   config: Config,
   settings: LoadedSettings,
+  sessionHooks?: NonInteractiveSlashCommandSessionHooks,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -405,7 +458,9 @@ export const handleSlashCommand = async (
   if (stackedResult.skills.length >= 2) {
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
+    let refreshContextFilesOnWrite = false;
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
+    const successfulSkillCommands: SlashCommand[] = [];
 
     for (const skill of stackedResult.skills) {
       if (!skill.action) continue;
@@ -423,15 +478,22 @@ export const handleSlashCommand = async (
       if (skillResult?.type === 'submit_prompt') {
         combinedContent.push(skillResult.content);
         firstModelOverride ??= skillResult.modelOverride;
+        refreshContextFilesOnWrite ||= Boolean(
+          skillResult.refreshContextFilesOnWrite,
+        );
         if (skillResult.onComplete) {
           onCompleteCallbacks.push(skillResult.onComplete);
         }
       }
 
+      const succeeded = skillResult?.type === 'submit_prompt';
       recordSkillInvocation(config, {
         skillName: getSkillCommandName(skill),
-        success: skillResult?.type === 'submit_prompt',
+        success: succeeded,
       });
+      if (succeeded) {
+        successfulSkillCommands.push(skill);
+      }
     }
 
     if (stackedResult.remainingText) {
@@ -450,11 +512,17 @@ export const handleSlashCommand = async (
     if (hookResult.blockedResult) {
       return hookResult.blockedResult;
     }
+    for (const skill of successfulSkillCommands) {
+      void recordAutoSkillCommandUsage(config, skill);
+    }
 
     return {
       type: 'submit_prompt',
       content: hookResult.content,
       ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+      ...(refreshContextFilesOnWrite
+        ? { refreshContextFilesOnWrite: true }
+        : {}),
       ...(onCompleteCallbacks.length
         ? {
             onComplete: async () => {
@@ -505,6 +573,11 @@ export const handleSlashCommand = async (
     return { type: 'no_command' };
   }
 
+  const resolvedCommand: ResolvedSlashCommandInfo = {
+    name: commandToExecute.name,
+    kind: commandToExecute.kind,
+  };
+
   // Not used by custom commands but may be in the future.
   const sessionStats: SessionStatsState = {
     sessionId: config?.getSessionId(),
@@ -527,6 +600,8 @@ export const handleSlashCommand = async (
 
   const context: CommandContext = {
     executionMode,
+    abortSignal:
+      commandToExecute.name === 'advisor' ? abortController.signal : undefined,
     services: {
       config,
       settings,
@@ -536,6 +611,9 @@ export const handleSlashCommand = async (
     session: {
       stats: sessionStats,
       sessionShellAllowlist: new Set(),
+      ...(sessionHooks?.startNewSession
+        ? { startNewSession: sessionHooks.startNewSession }
+        : {}),
     },
     invocation: {
       raw: trimmed,
@@ -571,6 +649,7 @@ export const handleSlashCommand = async (
       type: 'message',
       messageType: 'info',
       content: 'Command executed successfully.',
+      resolvedCommand,
     };
   }
 
@@ -590,17 +669,24 @@ export const handleSlashCommand = async (
     }
     if (hookResult.blockedResult) {
       recordSkillCommandInvocation(false);
-      return hookResult.blockedResult;
+      return { ...hookResult.blockedResult, resolvedCommand };
     }
     recordSkillCommandInvocation(true);
-    return handleCommandResult(
-      { ...result, content: hookResult.content },
-      outputHistoryItems,
-    );
+    void recordAutoSkillCommandUsage(config, commandToExecute);
+    return {
+      ...handleCommandResult(
+        { ...result, content: hookResult.content },
+        outputHistoryItems,
+      ),
+      resolvedCommand,
+    };
   }
 
   // Handle different result types
-  return handleCommandResult(result, outputHistoryItems);
+  return {
+    ...handleCommandResult(result, outputHistoryItems),
+    resolvedCommand,
+  };
 };
 
 /**

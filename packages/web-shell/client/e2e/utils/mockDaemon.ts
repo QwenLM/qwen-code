@@ -3,14 +3,21 @@ import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
   type DaemonCapabilities,
+  type DaemonChannelsSnapshot,
+  type DaemonChannelPairingRequest,
+  type DaemonChannelTypeCatalog,
+  type DaemonPersistedBranchedSession,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionArtifact,
+  type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
@@ -50,10 +57,19 @@ export interface WebShellDaemonScenario {
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  channelTypes: DaemonChannelTypeCatalog;
+  channels: DaemonChannelsSnapshot;
+  pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
+  pairingApprovals: Record<string, string[]>;
+  pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /** Artifact list returned by `GET /session/:id/artifacts`. */
+  artifacts: DaemonSessionArtifact[];
+  /** File contents served by `GET /file?path=...`, keyed by requested path. */
+  workspaceFiles: Record<string, string>;
   /**
    * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
    * (non-git workspace), matching the real daemon's graceful degradation.
@@ -64,6 +80,21 @@ export interface WebShellDaemonScenario {
    * empty pull-request list.
    */
   gitHubPrs?: DaemonGitHubPullRequestList;
+  /** Response for `GET /workspaces/:cwd/git/branches`. */
+  gitBranches?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/diff`. */
+  gitDiff?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/log`. */
+  gitLog?: unknown;
+  /** Response for `POST /session/:id/btw`. */
+  btwAnswer?: string;
+  /** Stateful response and replay used by historical branch E2E flows. */
+  branch?: {
+    sessionId: string;
+    clientId?: string;
+    displayName: string;
+    events: DaemonEvent[];
+  };
 }
 
 export interface MockDaemonController {
@@ -75,6 +106,8 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  branchRequests(): DaemonRequestRecord[];
+  configOptionRequests(): DaemonRequestRecord[];
 }
 
 type ScenarioOverrides = Partial<
@@ -88,6 +121,11 @@ type ScenarioOverrides = Partial<
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
+    | 'channelTypes'
+    | 'channels'
+    | 'pairingRequests'
+    | 'pairingApprovals'
+    | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -101,6 +139,11 @@ type ScenarioOverrides = Partial<
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  channelTypes?: DaemonChannelTypeCatalog;
+  channels?: DaemonChannelsSnapshot;
+  pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
+  pairingApprovals?: Record<string, string[]>;
+  pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -312,12 +355,24 @@ export function createWebShellDaemonScenario(
     extensions,
     extensionOperations,
     extensionUpdateCheck,
+    channelTypes: overrides.channelTypes ?? [],
+    channels: overrides.channels ?? { revision: '1', instances: {} },
+    pairingRequests: overrides.pairingRequests ?? {},
+    pairingApprovals: overrides.pairingApprovals ?? {},
+    pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
+    artifacts: overrides.artifacts ?? [],
+    workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
+    gitBranches: overrides.gitBranches,
+    gitDiff: overrides.gitDiff,
+    gitLog: overrides.gitLog,
+    btwAnswer: overrides.btwAnswer,
+    branch: overrides.branch,
   };
 }
 
@@ -386,6 +441,14 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
       ),
+    branchRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/branch\/?$/.test(request.path),
+      ),
+    configOptionRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/config-option$/.test(request.path),
+      ),
   };
 }
 
@@ -405,13 +468,24 @@ export function userTextEvent(
 
 export function assistantTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: {
+    id?: number;
+    sessionId?: string;
+    branchRecordId?: string;
+  } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.branchRecordId
+        ? {
+            _meta: {
+              qwenTranscript: { branchRecordId: options.branchRecordId },
+            },
+          }
+        : {}),
     },
     options.id,
   );
@@ -497,6 +571,27 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+// Mirror production query modes: `group=pinned` is the pinned bucket;
+// `group=all` (and missing group) returns the full active list. The UI
+// excludes pinned rows from organized sections via `excludePinned`.
+function filterScenarioSessions(
+  scenario: WebShellDaemonScenario,
+  searchParams: URLSearchParams,
+): DaemonSessionSummary[] {
+  const group = searchParams.get('group');
+  const sourceType = searchParams.get('sourceType');
+  const sourceSessions = sourceType
+    ? scenario.sessions.filter(
+        (session) =>
+          session.sourceType === sourceType ||
+          (sourceType === 'default' && session.sourceType === undefined),
+      )
+    : scenario.sessions;
+  return group === 'pinned'
+    ? sourceSessions.filter((session) => Boolean(session.isPinned))
+    : sourceSessions;
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
@@ -510,16 +605,35 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    ) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
+    /^\/workspace\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
     /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
+    /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
+    /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -535,6 +649,12 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (
+    (method === 'GET' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && path === '/workspace/providers') return true;
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
@@ -547,6 +667,18 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/settings\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(voice|providers)\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -556,10 +688,74 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/channels\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    (method === 'PUT' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspace\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspace\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/github\/default-branch\/?$/.test(path)
+  )
+    return true;
+  if (method === 'GET' && /^\/workspace\/github\/default-branch\/?$/.test(path))
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/github\/prs\/create\/?$/.test(path)
+  )
+    return true;
+  if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
+    return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
+  if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -581,7 +777,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -663,6 +859,37 @@ async function handleDaemonRoute(
     await json(route, workspaceVoice(scenario));
     return;
   }
+  if (method === 'GET' && /^\/file\/?$/.test(path)) {
+    const filePath = searchParams.get('path') ?? '';
+    const content = scenario.workspaceFiles[filePath];
+    if (content === undefined) {
+      await json(route, { error: `No such file: ${filePath}` }, 404);
+      return;
+    }
+    await json(route, workspaceFile(filePath, content));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
+    await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
+    await json(route, scenario.providers);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, scenario.settings);
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, {
+      key: getRecordValue(body, 'key') ?? 'unknown',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
+      value: getRecordValue(body, 'value'),
+      requiresRestart: false,
+    });
+    return;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     const serverName = decodeURIComponent(path.split('/')[3] ?? 'server');
     await json(route, workspaceMcpTools(scenario, serverName));
@@ -676,16 +903,14 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror production query modes: `group=pinned` is the pinned bucket;
-    // `group=all` (and missing group) returns the full active list. The UI
-    // excludes pinned rows from organized sections via `excludePinned`.
-    const group = searchParams.get('group');
-    const sessions =
-      group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
-    await json(route, { sessions });
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    await json(route, {
+      sessions: filterScenarioSessions(scenario, searchParams),
+    });
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
@@ -694,6 +919,174 @@ async function handleDaemonRoute(
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
     };
     await json(route, catalog);
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path)
+  ) {
+    await json(route, scenario.channelTypes);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/channels\/?$/.test(path)) {
+    await json(route, scenario.channels);
+    return;
+  }
+  const pairingMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/pairing-requests(\/approve)?\/?$/,
+  );
+  if (pairingMatch) {
+    const name = decodeURIComponent(pairingMatch[1]);
+    const requests = scenario.pairingRequests[name] ?? [];
+    if (method === 'GET' && !pairingMatch[2]) {
+      await json(route, { requests });
+      return;
+    }
+    if (method === 'POST' && pairingMatch[2]) {
+      const code = String(getRecordValue(body, 'code') ?? '').toUpperCase();
+      const approved = requests.find((request) => request.code === code);
+      if (!approved) {
+        await json(route, { error: 'Pairing request not found.' }, 404);
+        return;
+      }
+      const remaining = requests.filter((request) => request.code !== code);
+      scenario.pairingRequests = {
+        ...scenario.pairingRequests,
+        [name]: remaining,
+      };
+      if (approved.subject?.type === 'group') {
+        scenario.pairingGroupApprovals = {
+          ...scenario.pairingGroupApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingGroupApprovals[name] ?? []),
+              approved.subject.id,
+            ]),
+          ),
+        };
+      } else {
+        scenario.pairingApprovals = {
+          ...scenario.pairingApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingApprovals[name] ?? []),
+              approved.senderId,
+            ]),
+          ),
+        };
+      }
+      await json(route, { approved, requests: remaining });
+      return;
+    }
+  }
+  const pairingApprovalsMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/pairing-approvals\/?$/,
+  );
+  if (pairingApprovalsMatch) {
+    const name = decodeURIComponent(pairingApprovalsMatch[1]);
+    const senderIds = scenario.pairingApprovals[name] ?? [];
+    const groupIds = scenario.pairingGroupApprovals[name] ?? [];
+    if (method === 'GET') {
+      await json(route, { senderIds, groupIds });
+      return;
+    }
+    if (method === 'DELETE') {
+      const senderId = String(getRecordValue(body, 'senderId') ?? '');
+      const groupId = String(getRecordValue(body, 'groupId') ?? '');
+      const known = senderId
+        ? senderIds.includes(senderId)
+        : groupIds.includes(groupId);
+      if (!known) {
+        await json(
+          route,
+          {
+            error: 'Pairing approval was not found.',
+            code: 'channel_pairing_approval_not_found',
+          },
+          404,
+        );
+        return;
+      }
+      const remainingSenders = senderId
+        ? senderIds.filter((item) => item !== senderId)
+        : senderIds;
+      const remainingGroups =
+        groupId && !senderId
+          ? groupIds.filter((item) => item !== groupId)
+          : groupIds;
+      scenario.pairingApprovals = {
+        ...scenario.pairingApprovals,
+        [name]: remainingSenders,
+      };
+      scenario.pairingGroupApprovals = {
+        ...scenario.pairingGroupApprovals,
+        [name]: remainingGroups,
+      };
+      await json(route, {
+        revoked: senderId || groupId,
+        senderIds: remainingSenders,
+        groupIds: remainingGroups,
+      });
+      return;
+    }
+  }
+  const channelMutationMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/?$/,
+  );
+  if (channelMutationMatch && (method === 'PUT' || method === 'DELETE')) {
+    const name = decodeURIComponent(channelMutationMatch[1]);
+    if (
+      !isRecord(body) ||
+      body['expectedRevision'] !== scenario.channels.revision
+    ) {
+      await json(route, { error: 'Channel settings changed.' }, 409);
+      return;
+    }
+    const revision = nextRevision(scenario.channels.revision);
+    if (method === 'DELETE') {
+      const instances = { ...scenario.channels.instances };
+      delete instances[name];
+      scenario.channels = { revision, instances };
+      await json(route, {
+        snapshot: scenario.channels,
+        instance: {
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      });
+      return;
+    }
+    if (!isRecord(body['config'])) {
+      await badRequest(route, 'Invalid Channel configuration.');
+      return;
+    }
+    const previous = scenario.channels.instances[name];
+    const secrets = { ...(previous?.secrets ?? {}) };
+    if (isRecord(body['secrets'])) {
+      for (const [key, update] of Object.entries(body['secrets'])) {
+        if (!isRecord(update)) continue;
+        if (update['operation'] === 'clear') {
+          delete secrets[key];
+        } else if (update['operation'] === 'replace') {
+          secrets[key] = { present: true, source: 'literal' };
+        }
+      }
+    }
+    const instance = {
+      name,
+      config: body['config'],
+      secrets,
+      startsWithServe: previous?.startsWithServe ?? false,
+      runtime: previous?.runtime ?? ({ state: 'stopped' } as const),
+    };
+    scenario.channels = {
+      revision,
+      instances: { ...scenario.channels.instances, [name]: instance },
+    };
+    await json(route, { snapshot: scenario.channels, instance });
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
@@ -719,6 +1112,179 @@ async function handleDaemonRoute(
     );
     return;
   }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/branches\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitBranches ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        local: [
+          {
+            name: 'main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'feat/demo',
+            isHead: true,
+            ahead: 3,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        remote: [
+          {
+            name: 'origin/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'origin/develop',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'upstream/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        tags: [{ name: 'v1.0.0', date: 0, subject: 'Release 1.0' }],
+        recent: ['main', 'develop'],
+        head: 'feat/demo',
+        detached: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/diff\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitDiff ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        files: [
+          {
+            path: 'src/foo.ts',
+            added: 10,
+            removed: 3,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+          },
+          {
+            path: 'src/bar.ts',
+            added: 5,
+            removed: 0,
+            isBinary: false,
+            isUntracked: true,
+            isDeleted: false,
+          },
+        ],
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/log\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitLog ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        entries: [
+          {
+            sha: 'abc1234',
+            shortSha: 'abc1234',
+            subject: 'feat: add branch picker',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            refs: 'HEAD -> feat/demo',
+            parents: [],
+          },
+          {
+            sha: 'def5678',
+            shortSha: 'def5678',
+            subject: 'fix: resolve session per workspace',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            parents: [],
+          },
+        ],
+        hasMore: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/(checkout|branch|push|pull|commit)\/?$/.test(
+      path,
+    )
+  ) {
+    const action = path.replace(/\/$/, '').split('/').pop();
+    if (action === 'commit') {
+      await json(route, { sha: 'abc1234', subject: 'test commit' });
+    } else if (action === 'checkout' || action === 'branch') {
+      await json(route, { branch: 'feat/demo', detached: false });
+    } else {
+      await json(route, { success: true, output: '' });
+    }
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/default-branch\/?$/.test(path)
+  ) {
+    await json(route, { branch: 'origin/main' });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/prs\/create\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      { url: 'https://github.com/example/repo/pull/42', number: 42 },
+      201,
+    );
+    return;
+  }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
+    await json(route, {
+      sessionId: path.split('/')[2],
+      answer:
+        scenario.btwAnswer ??
+        'feat(web-shell): add git branch picker and commit dialog\n\n## What this PR does\nAdds branch picker, commit dialog, and create PR flow to the web shell.\n\n## Why it is needed\nCompletes the git workflow in the browser.',
+    });
+    return;
+  }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
     return;
@@ -733,6 +1299,27 @@ async function handleDaemonRoute(
     const extra = sessionMatch[3] ? decodeURIComponent(sessionMatch[3]) : '';
     if (action === 'load' || action === 'resume') {
       await json(route, restoredSessionEnvelope(scenario, sessionId));
+      return;
+    }
+    if (action === 'branch') {
+      if (!scenario.branch) {
+        await json(route, { error: 'Branch scenario is not configured.' }, 404);
+        return;
+      }
+      const branch = scenario.branch;
+      const response: DaemonPersistedBranchedSession = {
+        sessionId: branch.sessionId,
+        displayName: branch.displayName,
+        forkedFrom: {
+          sessionId,
+          displayName: scenario.displayName,
+        },
+      };
+      await json(route, response, 201);
+      return;
+    }
+    if (action === 'artifacts') {
+      await json(route, sessionArtifactsEnvelope(scenario, sessionId));
       return;
     }
     if (action === 'prompt') {
@@ -788,6 +1375,24 @@ async function handleDaemonRoute(
       }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
+      return;
+    }
+    if (action === 'config-option') {
+      const configId = readStringField(body, 'configId');
+      const value = readStringField(body, 'value');
+      if (configId !== 'reasoning_effort' || !value) {
+        await badRequest(route, 'Invalid config-option request.');
+        return;
+      }
+      const configOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions.map((option) =>
+            isRecord(option) && option['id'] === configId
+              ? { ...option, currentValue: value }
+              : option,
+          )
+        : [];
+      scenario.state.configOptions = configOptions;
+      await json(route, { configOptions });
       return;
     }
     if (action === 'approval-mode') {
@@ -867,17 +1472,22 @@ function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
 ): DaemonRestoredSession {
+  const branch =
+    scenario.branch?.sessionId === sessionId ? scenario.branch : undefined;
+  const events = branch?.events ?? scenario.events;
   return {
     sessionId,
     workspaceCwd: scenario.workspaceCwd,
     attached: true,
-    clientId: scenario.clientId,
+    clientId: branch?.clientId ?? scenario.clientId,
     createdAt: now,
     hasActivePrompt: false,
-    state: scenario.state,
-    compactedReplay: scenario.events,
+    state: branch
+      ? { ...scenario.state, displayName: branch.displayName }
+      : scenario.state,
+    compactedReplay: events,
     liveJournal: [],
-    lastEventId: maxEventId(scenario.events),
+    lastEventId: maxEventId(events),
   };
 }
 
@@ -916,6 +1526,13 @@ function readStringField(body: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value
     : undefined;
+}
+
+function nextRevision(revision: string): string {
+  const numeric = Number(revision);
+  return Number.isSafeInteger(numeric) && numeric >= 0
+    ? String(numeric + 1)
+    : `${revision}-next`;
 }
 
 function isApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -995,6 +1612,36 @@ function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
   return scenario.voice;
+}
+
+function sessionArtifactsEnvelope(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): DaemonSessionArtifactsEnvelope {
+  return {
+    v: 1,
+    sessionId,
+    artifacts: scenario.artifacts,
+    generatedAt: now,
+    limits: { maxArtifacts: 100 },
+  };
+}
+
+function workspaceFile(path: string, content: string): DaemonWorkspaceFile {
+  const sizeBytes = new TextEncoder().encode(content).byteLength;
+  return {
+    kind: 'file',
+    path,
+    content,
+    encoding: 'utf-8',
+    bom: false,
+    lineEnding: 'lf',
+    sizeBytes,
+    returnedBytes: sizeBytes,
+    truncated: false,
+    matchedIgnore: null,
+    originalLineCount: null,
+  };
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {

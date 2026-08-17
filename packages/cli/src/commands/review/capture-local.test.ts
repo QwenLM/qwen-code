@@ -14,8 +14,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { seedParseArgs } from './lib/test-utils.js';
+import { DEADLINE_ENV } from './lib/deadline.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
+const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
+vi.mock('../../config/settings.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  loadSettings: settingsMock,
+}));
 vi.mock('./lib/local-diff.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   captureLocalDiff: captureMock,
@@ -150,6 +157,58 @@ describe('capture-local (command boundary)', () => {
     expect(errs.join('')).toContain('the working tree is clean');
   });
 
+  it('records an explicit --effort in the plan', () => {
+    capture();
+    run('plan.json', { effort: 'medium' });
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBe('medium');
+    expect(errs.join('')).toContain('from --effort');
+  });
+
+  it('recovers the effort parse-args resolved when --effort is not re-threaded', () => {
+    // The gap this closes: the orchestrator ran `/review --effort medium`, but did
+    // not copy the level into `capture-local --effort`. Without the fallback the
+    // plan carries no effort and the roster safe-expands to the FULL set — the
+    // user's `medium` is silently ignored. The report parse-args already wrote is
+    // the deterministic source of truth.
+    seedParseArgs(dir, 'medium');
+    capture();
+    run('plan.json'); // note: no effort passed
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBe('medium');
+    expect(errs.join('')).toContain('from parse-args report');
+  });
+
+  it('lets an explicit --effort win over the parse-args report', () => {
+    seedParseArgs(dir, 'high');
+    capture();
+    run('plan.json', { effort: 'low' });
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBe('low');
+  });
+
+  it('omits effort (roster fail-safe to full) when neither flag nor report is present', () => {
+    capture();
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBeUndefined();
+  });
+
+  it('ignores a malformed effort in the report rather than trusting it', () => {
+    // A corrupt/hand-edited report must not smuggle a bogus level into the roster;
+    // an unrecognised value falls through to the full-roster fail-safe.
+    seedParseArgs(dir, 'turbo');
+    capture();
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBeUndefined();
+  });
+
   it('escapes a filename carrying terminal control characters', () => {
     // A filename is workspace-controlled, and git permits an ESC or a newline in
     // one. Printed raw it can forge a second warning line or drive the user's
@@ -160,5 +219,65 @@ describe('capture-local (command boundary)', () => {
     const out = errs.join('');
     expect(out).not.toContain('[2K');
     expect(out).toContain('\\u001b');
+  });
+});
+
+describe('capture-local — the budget context the handler actually passes', () => {
+  // `BudgetContext`'s fields are optional, so dropping either from this call
+  // site compiles clean and every unit test beneath it stays green. Only a
+  // handler-level assertion on the written plan can see it — and this command
+  // had none.
+  it('carries the operator ceiling and the clock into the written plan', () => {
+    const before = process.env[DEADLINE_ENV];
+    try {
+      const huge = Array.from(
+        { length: 9000 },
+        (_, i) => `+const x${i} = ${i};`,
+      ).join('\n');
+      capture({
+        diff: Buffer.from(
+          [
+            'diff --git a/src/huge.ts b/src/huge.ts',
+            '--- /dev/null',
+            '+++ b/src/huge.ts',
+            '@@ -0,0 +1,9000 @@',
+            huge,
+            '',
+          ].join('\n'),
+          'utf8',
+        ),
+        untracked: ['src/huge.ts'],
+      });
+
+      delete process.env[DEADLINE_ENV];
+      settingsMock.mockReturnValue({ merged: {} });
+      const noClock = join(dir, 'no-clock.json');
+      run(noClock);
+      const a = JSON.parse(readFileSync(noClock, 'utf8'));
+      expect(a.srcDiffLines).toBeGreaterThanOrEqual(3000);
+      expect(a.budget.reverseAuditRounds).toBe(5); // huge, no clock → 3B tier
+
+      process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+      const withClock = join(dir, 'with-clock.json');
+      run(withClock);
+      expect(
+        JSON.parse(readFileSync(withClock, 'utf8')).budget.reverseAuditRounds,
+      ).toBe(3);
+
+      // …and the operator ceiling lowers whichever tier applies.
+      settingsMock.mockReturnValue({
+        merged: { review: { reverseAuditRounds: 3 } },
+      });
+      delete process.env[DEADLINE_ENV];
+      const capped = join(dir, 'capped.json');
+      run(capped);
+      expect(
+        JSON.parse(readFileSync(capped, 'utf8')).budget.reverseAuditRounds,
+      ).toBe(3);
+    } finally {
+      settingsMock.mockReturnValue({ merged: {} });
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+    }
   });
 });

@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -154,7 +154,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -212,7 +212,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -259,7 +259,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -335,6 +335,28 @@ jobs:
           )
         )
       }}
+    # Set when the push-time guard decisively refuses because the version
+    # already shipped; notify_failure keeps this benign refusal out of the
+    # release-failed issue and autofix dispatch.
+    outputs:
+      version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
+    # Serialize publish per release tag: the pre-push re-validation in the
+    # push step is only sound while at most one run pushes and publishes a
+    # given version at a time, and --force removed the non-fast-forward
+    # rejection that used to serialize the push itself. In-progress runs are
+    # never cancelled; of queued same-tag runs only the latest survives, but
+    # whichever run reaches the push re-validates first, so the invariant
+    # holds. is_dry_run is part of the key because a dry run ships nothing
+    # (no push, tag, or release) and must not queue ahead of — or delay —
+    # the real release for the same tag. timeout-minutes bounds the hold
+    # a wedged publish (a stalled npm publish or release-asset upload)
+    # keeps on the group: without it the GitHub default of 360 minutes
+    # leaves same-tag retries queued behind it, unable to run, fail, or
+    # notify; a healthy publish completes well inside 90 minutes.
+    concurrency:
+      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
+      cancel-in-progress: false
+    timeout-minutes: 90
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
@@ -347,7 +369,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           # Persist the bot PAT for release-branch pushes so downstream CI
           # workflows are triggered.
@@ -393,20 +415,74 @@ jobs:
           npm run release:version "${RELEASE_VERSION}"
 
       - name: 'Commit and Conditionally Push package versions'
+        id: 'push_release_branch'
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          GITHUB_TOKEN: '${{ github.token }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/external-context/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
             git commit -m "chore(release): ${RELEASE_TAG}"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
+            # The guard runs scripts/get-release-version.js from the
+            # checked-out ref — the operator-controlled dispatch input `ref`
+            # — not the branch this workflow file came from. A ref predating
+            # this PR has an entry point that ignores --assert-unreleased,
+            # prints version JSON, and exits 0 (probed against the merge
+            # base), which would read as "unreleased verified" while the
+            # guard never ran. Refuse the force push unless the checked-out
+            # script carries the guard.
+            if ! grep -q "assert-unreleased" scripts/get-release-version.js; then
+              echo "::error::Checked-out ref predates the push-time guard; refusing force push."
+              exit 1
+            fi
+            # Force: a failed earlier attempt may have left this branch on an
+            # older head, and its divergent bump commit would fail a plain
+            # retry push as non-fast-forward. Replacing it is safe only while
+            # nothing for this version has shipped. prepare checked that once,
+            # but the validation jobs and the production-release approval gate
+            # separate that check from this push by minutes to hours, so
+            # re-validate prepare's invariant (doesVersionExist in
+            # scripts/get-release-version.js) at push time against the live
+            # registry, origin's tags, and GitHub releases: a concurrent
+            # same-version run that shipped in between would otherwise have
+            # its branch tip — and the tag and merge-to-main anchored to it —
+            # silently replaced. The script owns the published-package list,
+            # so this guard cannot drift from it. Exit 3 marks the decisive
+            # "already shipped" refusal, which the version_refusal output
+            # keeps out of the release-failed notification: such a refusal
+            # means the release shipped elsewhere (or partially), not that
+            # it failed. Any other non-zero exit stays a real failure. Exit 2
+            # (a probe failure) is retried a bounded number of times so a
+            # transient registry or network blip cannot fail the release and
+            # dispatch autofix at infrastructure noise; exit 0 and exit 3
+            # stay decisive on the first attempt.
+            for attempt in 1 2 3; do
+              GUARD_STATUS=0
+              node scripts/get-release-version.js --assert-unreleased="${RELEASE_VERSION}" || GUARD_STATUS=$?
+              if [[ "${GUARD_STATUS}" -ne 2 ]]; then
+                break
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                echo "Push-time guard probe failed (exit 2); retrying in $(( attempt * 15 ))s (attempt ${attempt} of 3)..."
+                sleep $(( attempt * 15 ))
+              fi
+            done
+            if [[ "${GUARD_STATUS}" -eq 3 ]]; then
+              echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
+            if [[ "${GUARD_STATUS}" -ne 0 ]]; then
+              exit "${GUARD_STATUS}"
+            fi
             echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+            git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags
           else
             echo "Dry run enabled. Skipping push."
           fi
@@ -425,6 +501,13 @@ jobs:
         run: |-
           npm run build
           npm run bundle
+          # The review staleness check degrades to "could not check" without
+          # this stamp; fail here instead of shipping a release that silently
+          # lost it.
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
           npm run prepare:package
 
       - name: 'Build Standalone Archives'
@@ -438,23 +521,87 @@ jobs:
           ${{ github.repository == 'QwenLM/qwen-code' }}
         working-directory: 'packages/audio-capture'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/channel-base'
         working-directory: 'packages/channels/base'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+
+      - name: 'Publish remaining channel packages'
+        working-directory: 'packages/channels'
+        run: |-
+          # Explicit allowlist: new channel workspaces require release approval.
+          PUBLISH_MARKER="$(mktemp)"
+          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
+            echo "::group::Publishing @qwen-code/channel-${channel}"
+            (
+              cd "${channel}"
+              PACKAGE_NAME="$(node -p "require('./package.json').name")"
+              PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+              if [[ "${IS_DRY_RUN}" == "true" ]]; then
+                PUBLISH_ARGS+=(--dry-run)
+              elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+                echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+                exit 0
+              fi
+              npm publish "${PUBLISH_ARGS[@]}"
+              echo "${channel}" >> "${PUBLISH_MARKER}"
+            )
+            echo "::endgroup::"
+          done
+          if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${PUBLISH_MARKER}" ]]; then
+            echo "::warning::Every channel package was already published; nothing shipped"
+          fi
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Verify Standalone Archives'
         run: |-
@@ -498,15 +645,76 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
+          # Always anchor the notes to the previous release. Every stable tag
+          # lives on its own release/* branch that is tagged before merging back
+          # to main, so the previous tag is normally NOT an ancestor of the
+          # branch being released; GitHub still diffs it correctly through the
+          # merge base. Dropping the anchor is what hurts: GitHub then falls
+          # back to the entire branch history, and the generated body blows past
+          # the 125000 character limit, failing the release after the npm
+          # packages have already been published.
+          NOTES_ARGS=()
+          if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
+            NOTES_ARGS+=(-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}")
+          fi
+
+          # Generate the body up front so an unusable one can be repaired here
+          # instead of aborting `gh release create`. A failed call still prints
+          # the API error payload on stdout, so its output is discarded rather
+          # than published as release notes.
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          generate_notes() {
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f "tag_name=${RELEASE_TAG}" \
+              -f "target_commitish=${RELEASE_BRANCH}" \
+              "$@" \
+              --jq '.body'
+          }
+          if ! generate_notes "${NOTES_ARGS[@]}" > "${NOTES_FILE}"; then
+            echo "::warning::Could not generate notes anchored at ${PREVIOUS_RELEASE_TAG:-<none>}; retrying without an anchor"
+            generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"
+          fi
+
+          # Caps the body below the 125000 character API limit and substitutes a
+          # minimal body when nothing was generated, so an oversized or missing
+          # changelog degrades the notes instead of the release.
+          node .github/scripts/cap-release-notes.mjs \
+            --file "${NOTES_FILE}" \
+            --tag "${RELEASE_TAG}" \
+            --previous-tag "${PREVIOUS_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --server-url "${GITHUB_SERVER_URL}"
+
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
             dist/standalone/qwen-code-* \
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
-            --generate-notes \
+            --notes-file "${NOTES_FILE}" \
             ${PRERELEASE_FLAG}
+
+      - name: 'Trigger ECS runner qwen update'
+        # Stable releases only: nightly/preview must not move the fleet.
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' &&
+              needs.prepare.outputs.is_dry_run == 'false' &&
+              needs.prepare.outputs.npm_tag == 'latest' }}
+        # The packages are already published; a dispatch failure must not
+        # fail the release — report it and let maintainers re-run the update
+        # workflow manually instead.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: |-
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            --method POST \
+            -f 'event_type=npm-published' \
+            -f "client_payload[version]=${RELEASE_VERSION}" || {
+              echo "::error::npm-published dispatch failed; run the 'Update ECS Runner Qwen' workflow manually."
+              exit 1
+            }
 
   notify_failure:
     name: 'Notify Release Failure'
@@ -517,6 +725,12 @@ jobs:
       - 'integration_none'
       - 'integration_docker'
       - 'publish'
+    # The push-time guard's decisive "already shipped" refusal
+    # (version_refusal) is a correct outcome, not a release failure: the
+    # version shipped via another attempt, or partially, so filing a
+    # "Release Failed" issue and dispatching autofix would chase a release
+    # that did not fail. Genuine publish failures — including the guard's
+    # fail-closed probe errors — still notify.
     if: |-
       ${{
         always() &&
@@ -529,7 +743,10 @@ jobs:
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||
           needs.integration_docker.result == 'failure' ||
-          needs.publish.result == 'failure'
+          (
+            needs.publish.result == 'failure' &&
+            needs.publish.outputs.version_refusal != 'true'
+          )
         )
       }}
     permissions:

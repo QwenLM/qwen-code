@@ -12,6 +12,7 @@ import request from 'supertest';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import { createServeApp } from './server.js';
 import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
@@ -43,6 +44,23 @@ function makeBridge(): AcpSessionBridge {
     permissionPolicy: 'first-responder',
     knownClientIds: () => new Set<string>(['client-1']),
     publishWorkspaceEvent: vi.fn(),
+    isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
+    runWorkspaceMemoryRemember: vi.fn(async () => ({
+      summary: 'saved',
+      filesTouched: ['/mem/project/secondary.md'],
+      touchedScopes: ['project'],
+    })),
+    runWorkspaceMemoryForget: vi.fn(async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: ['project'],
+      touchedScopes: ['project'],
+    })),
+    runWorkspaceMemoryDream: vi.fn(async () => ({
+      summary: 'dreamed',
+      touchedTopics: ['project'],
+      dedupedEntries: 1,
+    })),
     manageMcpServer: vi.fn(async (serverName, action, clientId) => ({
       serverName,
       action,
@@ -73,6 +91,7 @@ function makeBridge(): AcpSessionBridge {
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
         channelIdleTimeoutMs: 0,
         sessionIdleTimeoutMs: 1_800_000,
       },
@@ -135,6 +154,20 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
       sessionsRefreshed: 0,
       sessionsFailed: 0,
     })),
+    setWorkspaceSkillsEnabled: vi.fn(
+      async (_ctx, skillNames: readonly string[], enabled) => ({
+        enabled,
+        activation: 'deferred' as const,
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        results: skillNames.map((skillName) => ({
+          skillName,
+          enabled,
+          changed: true,
+        })),
+        errors: [],
+      }),
+    ),
     initWorkspace: vi.fn(async (ctx) => ({
       path: `${ctx.workspaceCwd}/QWEN.md`,
       action: 'created' as const,
@@ -186,6 +219,7 @@ async function makeHarness(opts?: {
   secondaryDirName?: string;
   token?: string;
   persistSetting?: boolean;
+  primaryWriteHold?: { hold: Promise<void>; onWriteStart?: () => void };
 }) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-workspace-qualified-rest-'),
@@ -199,11 +233,40 @@ async function makeHarness(opts?: {
   await fsp.writeFile(path.join(primaryCwd, 'target.txt'), 'primary');
   await fsp.writeFile(path.join(secondaryCwd, 'target.txt'), 'secondary');
 
-  const primaryFsFactory = createWorkspaceFileSystemFactory({
+  const primaryFsFactoryBase = createWorkspaceFileSystemFactory({
     boundWorkspaces: [primaryCwd],
     trusted: true,
     emit: () => {},
   });
+  // A Proxy (not a spread) so prototype methods like resolve/stat are
+  // preserved; only writeBytesAtomic is intercepted to hold the gate slot.
+  const primaryFsFactory = opts?.primaryWriteHold
+    ? {
+        assertCanWrite: () => {},
+        forRequest: (
+          ctx: Parameters<typeof primaryFsFactoryBase.forRequest>[0],
+        ) => {
+          const realFs = primaryFsFactoryBase.forRequest(ctx);
+          return new Proxy(realFs, {
+            get(target, prop, receiver) {
+              if (prop === 'writeBytesAtomic') {
+                return (
+                  p: Parameters<typeof realFs.writeBytesAtomic>[0],
+                  data: Buffer,
+                ) => {
+                  opts.primaryWriteHold?.onWriteStart?.();
+                  return opts.primaryWriteHold!.hold.then(() =>
+                    target.writeBytesAtomic(p, data),
+                  );
+                };
+              }
+              const value = Reflect.get(target, prop, receiver);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          });
+        },
+      }
+    : primaryFsFactoryBase;
   const secondaryFsFactory = createWorkspaceFileSystemFactory({
     boundWorkspaces: [secondaryCwd],
     trusted: true,
@@ -220,6 +283,7 @@ async function makeHarness(opts?: {
   const primary: WorkspaceRuntime = {
     workspaceId: 'same-as-path',
     workspaceCwd: primaryCwd,
+    sessionRuntimeBaseDir: path.join(primaryCwd, '.runtime'),
     primary: true,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -232,6 +296,7 @@ async function makeHarness(opts?: {
   const secondary: WorkspaceRuntime = {
     workspaceId: hashDaemonWorkspace(secondaryCwd),
     workspaceCwd: secondaryCwd,
+    sessionRuntimeBaseDir: path.join(secondaryCwd, '.runtime'),
     primary: false,
     trusted: opts?.secondaryTrusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -262,6 +327,8 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    primaryBridge: primary.bridge,
+    secondaryBridge: secondary.bridge,
     secondaryWorkspaceService,
     persistSetting,
     workspaceRegistry,
@@ -288,6 +355,7 @@ async function makeWindowsSelectorHarness() {
   const primary: WorkspaceRuntime = {
     workspaceId: 'primary-id',
     workspaceCwd: primaryCwd,
+    sessionRuntimeBaseDir: path.join(primaryCwd, '.runtime'),
     primary: true,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -299,6 +367,7 @@ async function makeWindowsSelectorHarness() {
   const windowsRuntime: WorkspaceRuntime = {
     workspaceId: 'windows-id',
     workspaceCwd: windowsCwd,
+    sessionRuntimeBaseDir: '/runtime/windows',
     primary: false,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -761,6 +830,193 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('routes workspace-qualified file uploads and never falls back to primary', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const data = Buffer.from([1, 2, 3, 4]);
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'blob.bin' })
+        .send(data);
+      expect(res.status).toBe(201);
+      expect(res.body.path).toBe('blob.bin');
+      // Landed in the SECONDARY workspace, not the primary.
+      await expect(
+        fsp.readFile(path.join(h.secondaryCwd, 'blob.bin')),
+      ).resolves.toEqual(data);
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'blob.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    // Untrusted secondary: 403, and nothing is written to primary either.
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/file/upload`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'blocked.bin' })
+        .send(Buffer.from('x'));
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      await expect(
+        fsp.stat(path.join(untrusted.primaryCwd, 'blocked.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads into a workspace whose root path trips the suspicious-pattern check', async () => {
+    // A canonical root with a trailing-dot segment matches
+    // hasSuspiciousPathPattern; candidates must re-resolve from the
+    // workspace-relative admission dir rather than the absolute root.
+    const h = await makeHarness({
+      token: 'secret',
+      secondaryDirName: 'my proj.',
+    });
+    try {
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'report.txt' })
+        .send(Buffer.from('hi'));
+      expect(res.status).toBe(201);
+      expect(res.body.path).toBe('report.txt');
+      await expect(
+        fsp.readFile(path.join(h.secondaryCwd, 'report.txt'), 'utf-8'),
+      ).resolves.toBe('hi');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one upload gate between legacy and qualified routes', async () => {
+    let started = 0;
+    let releaseWrites: () => void = () => {};
+    const hold = new Promise<void>((resolve) => {
+      releaseWrites = resolve;
+    });
+    const h = await makeHarness({
+      token: 'secret',
+      primaryWriteHold: { hold, onWriteStart: () => (started += 1) },
+    });
+    try {
+      const legacyUpload = (name: string) =>
+        request(h.app)
+          .post('/file/upload')
+          .set('Authorization', 'Bearer secret')
+          .set('Host', host())
+          .set('Content-Type', 'application/octet-stream')
+          .query({ path: name })
+          .send(Buffer.from('x'));
+
+      const inFlight = [
+        legacyUpload('a.bin'),
+        legacyUpload('b.bin'),
+        legacyUpload('c.bin'),
+        legacyUpload('d.bin'),
+      ];
+      // Supertest Tests are lazy thenables — attach a catch to actually
+      // send each request without awaiting it (they hang in the held write).
+      inFlight.forEach((p) => void p.catch(() => {}));
+      await vi.waitFor(() => {
+        expect(started).toBe(4);
+      });
+
+      // All four gate slots are held through the LEGACY route; a qualified
+      // upload must draw from the same shared gate and be turned away.
+      const qualified = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'q.bin' })
+        .send(Buffer.from('x'));
+      expect(qualified.status).toBe(429);
+      expect(qualified.body).toMatchObject({
+        errorKind: 'upload_busy',
+        status: 429,
+      });
+
+      releaseWrites();
+      const results = await Promise.all(inFlight);
+      for (const res of results) {
+        expect(res.status).toBe(201);
+      }
+    } finally {
+      releaseWrites();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects qualified uploads for unknown, draining, and already removed workspaces', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const unknown = await request(h.app)
+        .post('/workspaces/does-not-exist/file/upload')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'a.bin' })
+        .send(Buffer.from('x'));
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'a.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+
+      const secondaryRuntime = h.workspaceRegistry.getByWorkspaceId(
+        h.secondaryId,
+      );
+      expect(secondaryRuntime).toBeDefined();
+      expect(h.workspaceRegistry.beginDrain(secondaryRuntime!)).toBe(true);
+
+      const draining = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'b.bin' })
+        .send(Buffer.from('x'));
+      expect(draining.status).toBe(503);
+      expect(draining.body.code).toBe('workspace_runtime_unavailable');
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'b.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+
+      h.workspaceRegistry.completeDrain(secondaryRuntime!);
+      const removed = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'c.bin' })
+        .send(Buffer.from('x'));
+      expect(removed.status).toBe(400);
+      expect(removed.body.code).toBe('workspace_mismatch');
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'c.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes workspace-qualified lifecycle mutations and trust-gates them', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
@@ -946,6 +1202,43 @@ describe('workspace-qualified core REST', () => {
         sessionsFailed: 0,
       });
 
+      const batch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review', 'deploy'], enabled: false });
+      expect(batch.status).toBe(200);
+      expect(batch.body).toEqual({
+        enabled: false,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        results: [
+          {
+            skillName: 'review',
+            enabled: false,
+            changed: true,
+          },
+          {
+            skillName: 'deploy',
+            enabled: false,
+            changed: true,
+          },
+        ],
+        errors: [],
+      });
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        ['review', 'deploy'],
+        false,
+      );
+
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
       ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
@@ -969,6 +1262,70 @@ describe('workspace-qualified core REST', () => {
         .send({ enabled: false });
       expect(invalidClient.status).toBe(400);
       expect(invalidClient.body.code).toBe('invalid_client_id');
+
+      const invalidBatchClient = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(invalidBatchClient.status).toBe(400);
+      expect(invalidBatchClient.body.code).toBe('invalid_client_id');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(1);
+
+      const badBatchBody = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: [], enabled: false });
+      expect(badBatchBody.status).toBe(400);
+      expect(badBatchBody.body.code).toBe('invalid_skill_names');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(1);
+
+      const enableBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: true });
+      expect(enableBatch.status).toBe(200);
+      expect(enableBatch.body).toMatchObject({
+        enabled: true,
+        results: [{ skillName: 'review', enabled: true, changed: true }],
+      });
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        ['review'],
+        true,
+      );
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(2);
+
+      vi.mocked(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).mockRejectedValueOnce(new Error('disk full'));
+      const failedBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(failedBatch.status).toBe(500);
+      expect(failedBatch.body.error).toBe('disk full');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(3);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -987,6 +1344,19 @@ describe('workspace-qualified core REST', () => {
         .send({ enabled: false });
       expect(res.status).toBe(403);
       expect(res.body.code).toBe('untrusted_workspace');
+
+      const batch = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/skills/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(batch.status).toBe(403);
+      expect(batch.body.code).toBe('untrusted_workspace');
+      expect(
+        untrusted.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
     }
@@ -1156,6 +1526,322 @@ describe('workspace-qualified core REST', () => {
         ]),
       );
     } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes managed-memory tasks to the selected workspace bridge', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const queued = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Secondary only' });
+      expect(queued.status).toBe(202);
+
+      await vi.waitFor(() => {
+        expect(
+          h.secondaryBridge.runWorkspaceMemoryRemember,
+        ).toHaveBeenCalledWith({
+          content: 'Secondary only',
+          contextMode: 'workspace',
+        });
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+
+      const completed = await request(h.app)
+        .get(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember/${queued.body.taskId}`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(completed.status).toBe(200);
+      expect(completed.body).toMatchObject({
+        status: 'completed',
+        result: { touchedScopes: ['project'] },
+      });
+
+      const forget = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ query: 'Secondary only' });
+      expect(forget.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(h.secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledWith(
+          { query: 'Secondary only' },
+        );
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+
+      const dream = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(dream.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(h.secondaryBridge.runWorkspaceMemoryDream).toHaveBeenCalled();
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryDream).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects managed-memory tasks for an untrusted workspace', async () => {
+    const h = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Do not save' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).not.toHaveBeenCalled();
+      expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+
+      const forget = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ query: 'Do not forget' });
+      expect(forget.status).toBe(403);
+      expect(forget.body.code).toBe('untrusted_workspace');
+      expect(h.secondaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+      expect(h.primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+
+      const dream = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(dream.status).toBe(403);
+      expect(dream.body.code).toBe('untrusted_workspace');
+      expect(h.secondaryBridge.runWorkspaceMemoryDream).not.toHaveBeenCalled();
+      expect(h.primaryBridge.runWorkspaceMemoryDream).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a managed-memory lane on demand for a dynamically-added workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const lateCwd = canonicalizeWorkspace(path.join(h.scratch, 'late'));
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const lateId = hashDaemonWorkspace(lateCwd);
+      const lateBridge = makeBridge();
+      h.workspaceRegistry.add({
+        workspaceId: lateId,
+        workspaceCwd: lateCwd,
+        sessionRuntimeBaseDir: path.join(lateCwd, '.runtime'),
+        primary: false,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: lateBridge,
+        workspaceService: makeWorkspaceService('late'),
+        routeFileSystemFactory: createWorkspaceFileSystemFactory({
+          boundWorkspaces: [lateCwd],
+          trusted: true,
+          emit: () => {},
+        }),
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+        generationGuard: createWorkspaceGenerationGuard(),
+      });
+
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(lateId)}/memory/remember`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Late workspace' });
+
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(lateBridge.runWorkspaceMemoryRemember).toHaveBeenCalledWith({
+          content: 'Late workspace',
+          contextMode: 'workspace',
+        });
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('shares the singular lane for the primary workspace qualified route', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const queued = await request(h.app)
+        .post('/workspace/memory/remember')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Primary via singular' });
+      expect(queued.status).toBe(202);
+      const taskId = queued.body.taskId as string;
+
+      await vi.waitFor(() => {
+        expect(h.primaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalled();
+      });
+
+      const viaQualified = await request(h.app)
+        .get(`/workspaces/same-as-path/memory/remember/${taskId}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(viaQualified.status).toBe(200);
+      expect(viaQualified.body).toMatchObject({ taskId, status: 'completed' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 404 when reading a task id from another workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const queued = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Secondary only' });
+      expect(queued.status).toBe(202);
+      const taskId = queued.body.taskId as string;
+
+      const crossRead = await request(h.app)
+        .get(`/workspaces/same-as-path/memory/remember/${taskId}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(crossRead.status).toBe(404);
+      expect(crossRead.body.code).toBe('remember_task_not_found');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 404 when polling a task on a workspace that never enqueued one', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const lateCwd = canonicalizeWorkspace(path.join(h.scratch, 'late'));
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const lateId = hashDaemonWorkspace(lateCwd);
+      const lateBridge = makeBridge();
+      h.workspaceRegistry.add({
+        workspaceId: lateId,
+        workspaceCwd: lateCwd,
+        sessionRuntimeBaseDir: path.join(lateCwd, '.runtime'),
+        primary: false,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: lateBridge,
+        workspaceService: makeWorkspaceService('late'),
+        routeFileSystemFactory: createWorkspaceFileSystemFactory({
+          boundWorkspaces: [lateCwd],
+          trusted: true,
+          emit: () => {},
+        }),
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+        generationGuard: createWorkspaceGenerationGuard(),
+      });
+
+      // No POST first, so the workspace has no lane: the poll must answer a
+      // permanent 404 rather than allocate a mount or report a retryable 503.
+      const res = await request(h.app)
+        .get(
+          `/workspaces/${encodeURIComponent(lateId)}/memory/remember/never-enqueued`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('remember_task_not_found');
+      expect(lateBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+      const acpHandle = h.app.locals['acpHandle'] as AcpHttpHandle | undefined;
+      expect(acpHandle?.getWorkspaceRememberLane(lateId)).toBeUndefined();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed for unknown and draining workspace runtimes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const unknown = await request(h.app)
+        .post('/workspaces/does-not-exist/memory/remember')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'x' });
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const secondaryRuntime = h.workspaceRegistry.getByWorkspaceId(
+        h.secondaryId,
+      );
+      expect(secondaryRuntime).toBeDefined();
+      expect(h.workspaceRegistry.beginDrain(secondaryRuntime!)).toBe(true);
+
+      const draining = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'x' });
+      expect(draining.status).toBe(503);
+      expect(draining.body.code).toBe('workspace_runtime_unavailable');
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the primary qualified route alive when ACP HTTP is disabled', async () => {
+    const original = process.env['QWEN_SERVE_ACP_HTTP'];
+    process.env['QWEN_SERVE_ACP_HTTP'] = '0';
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const primary = await request(h.app)
+        .post('/workspaces/same-as-path/memory/remember')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Primary without ACP HTTP' });
+      expect(primary.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(h.primaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalled();
+      });
+
+      const secondary = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Secondary without ACP HTTP' });
+      expect(secondary.status).toBe(501);
+      expect(secondary.body.code).toBe('workspace_memory_unavailable');
+      expect(secondary.headers['retry-after']).toBeUndefined();
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).not.toHaveBeenCalled();
+    } finally {
+      if (original === undefined) {
+        delete process.env['QWEN_SERVE_ACP_HTTP'];
+      } else {
+        process.env['QWEN_SERVE_ACP_HTTP'] = original;
+      }
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

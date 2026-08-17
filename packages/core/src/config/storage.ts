@@ -42,9 +42,10 @@ export class Storage {
    * When null, falls back to getGlobalQwenDir().
    */
   private static runtimeBaseDir: string | null = null;
-  private static readonly runtimeBaseDirContext = new AsyncLocalStorage<
-    string | null
-  >();
+  private static readonly runtimeBaseDirContext = new AsyncLocalStorage<{
+    dir: string | null;
+    pinned: boolean;
+  }>();
 
   constructor(
     targetDir: string,
@@ -127,8 +128,24 @@ export class Storage {
     cwd: string | undefined,
     fn: () => T,
   ): T {
+    if (Storage.runtimeBaseDirContext.getStore()?.pinned) {
+      return fn();
+    }
     const resolved = Storage.resolveRuntimeBaseDir(dir, cwd);
-    return Storage.runtimeBaseDirContext.run(resolved, fn);
+    return Storage.runtimeBaseDirContext.run(
+      { dir: resolved, pinned: false },
+      fn,
+    );
+  }
+
+  static runWithResolvedRuntimeBaseDir<T>(dir: string, fn: () => T): T {
+    // A managed workspace runtime owns this root for its full lifetime.
+    // Unlike the configurable context above, later process-env reloads must
+    // not redirect storage created inside this context.
+    return Storage.runtimeBaseDirContext.run(
+      { dir: path.resolve(dir), pinned: true },
+      fn,
+    );
   }
 
   static hasRuntimeBaseDirContext(): boolean {
@@ -139,10 +156,14 @@ export class Storage {
    * Returns the base directory for all runtime output (temp files, debug logs,
    * session data, todos, insights, etc.).
    *
-   * Priority: QWEN_RUNTIME_DIR env var > setRuntimeBaseDir() value > getGlobalQwenDir()
+   * Priority: pinned runtime context > QWEN_RUNTIME_DIR env var > configurable context > setRuntimeBaseDir() value > getGlobalQwenDir()
    * @returns Absolute path to the runtime output base directory
    */
   static getRuntimeBaseDir(): string {
+    const contextualDir = Storage.runtimeBaseDirContext.getStore();
+    if (contextualDir?.pinned) {
+      return contextualDir.dir ?? Storage.getGlobalQwenDir();
+    }
     const envDir = process.env['QWEN_RUNTIME_DIR'];
     if (envDir) {
       return (
@@ -150,9 +171,8 @@ export class Storage {
       );
     }
 
-    const contextualDir = Storage.runtimeBaseDirContext.getStore();
     if (contextualDir !== undefined) {
-      return contextualDir ?? Storage.getGlobalQwenDir();
+      return contextualDir.dir ?? Storage.getGlobalQwenDir();
     }
     if (Storage.runtimeBaseDir) {
       return Storage.runtimeBaseDir;

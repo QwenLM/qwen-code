@@ -56,6 +56,62 @@ describe('SessionReferenceService', () => {
     expect(res.text).not.toContain('reason');
   });
 
+  it('uses clean user display metadata for referenced text and title', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+        },
+      ]),
+    );
+
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+
+    expect(res.meta.title).toBe('raw @file prompt');
+    expect(res.text).toContain('User: raw @file prompt');
+    expect(res.text).not.toContain('hook-only context');
+  });
+
+  it('keeps notification model text instead of its display label', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [{ text: 'notification model text' }],
+          },
+          systemPayload: { displayText: 'Background agent completed' },
+        },
+      ]),
+    );
+
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+
+    expect(res.text).toContain('User: notification model text');
+    expect(res.text).not.toContain('Background agent completed');
+  });
+
   it('collapses tool calls to one-line summaries without result bodies', async () => {
     const svc = makeSvc(
       fakeResumed([

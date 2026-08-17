@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { FileTextIcon, RefreshCwIcon } from 'lucide-react';
 import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
@@ -40,11 +41,21 @@ interface UserMessageImage {
   mimeType: string;
 }
 
+interface UserMessageFile {
+  name: string;
+  mimeType: string;
+}
+
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  files?: UserMessageFile[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
+  sendFailed?: boolean;
+  onRetrySend?: () => void;
+  /** Click an uploaded image to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 function DefaultUserMessageContent({
@@ -93,8 +104,12 @@ function DefaultUserMessageContent({
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  files,
   inputAnnotations,
   isLocateFlashing = false,
+  sendFailed = false,
+  onRetrySend,
+  onImagePreview,
 }: UserMessageProps) {
   const { t } = useI18n();
   const {
@@ -112,6 +127,7 @@ export const UserMessage = memo(function UserMessage({
     const explicit = renderUserMessageContent?.({
       content,
       images,
+      files,
       inputAnnotations,
     });
     if (explicit !== undefined && explicit !== null) return explicit;
@@ -149,6 +165,7 @@ export const UserMessage = memo(function UserMessage({
   }, [
     content,
     images,
+    files,
     inputAnnotations,
     onComposerTagClick,
     parseUserMessageContent,
@@ -179,63 +196,108 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={styles.chatMessageRow}>
-      <div
-        className={`${styles.chatBubble}${
-          isLocateFlashing ? ` ${flashStyles.flash}` : ''
-        }`}
-      >
+      <div className={styles.chatMessageColumn}>
         <div
-          ref={contentRef}
-          className={`${styles.chatContent} ${
-            heightOverflowing && !expanded ? styles.chatContentCollapsed : ''
+          className={`${styles.chatBubble}${
+            isLocateFlashing ? ` ${flashStyles.flash}` : ''
           }`}
         >
-          {images && images.length > 0 && (
-            <div className={styles.chatImages}>
-              {images.map((img, index) => {
-                const src = img.data.startsWith('data:')
-                  ? img.data
-                  : `data:${img.mimeType};base64,${img.data}`;
-                if (!isSafeImageSrc(src)) return null;
-                return (
-                  <img
-                    key={index}
-                    src={src}
-                    alt={t('user.uploadedImage', { index: index + 1 })}
-                    className={styles.chatImageThumb}
-                    onLoad={measureOverflow}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {renderedContent}
-        </div>
-        {heightOverflowing && (
-          <button
-            type="button"
-            className={styles.toggleButton}
-            onClick={() => setExpanded((value) => !value)}
+          <div
+            ref={contentRef}
+            className={`${styles.chatContent} ${
+              heightOverflowing && !expanded ? styles.chatContentCollapsed : ''
+            }`}
           >
-            <span>
-              {expanded ? t('userMessage.showLess') : t('userMessage.showMore')}
-            </span>
-            <svg
-              className={`${styles.toggleIcon} ${
-                expanded ? styles.toggleIconExpanded : ''
-              }`}
-              viewBox="0 0 16 16"
-              aria-hidden="true"
+            {images && images.length > 0 && (
+              <div className={styles.chatImages}>
+                {images.map((img, index) => {
+                  const src = img.data.startsWith('data:')
+                    ? img.data
+                    : `data:${img.mimeType};base64,${img.data}`;
+                  if (!isSafeImageSrc(src)) return null;
+                  return (
+                    <img
+                      key={index}
+                      src={src}
+                      alt={t('user.uploadedImage', { index: index + 1 })}
+                      className={`${styles.chatImageThumb}${
+                        onImagePreview
+                          ? ` ${styles.chatImageThumbInteractive}`
+                          : ''
+                      }`}
+                      onClick={
+                        onImagePreview
+                          ? () =>
+                              onImagePreview(
+                                src,
+                                t('user.uploadedImage', { index: index + 1 }),
+                              )
+                          : undefined
+                      }
+                      onLoad={measureOverflow}
+                    />
+                  );
+                })}
+              </div>
+            )}
+            {files && files.length > 0 && (
+              <div className={styles.chatFiles}>
+                {files.map((file, index) => (
+                  <span
+                    key={`${file.name}-${index}`}
+                    className={styles.chatFileChip}
+                  >
+                    <FileTextIcon size={13} aria-hidden="true" />
+                    <span className={styles.chatFileName}>{file.name}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+            {renderedContent}
+          </div>
+          {heightOverflowing && (
+            <button
+              type="button"
+              className={styles.toggleButton}
+              onClick={() => setExpanded((value) => !value)}
             >
-              <path
-                d="m4 6 4 4 4-4"
-                fill="none"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+              <span>
+                {expanded
+                  ? t('userMessage.showLess')
+                  : t('userMessage.showMore')}
+              </span>
+              <svg
+                className={`${styles.toggleIcon} ${
+                  expanded ? styles.toggleIconExpanded : ''
+                }`}
+                viewBox="0 0 16 16"
+                aria-hidden="true"
+              >
+                <path
+                  d="m4 6 4 4 4-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          )}
+        </div>
+        {sendFailed && onRetrySend && (
+          <div className={styles.sendFailure}>
+            <span>{t('userMessage.sendFailed')}</span>
+            <button
+              type="button"
+              className={styles.retryButton}
+              onClick={onRetrySend}
+              aria-label={t('userMessage.retrySend')}
+              title={t('userMessage.retrySend')}
+            >
+              <RefreshCwIcon aria-hidden="true" />
+              <span>{t('common.retry')}</span>
+            </button>
+          </div>
         )}
       </div>
     </div>

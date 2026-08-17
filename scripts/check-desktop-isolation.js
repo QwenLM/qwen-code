@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
-const desktopPrefix = 'packages/desktop';
+const desktopPrefixes = ['packages/desktop', 'packages/desktop-shell'];
 const forbiddenRootPackages = [
   'electron',
   'electron-builder',
@@ -25,7 +25,9 @@ let hasError = false;
 console.log('Checking desktop workspace isolation...');
 
 function isDesktopLocation(location) {
-  return location === desktopPrefix || location.startsWith(`${desktopPrefix}/`);
+  return desktopPrefixes.some(
+    (prefix) => location === prefix || location.startsWith(`${prefix}/`),
+  );
 }
 
 function reportError(message, values = []) {

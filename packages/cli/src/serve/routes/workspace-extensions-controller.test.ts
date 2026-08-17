@@ -13,7 +13,10 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
-import { createExtensionsController } from './workspace-extensions-controller.js';
+import {
+  createExtensionsController,
+  redactExtensionDisplaySource,
+} from './workspace-extensions-controller.js';
 
 vi.mock('../../i18n/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../i18n/index.js')>();
@@ -21,6 +24,19 @@ vi.mock('../../i18n/index.js', async (importOriginal) => {
     ...actual,
     resolveLanguageSetting: vi.fn().mockReturnValue('en'),
   };
+});
+
+describe('redactExtensionDisplaySource', () => {
+  it('keeps uploaded filenames readable while hiding their identity token', () => {
+    expect(
+      redactExtensionDisplaySource(
+        'upload:v1:550e8400-e29b-41d4-a716-446655440000:扩展?#.zip',
+      ),
+    ).toBe('upload:扩展?#.zip');
+    expect(redactExtensionDisplaySource('upload:legacy?#.zip')).toBe(
+      'upload:legacy?#.zip',
+    );
+  });
 });
 
 describe('createExtensionsController', () => {

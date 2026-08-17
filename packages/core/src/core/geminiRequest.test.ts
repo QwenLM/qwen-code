@@ -25,10 +25,16 @@ describe('partListUnionToString', () => {
     expect(result).toBe('[Video Metadata]');
   });
 
-  it('should handle thought', () => {
+  it('should handle a thought with no text', () => {
     const part: Part = { thought: true };
     const result = partListUnionToString(part);
-    expect(result).toBe('[Thought: true]');
+    expect(result).toBe('[Thought]');
+  });
+
+  it('should handle a thought carrying its reasoning', () => {
+    const part: Part = { thought: true, text: 'weighing the options' };
+    const result = partListUnionToString(part);
+    expect(result).toBe('[Thought: weighing the options]');
   });
 
   it('should handle codeExecutionResult', () => {

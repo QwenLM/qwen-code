@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryFilePath, getAutoMemoryIndexPath } from './paths.js';
+import {
+  AUTO_MEMORY_PINNED_DIRNAME,
+  getAutoMemoryFilePath,
+  getAutoMemoryIndexPath,
+} from './paths.js';
 import {
   buildManagedAutoMemoryIndex,
   buildTeamAutoMemoryIndex,
@@ -100,6 +104,32 @@ describe('managed auto-memory indexer', () => {
     );
     expect(index).toContain('[Project Memory](project/repo-workspaces.md)');
     expect(index).toContain('The repo uses pnpm workspaces.');
+  });
+
+  it('keeps a valid pinned document in the generated index', async () => {
+    const pinnedFile = getAutoMemoryFilePath(
+      projectRoot,
+      path.join(AUTO_MEMORY_PINNED_DIRNAME, 'architecture.md'),
+    );
+    await fs.mkdir(path.dirname(pinnedFile), { recursive: true });
+    await fs.writeFile(
+      pinnedFile,
+      [
+        '---',
+        'type: project',
+        'name: Canonical Architecture',
+        'description: The hand-curated architecture reference.',
+        '---',
+        '',
+        'This document is maintained by the user.',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const index = await rebuildManagedAutoMemoryIndex(projectRoot);
+
+    expect(index).toContain('[Canonical Architecture](pinned/architecture.md)');
+    expect(index).toContain('The hand-curated architecture reference.');
   });
 
   it('sanitizes attacker-controlled title/description before embedding', () => {

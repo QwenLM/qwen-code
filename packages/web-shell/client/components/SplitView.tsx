@@ -8,12 +8,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
-  type DaemonWorkspaceActions,
+  type DaemonSessionActions,
 } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonSessionMonitorTaskStatus,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
 import { useI18n } from '../i18n';
-import { ChatPane } from './ChatPane';
+import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 import type {
@@ -52,20 +56,25 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onOpenMonitor?: (
+    task: DaemonSessionMonitorTaskStatus,
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /**
-   * Bumped by the parent whenever the session list changes elsewhere (create /
-   * delete / rename). The "add pane" picker reloads on a change so it never
-   * offers a session that has since been removed or misses one just created.
+   * Extra actions rendered in each pane header, before the built-in close
+   * button. See `ChatPaneProps.renderHeaderActions`.
    */
-  sessionListReloadToken?: number;
+  renderPaneHeaderActions?: PaneHeaderActionsRenderer;
+  /** Include active sessions from every trusted registered workspace. */
   includeOtherWorkspaces?: boolean;
   /** Limit session discovery and pane attachment to this workspace. */
   workspaceCwd?: string;
@@ -73,6 +82,10 @@ export interface SplitViewProps {
   restartSseOnPrompt?: boolean;
   /** Persisted transcript records requested per page by each pane. */
   historyPageSize?: number;
+  voiceUserRevision?: number;
+  voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
+  voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
+  sessionWorkflowEnabled?: boolean;
 }
 
 /**
@@ -87,15 +100,21 @@ export function SplitView({
   onPanesChange,
   onExit,
   onError,
+  onImageIngestionNotice,
   onSlashCommand,
   onRightPanelOpen,
+  onOpenMonitor,
   onPaneArtifactsChange,
   messageTurnOutputs,
-  sessionListReloadToken,
+  renderPaneHeaderActions,
   includeOtherWorkspaces = true,
   workspaceCwd,
   restartSseOnPrompt,
   historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
+  voiceUserRevision = 0,
+  voiceWorkspaceRevisions = {},
+  voiceWorkspaces,
+  sessionWorkflowEnabled = false,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -189,34 +208,10 @@ export function SplitView({
   // created since the split was first entered.
   useEffect(() => {
     if (pickerOpen) {
-      void reload();
-      void reloadOther();
+      void reload().catch(() => undefined);
+      void reloadOther().catch(() => undefined);
     }
   }, [pickerOpen, reload, reloadOther]);
-
-  // Also refresh when the parent signals the list changed elsewhere (a session
-  // created / deleted / renamed in the sidebar or another tab), so an open
-  // picker — or the next open — reflects it without re-entering the split.
-  // Reload on every distinct token bump. `useDaemonResource` serializes
-  // responses via its sequence counter (last write wins), so overlapping reloads
-  // are safe; and the token is bumped only on discrete session-change events
-  // (App fires an immediate bump plus one delayed follow-up per change), not as a
-  // high-frequency stream. Deliberately *not* skipping while a reload is in
-  // flight: doing so would drop a bump that lands mid-reload — the effect has
-  // already run for that value and clearing an in-flight flag wouldn't re-run it,
-  // so the picker could stay stale after a burst. An occasional redundant fetch
-  // is far cheaper than a lost refresh, and the split has no polling fallback.
-  const prevReloadTokenRef = useRef(sessionListReloadToken);
-  useEffect(() => {
-    if (
-      sessionListReloadToken !== undefined &&
-      sessionListReloadToken !== prevReloadTokenRef.current
-    ) {
-      prevReloadTokenRef.current = sessionListReloadToken;
-      void reload();
-      void reloadOther();
-    }
-  }, [sessionListReloadToken, reload, reloadOther]);
 
   const titleById = useMemo(() => {
     const map = new Map<string, string>();
@@ -490,6 +485,15 @@ export function SplitView({
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}
+                      reportCatalogTurnCompletion={
+                        sessionId !== currentSessionId ||
+                        paneWorkspaceCwd !== connection.workspaceCwd
+                      }
+                      renderHeaderActions={renderPaneHeaderActions}
+                      hidden={isHidden}
+                      voiceUserRevision={voiceUserRevision}
+                      voiceWorkspaceRevisions={voiceWorkspaceRevisions}
+                      voiceWorkspaces={voiceWorkspaces}
                       onClose={() => removePane(sessionId)}
                       onToggleMaximize={
                         canMaximize
@@ -498,11 +502,13 @@ export function SplitView({
                       }
                       isMaximized={isMaximized}
                       onError={onError}
+                      onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
                       onRightPanelOpen={onRightPanelOpen}
+                      onOpenMonitor={onOpenMonitor}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
-                      restartSseOnPrompt={restartSseOnPrompt}
+                      sessionWorkflowEnabled={sessionWorkflowEnabled}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

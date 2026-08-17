@@ -48,8 +48,12 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { LogToSpanProcessor } from './log-to-span-processor.js';
-import { getCurrentSessionId } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionIdFromContext,
+} from './session-context.js';
 import { resolveHttpOtlpUrl } from './otlp-urls.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 /**
  * `TextMapPropagator` that emits nothing. Installed when
@@ -124,10 +128,13 @@ function validateUrl(url: string | undefined): string | undefined {
 }
 
 class SessionIdSpanProcessor implements SpanProcessor {
-  onStart(span: SdkSpan): void {
+  onStart(span: SdkSpan, parentContext: Context): void {
     try {
-      if ((span as unknown as ReadableSpan).attributes?.['session.id']) return;
-      const sessionId = getCurrentSessionId();
+      const existingSessionId = span.attributes['session.id'];
+      if (typeof existingSessionId === 'string' && existingSessionId) return;
+      const sessionId =
+        getSessionIdFromContext(parentContext) ??
+        (sessionIdContext.getStore() || getCurrentSessionId());
       if (sessionId) {
         span.setAttribute('session.id', sessionId);
       }
@@ -425,7 +432,11 @@ export async function startTelemetrySdk(
     // `configureMetricProviderFromEnv()` unconditionally, so env-based readers
     // are only suppressed when an explicit reader is provided. This is
     // intentionally asymmetric with `spanProcessors`/`logRecordProcessors`,
-    // where an empty array disables env fallback for those signals.
+    // where an empty array disables env fallback for those signals. Those two
+    // must stay unconditional arrays: omitting them re-enables sdk-node's
+    // env-based fallback, and the logs fallback runs in the NodeSDK
+    // constructor — outside the env-var scrub window around `start()` in
+    // sdk.ts (`startSdkWithExplicitExporters`).
     ...(metricReader && { metricReader }),
     instrumentations: [
       new HttpInstrumentation({

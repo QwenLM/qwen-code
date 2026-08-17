@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_METAFILE_PATH = resolve('dist/esbuild.json');
 const METAFILE_BUILD_COMMAND =
   'node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle';
+const ENTRY_OUTPUT = 'dist/cli.js';
+const ENTRY_INPUT = 'packages/cli/src/cli.ts';
 const SERVE_PRE_LISTEN_ROOTS = [
   {
     label: 'serve fast path entry',
@@ -506,6 +508,32 @@ export function checkSdkImplProtocolBoundary({
   return { ok: offenders.length === 0, offenders };
 }
 
+/**
+ * `cli.ts` bootstraps only when it is the main module, comparing
+ * `import.meta.url` against `process.argv[1]`. The bundle is built with
+ * `splitting: true`, so a *static* `import ... from './cli.js'` in any module
+ * the entry loads lazily (e.g. `gemini.tsx`) makes esbuild move the entry's
+ * body into a shared chunk and leave `dist/cli.js` as a re-export stub. Inside
+ * a chunk that comparison can never hold, so the bundled CLI exits 0 without
+ * running anything — with `tsc`, eslint and every src-based unit test still
+ * green. Assert the entry module still compiles into the entry output.
+ */
+export function checkEntryBootstrapIntact({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  const metafile = readMetafile(metafilePath);
+  const output = metafile?.outputs?.[ENTRY_OUTPUT];
+  if (!output) {
+    throw new Error(
+      `Missing ${ENTRY_OUTPUT} in the esbuild metafile at ${metafilePath}. ` +
+        `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
+    );
+  }
+
+  const inputs = Object.keys(output.inputs ?? {});
+  return { ok: inputs.includes(ENTRY_INPUT), inputs };
+}
+
 function main() {
   try {
     const serveResult = checkServeFastPathBundle();
@@ -535,7 +563,22 @@ function main() {
       process.exitCode = 1;
     }
 
-    if (serveResult.ok && acpResult.ok && sdkImplResult.ok) {
+    const entryResult = checkEntryBootstrapIntact();
+    if (!entryResult.ok) {
+      console.error(
+        `${ENTRY_OUTPUT} no longer contains ${ENTRY_INPUT} — esbuild code ` +
+          'splitting hoisted the entry into a shared chunk, so its\n' +
+          '`import.meta.url === pathToFileURL(process.argv[1]).href` guard ' +
+          'can never match and the bundled CLI\nwould exit 0 without running. ' +
+          'Cause: a module the entry loads lazily now statically imports ' +
+          "'./cli.js'.\nMove the shared helper into a leaf module and import " +
+          `that from both sides instead.\nCurrent ${ENTRY_OUTPUT} inputs: ` +
+          `${entryResult.inputs.length === 0 ? '(none)' : entryResult.inputs.join(', ')}`,
+      );
+      process.exitCode = 1;
+    }
+
+    if (serveResult.ok && acpResult.ok && sdkImplResult.ok && entryResult.ok) {
       console.log('Startup bundle closure checks passed.');
     }
   } catch (error) {

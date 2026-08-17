@@ -8,8 +8,12 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FunctionDeclaration } from '@google/genai';
-import { AgentCore, type ReasoningLoopResult } from './agent-core.js';
+import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
+import {
+  AgentCore,
+  extractParentToolNames,
+  type ReasoningLoopResult,
+} from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
@@ -47,6 +51,20 @@ import {
 } from '../../utils/invocation-context.js';
 import { GeminiChat } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
+import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
+
+const boundaryObserveMock = vi.hoisted(() =>
+  vi.fn((_observation: ToolResultBoundaryObservation) => false),
+);
+vi.mock(
+  '../../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeToolResultBoundary: boundaryObserveMock,
+  }),
+);
 
 describe('AgentCore.createChat manual plan-exit notice ownership', () => {
   it('enables notices only for interactive agent chats', async () => {
@@ -625,6 +643,10 @@ describe('AgentCore.prepareTools', () => {
         description: 'task update',
       } as FunctionDeclaration,
       {
+        name: ToolNames.TODO_WRITE,
+        description: 'TodoWrite',
+      } as FunctionDeclaration,
+      {
         name: ToolNames.ENTER_PLAN_MODE,
         description: 'enter plan mode',
       } as FunctionDeclaration,
@@ -694,6 +716,7 @@ describe('AgentCore.prepareTools', () => {
   it.each([ToolNames.ENTER_PLAN_MODE, ToolNames.EXIT_PLAN_MODE])(
     'returns a dedicated message when filtered %s is called directly',
     async (toolName) => {
+      boundaryObserveMock.mockClear();
       const { core } = buildAgentForTools(undefined, []);
 
       const result = await runWithAgentContext('test-subagent', () =>
@@ -719,6 +742,13 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).toContain('not available inside subagents');
       expect(response?.error).toContain('return your plan');
       expect(response?.error).not.toContain('not found');
+      const producerObservations = boundaryObserveMock.mock.calls
+        .map(([observation]) => observation)
+        .filter((observation) => observation.stage === 'producer');
+      expect(producerObservations).toHaveLength(1);
+      expect(producerObservations[0].artifacts).toEqual([
+        { state: 'none', kinds: [] },
+      ]);
     },
   );
 
@@ -887,5 +917,80 @@ describe('AgentCore.prepareTools', () => {
     const deniedNames = deniedTools.map((t) => t.name);
     expect(deniedNames).not.toContain(ToolNames.AGENT);
     expect(deniedNames).toContain('read_file');
+  });
+});
+
+describe('extractParentToolNames', () => {
+  const configWithTools = (
+    tools: Array<{ functionDeclarations?: FunctionDeclaration[] }>,
+  ): GenerateContentConfig => ({ tools }) as unknown as GenerateContentConfig;
+
+  it('extracts declaration names from a single group', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: ToolNames.READ_FILE },
+            { name: ToolNames.WRITE_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
+  });
+
+  it('flattens and deduplicates names across multiple functionDeclarations groups', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        { functionDeclarations: [{ name: ToolNames.READ_FILE }] },
+        {
+          functionDeclarations: [
+            { name: ToolNames.READ_FILE },
+            { name: ToolNames.GREP },
+          ],
+        },
+      ]),
+    );
+    // READ_FILE appears in both groups but is returned once.
+    expect(names).toEqual([ToolNames.READ_FILE, ToolNames.GREP]);
+  });
+
+  it('drops tools a subagent must never inherit (EXCLUDED_TOOLS_FOR_SUBAGENTS)', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: ToolNames.WORKFLOW },
+            { name: ToolNames.AGENT },
+            { name: ToolNames.READ_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE]);
+    expect(names).not.toContain(ToolNames.WORKFLOW);
+    expect(names).not.toContain(ToolNames.AGENT);
+  });
+
+  it('filters out empty and non-string declaration names', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: '' },
+            { name: undefined } as FunctionDeclaration,
+            { name: ToolNames.READ_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE]);
+  });
+
+  it('returns an empty array for undefined config or missing tools', () => {
+    expect(extractParentToolNames(undefined)).toEqual([]);
+    expect(extractParentToolNames({} as GenerateContentConfig)).toEqual([]);
+    expect(extractParentToolNames(configWithTools([]))).toEqual([]);
+    expect(extractParentToolNames(configWithTools([{}]))).toEqual([]);
   });
 });

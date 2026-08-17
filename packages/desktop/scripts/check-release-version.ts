@@ -127,7 +127,7 @@ function main(): void {
       [
         `Release version mismatch. Requested ${version}, but source versions differ:`,
         details,
-        'Update package.json, apps/electron/package.json, and packages/shared/package.json before releasing.',
+        'Update the desktop release package versions before releasing.',
       ].join('\n'),
     );
   }

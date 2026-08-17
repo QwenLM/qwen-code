@@ -4,13 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
     include: ['scripts/tests/**/*.test.{js,ts}'],
+    // Script tests that drive Linux-only CI (ubuntu-latest workflow jobs, or
+    // bash/shell fixtures Windows cannot express) fail on a Windows runner.
+    // Linux CI remains their authoritative coverage.
+    exclude:
+      process.platform === 'win32'
+        ? [
+            ...configDefaults.exclude,
+            'scripts/tests/pr-self-report-label.test.js',
+            'scripts/tests/qwen-*-workflow.test.js',
+          ]
+        : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full

@@ -20,26 +20,69 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { reviewWriteAuthorization } from './lib/authorization.js';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { parseLedger } from './lib/ledger.js';
 
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
 const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
-vi.mock('./lib/gh.js', () => ({
-  ghWithInput: ghMock,
-  gh: ghViewMock,
-  setGhHost: vi.fn(),
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    ghWithInput: ghMock,
+    gh: ghViewMock,
+    setGhHost: vi.fn(),
+  };
+});
 
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
+const writeStderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: writeStdoutSpy,
-  writeStderrLine: vi.fn(),
+  writeStderrLine: writeStderrSpy,
+}));
+vi.mock('../../utils/version.js', () => ({
+  getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
 
-const { runSubmit } = await import('./submit.js');
+// The handler reads `review.attribution` / `review.comment` from the
+// operator's real settings.json — a developer running with either set would
+// watch the assertions below redden through no fault of the code. Pin the
+// values these tests read; the attribution-off path is covered by calling
+// runSubmit directly.
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({ attribution: true })),
+);
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    // The production call carries `{ skipWorkspaceSettings: true }` — these
+    // policy keys resolve from operator scopes only. A caller that forgets
+    // the flag reads the workspace-polluted view below instead, and the
+    // assertions redden: a repository's `.qwen/settings.json` must not
+    // control them.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
+  };
+});
+
+const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
 let savedSessionId: string | undefined;
@@ -87,6 +130,8 @@ beforeEach(() => {
   ghMock.mockClear();
   ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
+  writeStderrSpy.mockClear();
+  reviewSettingsMock.mockReturnValue({ attribution: true });
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
@@ -96,6 +141,142 @@ afterEach(() => {
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
   else process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+});
+
+describe('authorization — URL-shaped host and repo binding at the submit call site', () => {
+  // The pr-url binding (repo + bidirectional host) was, until now, exercised
+  // only through publish-assets' suite; the gate is shared, and submit is the
+  // caller that always binds the repo. Pin it here too.
+  let dir: string;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'submit-auth-'));
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+  });
+
+  function authFor(rawArgs: string, over: Record<string, unknown> = {}) {
+    const argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, `${rawArgs}\n`);
+    return reviewWriteAuthorization({
+      userAuthorized: false,
+      skillArgs: argsFile,
+      pr: 123,
+      repo: 'o/r',
+      host: undefined,
+      ...over,
+    } as never);
+  }
+
+  it('binds the repo of a URL-shaped authorisation', () => {
+    expect(authFor('https://github.com/o/r/pull/123 --comment').ok).toBe(true);
+    const wrong = authFor('https://github.com/other/repo/pull/123 --comment');
+    expect(wrong.ok).toBe(false);
+    expect(wrong.why).toContain('other/repo');
+  });
+
+  it('binds the host in both directions, defaulting an absent host to github.com', () => {
+    // Enterprise authorisation, host-less write → refused.
+    const up = authFor('https://ghe.corp.example/o/r/pull/123 --comment');
+    expect(up.ok).toBe(false);
+    expect(up.why).toContain('ghe.corp.example');
+    // github.com authorisation, Enterprise write → refused.
+    const down = authFor('https://github.com/o/r/pull/123 --comment', {
+      host: 'ghe.corp.example',
+    });
+    expect(down.ok).toBe(false);
+    // Matching Enterprise pair → passes.
+    expect(
+      authFor('https://ghe.corp.example/o/r/pull/123 --comment', {
+        host: 'ghe.corp.example',
+      }).ok,
+    ).toBe(true);
+  });
+
+  it('the audit text names the source that authorised — flag and setting stay distinguishable', () => {
+    // `why` rides the success line and the persisted refusal record. Swapping
+    // the gate's two ternary branches attributes a setting-authorised post to
+    // a flag the operator never typed — and survives every other test, so pin
+    // both branches here.
+    const bySetting = authFor('123', { defaultComment: true });
+    expect(bySetting.ok).toBe(true);
+    expect(bySetting.why).toContain('`review.comment` is enabled in settings');
+    expect(bySetting.why).toContain('#123');
+
+    const byFlag = authFor('123 --comment');
+    expect(byFlag.ok).toBe(true);
+    expect(byFlag.why).toContain('`--comment` was in the review arguments');
+  });
+
+  it('a requested-but-unbindable comment names the missing PR, not a missing flag', () => {
+    // When comment was requested — by the flag or the standing setting — but
+    // the arguments name no PR, the refusal must say THAT. Blaming a missing
+    // `--comment` flag the operator never typed (and implying one would fix
+    // it) misdirects; the request itself is on record.
+    const bySetting = authFor('src/foo.ts', { defaultComment: true });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain('do not name a');
+    expect(bySetting.why).not.toContain(
+      '`--comment` was not in the review arguments',
+    );
+
+    const byFlag = authFor('src/foo.ts --comment');
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('do not name a');
+
+    // Neither source requested it: the original wording stands.
+    const neither = authFor('src/foo.ts');
+    expect(neither.ok).toBe(false);
+    expect(neither.why).toContain(
+      '`--comment` was not in the review arguments',
+    );
+  });
+
+  it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
+    // With `review.comment` on, telling the operator to re-run with
+    // `--comment` misdirects: the blocker is that no recorded invocation
+    // names a PR, and a plain re-run fixes it. Flag-driven operators keep
+    // the flag wording — for them the flag IS the missing piece.
+    const missing = join(dir, 'no-such-args.txt');
+    const base = {
+      userAuthorized: false,
+      skillArgs: missing,
+      pr: 123,
+      repo: 'o/r',
+    };
+
+    const bySetting = reviewWriteAuthorization({
+      ...base,
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain(
+      'no recorded invocation names a pull request',
+    );
+    expect(bySetting.why).not.toContain('`--comment`');
+
+    const byFlag = reviewWriteAuthorization(base);
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('cannot show that `--comment` was requested');
+
+    // Both production callers pass a strict boolean (destructured default /
+    // the resolved setting), so pin the flag branch with the explicit false
+    // they actually send — a presence-check mutation of the ternary must not
+    // survive.
+    const byFlagExplicit = reviewWriteAuthorization({
+      ...base,
+      defaultComment: false,
+    });
+    expect(byFlagExplicit.ok).toBe(false);
+    expect(byFlagExplicit.why).toContain(
+      'cannot show that `--comment` was requested',
+    );
+  });
 });
 
 describe('the posting gate', () => {
@@ -192,6 +373,55 @@ describe('the posting gate', () => {
   it('refuses when the arguments name no pull request at all', () => {
     // `--comment` on a local review is not authorisation to post anywhere.
     runSubmit(args({ skillArgs: file('skill-args.txt', '--comment') }));
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('matches the refusal advice to the refusal class', () => {
+    // The advice is the prose the reviewing model reads to choose its retry.
+    // An unconditional "Re-run with --comment" is wrong for the target-
+    // binding refusals the review.comment setting path reaches: the flag
+    // cannot bind a target (and the setting already stood in for it), so
+    // advising it there buys a futile retry loop. Pin both branches: a
+    // wording edit to the gate that breaks the class split reddens here.
+    const advice = () =>
+      (writeStderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+
+    // A post that was never requested: the remedy names the flag.
+    runSubmit(args({ skillArgs: file('advice-flag.txt', '6771') }));
+    expect(advice()).toContain('Re-run with `--comment`');
+    writeStderrSpy.mockClear();
+
+    // A request the recorded arguments do not bind — they name no PR...
+    runSubmit(
+      args({ skillArgs: file('advice-nopr.txt', 'src/foo.ts') }),
+      'unknown',
+      { defaultComment: true },
+    );
+    expect(advice()).not.toContain('Re-run with `--comment`');
+    expect(advice()).toContain('invoked naming it');
+    expect(advice()).toContain('Nothing recorded authorises binding');
+    writeStderrSpy.mockClear();
+
+    // ...or a different PR than this submission targets.
+    runSubmit(
+      args({ skillArgs: file('advice-otherpr.txt', '9999') }),
+      'unknown',
+      { defaultComment: true },
+    );
+    expect(advice()).not.toContain('Re-run with `--comment`');
+    expect(advice()).toContain('invoked naming it');
+    writeStderrSpy.mockClear();
+
+    // Nothing recorded at all, with the setting authorising: the refusal
+    // names the missing invocation, and the advice preamble must not
+    // contradict it by presupposing recorded arguments exist.
+    runSubmit(args({ skillArgs: join(dir, 'advice-missing.txt') }), 'unknown', {
+      defaultComment: true,
+    });
+    expect(advice()).toContain('no recorded invocation names a pull request');
+    expect(advice()).toContain('Nothing recorded authorises binding');
+    expect(advice()).not.toContain('The recorded arguments');
     expect(ghMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(3);
   });
@@ -393,6 +623,248 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(posted().comments).toEqual([]);
   });
 
+  it('carries duplicate-dropped Suggestions through the state seam', () => {
+    // The seam strips keys by a destructuring exclusion list, then spreads
+    // the rest into composeReview. The field rides the spread today; if it
+    // ever joins the exclusion list, the posted body loses the duplicate
+    // paragraph — the exact incident shape #9204 fixes — while every direct
+    // composeReview test stays green, because each one bypasses this seam.
+    // The body is the observable here: this fixture brings no plan, so the
+    // missing-plan cap posts COMMENT whatever the counts, and the verdict
+    // side of a duplicates-only run is pinned by the cap-free fixtures in
+    // compose-review.test.ts, which own the transcript scaffolding.
+    const review = file('duplicates.json', {
+      commit_id: 'abc123',
+      comments: [],
+      state: {
+        suggestionsDroppedAsDuplicates: [
+          'R1-1 pin gap — already reported (comment 1)',
+        ],
+        modelId: 'qwen3.7-max',
+      },
+    });
+    runSubmit(authorized({ review }));
+    expect(posted().body).toContain(
+      '1 Suggestion-level finding(s) this review confirmed',
+    );
+  });
+
+  it('posts the injected CLI version in the review footer', () => {
+    runSubmit(authorized({}), '0.21.2');
+
+    expect(posted().body).toContain('via Qwen Code /review');
+    expect(
+      posted().body.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.2)_'),
+    ).toBe(true);
+  });
+
+  it('uses the inherited startup version instead of the resolved CLI version', async () => {
+    // Driven through the handler — the one production call site — with the
+    // stamp set: reverting the handler to a bare `getCliVersion()` reddens
+    // this, which is the exact regression the PR closes.
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    process.env['QWEN_CODE_STARTUP_VERSION'] = '0.21.3';
+    try {
+      await submitCommand.handler?.(authorized({}) as never);
+      expect(posted().body).toContain('(v0.21.3)');
+      expect(posted().body).not.toContain('(v0.21.2)');
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+    }
+  });
+
+  it('honours the review.attribution setting through the handler', async () => {
+    reviewSettingsMock.mockReturnValue({ attribution: false });
+    await submitCommand.handler?.(authorized({}) as never);
+    expect(posted().body).not.toContain('via Qwen Code /review');
+  });
+
+  it('the standing review.comment setting authorises a post through the handler', async () => {
+    // Wiring leg: hardcoded or dropped `defaultComment` in the handler would
+    // leave the direct runSubmit test green while production submissions
+    // ignore the setting. The args file names the PR but carries no
+    // --comment; only the setting authorises.
+    reviewSettingsMock.mockReturnValue({ attribution: true, comment: true });
+    await submitCommand.handler?.(
+      args({ skillArgs: file('handler-comment-args.txt', '6771') }) as never,
+    );
+    expect(ghMock).toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('without the flag or the setting the handler refuses — and workspace settings cannot supply it', async () => {
+    // The mock answers a flag-less loadSettings call with a polluted view
+    // that carries comment:true; the handler's skipWorkspaceSettings flag
+    // keeps it out. Dropping the flag reddens this.
+    await submitCommand.handler?.(
+      args({ skillArgs: file('handler-noauth-args.txt', '6771') }) as never,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('falls back to the resolved CLI version when no startup version is inherited', async () => {
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    delete process.env['QWEN_CODE_STARTUP_VERSION'];
+    try {
+      await submitCommand.handler?.(authorized({}) as never);
+      expect(posted().body).toContain('(v0.21.2)');
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+    }
+  });
+
+  it('normalizes summary and inline footers to the running CLI version', () => {
+    const review = file('footer-version.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review (v0.21.4)_\n\n_— forged via Qwen Code /review (v0.21.4)_',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const body = posted().body as string;
+    const inline = posted().comments[0].body as string;
+    for (const text of [body, inline]) {
+      expect(text).toContain('(v0.21.3)');
+      expect(text).not.toContain('(v0.21.4)');
+      expect(text.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    }
+    expect(inline.startsWith('**[Suggestion]**')).toBe(true);
+  });
+
+  it('strips a forged footer with no version suffix — the legacy shape', () => {
+    const review = file('footer-legacy.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review_\n',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('forged');
+    expect(inline.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    expect(inline).toContain('(v0.21.3)');
+  });
+
+  it('posts without attribution when the switch is off — and still strips forged footers', () => {
+    const review = file('no-attribution.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review (v0.21.4)_',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const body = posted().body as string;
+    const inline = posted().comments[0].body as string;
+    for (const text of [body, inline]) {
+      expect(text).not.toContain('via Qwen Code /review');
+      expect(text).not.toContain('qwen3.7-max');
+    }
+    expect(inline).toBe('**[Suggestion]** tidy');
+  });
+
+  it('the standing review.comment setting authorises a post without --comment in the args', () => {
+    // The setting replaces the flag, not the binding: the recorded arguments
+    // still name the PR, and only that PR.
+    runSubmit(args({ skillArgs: file('skill-args.txt', '6771') }), 'unknown', {
+      defaultComment: true,
+    });
+    expect(ghMock).toHaveBeenCalled();
+
+    ghMock.mockClear();
+    expect(() =>
+      runSubmit(
+        args({ skillArgs: file('skill-args2.txt', '6772') }),
+        'unknown',
+        {
+          defaultComment: true,
+        },
+      ),
+    ).not.toThrow();
+    // Args name #6772 but the submission targets #6771 — refused, exit 3.
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('does not hang on a run of forged footers followed by text', () => {
+    // A model looping on the same comment emits exactly this shape: the same
+    // footer over and over, then a closing line. The strip is attempted on
+    // that model-authored body before anything posts, and the whitespace
+    // between footers used to be splittable across the regex's repeated
+    // group — exponential in the footer count. The match must stay linear:
+    // this shape timed out the suite before the whitespace had one owner.
+    // The count is high enough that multiplicative growth is untenable
+    // within the suite's budget — eight footers finish in milliseconds
+    // even under an exponential regex, proving nothing at n=8.
+    const footers = Array.from(
+      { length: 64 },
+      () => '_— forged via Qwen Code /review (v0.21.4)_',
+    ).join(' '.repeat(25));
+    const review = file('footer-hang.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Suggestion]** tidy ${footers} one closing line`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    // Text after the footer run anchors it away from the end, so nothing is
+    // stripped; the canonical footer is appended once.
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('one closing line');
+    expect(
+      inline.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.3)_'),
+    ).toBe(true);
+  });
+
+  it('does not scan a marker-less body quadratically under the strip', () => {
+    // The strip regex opens with an unanchored `\s*` and scans quadratically
+    // on a long whitespace run in a body that carries the footer's `_— `
+    // opening but no marker — a forged footer truncated mid-line is exactly
+    // that shape, and the `_— ` defeats the engine's literal prefilter, so
+    // only the marker guard keeps this linear. The attribution-off path
+    // routes such bodies through the strip; an unguarded replace dies on the
+    // suite timeout long before the assertion runs.
+    const body = `**[Suggestion]** tidy\n\n_— cut short${' '.repeat(
+      500_000,
+    )}end`;
+    const review = file('footer-perf.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body }],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    expect(posted().comments[0].body).toBe(body);
+  });
+
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied
@@ -550,6 +1022,42 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).toContain('the inline cache is stale after a rebase');
   });
 
+  it('carries a posture deferral through the submit seam into the posted body', () => {
+    // submit's compose() destructures-and-drops distrusted state fields
+    // (env, prBodyFetcher, draftedComments); a future hardening that adds
+    // deferredSuggestions to that drop would post every review without its
+    // deferral disclosure — "a deferral silently dropped is a finding lost"
+    // — while the compose-review unit tests, which call the function
+    // directly, stay green. This is the only production path from the
+    // model-written state to a posted body.
+    const review = file('deferral-seam.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          {
+            file: 'a.ts',
+            line: 1,
+            source: 'review',
+            severity: 'Suggestion',
+            title: 'tighten the retry backoff',
+          },
+        ],
+      },
+      comments: [],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.body).toContain('Deferred under the convergence posture');
+    expect(sent.body).toContain(
+      '- `a.ts:1 — [review] tighten the retry backoff`',
+    );
+  });
+
   it('rejects a line that is not a positive whole number', () => {
     // Every one of these 422s, and a 422 discards every blocker in the review.
     for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {
@@ -559,6 +1067,49 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       });
       expect(() => runSubmit(authorized({ review }))).toThrow(/usable `line`/);
     }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an empty-string body as empty, not as unmarked', () => {
+    // Normalisation runs before the consistency check; a footer pasted onto
+    // '' would turn the precise 'empty comment' refusal into a misleading
+    // 'missing severity marker' one.
+    const review = file('empty-body.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '' }],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(/empty comment/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a `comments` field that is present but not an array', () => {
+    // `"comments": {}` used to escape normalisation — which runs outside
+    // `compose`'s try/catch — as a bare TypeError instead of the structured
+    // refusal the re-compose loop parses.
+    const review = file('comments-not-array.json', {
+      ...REVIEW,
+      comments: {},
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /`comments` is not an array/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a `comments` entry that is not an object', () => {
+    // `"comments": [null]` cleared the arrayness check and threw a bare
+    // TypeError in the normalisation `.map` — outside `compose`'s try/catch
+    // — instead of the structured refusal the re-compose loop parses.
+    const review = file('comments-null-entry.json', {
+      ...REVIEW,
+      comments: [null],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /entries must each be an object/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -666,6 +1217,73 @@ describe('the verdict is computed, not carried', () => {
 
     expect(() => runSubmit(authorized({ review }))).toThrow(/not inputs/);
     expect(ghMock).not.toHaveBeenCalled();
+  });
+});
+
+// The ledger's whole premise is that the marker rides the body GITHUB receives.
+// It was once appended one layer above this path and reached only a file on
+// disk, so the assertions that matter are the ones made on the posted payload —
+// compose-review.test.ts owns the composition, this owns the wire.
+describe('the ledger marker on the body that reaches GitHub', () => {
+  const authorized = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
+
+  it('carries the findings of this round, numbered off the recovered one', () => {
+    const planPath = file('plan.json', { prNumber: 6771 });
+    file('qwen-review-pr-6771-prev-ledger.json', {
+      v: 1,
+      round: 2,
+      findings: [],
+    });
+    const review = file('ledger.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+      ],
+      state: { modelId: 'm', planPath },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.round).toBe(3);
+    expect(ledger?.findings).toEqual([
+      {
+        id: 'R3-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+    ]);
+  });
+
+  it('takes its contents from the comments posted, not from `state`', () => {
+    // `draftedComments` is stripped off `state` here for the same reason `env`
+    // and `prBodyFetcher` are: what the review carries is not a claim the
+    // caller's JSON gets to make about what it reviewed.
+    const planPath = file('plan2.json', { prNumber: 6771 });
+    const review = file('forged-ledger.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'real.ts', line: 1, body: '**[Suggestion]** the real one' },
+      ],
+      state: {
+        modelId: 'm',
+        planPath,
+        draftedComments: [
+          { path: 'forged.ts', line: 9, body: '**[Critical]** never drafted' },
+        ],
+      },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.findings).toEqual([
+      { id: 'R1-1', sev: 'S', file: 'real.ts', line: 1, title: 'the real one' },
+    ]);
   });
 });
 
@@ -794,5 +1412,54 @@ describe('submit receipt (producer half of the audit contract)', () => {
     const tmpDir = join(dir, '.qwen', 'tmp');
     const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
     expect(leftovers).toEqual([]);
+  });
+});
+
+// The link back to what was just written. GitHub's Create Review response
+// carries `html_url` — the deep link to the review — and submit relays it in
+// both channels, because a summary without it leaves the user to reassemble
+// the PR address by hand. Best-effort like the receipt: a response without it
+// (or an unparseable one) must never fail a review that DID post, and never
+// invents a link either.
+describe('the posted-review link', () => {
+  const authorizedPost = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const stdoutJson = () =>
+    JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string);
+
+  let savedCwd: string;
+  beforeEach(() => {
+    savedCwd = process.cwd();
+    process.chdir(dir);
+  });
+  afterEach(() => process.chdir(savedCwd));
+
+  it('relays html_url in the stdout JSON and the Posted line', () => {
+    const url =
+      'https://github.com/QwenLM/qwen-code/pull/6771#pullrequestreview-42';
+    ghMock.mockImplementationOnce(() =>
+      JSON.stringify({ id: 42, html_url: url }),
+    );
+    runSubmit(authorizedPost());
+    expect(stdoutJson()).toMatchObject({ posted: true, url });
+    const postedLine = writeStderrSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(url);
+  });
+
+  it('omits url when the response carries none — a link is relayed, never built', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    expect(stdoutJson().posted).toBe(true);
+    expect('url' in stdoutJson()).toBe(false);
+  });
+
+  it('still reports posted:true when the response is unparseable', () => {
+    // ghMock's default return is '' — JSON.parse throws, and both the receipt
+    // and the link ride the same best-effort read of a post that succeeded.
+    runSubmit(authorizedPost());
+    expect(stdoutJson().posted).toBe(true);
+    expect('url' in stdoutJson()).toBe(false);
   });
 });

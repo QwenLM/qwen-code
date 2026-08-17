@@ -6,6 +6,7 @@
 
 import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   SessionTranscriptChangedError,
   SessionWriterConflictError,
@@ -13,6 +14,7 @@ import {
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from './error-response.js';
+import { DaemonDrainingError } from './session-archive.js';
 
 function responseMock(): {
   response: Response;
@@ -28,6 +30,40 @@ function responseMock(): {
 }
 
 describe('sendBridgeError session writer errors', () => {
+  it('serializes the structured session-closing code', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new SessionNotFoundError(
+        'session-1',
+        'The session is closing',
+        'session_closing',
+      ),
+    );
+
+    expect(status).toHaveBeenCalledWith(404);
+    expect(json).toHaveBeenCalledWith({
+      error: 'No session with id "session-1". The session is closing',
+      code: 'session_closing',
+      sessionId: 'session-1',
+    });
+  });
+
+  it('maps sealed session maintenance to daemon_draining', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, new DaemonDrainingError());
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'The daemon is draining and no longer accepts session maintenance.',
+      code: 'daemon_draining',
+      errorKind: 'daemon_draining',
+    });
+  });
+
   it.each([
     {
       error: new SessionWriterConflictError(),
@@ -84,6 +120,22 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Session write ownership could not be verified.',
       code: 'session_writer_unavailable',
       errorKind: 'session_writer_unavailable',
+    });
+  });
+
+  it.each([
+    ['invalid_session_media_reference', 400],
+    ['session_media_gone', 410],
+  ] as const)('maps %s to %i', (code, expectedStatus) => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('media reference failed'), { code });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(expectedStatus);
+    expect(json).toHaveBeenCalledWith({
+      error: 'media reference failed',
+      code,
     });
   });
 });

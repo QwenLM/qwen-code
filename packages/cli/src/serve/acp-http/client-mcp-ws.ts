@@ -41,7 +41,7 @@ import {
   type ClientMcpFrame,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { isValidServerName } from '../validate-server-name.js';
+import { isValidServerName } from '../../runtime/validate-server-name.js';
 
 /** WS frame discriminators owned by this module. */
 export const CLIENT_MCP_FRAME_TYPES = {

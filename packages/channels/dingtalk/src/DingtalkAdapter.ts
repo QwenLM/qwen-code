@@ -3,7 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
-import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
+import {
+  DWClient,
+  TOPIC_CARD,
+  TOPIC_ROBOT,
+  EventAck,
+} from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
@@ -24,13 +29,29 @@ import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
+import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  parseDingtalkCardActorId,
+  parseDingtalkCardCallback,
+  parseDingtalkInteractiveCardConfig,
+  type DingtalkCardCallback,
+  type DingtalkCardCallbackResult,
+  type DingtalkInteractiveCardConfig,
+} from './interactive-card-types.js';
+import { StatusCardController } from './status-card-controller.js';
+import { QuestionCardController } from './question-card-controller.js';
+import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   SessionTarget,
+  UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 
 /**
@@ -109,7 +130,6 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
-const TEXT_MESSAGE_LIMIT = 3800;
 const mentionTarget = Symbol('mentionTarget');
 const IMAGE_INSTRUCTIONS = [
   '',
@@ -125,12 +145,15 @@ type MentionTargetEnvelope = Envelope & {
   [mentionTarget]?: string;
 };
 
-function withNonBotMentionContext(
-  data: DingTalkMessageData,
-  text: string,
-): string {
+interface CardRunCorrelation {
+  ownerId: string;
+  target: { chatId: string; isGroup: boolean };
+  sender?: { senderName: string };
+}
+
+function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
-    return text;
+    return [];
   }
 
   const mentions = new Set<string>();
@@ -141,14 +164,12 @@ function withNonBotMentionContext(
     // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
     if (dingtalkId === data.chatbotUserId) continue;
     const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
-    const stableId = dingtalkId || staffId;
+    // Prefer staffId so the model sees the same identifier space as senderId.
+    const stableId = staffId || dingtalkId;
     if (stableId) mentions.add(stableId);
   }
 
-  if (mentions.size === 0) return text;
-  const memberLabel = mentions.size === 1 ? 'member' : 'members';
-  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
-  return text ? `${context}\n${text}` : context;
+  return [...mentions];
 }
 
 interface DingTalkTokenResponse {
@@ -163,20 +184,6 @@ interface DingTalkDirectMessageResponse {
   invalidStaffIdList?: string[];
 }
 
-function splitTextChunks(text: string, firstChunkLimit: number): string[] {
-  if (!text) return [text];
-
-  const chunks: string[] = [];
-  let offset = 0;
-  let chunkLimit = firstChunkLimit;
-  while (offset < text.length) {
-    chunks.push(text.slice(offset, offset + chunkLimit));
-    offset += chunkLimit;
-    chunkLimit = TEXT_MESSAGE_LIMIT;
-  }
-  return chunks;
-}
-
 type DingTalkClientInternals = DWClient & {
   debug: boolean;
   onDownStream(data: unknown): void;
@@ -187,6 +194,7 @@ type DingTalkClientInternals = DWClient & {
 
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
+  interactiveCards?: unknown;
 };
 
 export class DingtalkChannel extends ChannelBase {
@@ -196,7 +204,6 @@ export class DingtalkChannel extends ChannelBase {
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
   private sessionMentionTargets = new Map<string, string>();
-  private textReplySessions = new Set<string>();
   private bufferedMentionTargets = new Set<string>();
   private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
@@ -219,6 +226,14 @@ export class DingtalkChannel extends ChannelBase {
    * on (re)connect, so a long-lived socket serves a stale one after ~2h.
    */
   private proactiveToken?: { token: string; expiresAt: number };
+  private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
+  protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
+  private statusCardController?: StatusCardController;
+  private questionCardController?: QuestionCardController;
+  private interactionPresenter?: DingtalkInteractionPresenter;
+  private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
+  private readonly cardRunBySession = new Map<string, string>();
+  private readonly cardRuns = new Map<string, CardRunCorrelation>();
 
   constructor(
     name: string,
@@ -240,6 +255,9 @@ export class DingtalkChannel extends ChannelBase {
     } else if (!this.config.instructions.includes('[IMAGE:')) {
       this.config.instructions += IMAGE_INSTRUCTIONS;
     }
+    this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
+      (config as DingtalkChannelConfig).interactiveCards,
+    );
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -260,6 +278,57 @@ export class DingtalkChannel extends ChannelBase {
     const useConnectionManager = rawUseConnectionManager ?? true;
 
     this.client = this.createClient(useConnectionManager);
+    if (this.interactiveCardConfig.enabled) {
+      this.interactiveCardClient = new DingtalkInteractiveCardClient({
+        robotCode: config.clientId,
+        getAccessToken: () => this.getProactiveToken(),
+      });
+      if (
+        this.interactiveCardConfig.statusCard.enabled &&
+        config.blockStreaming !== 'on'
+      ) {
+        this.statusCardController = new StatusCardController({
+          client: this.interactiveCardClient,
+          cancelRun: (sessionId, runId) =>
+            this.requestPromptRunCancellation(sessionId, runId),
+          ...(config.model ? { model: config.model } : {}),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (this.interactiveCardConfig.questionCard.enabled) {
+        this.questionCardController = new QuestionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.questionCard.timeoutMs,
+          sendFallback: (chatId, text) => this.sendMessage(chatId, text),
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (this.statusCardController || this.questionCardController) {
+        this.interactionPresenter = new DingtalkInteractionPresenter({
+          statusCards: this.statusCardController,
+          questionCards: this.questionCardController,
+          ...(config.blockStreaming !== 'on'
+            ? {
+                sendFallback: (
+                  chatId: string,
+                  text: string,
+                  sessionId: string,
+                ) => this.sendFallbackReply(chatId, text, sessionId),
+              }
+            : {}),
+        });
+      }
+    }
     if (useConnectionManager) {
       this.connectionManager = new DingtalkConnectionManager({
         initialClient: this.client,
@@ -308,6 +377,66 @@ export class DingtalkChannel extends ChannelBase {
       });
       this.onMessage(msg);
     });
+    if (this.interactiveCardConfig.enabled) {
+      client.registerCallbackListener(TOPIC_CARD, (msg: DWClientDownStream) => {
+        this.onCardCallback(client, msg);
+      });
+    }
+  }
+
+  private onCardCallback(client: DWClient, msg: DWClientDownStream): void {
+    const callback = parseDingtalkCardCallback(msg.data);
+    const actorId = callback?.actorId ?? parseDingtalkCardActorId(msg.data);
+    let result: DingtalkCardCallbackResult;
+    try {
+      result = callback
+        ? this.routeCardCallback(callback)
+        : { kind: 'ignored', ...(actorId ? { actorId } : {}) };
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] card callback routing failed: ${sanitizeLogText(String(err), 200)}\n`,
+      );
+      result = { kind: 'ignored', ...(actorId ? { actorId } : {}) };
+    }
+    client.send(msg.headers.messageId, {
+      status: EventAck.SUCCESS,
+      message: 'ok',
+    });
+    if (result.kind === 'accepted') {
+      void result.execute().catch((err) => {
+        process.stderr.write(
+          `[DingTalk:${this.name}] card callback action failed: ${sanitizeLogText(String(err), 200)}\n`,
+        );
+      });
+    } else if (result.kind === 'forbidden') {
+      void this.sendCardInteractionFeedback(
+        result.actorId,
+        result.target,
+      ).catch((err) => {
+        process.stderr.write(
+          `[DingTalk:${this.name}] card interaction feedback failed: ${sanitizeLogText(String(err), 200)}\n`,
+        );
+      });
+    }
+  }
+
+  protected routeCardCallback(
+    callback: DingtalkCardCallback,
+  ): DingtalkCardCallbackResult {
+    if (callback.actionId === 'btn_stop') {
+      return (
+        this.statusCardController?.claimStop(
+          callback.outTrackId,
+          callback.actorId,
+        ) ?? { kind: 'ignored', actorId: callback.actorId }
+      );
+    }
+    return (
+      this.questionCardController?.claim(callback) ?? {
+        kind: 'ignored',
+        actorId: callback.actorId,
+      }
+    );
   }
 
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
@@ -539,42 +668,6 @@ export class DingtalkChannel extends ChannelBase {
         body: JSON.stringify(body),
       });
 
-      if (!resp.ok) {
-        const detail = await resp.text().catch(() => '');
-        process.stderr.write(
-          `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
-        );
-      }
-    }
-  }
-
-  private async sendTextReply(
-    chatId: string,
-    text: string,
-    atUserId?: string,
-  ): Promise<void> {
-    const webhook = this.webhooks.get(chatId);
-    if (!webhook) return;
-
-    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
-    const chunks = splitTextChunks(
-      text,
-      TEXT_MESSAGE_LIMIT - mentionPrefix.length,
-    );
-    for (let i = 0; i < chunks.length; i++) {
-      const isMention = i === 0 && atUserId !== undefined;
-      const resp = await fetch(webhook, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          msgtype: 'text',
-          text: {
-            content: isMention ? `${mentionPrefix}${chunks[i]!}` : chunks[i]!,
-          },
-          ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
-        }),
-      });
-
       if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
         const payload = (await resp
           .clone()
@@ -597,7 +690,7 @@ export class DingtalkChannel extends ChannelBase {
       if (!resp.ok) {
         const detail = await resp.text().catch(() => '');
         process.stderr.write(
-          `[DingTalk:${this.name}] sendTextReply failed: HTTP ${resp.status} ${detail}\n`,
+          `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
       }
     }
@@ -700,6 +793,36 @@ export class DingtalkChannel extends ChannelBase {
         Date.now() + Math.max(60, (data.expires_in ?? 7200) - 60) * 1000,
     };
     return data.access_token;
+  }
+
+  private sendCardInteractionFeedback(
+    actorId: string,
+    target?: { chatId: string; isGroup: boolean },
+  ): Promise<void> {
+    if (target?.isGroup) {
+      return this.sendProactiveChunk(
+        {
+          channelName: this.name,
+          senderId: actorId,
+          chatId: target.chatId,
+          isGroup: true,
+        },
+        '卡片操作',
+        '仅任务发起人可以操作这张卡片，本次操作未生效。',
+        'card interaction feedback',
+      );
+    }
+    return this.sendProactiveChunk(
+      {
+        channelName: this.name,
+        senderId: actorId,
+        chatId: actorId,
+        isGroup: false,
+      },
+      '卡片操作',
+      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+      'card interaction feedback',
+    );
   }
 
   private async sendProactiveChunk(
@@ -970,7 +1093,12 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
-    this.textReplySessions.delete(sessionId);
+    const cardRunId = this.cardRunBySession.get(sessionId);
+    if (cardRunId) {
+      this.cardRunBySession.delete(sessionId);
+      this.interactionPresenter?.terminalizeRun(cardRunId, 'cancelled');
+      this.cardRuns.delete(cardRunId);
+    }
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
@@ -988,11 +1116,52 @@ export class DingtalkChannel extends ChannelBase {
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
       this.startReaction(event.chatId, event.messageId, event.sessionId);
+      const inboundOwner = event.messageId
+        ? this.inboundCardOwners.get(event.messageId)
+        : undefined;
+      if (event.messageId) this.inboundCardOwners.delete(event.messageId);
+      if (
+        event.runId &&
+        event.owner &&
+        inboundOwner?.ownerId === event.owner.id
+      ) {
+        this.cardRuns.set(event.runId, inboundOwner);
+        this.cardRunBySession.set(event.sessionId, event.runId);
+        this.interactionPresenter?.registerRun(
+          event.runId,
+          event.owner.id,
+          inboundOwner.target,
+          event.sessionId,
+          inboundOwner.sender,
+        );
+        this.interactionPresenter?.startStatusCard(event.runId);
+      }
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      if (event.runId) {
+        if (event.type === 'failed') {
+          this.interactionPresenter?.terminalizeRun(
+            event.runId,
+            'failed',
+            event.error,
+          );
+        } else if (event.type === 'cancelled') {
+          this.interactionPresenter?.terminalizeRun(
+            event.runId,
+            'cancelled',
+            event.reason,
+          );
+        } else {
+          this.interactionPresenter?.terminalizeRun(event.runId, 'completed');
+        }
+        this.cardRuns.delete(event.runId);
+        if (this.cardRunBySession.get(event.sessionId) === event.runId) {
+          this.cardRunBySession.delete(event.sessionId);
+        }
+      }
     }
   }
 
@@ -1050,7 +1219,6 @@ export class DingtalkChannel extends ChannelBase {
       this.mentionTargets.delete(messageId);
       if (this.atSender && atUserId) {
         this.sessionMentionTargets.set(sessionId, atUserId);
-        this.textReplySessions.add(sessionId);
       }
     }
     this.startReaction(chatId, messageId, sessionId);
@@ -1060,6 +1228,27 @@ export class DingtalkChannel extends ChannelBase {
     if (!(await this.preflightInbound(envelope))) return;
 
     const messageId = envelope.messageId;
+    if (messageId && envelope.senderId) {
+      this.inboundCardOwners.delete(messageId);
+      this.inboundCardOwners.set(messageId, {
+        ownerId: envelope.senderId,
+        target: {
+          chatId: envelope.chatId,
+          isGroup: envelope.isGroup,
+        },
+        ...(this.atSender && envelope.isGroup
+          ? {
+              sender: {
+                senderName: envelope.senderName,
+              },
+            }
+          : {}),
+      });
+      if (this.inboundCardOwners.size > 1000) {
+        const oldest = this.inboundCardOwners.keys().next().value;
+        if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+      }
+    }
     const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
     if (this.atSender && messageId && atUserId) {
       this.mentionTargets.set(messageId, atUserId);
@@ -1096,7 +1285,6 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.sessionMentionTargets.delete(sessionId);
-    this.textReplySessions.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
   }
 
@@ -1109,15 +1297,76 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    if (this.textReplySessions.has(sessionId)) {
-      if (findImageMarkers(text).length > 0) {
-        await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(chatId, text, atUserId);
+  }
+
+  private async sendFallbackReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    // Mid-run fallbacks must not consume the prompt's mention target: the
+    // final answer of the same run still needs it.
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
+    await this.sendReply(chatId, text, atUserId);
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ): Promise<void> {
+    if (segment && this.interactionPresenter) {
+      const outgoingText = await this.prepareOutgoingText(text);
+      if (
+        await this.interactionPresenter.closeOutput(
+          segment.segmentId,
+          outgoingText,
+          'completed',
+          segment,
+        )
+      ) {
         return;
       }
-      await this.sendTextReply(chatId, text, atUserId);
-      return;
     }
-    await this.sendReply(chatId, text);
+    await this.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  protected override onOutputSegmentEnd(
+    _chatId: string,
+    _sessionId: string,
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    if (!this.interactionPresenter) return;
+    return this.interactionPresenter
+      .closeOutput(segment.segmentId, '', reason, segment)
+      .then(() => undefined);
+  }
+
+  protected override onResponseChunk(
+    _chatId: string,
+    chunk: string,
+    _sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ): void {
+    if (segment) this.interactionPresenter?.appendOutput(segment, chunk);
+  }
+
+  protected override async presentUserInputRequest(
+    context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (!this.questionCardController || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
+    }
+    return this.interactionPresenter.presentInput(context);
   }
 
   /**
@@ -1457,9 +1706,10 @@ export class DingtalkChannel extends ChannelBase {
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
       const messageText = isMentioned ? cleanText : cleanText || content.text;
-      const envelopeText = isGroup
-        ? withNonBotMentionContext(data, messageText)
-        : messageText;
+      // Carry mention targets as a structured envelope field (like
+      // referencedText) so ChannelBase renders the marker after prompt
+      // sanitization and slash-command parsing sees the body alone.
+      const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
@@ -1471,7 +1721,8 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: envelopeText,
+        text: messageText,
+        ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,

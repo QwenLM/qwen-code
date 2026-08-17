@@ -49,7 +49,7 @@ Use the todo_write tool to create this list.`;
     expect(todoWriteCalls.length).toBeGreaterThan(0);
 
     // Parse the arguments to verify they contain our tasks
-    const todoArgs = JSON.parse(todoWriteCalls[0].toolRequest.args);
+    const todoArgs = JSON.parse(todoWriteCalls[0].toolRequest.args ?? '{}');
 
     expect(todoArgs.todos).toBeDefined();
     expect(Array.isArray(todoArgs.todos)).toBe(true);

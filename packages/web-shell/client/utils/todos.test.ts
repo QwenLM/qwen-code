@@ -6,9 +6,12 @@ import {
   computeTodoTimeline,
   extractTodoStats,
   extractTodosFromToolCall,
+  getAgentToolsForPlan,
   getFloatingTodos,
+  getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
+  isExitPlanApprovalRequest,
   isTodoWriteToolName,
   todoDetailSignature,
   todoStateKey,
@@ -36,6 +39,7 @@ function todoWriteMessage(
   id: string,
   todos: TodoItem[],
   stats?: TodoStatsSnapshot,
+  planId?: string,
 ): Message {
   const tool: ACPToolCall = {
     callId: `call-${id}`,
@@ -43,7 +47,14 @@ function todoWriteMessage(
     status: 'completed',
     kind: 'think',
     args: { todos },
-    ...(stats ? { rawOutput: { stats } } : {}),
+    ...(stats || planId
+      ? {
+          rawOutput: {
+            ...(stats ? { stats } : {}),
+            ...(planId ? { plan: { id: planId } } : {}),
+          },
+        }
+      : {}),
   };
   return { id, role: 'tool_group', tools: [tool] };
 }
@@ -89,13 +100,13 @@ describe('getFloatingTodos', () => {
       getFloatingTodos([userMessage('u1'), assistantMessage('a1')]),
     ).toEqual({
       todos: [],
+      planId: null,
       allCompleted: false,
       sourceMessageId: null,
-      sourceCallId: null,
     });
   });
 
-  it('returns the latest active list with its source ids', () => {
+  it('returns the latest active list with its source message', () => {
     const first = [todo('1', 'in_progress')];
     const second = [todo('1', 'completed'), todo('2', 'in_progress')];
     const state = getFloatingTodos([
@@ -105,13 +116,42 @@ describe('getFloatingTodos', () => {
     expect(state.todos.map((t) => t.id)).toEqual(['1', '2']);
     expect(state.allCompleted).toBe(false);
     expect(state.sourceMessageId).toBe('m2');
-    expect(state.sourceCallId).toBe('call-m2');
   });
 
-  it('uses a null sourceCallId for plan messages', () => {
+  it('preserves a stable plan id and dependency metadata', () => {
+    const tool: ACPToolCall = {
+      callId: 'call-plan',
+      toolName: 'todo_write',
+      status: 'completed',
+      rawOutput: {
+        entries: [
+          {
+            content: 'Build',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'build', blockedBy: ['research'] } },
+          },
+        ],
+        plan: { id: 'plan-1' },
+      },
+    };
+    const state = getFloatingTodos([
+      { id: 'message-plan', role: 'tool_group', tools: [tool] },
+    ]);
+
+    expect(state.planId).toBe('plan-1');
+    expect(state.todos).toEqual([
+      {
+        id: 'build',
+        content: 'Build',
+        status: 'pending',
+        blockedBy: ['research'],
+      },
+    ]);
+  });
+
+  it('tracks the source message for plan messages', () => {
     const state = getFloatingTodos([planMessage('p1', [todo('1', 'pending')])]);
     expect(state.sourceMessageId).toBe('p1');
-    expect(state.sourceCallId).toBeNull();
   });
 
   it('clears an active list after the next user message', () => {
@@ -196,6 +236,209 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('getActiveTodosForPlanRevision', () => {
+  it('returns only the snapshot named by the approval revision', () => {
+    const todos = [todo('1', 'in_progress')];
+    const revisedTodos = [todo('2', 'pending')];
+    expect(
+      getActiveTodosForPlanRevision(
+        [
+          todoWriteMessage('m1', todos, undefined, 'plan-1'),
+          userMessage('revision'),
+          todoWriteMessage('m2', revisedTodos, undefined, 'plan-1'),
+        ],
+        { planId: 'plan-1', sourceCallId: 'call-m2' },
+      ),
+    ).toEqual(revisedTodos);
+  });
+
+  it('rejects missing and mismatched revisions but preserves terminal ones', () => {
+    expect(getActiveTodosForPlanRevision([], undefined)).toEqual([]);
+    expect(
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
+        undefined,
+      ),
+    ).toEqual([]);
+    expect(
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
+        { planId: 'plan-other', sourceCallId: 'call-m1' },
+      ),
+    ).toEqual([]);
+    const completed = [todo('1', 'completed')];
+    expect(
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('done', completed, undefined, 'plan-1')],
+        { planId: 'plan-1', sourceCallId: 'call-done' },
+      ),
+    ).toEqual(completed);
+  });
+});
+
+describe('getAgentToolsForPlan', () => {
+  const planUpdate = (messageId: string, planId: string): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${messageId}`,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: {
+          entries: [{ content: planId, status: 'pending' }],
+          plan: { id: planId },
+        },
+      },
+    ],
+  });
+  const completedPlanUpdate = (messageId: string, planId: string): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${messageId}`,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: {
+          entries: [{ content: planId, status: 'completed' }],
+          plan: { id: planId },
+        },
+      },
+    ],
+  });
+  const clearedPlanUpdate = (messageId: string, planId: string): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${messageId}`,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: {
+          entries: [],
+          plan: { id: planId },
+        },
+      },
+    ],
+  });
+  const agentUpdate = (
+    messageId: string,
+    callId: string,
+    parentToolCallId?: string,
+  ): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId,
+        toolName: 'Agent',
+        status: 'completed',
+        args: { todo_id: 'work' },
+        ...(parentToolCallId ? { parentToolCallId } : {}),
+      },
+    ],
+  });
+
+  it('collects only top-level Agent calls from the current stable plan', () => {
+    const messages = [
+      planUpdate('old-plan', 'old'),
+      agentUpdate('old-agent', 'old-agent'),
+      planUpdate('new-plan', 'new'),
+      agentUpdate('new-agent', 'new-agent'),
+      agentUpdate('nested-agent', 'nested-agent', 'new-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'new',
+        sourceMessageId: 'new-plan',
+      }).map((tool) => tool.callId),
+    ).toEqual(['new-agent']);
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'old',
+        sourceMessageId: 'old-plan',
+      }).map((tool) => tool.callId),
+    ).toEqual(['old-agent']);
+  });
+
+  it('keeps collecting agents after an update to the same plan', () => {
+    const messages = [
+      planUpdate('plan-start', 'stable'),
+      agentUpdate('first-agent', 'first-agent'),
+      planUpdate('plan-progress', 'stable'),
+      agentUpdate('second-agent', 'second-agent'),
+      planUpdate('next-plan', 'next'),
+      agentUpdate('next-agent', 'next-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'stable',
+        sourceMessageId: 'plan-start',
+      }).map((tool) => tool.callId),
+    ).toEqual(['first-agent', 'second-agent']);
+  });
+
+  it('stops collecting as soon as a plan is completed', () => {
+    const messages = [
+      planUpdate('plan-start', 'stable'),
+      agentUpdate('plan-agent', 'plan-agent'),
+      completedPlanUpdate('plan-complete', 'stable'),
+      agentUpdate('unrelated-agent', 'unrelated-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'stable',
+        sourceMessageId: 'plan-start',
+      }).map((tool) => tool.callId),
+    ).toEqual(['plan-agent']);
+  });
+
+  it('stops collecting as soon as a plan is cleared', () => {
+    const messages = [
+      planUpdate('plan-start', 'stable'),
+      agentUpdate('plan-agent', 'plan-agent'),
+      clearedPlanUpdate('plan-clear', 'stable'),
+      agentUpdate('unrelated-agent', 'unrelated-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'stable',
+        sourceMessageId: 'plan-start',
+      }).map((tool) => tool.callId),
+    ).toEqual(['plan-agent']);
+  });
+
+  it('stops an ACP plan at the next plan message', () => {
+    const messages = [
+      planMessage('first', [todo('first', 'in_progress')]),
+      agentUpdate('first-agent', 'first-agent'),
+      planMessage('second', [todo('second', 'in_progress')]),
+      agentUpdate('second-agent', 'second-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: null,
+        sourceMessageId: 'first',
+      }).map((tool) => tool.callId),
+    ).toEqual(['first-agent']);
+  });
+
+  it('returns immediately when there is no active plan source', () => {
+    expect(
+      getAgentToolsForPlan([agentUpdate('agent', 'agent')], {
+        planId: null,
+        sourceMessageId: null,
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -398,6 +641,38 @@ describe('isTodoWriteToolName', () => {
   });
 });
 
+describe('isExitPlanApprovalRequest', () => {
+  it('matches a switch_mode exit_plan_mode request', () => {
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'switch_mode',
+        toolName: 'Exit_Plan_Mode',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a mismatched kind or name', () => {
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'execute',
+        toolName: 'exit_plan_mode',
+      }),
+    ).toBe(false);
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'switch_mode',
+        toolName: 'read_file',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a missing or null request', () => {
+    expect(isExitPlanApprovalRequest(undefined)).toBe(false);
+    expect(isExitPlanApprovalRequest(null)).toBe(false);
+    expect(isExitPlanApprovalRequest({})).toBe(false);
+  });
+});
+
 describe('extractTodosFromToolCall', () => {
   function toolCall(overrides: Partial<ACPToolCall>): ACPToolCall {
     return {
@@ -430,6 +705,30 @@ describe('extractTodosFromToolCall', () => {
     expect(todos?.map((t) => t.status)).toEqual(['completed']);
   });
 
+  it('reads stable ids and dependencies from entry metadata', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({
+        rawOutput: {
+          entries: [
+            {
+              content: 'A',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'a', blockedBy: ['root'] } },
+            },
+          ],
+        },
+      }),
+    );
+    expect(todos).toEqual([
+      {
+        id: 'a',
+        content: 'A',
+        status: 'pending',
+        blockedBy: ['root'],
+      },
+    ]);
+  });
+
   it('returns undefined for a non-todo tool even if it carries a todos array', () => {
     const todos = extractTodosFromToolCall(
       toolCall({
@@ -439,6 +738,18 @@ describe('extractTodosFromToolCall', () => {
       }),
     );
     expect(todos).toBeUndefined();
+  });
+
+  it('does not treat an empty output from another tool as a plan clear', () => {
+    expect(
+      extractTodosFromToolCall(
+        toolCall({
+          toolName: 'mcp__example__list',
+          kind: 'other',
+          rawOutput: { entries: [], plan: {} },
+        }),
+      ),
+    ).toBeUndefined();
   });
 });
 

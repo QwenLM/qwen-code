@@ -131,7 +131,6 @@ const daemon = spawn(
 let stderr = '';
 let javaTest: ChildProcess | undefined;
 let receivedSignal: NodeJS.Signals | undefined;
-let succeeded = false;
 daemon.stderr?.on('data', (chunk) => {
   stderr += chunk.toString();
 });
@@ -297,7 +296,6 @@ try {
       'Java E2E completed without exercising the daemon model path; the integration tests may have been skipped',
     );
   }
-  succeeded = true;
 } catch (error) {
   runFailure = error;
 }
@@ -322,10 +320,14 @@ try {
 }
 process.off('SIGINT', handleSigint);
 process.off('SIGTERM', handleSigterm);
-if (succeeded && cleanupFailures.length === 0) {
-  rmSync(temporary, { recursive: true, force: true });
-} else {
+if (process.env.QWEN_DAEMON_E2E_KEEP_STATE === '1') {
   console.error(`Retained Java daemon E2E state at ${temporary}`);
+} else {
+  try {
+    rmSync(temporary, { recursive: true, force: true });
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
 }
 if (receivedSignal !== undefined) {
   process.kill(process.pid, receivedSignal);

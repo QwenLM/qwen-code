@@ -18,6 +18,7 @@ import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -2308,6 +2309,25 @@ bad`);
       afterEach(() => {
         mockAgentHeadlessCreate.mockReset();
         mockCreateContentGenerator.mockReset();
+      });
+
+      it('removes the interactive question tool from regular subagents', async () => {
+        await manager.createAgentHeadless(
+          {
+            ...agentConfig,
+            tools: [ToolNames.READ_FILE, ToolNames.ASK_USER_QUESTION],
+            disallowedTools: [ToolNames.EDIT],
+          },
+          mockConfig,
+        );
+
+        const { toolConfig } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(toolConfig).toEqual({
+          tools: [ToolNames.READ_FILE, ToolNames.ASK_USER_QUESTION],
+          disallowedTools: [ToolNames.EDIT, ToolNames.ASK_USER_QUESTION],
+        });
       });
 
       it('should create a new ContentGenerator for bare model IDs', async () => {

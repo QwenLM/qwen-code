@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
+import { I18nProvider } from '../../i18n';
 import { UserMessage } from './UserMessage';
 
 (
@@ -66,6 +67,39 @@ describe('UserMessage', () => {
   it('renders content', () => {
     const container = render(<UserMessage content="hello world" />);
     expect(container.textContent).toContain('hello world');
+  });
+
+  it('renders an accessible retry action for a failed send', () => {
+    const onRetrySend = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          sendFailed
+          onRetrySend={onRetrySend}
+        />
+      </I18nProvider>,
+    );
+
+    expect(container.textContent).toContain('Failed to send');
+    const retry = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Retry sending message"]',
+    );
+    expect(retry?.type).toBe('button');
+    expect(retry?.title).toBe('Retry sending message');
+    expect(retry?.textContent).toBe('Try again');
+
+    act(() => retry?.click());
+    expect(onRetrySend).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not render send failure controls by default', () => {
+    const container = render(<UserMessage content="hello world" />);
+
+    expect(container.textContent).not.toContain('Failed to send');
+    expect(
+      container.querySelector('button[aria-label="Retry sending message"]'),
+    ).toBeNull();
   });
 
   it('renders file references as chips from input annotations', () => {
@@ -303,6 +337,46 @@ describe('UserMessage', () => {
     const img = container.querySelector('img');
     expect(img).not.toBeNull();
     expect(img!.getAttribute('src')).toBe('data:image/png;base64,abc');
+  });
+
+  it('opens the image preview on click', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content=""
+        images={[{ data: 'abc', mimeType: 'image/png' }]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+    const img = container.querySelector('img')!;
+    act(() => img.click());
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,abc',
+      expect.any(String),
+    );
+  });
+
+  it('renders BMP images through the shared safe-source policy', () => {
+    const container = render(
+      <UserMessage
+        content=""
+        images={[{ data: 'Qk0=', mimeType: 'image/bmp' }]}
+      />,
+    );
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(
+      'data:image/bmp;base64,Qk0=',
+    );
+  });
+
+  it('renders file attachment chips when provided', () => {
+    const container = render(
+      <UserMessage
+        content="check this"
+        files={[{ name: 'app.log', mimeType: 'text/plain' }]}
+      />,
+    );
+    expect(container.textContent).toContain('check this');
+    expect(container.textContent).toContain('app.log');
   });
 
   it('uses a custom content renderer when provided', () => {

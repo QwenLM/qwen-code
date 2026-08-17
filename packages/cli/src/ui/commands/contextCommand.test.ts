@@ -52,6 +52,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
+    getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -83,6 +84,7 @@ describe('collectContextData (contextCommand)', () => {
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -110,11 +112,15 @@ describe('collectContextData (contextCommand)', () => {
     // per-session value and must win.
     mockGetLastPromptTokenCount.mockReturnValue(999_000); // wrong session's global value
     const getLastPromptTokenCount = vi.fn().mockReturnValue(50_000);
+    const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
     const config = {
       ...makeMockConfig(200_000),
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
-        getChat: vi.fn().mockReturnValue({ getLastPromptTokenCount }),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          isLastPromptTokenCountEstimated,
+        }),
       }),
     } as unknown as Config;
 
@@ -124,6 +130,28 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.totalTokens).toBe(50_000);
     // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('reports a nonzero compression-derived count as estimated', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount: vi.fn().mockReturnValue(50_000),
+          isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(true),
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.isEstimated).toBe(true);
+    expect(data.totalTokens).toBe(50_000);
+    expect(data.breakdown.freeSpace).toBeLessThan(150_000);
+    const text = formatContextUsageText(data);
+    expect(text).toContain('Token usage is estimated');
+    expect(text).not.toContain('No API response yet');
   });
 
   it('falls back to the global singleton when the session chat is not initialized', async () => {
@@ -179,6 +207,7 @@ describe('collectContextData (contextCommand)', () => {
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -224,6 +253,7 @@ describe('collectContextData (contextCommand)', () => {
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
@@ -254,6 +284,37 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(1);
     expect(data.memoryFiles[0].path).toBe(t('auto memory'));
     expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+  });
+
+  it('excludes disabled skills from the detail breakdown', async () => {
+    const config = {
+      ...makeMockConfig(),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'enabled-skill',
+            description: 'Enabled skill',
+            level: 'user',
+            filePath: '/skills/enabled-skill/SKILL.md',
+            body: 'Enabled body',
+          },
+          {
+            name: 'Disabled-Skill',
+            description: 'Disabled skill',
+            level: 'user',
+            filePath: '/skills/disabled-skill/SKILL.md',
+            body: 'Disabled body',
+          },
+        ]),
+      }),
+      getDisabledSkillNames: vi
+        .fn()
+        .mockReturnValue(new Set(['disabled-skill'])),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
 

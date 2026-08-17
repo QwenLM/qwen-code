@@ -23,8 +23,10 @@ import {
   SessionService,
   ideContextStore,
   type ResumedSessionData,
+  type SessionRestoreProjection,
   type LspClient,
   type ToolName,
+  type ToolInvocationGuard,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
@@ -38,11 +40,14 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
+  addDaemonRequestAttribute,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
@@ -69,19 +74,9 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
+import { isValidSessionId } from './session-id.js';
 
-// UUID v4 regex pattern for validation
-const SESSION_ID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
-
-/**
- * Validates if a string is a valid session ID format.
- * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
- * (used by Arena to give each agent a deterministic session ID).
- */
-export function isValidSessionId(value: string): boolean {
-  return SESSION_ID_REGEX.test(value);
-}
+export { isValidSessionId } from './session-id.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
@@ -112,6 +107,17 @@ const VALID_APPROVAL_MODE_VALUES = [
   'auto',
   'yolo',
 ] as const;
+
+const SKILL_LEVELS: readonly SkillLevel[] = [
+  'project',
+  'user',
+  'extension',
+  'bundled',
+];
+
+function isSkillLevel(value: unknown): value is SkillLevel {
+  return SKILL_LEVELS.includes(value as SkillLevel);
+}
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
@@ -736,8 +742,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'],
+          description:
+            'Channel identifier (VSCode, ACP, SDK, CI, desktop, daemon)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -1159,9 +1166,12 @@ export async function parseArguments(): Promise<CliArgs> {
     }
   }
 
-  // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
+  // Apply ACP fallback: if acp or experimental-acp is present but no explicit
+  // --channel, attribute the launch — daemon-spawned children carry the serve
+  // marker, the Tauri desktop shell additionally sets QWEN_CODE_DESKTOP.
   if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
-    (result as Record<string, unknown>)['channel'] = 'ACP';
+    (result as Record<string, unknown>)['channel'] =
+      resolveAcpChannelFallback();
   }
 
   return result as unknown as CliArgs;
@@ -1475,6 +1485,22 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+/**
+ * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
+ * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
+ * exits the process on a duplicate id, but that would kill a shared ACP child
+ * and every session on its channel — embedded callers catch this and fail the
+ * single request instead.
+ */
+export class SessionIdConflictError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message: string) {
+    super(message);
+    this.name = 'SessionIdConflictError';
+    this.sessionId = sessionId;
+  }
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1519,6 +1545,26 @@ export async function loadCliConfig(
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
    */
   settingsWatcher?: { stopWatching(): void },
+  /**
+   * When true, a duplicate caller-supplied session id throws
+   * `SessionIdConflictError` instead of calling `process.exit(1)`. Embedded
+   * callers (ACP/daemon) set this so one conflicting `newSession` degrades a
+   * single request rather than terminating the shared child process.
+   */
+  throwOnSessionIdConflict = false,
+  /**
+   * Runtime-only host policy. This is deliberately not sourced from argv,
+   * settings, or the environment: only an embedding host that owns the Config
+   * construction may install the executor-boundary callback.
+   */
+  hostPolicy?: {
+    toolInvocationGuard?: ToolInvocationGuard;
+    sessionRestore?: {
+      projectionSource: (
+        sessionId: string,
+      ) => Promise<SessionRestoreProjection | undefined>;
+    };
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -1862,7 +1908,18 @@ export async function loadCliConfig(
   if (argv.allowedMcpServerNames) {
     allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
     excludedMcpServers = undefined;
-  } else if (!bareMode) {
+  } else if (!bareMode && !safeMode) {
+    // Settings-sourced allow/exclude lists are LOCAL/ambient state, same
+    // category as settings.mcpServers itself — safe mode already drops the
+    // latter (getMcpServers()) but this branch used to read the former
+    // unconditionally (only bareMode was guarded), so a settings.json
+    // mcp.allowed narrower than the caller's own top-tier servers would
+    // silently filter them back out via getMcpServers()'s allowedMcpServers
+    // filter (added in this same PR, #7827, for the `--allowed-mcp-server-
+    // names` case) — defeating the very guarantee this PR exists to provide.
+    // The argv.allowedMcpServerNames branch above is unaffected: that's an
+    // explicit per-invocation argument, not local state, so it still applies
+    // under safe mode same as topTierMcpServers itself.
     allowedMcpServers = settings.mcp?.allowed
       ? new Set(settings.mcp.allowed.filter(Boolean))
       : undefined;
@@ -1925,6 +1982,10 @@ export async function loadCliConfig(
 
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
+  let sessionRestoreProjection: SessionRestoreProjection | undefined;
+  const sessionRestoreProjectionSource =
+    hostPolicy?.sessionRestore?.projectionSource;
+  let deferProjectionUntilWriterLease = false;
 
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
@@ -1945,8 +2006,24 @@ export async function loadCliConfig(
       // session UUID by gemini.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
-      sessionData = await sessionService.loadSession(argv.resume);
-      if (!sessionData) {
+      deferProjectionUntilWriterLease =
+        sessionRestoreProjectionSource !== undefined &&
+        (argv.chatRecording ?? settings.general?.chatRecording ?? true) &&
+        isAcpMode === true &&
+        settings.experimental?.sessionWriterLease === true;
+      if (sessionRestoreProjectionSource) {
+        if (!deferProjectionUntilWriterLease && !argv.forkSession) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(sessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(argv.resume);
+      }
+      if (!sessionRestoreProjectionSource && !sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
         writeStderrLine(message);
         process.exit(1);
@@ -1965,10 +2042,22 @@ export async function loadCliConfig(
         process.exit(1);
       }
       sessionId = forkedSessionId;
-      sessionData = await sessionService.loadSession(forkedSessionId);
-      if (!sessionData) {
-        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
-        process.exit(1);
+      if (sessionRestoreProjectionSource) {
+        sessionData = undefined;
+        if (!deferProjectionUntilWriterLease) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(forkedSessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(forkedSessionId);
+        if (!sessionData) {
+          writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+          process.exit(1);
+        }
       }
     }
   } else if (argv.sandboxSessionId) {
@@ -1986,6 +2075,9 @@ export async function loadCliConfig(
     );
     if (exists) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
+      if (throwOnSessionIdConflict) {
+        throw new SessionIdConflictError(argv['sessionId'], message);
+      }
       writeStderrLine(message);
       process.exit(1);
     }
@@ -1994,6 +2086,11 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
   const providerProtocolConfig = settings.providerProtocol;
+  const restoreSessionId = sessionId;
+  const boundSessionRestoreProjectionSource =
+    sessionRestoreProjectionSource && restoreSessionId
+      ? () => sessionRestoreProjectionSource(restoreSessionId)
+      : undefined;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -2008,10 +2105,20 @@ export async function loadCliConfig(
     sessionMcpServers || cliMcpServers
       ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
       : undefined;
+  // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
+  // ambient, file-sourced state they're meant to distrust) — but top-tier
+  // servers are an explicit, per-invocation argument from the caller (ACP
+  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
   const mcpServers =
     bareMode || safeMode
-      ? {}
+      ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  // Top-tier servers are never gated (#4615, see the comment above), so this
+  // is a no-op for them either way today. Skipped under safe mode anyway
+  // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
+  // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
+  // state at all, not even a read with no behavioral effect. Revisit if a
+  // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
@@ -2020,6 +2127,8 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
+    sessionRestoreProjection,
+    sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2047,6 +2156,18 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    terminalImageRenderSupportProvider: interactive
+      ? async () => {
+          const { getTerminalImageRenderSupport } = await import(
+            '../ui/utils/terminal-image-renderer.js'
+          );
+          return getTerminalImageRenderSupport();
+        }
+      : undefined,
+    disabledSkillLevels:
+      bareMode || safeMode || !Array.isArray(settings.skills?.disabledLevels)
+        ? undefined
+        : settings.skills.disabledLevels.filter(isSkillLevel),
     customSkillDirs:
       bareMode || safeMode
         ? undefined
@@ -2060,6 +2181,8 @@ export async function loadCliConfig(
             .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
+    toolSearchThreshold:
+      bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
@@ -2068,6 +2191,7 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
+    toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
@@ -2144,6 +2268,8 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    sessionWriterLeaseEnabled:
+      settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
@@ -2206,6 +2332,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? []
         : (settings.security?.allowedHttpHookUrls ?? []),
+    allowPrivateNetworkHooks:
+      bareMode || safeMode
+        ? false
+        : (settings.security?.allowPrivateNetworkHooks ?? false),
     cliVersion: await getCliVersion(),
     ideMode,
     chatCompression: settings.model?.chatCompression,
@@ -2257,10 +2387,12 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
+    memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
+    compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(

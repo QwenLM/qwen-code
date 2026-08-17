@@ -55,8 +55,15 @@ export function validateRequests(raw: unknown): AnchorRequest[] {
         );
       }
     }
-    if (o['line'] !== undefined && typeof o['line'] !== 'number') {
-      throw new Error(`Finding "${o['id']}" has a non-numeric "line".`);
+    // The same rule `findings`'s parseLocations applies: two validators in one
+    // pipeline must not disagree, or an entry passes here and hard-fails there.
+    if (
+      o['line'] !== undefined &&
+      (typeof o['line'] !== 'number' ||
+        !Number.isSafeInteger(o['line']) ||
+        o['line'] <= 0)
+    ) {
+      throw new Error(`Finding "${o['id']}" has an invalid "line".`);
     }
     return {
       id: o['id'] as string,
@@ -134,6 +141,9 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
       // finding is fine; the agent's counting was not. Worth seeing.
       drifted: resolved.filter((r) => (r.drift ?? 0) > 0).length,
       loose: resolved.filter((r) => r.tier?.startsWith('loose')).length,
+      // A fragment matched inside a longer hunk line — anchored, and the
+      // weakest claim about WHICH line, so it is worth a second look.
+      substring: resolved.filter((r) => r.tier?.startsWith('substring')).length,
     },
   };
 
@@ -151,6 +161,9 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
       (s.ambiguous ? `, ${s.ambiguous} ambiguous` : '') +
       (s.loose
         ? `, ${s.loose} matched only after normalising indentation`
+        : '') +
+      (s.substring
+        ? `, ${s.substring} matched inside a longer hunk line`
         : '') +
       (s.unmatched ? `, ${s.unmatched} UNMATCHED` : ''),
   );

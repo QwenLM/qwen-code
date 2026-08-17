@@ -120,6 +120,23 @@ function isRecentHistoryTodoSnapshot(
   return historyItemsAfterSnapshot < MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY;
 }
 
+/**
+ * Returns true when a user message exists after the given index, meaning the
+ * todo snapshot belongs to a previous turn.  The sticky panel should not
+ * resurface stale todos from an earlier turn when the user starts a new one.
+ */
+function hasUserMessageAfter(
+  items: readonly HistoryLikeItem[],
+  afterIndex: number,
+): boolean {
+  for (let i = afterIndex + 1; i < items.length; i++) {
+    if (items[i].type === 'user') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function getStickyTodos(
   history: readonly HistoryItem[],
   pendingHistoryItems: readonly HistoryItemWithoutId[],
@@ -140,6 +157,12 @@ export function getStickyTodos(
   // reliable per-item viewport API. Treat very recent TodoWrite snapshots as
   // still visible so the footer does not duplicate the inline result.
   if (isRecentHistoryTodoSnapshot(historySnapshot.itemIndex, history.length)) {
+    return null;
+  }
+
+  // If a new user message appeared after the todo snapshot, the snapshot
+  // belongs to a previous turn.  Do not resurface stale todos.
+  if (hasUserMessageAfter(history, historySnapshot.itemIndex)) {
     return null;
   }
 

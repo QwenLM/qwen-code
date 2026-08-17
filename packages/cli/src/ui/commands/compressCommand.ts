@@ -108,7 +108,9 @@ export const compressCommand: SlashCommand = {
           }
           yield {
             messageType: 'info' as const,
-            content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+            content:
+              `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).` +
+              (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
           };
         } catch (e) {
           yield {
@@ -172,13 +174,21 @@ export const compressCommand: SlashCommand = {
           } as HistoryItemCompression,
           Date.now(),
         );
+        if (compressed.warning) {
+          ui.addItem(
+            { type: MessageType.INFO, text: `⚠️ ${compressed.warning}` },
+            Date.now(),
+          );
+        }
         return;
       }
 
       return {
         type: 'message',
         messageType: 'info',
-        content: `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+        content:
+          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).` +
+          (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
       };
     } catch (e) {
       // If cancelled via ESC, don't show error — cancelSlashCommand already handled UI

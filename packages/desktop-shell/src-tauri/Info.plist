@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Qwen Code uses a folder in Documents as its default local workspace.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Qwen Code uses the microphone for voice dictation in the prompt composer.</string>
+</dict>
+</plist>

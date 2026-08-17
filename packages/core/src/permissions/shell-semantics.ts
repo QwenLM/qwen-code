@@ -35,7 +35,7 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommand } from './rule-parser.js';
+import { splitCompoundCommandSegments } from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2263,21 +2263,32 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommand(stripHeredocBodies(command));
+  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
 
-  for (const sub of subCommands) {
+  for (const { command: sub, terminator } of subCommands) {
+    // `cd x & …` runs the `cd` in a background subshell, so it does not move
+    // the cwd the following segments run in. Treating it as a foreground `cd`
+    // would attribute their relative writes to the wrong directory — for
+    // `cd /tmp & echo {} > settings.json` the write lands in the *original*
+    // cwd, which is exactly where a protected settings file would be.
+    const backgrounded = terminator === '&';
+
     const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
     if (cdTarget.kind === 'static') {
-      effectiveCwd = cdTarget.cwd;
-      cwdUnknown = cdTarget.cwdUnknown;
+      if (!backgrounded) {
+        effectiveCwd = cdTarget.cwd;
+        cwdUnknown = cdTarget.cwdUnknown;
+      }
       continue;
     }
     if (cdTarget.kind === 'dynamic') {
-      cwdUnknown = true;
+      if (!backgrounded) {
+        cwdUnknown = true;
+      }
       continue;
     }
 

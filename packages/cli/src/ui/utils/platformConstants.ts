@@ -42,6 +42,7 @@ export const KITTY_MODIFIER_EVENT_TYPES_OFFSET = 128; // Added when event types 
  * - bit 0 (1): Shift
  * - bit 1 (2): Alt/Option (reported as "alt" in spec; we map to meta)
  * - bit 2 (4): Ctrl
+ * - bit 3 (8): Super (Windows key / macOS Command; we map to meta)
  *
  * Some terminals add 128 to the entire modifiers field when reporting event types.
  * See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
@@ -49,6 +50,7 @@ export const KITTY_MODIFIER_EVENT_TYPES_OFFSET = 128; // Added when event types 
 export const MODIFIER_SHIFT_BIT = 1;
 export const MODIFIER_ALT_BIT = 2;
 export const MODIFIER_CTRL_BIT = 4;
+export const MODIFIER_SUPER_BIT = 8;
 
 /**
  * Timing constants for terminal interactions

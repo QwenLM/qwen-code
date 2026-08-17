@@ -25,27 +25,34 @@ const KIND_NAMES = {
 } as const;
 
 /**
- * True if any background agent has a tool call parked awaiting user
+ * True if any background agent or workflow has a tool call parked awaiting user
  * approval (permission bubbling). Drives the pill's "needs approval"
  * marker so the user is nudged to open the dialog and answer.
  */
 export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
   return entries.some(
-    (e) => e.kind === 'agent' && (e.pendingApprovals?.length ?? 0) > 0,
+    (e) =>
+      (e.kind === 'agent' || e.kind === 'workflow') &&
+      (e.pendingApprovals?.length ?? 0) > 0,
   );
 }
 
 /**
- * Pill label: prefer live running counts, then paused resumable agent counts;
+ * Pill label: prefer live running counts and active workflows, then paused resumable agent counts;
  * once everything is terminal, switch to a generic "done" form so the pill
  * still invites reopening the dialog to inspect final state.
  */
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
 
-  const running = entries.filter((e) => e.status === 'running');
-  if (running.length > 0) {
-    return groupAndFormat(running);
+  const live = entries.filter(
+    (e) =>
+      e.status === 'running' ||
+      (e.kind === 'workflow' &&
+        (e.status === 'pausing' || e.status === 'paused')),
+  );
+  if (live.length > 0) {
+    return groupAndFormat(live);
   }
   const pausedAgents = entries.filter(
     (e): e is Extract<DialogEntry, { kind: 'agent' }> =>
@@ -132,10 +139,19 @@ export const BackgroundTasksPill: React.FC = () => {
 
   return (
     <>
-      <Text color={theme.text.secondary}> · </Text>
-      <Text inverse={pillFocused}>{label}</Text>
+      {/* Truncate every node: the pill shares the footer's shrinkable hint
+          row, where a default-wrap child grows the footer mid-turn once the
+          queued-count badge squeezes the row (#8667). */}
+      <Text color={theme.text.secondary} wrap="truncate">
+        {' · '}
+      </Text>
+      <Text inverse={pillFocused} wrap="truncate">
+        {label}
+      </Text>
       {needsApproval && (
-        <Text color={theme.status.warning}>{` ⚠ ${t('needs approval')}`}</Text>
+        <Text color={theme.status.warning} wrap="truncate">
+          {` ⚠ ${t('needs approval')}`}
+        </Text>
       )}
     </>
   );

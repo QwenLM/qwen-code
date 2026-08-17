@@ -14,22 +14,20 @@
 //!    `FindAll(TreeScope::Children, ...)` makes no z-order guarantee, so we
 //!    deliberately do NOT let it reorder anything Win32 already reported.
 //!
-//! Both sources apply the same listability filter (`is_listable_top_level`:
-//! visible, non-iconic, owner-less, non-cloaked). The title is read for
-//! display only and is **not** a filter — empty-caption windows (WPF
-//! `HwndWrapper[...]`, borderless / custom-chrome apps) are listed. The
-//! `filter_pid` argument is applied to the merged list so the union/dedupe
-//! pipeline runs unconditionally.
+//! Both sources require a visible, addressable top-level window. The title is
+//! display metadata rather than a filter, so empty-caption windows remain
+//! targetable. Minimized windows remain addressable and are reported as
+//! off-screen so callers can restore them explicitly. The `filter_pid`
+//! argument is applied to the merged list so the union/dedupe pipeline runs
+//! unconditionally.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
-use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
-};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetClassNameW, GetWindow, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_OWNER,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
 };
 
 #[derive(Debug, Clone)]
@@ -43,6 +41,8 @@ pub struct WindowInfo {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub is_on_screen: bool,
+    pub minimized: bool,
 }
 
 struct EnumState {
@@ -85,12 +85,13 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
     merged
 }
 
-/// Walk `EnumWindows` and collect every listable top-level window (see
-/// `is_listable_top_level`). The title is read for display but is not a
-/// filter, so empty-caption windows are included. No pid filter is applied
-/// here — the caller does that on the merged list.
+/// Walk `EnumWindows` and collect every visible top-level window, including
+/// empty-caption windows. No pid filter is applied here — the caller does that
+/// on the merged list.
 fn enumerate_via_enum_windows() -> Vec<WindowInfo> {
-    let state = Mutex::new(EnumState { windows: Vec::new() });
+    let state = Mutex::new(EnumState {
+        windows: Vec::new(),
+    });
     let state_ptr = &state as *const Mutex<EnumState> as isize;
     unsafe {
         let _ = EnumWindows(Some(enum_windows_cb), LPARAM(state_ptr));
@@ -101,22 +102,19 @@ fn enumerate_via_enum_windows() -> Vec<WindowInfo> {
 unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let state = &*(lparam.0 as *const Mutex<EnumState>);
 
-    // Listable == a real, targetable top-level window. We deliberately do NOT
-    // gate on the title: a visible, non-iconic, owner-less, non-cloaked window
-    // is a legitimate target even with an empty caption (WPF, borderless /
-    // custom-chrome apps). Filtering on a non-empty title used to hide these
-    // from the agent even though `debug_window_info` could see them — see
-    // trycua/cua#2020.
-    if !is_listable_top_level(hwnd) {
+    // Invisible helper windows are not user-addressable. Iconic windows are:
+    // retain them with explicit state so callers can restore them.
+    if IsWindowVisible(hwnd).0 == 0 {
         return TRUE;
     }
+    let minimized = IsIconic(hwnd).0 != 0;
 
     // Get pid.
     let mut pid: u32 = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
-    // Read the caption for display only — empty is fine. The tool layer
-    // already renders "(no title)" for these records.
+    // Empty captions are legitimate targets; retain the exact OS caption for
+    // display and let callers provide their own fallback label.
     let title = window_title(hwnd);
 
     // Get bounds — prefer DWM extended frame bounds (includes shadow), fallback to GetWindowRect.
@@ -130,80 +128,11 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         y,
         width: w,
         height: h,
+        is_on_screen: !minimized,
+        minimized,
     });
 
     TRUE
-}
-
-/// Is `hwnd` a real, agent-targetable top-level window?
-///
-/// Single source of truth for what `list_windows` exposes, shared by the
-/// `EnumWindows` and UI Automation enumeration paths so the two can't drift
-/// (that drift was the root cause of trycua/cua#2020). A window qualifies when
-/// it is:
-///
-///   - visible (`IsWindowVisible`) and not minimized (`!IsIconic`),
-///   - a true top-level window — no owner (`GW_OWNER` is null), which excludes
-///     tool-tips, owned pop-ups and transient child surfaces, and
-///   - not DWM-cloaked (`DWMWA_CLOAKED == 0`), which excludes the hidden
-///     background frames of suspended UWP / `ApplicationFrameHost` apps that
-///     still report `IsWindowVisible == true`.
-///
-/// What is deliberately NOT checked: the window title. An empty caption is not
-/// a signal that a window is unreal — WPF apps (`HwndWrapper[App.exe;;<guid>]`),
-/// borderless / custom-chrome apps, and various splash/tool windows ship
-/// visible, owner-less top-level windows with no caption. The owner + cloaked
-/// gates here express "is this a real window?" directly, which is what the
-/// non-empty-title check was a poor proxy for.
-pub(crate) fn is_listable_top_level(hwnd: HWND) -> bool {
-    unsafe {
-        if IsWindowVisible(hwnd).0 == 0 || IsIconic(hwnd).0 != 0 {
-            return false;
-        }
-        // Owner-less == genuine top-level. `GetWindow(GW_OWNER)` yields the
-        // owner HWND, or null/err when there is none. Mirrors the top-level
-        // test `debug_window_info` uses, so the two tools agree on a given HWND.
-        if !GetWindow(hwnd, GW_OWNER).unwrap_or_default().is_invalid() {
-            return false;
-        }
-        // Suspended UWP / ApplicationFrameHost shells keep `WS_VISIBLE` but are
-        // cloaked by DWM (not actually on screen). Drop them.
-        if is_cloaked(hwnd) {
-            return false;
-        }
-        true
-    }
-}
-
-/// True iff DWM reports `hwnd` as cloaked — hidden by the compositor even
-/// though `WS_VISIBLE` is set (suspended UWP app, window on another virtual
-/// desktop, etc.). Returns false if the attribute can't be read.
-unsafe fn is_cloaked(hwnd: HWND) -> bool {
-    let mut cloaked: u32 = 0;
-    let ok = DwmGetWindowAttribute(
-        hwnd,
-        DWMWA_CLOAKED,
-        &mut cloaked as *mut u32 as *mut _,
-        std::mem::size_of::<u32>() as u32,
-    );
-    ok.is_ok() && cloaked != 0
-}
-
-/// Read a window's caption via `GetWindowTextW`. Returns an empty string for
-/// untitled windows — which are still listed (see `is_listable_top_level`).
-/// Shared by the `EnumWindows` and UIA enumeration paths so both report the
-/// OS-level caption identically.
-pub(crate) fn window_title(hwnd: HWND) -> String {
-    unsafe {
-        let title_len = GetWindowTextLengthW(hwnd);
-        if title_len == 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; (title_len + 1) as usize];
-        GetWindowTextW(hwnd, &mut buf);
-        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        String::from_utf16_lossy(&buf[..len])
-    }
 }
 
 fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
@@ -220,7 +149,26 @@ fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
             // Fallback to GetWindowRect.
             let _ = GetWindowRect(hwnd, &mut rect);
         }
-        (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        (
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        )
+    }
+}
+
+/// Read a window caption without treating an empty title as absence.
+pub(crate) fn window_title(hwnd: HWND) -> String {
+    unsafe {
+        let title_len = GetWindowTextLengthW(hwnd);
+        if title_len == 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; (title_len + 1) as usize];
+        GetWindowTextW(hwnd, &mut buf);
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..len])
     }
 }
 
@@ -237,39 +185,70 @@ fn window_class_name(hwnd: HWND) -> String {
 /// Resolve a packaged-app (UWP) process id to the `ApplicationFrameWindow`
 /// that actually hosts it.
 ///
-/// `IApplicationActivationManager::ActivateApplication` returns the real
-/// packaged-app pid, but a UWP app's top-level window is owned by
-/// `ApplicationFrameHost.exe`, not the app process. The app's own
-/// `CoreWindow` is reparented inside the frame as a child. Consequently
-/// `list_windows(Some(app_pid))` is empty — the frame's
-/// `GetWindowThreadProcessId` reports the AFH pid, not `app_pid`.
+/// ## Why this exists
 ///
-/// We walk every visible top-level `ApplicationFrameWindow`, enumerate its
-/// children, and return the first frame that owns a child whose pid equals
-/// `app_pid`.
+/// `IApplicationActivationManager::ActivateApplication` (see `launch_uwp`)
+/// returns the **real** packaged-app pid — e.g. `CalculatorApp.exe`,
+/// `SystemSettings.exe`. But a modern UWP app's *top-level* window is not
+/// owned by that process. `ApplicationFrameHost.exe` owns the top-level
+/// `ApplicationFrameWindow` (title bar, caption, the HWND a user drags); the
+/// app's own process only owns a `Windows.UI.Core.CoreWindow` reparented
+/// *inside* that frame as a child. Consequences:
 ///
-/// Returns `None` if no hosting frame is found (callers should retry) or if
-/// `app_pid` is 0 (brokered activations that report no pid).
+/// - `list_windows(Some(app_pid))` is **empty** — the app process owns no
+///   top-level window, and the frame's `GetWindowThreadProcessId` reports the
+///   AFH pid, not `app_pid`.
+/// - One `ApplicationFrameHost.exe` pid hosts **many** unrelated UWP apps, so
+///   the AFH pid alone is not an app identity — only the specific frame HWND
+///   disambiguates.
+///
+/// So after a UWP launch, the handles a caller must actually drive are
+/// `(frame_hwnd, afh_pid)` — NOT the `(app_pid, …)` pair `launch_app` would
+/// otherwise report, which resolves to no window at all.
+///
+/// ## How the mapping is made
+///
+/// The stable identity link is process ownership of the hosted child: AFH
+/// reparents the app's `CoreWindow` under the frame, and that child window's
+/// `GetWindowThreadProcessId` reports the **app** pid (the child stays owned
+/// by the app process even though it lives under the AFH frame). We therefore
+/// walk every visible top-level `ApplicationFrameWindow`, scan its child
+/// windows, and return the first frame that owns a child whose process id
+/// equals `app_pid`. This keys off OS-level window parentage rather than a raw
+/// HWND/pid the caller cached, so it stays correct across the HWND churn UWP
+/// activations exhibit in the first moments after launch.
+///
+/// Returns `None` if no hosting frame is found yet (the frame can lag the
+/// process by a few hundred ms — callers should retry) or if `app_pid` is 0
+/// (brokered activations that report no pid; not resolvable by this path).
 pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
     if app_pid == 0 {
         return None;
     }
 
     struct FrameScan {
+        /// pid we're hunting for among each frame's child windows.
         target_app_pid: u32,
+        /// Set to the hosting frame's HWND once a child match is found.
         matched_frame: Option<HWND>,
     }
 
+    // Outer pass: every top-level ApplicationFrameWindow. For each, an inner
+    // EnumChildWindows pass looks for a child owned by `target_app_pid`.
     unsafe extern "system" fn frame_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let scan = &mut *(lparam.0 as *mut FrameScan);
 
         if IsWindowVisible(hwnd).0 == 0 || IsIconic(hwnd).0 != 0 {
             return TRUE;
         }
+        // Only ApplicationFrameHost frames host UWP CoreWindows; skip the rest
+        // cheaply before paying for a child enumeration.
         if window_class_name(hwnd) != "ApplicationFrameWindow" {
             return TRUE;
         }
 
+        // Inner pass: does this frame own a child window belonging to the
+        // launched app process?
         struct ChildScan {
             target_app_pid: u32,
             found: bool,
@@ -280,7 +259,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
             GetWindowThreadProcessId(child, Some(&mut child_pid));
             if child_pid == cs.target_app_pid {
                 cs.found = true;
-                return windows::Win32::Foundation::FALSE;
+                return windows::Win32::Foundation::FALSE; // stop enumerating children
             }
             TRUE
         }
@@ -297,7 +276,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
 
         if child_scan.found {
             scan.matched_frame = Some(hwnd);
-            return windows::Win32::Foundation::FALSE;
+            return windows::Win32::Foundation::FALSE; // stop enumerating frames
         }
         TRUE
     }
@@ -307,18 +286,29 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
         matched_frame: None,
     };
     unsafe {
-        let _ = EnumWindows(
-            Some(frame_cb),
-            LPARAM(&mut scan as *mut FrameScan as isize),
-        );
+        let _ = EnumWindows(Some(frame_cb), LPARAM(&mut scan as *mut FrameScan as isize));
     }
 
     let frame = scan.matched_frame?;
 
+    // Build the WindowInfo for the frame itself: its HWND is what the caller
+    // drives, and its owning pid is the AFH pid (what get_window_state will
+    // validate `window_id` against and what list_windows reports for it).
     let mut afh_pid: u32 = 0;
     unsafe { GetWindowThreadProcessId(frame, Some(&mut afh_pid)) };
 
-    let title = window_title(frame);
+    let title = unsafe {
+        let len = GetWindowTextLengthW(frame);
+        if len == 0 {
+            String::new()
+        } else {
+            let mut buf = vec![0u16; (len + 1) as usize];
+            GetWindowTextW(frame, &mut buf);
+            let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            String::from_utf16_lossy(&buf[..n])
+        }
+    };
+
     let (x, y, w, h) = get_window_bounds(frame);
 
     Some(WindowInfo {
@@ -329,141 +319,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
         y,
         width: w,
         height: h,
+        is_on_screen: true,
+        minimized: false,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{LRESULT, WPARAM};
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-        RegisterClassExW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, MSG, PM_REMOVE,
-        SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    };
-
-    unsafe extern "system" fn test_wnd_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-        DefWindowProcW(h, m, w, l)
-    }
-
-    /// Drain the calling thread's message queue a few times so the freshly
-    /// created window finishes coming up (and DWM settles its cloaked state)
-    /// before we enumerate.
-    fn pump_messages(rounds: usize) {
-        unsafe {
-            for _ in 0..rounds {
-                let mut msg = MSG::default();
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-    }
-
-    /// Regression test for trycua/cua#2020: a visible, owner-less,
-    /// **empty-title** top-level window must be enumerated by `list_windows`.
-    ///
-    /// Before the fix, both enumeration sources dropped any window with
-    /// `GetWindowTextLengthW == 0`, so WPF (`HwndWrapper[App.exe;;<guid>]`),
-    /// borderless and custom-chrome apps were invisible to the agent even
-    /// though `debug_window_info` could list them.
-    ///
-    /// `#[ignore]` because it needs an interactive window station to create a
-    /// visible top-level window; run it via the Windows sandbox harness runner
-    /// or locally with
-    /// `cargo test -p platform-windows -- --ignored empty_title`.
-    #[test]
-    #[ignore]
-    fn empty_title_top_level_window_is_listed() {
-        unsafe {
-            let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-            let class_name: Vec<u16> = "Cua.Test.EmptyTitleWindow\0".encode_utf16().collect();
-
-            let wc = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                style: CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(test_wnd_proc),
-                hInstance: hinstance.into(),
-                lpszClassName: PCWSTR(class_name.as_ptr()),
-                ..Default::default()
-            };
-            // Ignore the return: a re-run in the same process sees the class
-            // already registered, which is harmless.
-            RegisterClassExW(&wc);
-
-            // Empty window name == empty caption — the whole point of the test.
-            let empty_title: Vec<u16> = "\0".encode_utf16().collect();
-            let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                PCWSTR(class_name.as_ptr()),
-                PCWSTR(empty_title.as_ptr()),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                100,
-                100,
-                320,
-                80,
-                None,
-                None,
-                hinstance,
-                None,
-            )
-            .expect("CreateWindowExW failed");
-
-            // RAII guard so the visible test window is always destroyed, even
-            // if a precondition assertion below panics before the explicit
-            // teardown runs.
-            struct WindowGuard(HWND);
-            impl Drop for WindowGuard {
-                fn drop(&mut self) {
-                    unsafe {
-                        let _ = DestroyWindow(self.0);
-                    }
-                }
-            }
-            let window_guard = WindowGuard(hwnd);
-
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            pump_messages(5);
-
-            // Preconditions: the OS really gave us an empty-caption window, and
-            // the shared predicate accepts it despite the empty title.
-            assert_eq!(
-                window_title(hwnd),
-                "",
-                "test precondition: the created window must be untitled"
-            );
-            assert!(
-                is_listable_top_level(hwnd),
-                "an empty-title visible owner-less top-level window must be listable"
-            );
-
-            let pid = GetCurrentProcessId();
-            let windows = list_windows(Some(pid));
-            let found = windows.iter().find(|w| w.hwnd == hwnd.0 as u64).cloned();
-
-            // Tear the window down before the final asserts. Dropping the guard
-            // runs DestroyWindow; if an assertion above already panicked, the
-            // guard's Drop ran during unwind, so the window is gone either way.
-            drop(window_guard);
-            pump_messages(2);
-
-            let found = found.expect(
-                "empty-title top-level window was dropped by list_windows — #2020 regression",
-            );
-            assert_eq!(
-                found.title, "",
-                "listed record should carry the (empty) OS caption verbatim"
-            );
-            assert_eq!(
-                found.pid, pid,
-                "listed record pid should match the creating process"
-            );
-        }
-    }
 }

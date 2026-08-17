@@ -187,10 +187,10 @@ export function SuggestionsDisplay({
               </Box>
             );
           })}
+          {/* Bare ←/→: the original Ctrl+←/→ was unreachable because terminals
+              and macOS Mission Control intercept it (#8069). */}
           <Box marginLeft={2}>
-            <Text color={theme.text.secondary}>
-              {t('(Ctrl+←/→ to switch)')}
-            </Text>
+            <Text color={theme.text.secondary}>{t('(←/→ to switch)')}</Text>
           </Box>
         </Box>
       )}
@@ -235,7 +235,7 @@ export function SuggestionsDisplay({
                 : { flexShrink: 1 as const })}
             >
               <Box>
-                {labelElement}
+                <Box flexShrink={0}>{labelElement}</Box>
                 {suggestion.argumentHint && (
                   <Text color={theme.text.secondary}>
                     {' '}

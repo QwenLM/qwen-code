@@ -6,6 +6,7 @@
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { ServeChannelSelection } from './types.js';
 
 /**
@@ -16,6 +17,7 @@ export interface ChannelWorkspaceInput {
   readonly workspaceCwd: string;
   readonly primary: boolean;
   readonly trusted: boolean;
+  readonly provenance?: WorkspaceRuntimeProvenance;
 }
 
 /** A channel selection scoped to a single owning workspace. */
@@ -85,7 +87,10 @@ function rawChannelCwd(entry: unknown): string | undefined {
 export function resolveChannelWorkspaceGroups(
   input: ResolveChannelWorkspaceGroupsInput,
 ): ChannelWorkspaceGroupingResult {
-  const { workspaces, selection, loadChannelsConfig } = input;
+  const { selection, loadChannelsConfig } = input;
+  const workspaces = input.workspaces.filter(
+    (workspace) => workspace.provenance !== 'live-conversation',
+  );
   const primary = workspaces.find((workspace) => workspace.primary);
   if (!primary) {
     return {

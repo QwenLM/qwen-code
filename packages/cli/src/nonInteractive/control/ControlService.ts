@@ -90,6 +90,9 @@ export class ControlService {
        */
       handleTeammateApproval:
         controller.handleTeammateApproval.bind(controller),
+
+      handleWorkflowApproval:
+        controller.handleWorkflowApproval.bind(controller),
     };
   }
 

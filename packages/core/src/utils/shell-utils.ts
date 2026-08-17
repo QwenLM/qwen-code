@@ -210,6 +210,10 @@ export function splitCommands(command: string): string[] {
   let inDoubleQuotes = false;
   let inBackticks = false;
   let substitutionDepth = 0;
+  // Quote state of each enclosing level, saved on `$(` and restored on the
+  // matching `)`, so a substitution body's quotes cannot leak outwards and the
+  // surrounding quotes cannot mask the body's closing paren.
+  const quoteStack: Array<{ single: boolean; double: boolean }> = [];
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -250,25 +254,39 @@ export function splitCommands(command: string): string[] {
       char === '$' &&
       nextChar === '('
     ) {
+      // A substitution body is quoted independently of its surroundings, so
+      // save the enclosing quote state and start the body unquoted. `"$(...)"`
+      // is the common case: the double quote belongs to the outer command and
+      // must not make the body's `)` look quoted.
+      quoteStack.push({ single: inSingleQuotes, double: inDoubleQuotes });
+      inSingleQuotes = false;
+      inDoubleQuotes = false;
       substitutionDepth++;
       currentCommand += '$(';
       i += 2;
       continue;
-    } else if (!inBackticks && substitutionDepth > 0 && char === ')') {
-      substitutionDepth--;
     } else if (
       !inBackticks &&
-      substitutionDepth === 0 &&
-      char === "'" &&
+      substitutionDepth > 0 &&
+      char === ')' &&
+      !inSingleQuotes &&
       !inDoubleQuotes
     ) {
+      // A quoted `)` inside the body is data, not the closing paren. Closing
+      // on it ended the substitution early and left the body's closing quote
+      // to flip the parser into "in quote" state, which then swallowed every
+      // separator to the end of the line -- so `echo $(echo ')') ; rm -rf x`
+      // came back as one segment with `rm` nowhere in it.
+      const enclosing = quoteStack.pop();
+      inSingleQuotes = enclosing?.single ?? false;
+      inDoubleQuotes = enclosing?.double ?? false;
+      substitutionDepth--;
+    } else if (!inBackticks && char === "'" && !inDoubleQuotes) {
+      // Tracked at every depth, not just the top level: without this the
+      // quotes inside a substitution body are invisible and the `)` guard
+      // above has nothing to test.
       inSingleQuotes = !inSingleQuotes;
-    } else if (
-      !inBackticks &&
-      substitutionDepth === 0 &&
-      char === '"' &&
-      !inSingleQuotes
-    ) {
+    } else if (!inBackticks && char === '"' && !inSingleQuotes) {
       inDoubleQuotes = !inDoubleQuotes;
     }
 
@@ -1806,6 +1824,23 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n' && command[i - 1] === '$') {
+        let dollarStart = i - 1;
+        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+          dollarStart--;
+        }
+        let escapeStart = dollarStart;
+        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+          escapeStart--;
+        }
+        if (
+          (i - dollarStart) % 2 === 1 &&
+          (dollarStart - escapeStart) % 2 === 0 &&
+          command[i + 2] === '('
+        ) {
+          return true;
+        }
+      }
       i += 2; // Skip the escaped character
       continue;
     }
@@ -1844,6 +1879,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(i))
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -1871,12 +1914,13 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`).
  * Shared across the shell-tool and monitor-tool confirmation paths so
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+  'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
 
 /**
  * Single dual-check predicate: does the command contain shell command
@@ -1967,7 +2011,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), >(), or ${parameter@P} is not allowed for security reasons',
       isHardDenial: true,
     };
   }

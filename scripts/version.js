@@ -5,8 +5,14 @@
  */
 
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -104,12 +110,42 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 7. Run `npm install` to update package-lock.json.
+// 7. Pin channel adapters' semver dependency on @qwen-code/channel-base to
+// the exact new version. A caret range like ^0.21.0 does not match a
+// prerelease bump (e.g. 0.21.1-preview.0), so npm would replace the workspace
+// link with the stale registry package and the release build would compile
+// against outdated types.
+const channelsDir = resolve(process.cwd(), 'packages/channels');
+for (const entry of readdirSync(channelsDir)) {
+  const pkgPath = join(channelsDir, entry, 'package.json');
+  if (!existsSync(pkgPath)) continue;
+  const pkg = readJson(pkgPath);
+  const dep = pkg.dependencies?.['@qwen-code/channel-base'];
+  if (dep && !dep.startsWith('file:')) {
+    pkg.dependencies['@qwen-code/channel-base'] = newVersion;
+    writeJson(pkgPath, pkg);
+    console.log(
+      `Pinned @qwen-code/channel-base to ${newVersion} in ${pkg.name}`,
+    );
+  }
+}
+
+// 8. Refresh node_modules and package-lock.json against the pinned exact
+// versions so the adapters resolve channel-base to the workspace link again.
 // --ignore-scripts prevents the root `prepare` lifecycle from triggering a
 // redundant full build that fails with TS5055 when dist/ already exists from
 // the initial `npm ci` install.
-run(
-  'npm install --workspace packages/cli --workspace packages/core --workspace packages/channels/base --workspace packages/channels/plugin-example --package-lock-only --ignore-scripts',
-);
+run('npm install --ignore-scripts');
+
+// 9. The per-workspace `npm version` reifies above nested a stale registry
+// copy of channel-base under each adapter while ranges briefly mismatched.
+// The install above cleans both lockfiles but can leave that directory on
+// disk, where it shadows the workspace link during tsc. Remove it.
+for (const entry of readdirSync(channelsDir)) {
+  rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {
+    recursive: true,
+    force: true,
+  });
+}
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

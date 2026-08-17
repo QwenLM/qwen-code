@@ -24,6 +24,7 @@
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
@@ -385,6 +386,7 @@ export interface NotificationMeta {
   status: TaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
+  todoWorkChainId?: string;
 }
 
 export type BackgroundNotificationCallback = (
@@ -676,6 +678,7 @@ export class BackgroundTaskRegistry {
     entry.notified = options.preserveNotificationState
       ? ((registration as AgentTask).notified ?? false)
       : false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     entry.pendingMessages = registration.pendingMessages ?? [];
     // Resolve the parent's display name at registration time — before the
     // parent can evict — so the UI's orphan annotation survives it. Owned
@@ -1302,6 +1305,33 @@ export class BackgroundTaskRegistry {
   }
 
   /**
+   * The agent ids behind `hasUnfinalizedTasks()`, in registration order.
+   *
+   * Callers that must *name* the outstanding work — rather than just know
+   * that some exists — use this. The daemon's active-work snapshot builds
+   * one hold per id so a restart controller and the session-retention path
+   * both see the same set the registry itself would report, with no second
+   * ledger to drift out of sync. Deliberately shares
+   * `hasUnfinalizedTasks()`'s predicate (and not `hasRunningTasks()`'s):
+   * a cancelled entry still owes its terminal task-notification, and
+   * dropping it here would let the daemon reap the session inside the
+   * cancel → finalizeCancelled() window.
+   */
+  listUnfinalizedBackgroundAgentIds(): string[] {
+    const ids: string[] = [];
+    for (const entry of this.agents.values()) {
+      if (!entry.isBackgrounded) continue;
+      if (
+        entry.status === 'running' ||
+        (entry.status === 'cancelled' && !entry.notified)
+      ) {
+        ids.push(entry.agentId);
+      }
+    }
+    return ids;
+  }
+
+  /**
    * True while any background entry is still actually executing. Unlike
    * `hasUnfinalizedTasks()`, a `cancelled`-but-not-yet-finalized entry
    * does NOT count: its work has already been aborted and only the
@@ -1499,6 +1529,20 @@ export class BackgroundTaskRegistry {
     this.statusChangeCallback = cb;
   }
 
+  /**
+   * Retract `cb`, but only if it is still the installed one.
+   *
+   * The slot holds a single callback, so a subscriber that clears it
+   * unconditionally on teardown can unhook whoever claimed it afterwards. This
+   * makes the retraction safe to call from any owner's dispose path without
+   * having to know whether it is still the owner.
+   */
+  clearStatusChangeCallback(cb: BackgroundStatusChangeCallback): void {
+    if (this.statusChangeCallback === cb) {
+      this.statusChangeCallback = undefined;
+    }
+  }
+
   setActivityChangeCallback(
     cb: BackgroundActivityChangeCallback | undefined,
   ): void {
@@ -1601,6 +1645,7 @@ export class BackgroundTaskRegistry {
       status: entry.status,
       stats: entry.stats,
       toolUseId: entry.toolUseId,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     try {

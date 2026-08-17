@@ -59,6 +59,49 @@
   overflow: hidden;
 }
 
+.contextShell {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatHeaderRow {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+
+.customChatHeader {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.contextBody {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.contextBodyWithEnvironmentPanel .chatPane,
+.contextBodyWithEnvironmentPanel .content {
+  overflow: visible;
+}
+
+.contextBodyWithEnvironmentPanel [data-web-shell-message-list] {
+  box-sizing: border-box;
+  width: calc(100% + 332px);
+  padding-right: 356px;
+}
+
 .chatPane {
   flex: 1 1 auto;
   min-width: 0;
@@ -116,6 +159,34 @@
   .artifactPanelDock {
     animation: none;
   }
+}
+
+/* Applied on the fullscreen -> docked transition: the same node swaps back to
+   .artifactPanelDock, whose open animation would otherwise restart (the
+   computed animation-name flips none -> artifactPanelDockOpen) and re-play the
+   slide-in on the already-open panel. */
+.artifactPanelDockNoOpenAnimation {
+  animation: none;
+}
+
+/* In-tree placeholder for the docked panel's portal target: display:contents
+   generates no box, so the portaled dock wrapper stays a direct flex item of
+   .appShell exactly as before. */
+.artifactPanelSlot {
+  display: contents;
+}
+
+.artifactPanelFullscreen {
+  position: fixed;
+  inset: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+  /* max() clamps the floor: the value is dialog-backdrop z - 10, and hosts may
+     set the variable below 10 (the README documents no floor). A negative
+     z-index would paint the opaque surface behind the app background and
+     blank the shell. */
+  z-index: max(1, calc(var(--web-shell-dialog-backdrop-z-index, 50) - 10));
+  background: var(--background);
+  display: flex;
 }
 
 /* Positioning context so the scheduled-tasks page (position:absolute) covers
@@ -343,6 +414,7 @@
   --foreground: #fafafa;
   --card: #161616;
   --card-foreground: #fafafa;
+  --table-section-bg: var(--subtle-bg);
   --popover: #1a1a1a;
   --popover-foreground: #fafafa;
   --primary: #fafafa;
@@ -416,6 +488,7 @@
   --foreground: #0a0a0b;
   --card: #ffffff;
   --card-foreground: #0a0a0b;
+  --table-section-bg: #f3f4f6;
   --popover: #ffffff;
   --popover-foreground: #0a0a0b;
   --primary: #151517;
@@ -646,8 +719,14 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
+}
+
+.appChatEmpty .chatPane {
+  position: relative;
 }
 
 .footer {
@@ -758,10 +837,6 @@
   margin-bottom: 8px;
 }
 
-.chatHeader {
-  flex-shrink: 0;
-}
-
 .customFooter {
   flex-shrink: 0;
 }
@@ -859,6 +934,20 @@
     overflow: hidden;
   }
 
+  /* Override chatViewWrap's relative positioning so the absolute footer
+     anchors to chatPane. The wrap remains a flex item, so the z-index: 1 it
+     gets from `.appChatEmpty .chatViewWrap` still applies under static
+     positioning and keeps the welcome content and composer above the dot
+     field. The welcome-middle + custom-footer variant keeps the positioned
+     wrap: `.footerWithCustomFooter` renders `display: contents` there, so
+     the wrap must remain the containing block for `.bottomPanels`. */
+  .appChatEmpty
+    .chatViewWithMobileComposerBottom:not(
+      .chatViewWithWelcomeMiddle.chatViewWithCustomFooter
+    ) {
+    position: static;
+  }
+
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
     position: absolute;
     right: 0;
@@ -916,6 +1005,7 @@
 }
 
 .queuedPrompts {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -939,6 +1029,12 @@
   max-width: 100%;
   min-height: 28px;
   color: var(--foreground);
+}
+
+.queuedPromptAmbiguity {
+  color: var(--secondary-foreground);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .queuedPrompt + .queuedPrompt {
@@ -977,12 +1073,38 @@
   white-space: nowrap;
 }
 
+.queuedPromptImages {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.queuedPromptImage {
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.queuedPromptImageInteractive {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.queuedPromptImageInteractive:hover {
+  opacity: 0.85;
+}
+
 .queuedPromptState {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
   margin-left: 8px;
   color: var(--secondary-foreground);
+  white-space: nowrap;
 }
 
 .queuedPromptSpinner {
@@ -1031,7 +1153,17 @@
   height: 14px;
 }
 
-.queuedPromptAction:hover {
+@container (max-width: 699px) {
+  .queuedPromptStateLabel {
+    display: none;
+  }
+
+  .queuedPromptState:not(.queuedPromptStateLoading) {
+    display: none;
+  }
+}
+
+.queuedPromptAction:not(:disabled):hover {
   background: var(--accent);
   color: var(--foreground);
 }

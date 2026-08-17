@@ -17,7 +17,7 @@ import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
-import { findGitRoot } from './gitUtils.js';
+import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
@@ -1369,11 +1369,40 @@ async function detectGitOperation(
   return undefined;
 }
 
-/** Stash count = lines in `<gitDir>/logs/refs/stash` (0 when absent). */
+/**
+ * Resolve the git dir shared by every worktree of a repository.
+ *
+ * For a linked worktree (`git worktree add`) `resolveGitDirFromRoot` returns
+ * the per-worktree dir `.git/worktrees/<name>`, which is correct for the
+ * per-worktree state the callers above probe — HEAD, the index, and the
+ * MERGE_HEAD / rebase-* / BISECT_LOG markers all live there. Refs and their
+ * reflogs do not: they live in the common dir, which git records in a
+ * `commondir` file next to those markers. Falls back to `gitDir` itself,
+ * which is the right answer for a main worktree (no `commondir` file).
+ */
+async function resolveCommonGitDir(gitDir: string): Promise<string> {
+  // Read it the way gitDirect.ts already reads this same file: O_NOFOLLOW
+  // refuses a symlink and O_NONBLOCK never blocks on a FIFO. A plain readFile
+  // on a crafted `commondir` named pipe would hang forever and pin a libuv
+  // thread-pool slot, and `getGitWorkingTreeStatus` polls unattended, so it has
+  // to survive a hostile repository -- the same hazard countStashEntries below
+  // guards against for the reflog it reads.
+  const raw = (
+    await readFirstLineNoFollow(path.join(gitDir, 'commondir'))
+  )?.trim();
+  if (!raw) return gitDir;
+  return path.isAbsolute(raw) ? raw : path.resolve(gitDir, raw);
+}
+
+/** Stash count = lines in `<commonDir>/logs/refs/stash` (0 when absent). */
 async function countStashEntries(gitRoot: string): Promise<number> {
   const gitDir = await resolveGitDirFromRoot(gitRoot);
   if (!gitDir) return 0;
-  const stashLog = path.join(gitDir, 'logs', 'refs', 'stash');
+  // The stash is a single ref shared by the whole repository, so it must be
+  // read from the common dir. Reading it from the per-worktree dir reported 0
+  // stashes inside every linked worktree, whatever `git stash list` said.
+  const commonDir = await resolveCommonGitDir(gitDir);
+  const stashLog = path.join(commonDir, 'logs', 'refs', 'stash');
   // lstat before read: a symlink-to-FIFO would block readFile forever (the
   // same hazard the untracked-file readers guard against). Only count a
   // regular file.
@@ -1469,7 +1498,7 @@ function parseLogFields(parts: string[]): GitLogEntry | null {
  */
 export async function fetchGitLog(
   cwd: string,
-  options?: { limit?: number; skip?: number },
+  options?: { limit?: number; skip?: number; range?: string },
 ): Promise<GitLogResult | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
@@ -1489,6 +1518,12 @@ export async function fetchGitLog(
       '-n',
       String(limit + 1),
       ...(skip > 0 ? ['--skip', String(skip)] : []),
+      ...(options?.range &&
+      !options.range.startsWith('-') &&
+      !options.range.startsWith('..') &&
+      /^[A-Za-z0-9_./~^-]+$/.test(options.range)
+        ? [options.range, '--']
+        : []),
     ],
     gitRoot,
   );

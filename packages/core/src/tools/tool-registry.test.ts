@@ -17,6 +17,7 @@ import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
 import {
@@ -563,6 +564,153 @@ describe('ToolRegistry', () => {
         { name: 'alpha', description: 'alpha desc' },
         { name: 'bravo', description: 'bravo desc' },
       ]);
+    });
+
+    describe('preloadDeferredToolsWithinBudget', () => {
+      const mcpCallable = {} as CallableTool;
+      const makeMcpTool = (serverToolName: string) =>
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'files',
+          serverToolName,
+          `${serverToolName} description`,
+          {},
+        );
+      const tokensFor = (...tools: Array<{ schema: unknown }>) =>
+        Math.ceil(
+          tools.reduce(
+            (chars, tool) => chars + JSON.stringify(tool.schema).length,
+            0,
+          ) / CHARS_PER_TOKEN,
+        );
+
+      it('reveals all deferred tools, bundled and MCP, when their schemas fit the budget', () => {
+        const toolA = makeMcpTool('read_tree');
+        const toolB = makeMcpTool('write_tree');
+        const bundled = new MockTool({ name: 'bundled', shouldDefer: true });
+        toolRegistry.registerTool(toolA);
+        toolRegistry.registerTool(toolB);
+        toolRegistry.registerTool(bundled);
+
+        const revealed = toolRegistry.preloadDeferredToolsWithinBudget(
+          tokensFor(toolA, toolB, bundled),
+        );
+
+        expect(revealed).toBe(3);
+        const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+        expect(names).toContain(toolA.name);
+        expect(names).toContain(toolB.name);
+        expect(names).toContain('bundled');
+      });
+
+      it('reveals nothing when the combined schemas exceed the budget', () => {
+        const toolA = makeMcpTool('read_tree');
+        const toolB = makeMcpTool('write_tree');
+        toolRegistry.registerTool(toolA);
+        toolRegistry.registerTool(toolB);
+
+        const revealed = toolRegistry.preloadDeferredToolsWithinBudget(
+          tokensFor(toolA, toolB) - 1,
+        );
+
+        expect(revealed).toBe(0);
+        expect(toolRegistry.isDeferredToolRevealed(toolA.name)).toBe(false);
+        expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
+      });
+
+      it('counts bundled deferred tools toward the budget (all-or-nothing)', () => {
+        const mcpTool = makeMcpTool('read_tree');
+        const bundled = new MockTool({ name: 'bundled', shouldDefer: true });
+        toolRegistry.registerTool(mcpTool);
+        toolRegistry.registerTool(bundled);
+
+        // Budget covers the MCP tool alone; the bundled tool pushes the
+        // union over. A partial (MCP-only) reveal would leave the prefix
+        // unstable anyway, so nothing is revealed.
+        const revealed = toolRegistry.preloadDeferredToolsWithinBudget(
+          tokensFor(mcpTool),
+        );
+
+        expect(revealed).toBe(0);
+        expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(false);
+        expect(toolRegistry.isDeferredToolRevealed('bundled')).toBe(false);
+      });
+
+      it('counts already-revealed tools toward the budget', () => {
+        const toolA = makeMcpTool('read_tree');
+        const toolB = makeMcpTool('write_tree');
+        toolRegistry.registerTool(toolA);
+        toolRegistry.registerTool(toolB);
+        toolRegistry.revealDeferredTool(toolA.name);
+
+        // Budget covers one tool but not both: the already-revealed tool
+        // must keep the second one deferred rather than ratcheting past
+        // the budget one reveal at a time.
+        const revealed = toolRegistry.preloadDeferredToolsWithinBudget(
+          tokensFor(toolB),
+        );
+
+        expect(revealed).toBe(0);
+        expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
+      });
+
+      it('excludes visible deferred tools from the preload budget', () => {
+        const visibleTool = new MockTool({
+          name: 'visible',
+          description: 'x'.repeat(CHARS_PER_TOKEN * 10),
+          shouldDefer: true,
+        });
+        const deferredTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+        });
+        const visibleConfig = new Config({
+          ...baseConfigParams,
+          visibleTools: [visibleTool.name],
+        });
+        const registry = new ToolRegistry(visibleConfig);
+        registry.registerTool(visibleTool);
+        registry.registerTool(deferredTool);
+
+        const revealed = registry.preloadDeferredToolsWithinBudget(
+          tokensFor(deferredTool),
+        );
+
+        expect(revealed).toBe(1);
+        expect(registry.isDeferredToolRevealed(deferredTool.name)).toBe(true);
+        expect(registry.getFunctionDeclarations().map((d) => d.name)).toEqual(
+          expect.arrayContaining([visibleTool.name, deferredTool.name]),
+        );
+      });
+
+      it('excludes always-loaded tools from the preload budget', () => {
+        const alwaysLoadedTool = new MockTool({
+          name: 'always-loaded',
+          description: 'x'.repeat(CHARS_PER_TOKEN * 10),
+          shouldDefer: true,
+          alwaysLoad: true,
+        });
+        const deferredTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+        });
+        toolRegistry.registerTool(alwaysLoadedTool);
+        toolRegistry.registerTool(deferredTool);
+
+        const revealed = toolRegistry.preloadDeferredToolsWithinBudget(
+          tokensFor(deferredTool),
+        );
+
+        expect(revealed).toBe(1);
+        expect(toolRegistry.isDeferredToolRevealed(deferredTool.name)).toBe(
+          true,
+        );
+        expect(
+          toolRegistry.getFunctionDeclarations().map((d) => d.name),
+        ).toEqual(
+          expect.arrayContaining([alwaysLoadedTool.name, deferredTool.name]),
+        );
+      });
     });
 
     it('getDeferredToolSummary includes MCP server names', () => {

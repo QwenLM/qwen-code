@@ -31,6 +31,10 @@ import {
   HOST_UPDATE_RELAUNCH_ENV_VAR,
   SKIP_UPDATE_CHECK_ENV_VAR,
 } from './processUtils.js';
+import {
+  QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_SERVE_ENV,
+} from '../config/acp-channel-fallback.js';
 
 const execAsync = promisify(exec);
 
@@ -75,6 +79,8 @@ export function getSandboxPassthroughEnvArgs(
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,
+    QWEN_CODE_SERVE_ENV,
+    QWEN_CODE_DESKTOP_ENV,
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
@@ -631,16 +637,16 @@ export async function start_sandbox(
     )}`;
     writeStderrLine(`ContainerName: ${containerName}`);
   } else {
-    let index = 0;
-    const containerNameCheck = execSync(
-      `${config.command} ps -a --format "{{.Names}}"`,
-    )
-      .toString()
-      .trim();
-    while (containerNameCheck.includes(`${imageName}-${index}`)) {
-      index++;
-    }
-    containerName = `${imageName}-${index}`;
+    // Random suffix, NOT a counted index: several runner registrations can
+    // share one docker daemon (the CI pool packs multiple runners per
+    // host), and the old count-then-run window let concurrent launches
+    // pick the same index — docker then rejects the loser's `docker run`
+    // with a name Conflict (exit 125). Observed at scale: 7 of 14 legs of
+    // one autofix scan lost that race in a single tick. Consumers that
+    // need the name parse it from the line below rather than predicting
+    // it, and cleanup tooling matches on the image-name prefix, so the
+    // suffix shape is free to be collision-proof.
+    containerName = `${imageName}-${randomBytes(4).toString('hex')}`;
     writeStderrLine(`ContainerName (regular): ${containerName}`);
   }
   args.push('--name', containerName, '--hostname', containerName);

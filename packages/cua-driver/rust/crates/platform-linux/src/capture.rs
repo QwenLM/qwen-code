@@ -46,7 +46,6 @@ fn capture_via_import(xid: u64) -> Result<Vec<u8>> {
 }
 
 fn capture_via_xgetimage(xid: u64) -> Result<(String, u32, u32)> {
-    use x11rb::connection::Connection;
     use x11rb::protocol::xproto::*;
     use x11rb::rust_connection::RustConnection;
 
@@ -57,13 +56,17 @@ fn capture_via_xgetimage(xid: u64) -> Result<(String, u32, u32)> {
     let w = geom.width as u32;
     let h = geom.height as u32;
 
-    let img = conn.get_image(
-        ImageFormat::Z_PIXMAP,
-        window,
-        0, 0,
-        w as u16, h as u16,
-        !0u32,
-    )?.reply()?;
+    let img = conn
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            window,
+            0,
+            0,
+            w as u16,
+            h as u16,
+            !0u32,
+        )?
+        .reply()?;
 
     // The raw data is BGRA or BGRX depending on depth.
     // Encode as a minimal PNG.
@@ -71,7 +74,7 @@ fn capture_via_xgetimage(xid: u64) -> Result<(String, u32, u32)> {
     let (bpp, has_alpha) = match img.depth {
         32 => (4usize, true),
         24 => (4usize, false),
-        _  => bail!("Unsupported depth: {}", img.depth),
+        _ => bail!("Unsupported depth: {}", img.depth),
     };
 
     // Convert to RGBA.
@@ -103,21 +106,28 @@ pub fn png_dimensions_pub(data: &[u8]) -> Result<(u32, u32)> {
 /// Dispatch:
 /// - Native Wayland (`CUA_DRIVER_RS_ENABLE_WAYLAND=1` + Wayland session):
 ///   routes through [`crate::wayland::screenshot_display_dispatch`] which
-///   cascades wlroots screencopy → ext-image-copy-capture-v1 → portal
-///   Screenshot. Each tier falls through to the next on missing globals.
+///   owns the complete GNOME helper → wlroots screencopy →
+///   ext-image-copy-capture-v1 → portal Screenshot → X11 cascade. An
+///   available GNOME helper's capture failure is terminal.
 /// - X11 / Wayland-disabled: ImageMagick `import` → x11rb `XGetImage`.
 pub fn screenshot_display_bytes() -> Result<Vec<u8>> {
-    if crate::wayland::is_wayland() {
-        match crate::wayland::screenshot_display_dispatch() {
-            Ok(bytes) => return Ok(bytes),
-            Err(e) => {
-                tracing::debug!(
-                    "wayland screenshot cascade unavailable ({e}); falling through to X11"
-                );
-            }
-        }
+    screenshot_display_bytes_with_dispatch(
+        crate::wayland::is_wayland(),
+        crate::wayland::screenshot_display_dispatch,
+        screenshot_display_bytes_x11,
+    )
+}
+
+fn screenshot_display_bytes_with_dispatch(
+    wayland_enabled: bool,
+    wayland_capture: impl FnOnce() -> Result<Vec<u8>>,
+    x11_capture: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    if wayland_enabled {
+        wayland_capture()
+    } else {
+        x11_capture()
     }
-    screenshot_display_bytes_x11()
 }
 
 /// X11-only display capture path — extracted so the wayland cascade in
@@ -156,9 +166,14 @@ pub(crate) fn screenshot_display_bytes_x11() -> Result<Vec<u8>> {
             crate::no_display_hint()
         );
     }
-    let img = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, w as u16, h as u16, !0u32)?.reply()?;
+    let img = conn
+        .get_image(ImageFormat::Z_PIXMAP, root, 0, 0, w as u16, h as u16, !0u32)?
+        .reply()?;
     let bytes = img.data;
-    let bpp = match img.depth { 32 | 24 => 4usize, _ => anyhow::bail!("Unsupported depth") };
+    let bpp = match img.depth {
+        32 | 24 => 4usize,
+        _ => anyhow::bail!("Unsupported depth"),
+    };
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for chunk in bytes.chunks_exact(bpp) {
         let (b, g, r) = (chunk[0], chunk[1], chunk[2]);
@@ -198,3 +213,45 @@ pub fn crosshair_png_bytes(png_bytes: &[u8], cx: f64, cy: f64) -> Result<Vec<u8>
     cua_driver_core::image_utils::crosshair_png_bytes(png_bytes, cx, cy)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn available_gnome_helper_failure_is_terminal_at_public_boundary() {
+        let x11_called = Cell::new(false);
+
+        let result = screenshot_display_bytes_with_dispatch(
+            true,
+            || Err(anyhow::anyhow!("GNOME compositor helper capture failed")),
+            || {
+                x11_called.set(true);
+                Ok(vec![1, 2, 3])
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "GNOME compositor helper capture failed"
+        );
+        assert!(!x11_called.get(), "public boundary retried X11 capture");
+    }
+
+    #[test]
+    fn wayland_disabled_uses_x11_capture() {
+        let wayland_called = Cell::new(false);
+
+        let result = screenshot_display_bytes_with_dispatch(
+            false,
+            || {
+                wayland_called.set(true);
+                Err(anyhow::anyhow!("Wayland capture should not run"))
+            },
+            || Ok(vec![1, 2, 3]),
+        );
+
+        assert_eq!(result.unwrap(), vec![1, 2, 3]);
+        assert!(!wayland_called.get());
+    }
+}

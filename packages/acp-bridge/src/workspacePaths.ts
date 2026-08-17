@@ -66,7 +66,7 @@ export function translateWindowsWorkspaceForPosixSandbox(
   // making the "translated candidate actually exists" contract a lie. Not a
   // privilege escalation (downstream workspace binding still rejects it),
   // but refuse to translate anything that escapes the drive prefix.
-  const resolvedTranslated = path.resolve(translated);
+  const resolvedTranslated = path.posix.resolve(translated);
   if (
     resolvedTranslated !== `/${match[1]!.toLowerCase()}` &&
     !resolvedTranslated.startsWith(`/${match[1]!.toLowerCase()}/`)
