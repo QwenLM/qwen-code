@@ -369,9 +369,13 @@ describe('vitest configs stay wired to the guard', () => {
         new URL(`../../${pkg}/vitest.config.ts`, import.meta.url),
       );
       const source = readFileSync(configPath, 'utf8');
-      expect(source).toContain(
-        "globalSetup: '../../scripts/vitest-global-setup.js'",
-      );
+      // The guard must be anchored to the config file via path.resolve so it
+      // loads regardless of vitest's root/cwd; a bare relative string would
+      // only resolve when vitest runs from inside the package directory.
+      // Checked as two substrings so the assertion is robust to prettier's
+      // line-wrapping of the path.resolve(...) call.
+      expect(source).toContain('globalSetup: path.resolve(');
+      expect(source).toContain("'../../scripts/vitest-global-setup.js'");
     },
   );
 });

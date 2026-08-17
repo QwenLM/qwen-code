@@ -161,7 +161,12 @@ export default defineConfig({
     // Fail fast with an actionable message when workspace dist/ output or
     // generated files are missing (fresh clone, new worktree, deep clean).
     // See scripts/vitest-global-setup.js and issue #9149.
-    globalSetup: '../../scripts/vitest-global-setup.js',
+    // Resolved against this config file (not vitest's root/cwd) so the guard
+    // also loads when vitest is launched from elsewhere with --config.
+    globalSetup: path.resolve(
+      __dirname,
+      '../../scripts/vitest-global-setup.js',
+    ),
     coverage: {
       enabled: true,
       provider: 'v8',
