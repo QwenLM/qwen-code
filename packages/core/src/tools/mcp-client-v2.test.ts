@@ -255,14 +255,9 @@ describe('configured MCP SDK v2 negotiation', () => {
     }
   });
 
-  it('sends the modern protocol headers over HTTP', async () => {
+  it('connects remote HTTP with the legacy initialize handshake', async () => {
     const http = await import('node:http');
-    const requests: Array<{
-      method: string;
-      protocolVersion: string | string[] | undefined;
-      mcpMethod: string | string[] | undefined;
-      mcpName: string | string[] | undefined;
-    }> = [];
+    const methods: string[] = [];
     const server = http.createServer((request, responseStream) => {
       let body = '';
       request.setEncoding('utf8');
@@ -270,33 +265,45 @@ describe('configured MCP SDK v2 negotiation', () => {
         body += chunk;
       });
       request.on('end', () => {
-        const message = JSON.parse(body) as RequestMessage;
-        requests.push({
-          method: message.method,
-          protocolVersion: request.headers['mcp-protocol-version'],
-          mcpMethod: request.headers['mcp-method'],
-          mcpName: request.headers['mcp-name'],
-        });
+        if (!body) {
+          responseStream.writeHead(405);
+          responseStream.end();
+          return;
+        }
+        const message = JSON.parse(body) as JSONRPCMessage;
+        if (!('method' in message) || typeof message.method !== 'string') {
+          responseStream.writeHead(400);
+          responseStream.end();
+          return;
+        }
+        methods.push(message.method);
+        if (message.method === 'server/discover') {
+          responseStream.writeHead(500);
+          responseStream.end();
+          return;
+        }
+        if (!('id' in message)) {
+          responseStream.writeHead(202);
+          responseStream.end();
+          return;
+        }
 
         let result: Record<string, unknown>;
         switch (message.method) {
-          case 'server/discover':
+          case 'initialize':
             result = {
-              supportedVersions: ['2026-07-28'],
+              protocolVersion: '2025-06-18',
               capabilities: { tools: {} },
+              serverInfo: { name: 'http-legacy', version: '1.0.0' },
             };
             break;
           case 'tools/list':
             result = {
-              resultType: 'complete',
               tools: [{ name: 'echo', inputSchema: { type: 'object' } }],
-              ttlMs: 60_000,
-              cacheScope: 'private',
             };
             break;
           case 'tools/call':
             result = {
-              resultType: 'complete',
               content: [{ type: 'text', text: 'ok' }],
             };
             break;
@@ -307,7 +314,9 @@ describe('configured MCP SDK v2 negotiation', () => {
         }
 
         responseStream.writeHead(200, { 'Content-Type': 'application/json' });
-        responseStream.end(JSON.stringify(response(message, result)));
+        responseStream.end(
+          JSON.stringify(response(message as RequestMessage, result)),
+        );
       });
     });
     await new Promise<void>((resolve) =>
@@ -321,35 +330,21 @@ describe('configured MCP SDK v2 negotiation', () => {
     let client: Awaited<ReturnType<typeof connectToMcpServer>> | undefined;
     try {
       client = await connectToMcpServer(
-        'modern-http',
+        'remote-http',
         {
           httpUrl: `http://127.0.0.1:${address.port}/mcp`,
         } as MCPServerConfig,
         false,
         workspaceContext(),
       );
+      expect(client.getProtocolEra()).toBe('legacy');
       await client.listTools();
       await client.callTool({ name: 'echo' });
-      expect(requests).toEqual([
-        {
-          method: 'server/discover',
-          protocolVersion: '2026-07-28',
-          mcpMethod: 'server/discover',
-          mcpName: undefined,
-        },
-        {
-          method: 'tools/list',
-          protocolVersion: '2026-07-28',
-          mcpMethod: 'tools/list',
-          mcpName: undefined,
-        },
-        {
-          method: 'tools/call',
-          protocolVersion: '2026-07-28',
-          mcpMethod: 'tools/call',
-          mcpName: 'echo',
-        },
-      ]);
+      expect(methods).not.toContain('server/discover');
+      expect(methods[0]).toBe('initialize');
+      expect(methods).toEqual(
+        expect.arrayContaining(['initialize', 'tools/list', 'tools/call']),
+      );
     } finally {
       await client?.close();
       await new Promise<void>((resolve, reject) =>

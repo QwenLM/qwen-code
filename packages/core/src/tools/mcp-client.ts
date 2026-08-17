@@ -85,7 +85,10 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 // Auto-negotiation `server/discover` otherwise inherits connect()'s
 // timeout (10 minutes here, 60s SDK default). Silent legacy stdio
 // servers never answer that probe; cap it so fallback fits inside
-// the 30s discovery window.
+// the 30s discovery window. Remote HTTP/SSE/WS skip the probe
+// entirely (`mode: 'legacy'`): SDK v2 rejects HTTP probe timeouts
+// with no `initialize` fallback, and the remote discovery window
+// is also 5s.
 export const MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS = 5_000;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
@@ -357,14 +360,17 @@ export type DiscoveredMCPResource = Resource & {
   serverName: string;
 };
 
-function createMcpClient(name: string): Client {
+function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+  const remote = !!(cfg.httpUrl || cfg.url || cfg.tcp);
   return new Client(
     { name, version: '0.0.1' },
     {
-      versionNegotiation: {
-        mode: 'auto',
-        probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
-      },
+      versionNegotiation: remote
+        ? { mode: 'legacy' }
+        : {
+            mode: 'auto',
+            probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
+          },
       // Default 64 throws ListPaginationExceeded and discoverTools
       // swallows that into []. 0 disables the cap; the SDK still
       // stops on a repeating cursor.
@@ -458,7 +464,10 @@ export class McpClient {
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.client = createMcpClient(`qwen-cli-mcp-client-${this.serverName}`);
+    this.client = createMcpClient(
+      `qwen-cli-mcp-client-${this.serverName}`,
+      this.serverConfig,
+    );
   }
 
   /**
@@ -1788,7 +1797,7 @@ export async function connectToMcpServer(
   sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
   clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
-  const mcpClient = createMcpClient('qwen-code-mcp-client');
+  const mcpClient = createMcpClient('qwen-code-mcp-client', mcpServerConfig);
 
   mcpClient.registerCapabilities({
     roots: {
