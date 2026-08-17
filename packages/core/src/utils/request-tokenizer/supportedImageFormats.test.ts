@@ -14,6 +14,19 @@ import {
 
 describe('supportedImageFormats', () => {
   it('forwards only the provider-safe subset to model endpoints', () => {
+    // Pin the exact pipeline set: negative-membership assertions alone
+    // would still pass for an empty list, letting the advertised contract
+    // silently regress to nothing (or drop a forwarded format) while the
+    // suite stays green.
+    expect([...PIPELINE_IMAGE_MIME_TYPES].sort()).toEqual(
+      [
+        'image/gif',
+        'image/jpeg',
+        'image/jpg',
+        'image/png',
+        'image/webp',
+      ].sort(),
+    );
     // The read-path omission gate (#9291) drops everything outside the
     // pipeline set, so the advertised contract must not include it.
     expect(PIPELINE_IMAGE_MIME_TYPES).not.toContain('image/heic');

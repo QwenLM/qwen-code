@@ -51,6 +51,7 @@ import {
   ImageViewError,
   renderImageOverview,
 } from './image-view.js';
+import { PIPELINE_IMAGE_MIME_TYPES } from './request-tokenizer/supportedImageFormats.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 const CANONICAL_IMAGE_MIME_TYPES = new Set([
@@ -63,16 +64,12 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
 // (image/heic, image/tiff, ...) must never be forwarded verbatim: providers
 // reject the unknown media during request validation, and the resulting 400
 // aborts the whole session instead of surfacing a recoverable result (#9291).
-// Keep in sync with PIPELINE_IMAGE_MIME_TYPES in
-// request-tokenizer/supportedImageFormats.ts, which advertises this contract
-// to users.
-const PROVIDER_SAFE_IMAGE_MIME_TYPES = new Set([
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-  'image/gif',
-]);
+// Derived from PIPELINE_IMAGE_MIME_TYPES in
+// request-tokenizer/supportedImageFormats.ts so the read-path gate and the
+// contract advertised to users cannot drift apart.
+const PROVIDER_SAFE_IMAGE_MIME_TYPES = new Set<string>(
+  PIPELINE_IMAGE_MIME_TYPES,
+);
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
