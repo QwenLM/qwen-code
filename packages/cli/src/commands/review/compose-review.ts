@@ -21,6 +21,7 @@
 // real); this owns only the bookkeeping that follows from the counts.
 
 import type { CommandModule } from 'yargs';
+import { roundModelIdFrom } from './lib/round-model.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -2997,8 +2998,8 @@ export const composeReviewCommand: CommandModule = {
       // launching command can still override the env (and a hijacked
       // orchestrator can forge the marker outright via the API) — the same
       // forgeable posture DESIGN.md records for the cache path.
-      // See submit.ts: the provider-qualified identity when published.
-      process.env['QWEN_CODE_MODEL_IDENTITY'] ?? process.env['QWEN_CODE_MODEL'],
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
