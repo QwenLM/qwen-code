@@ -280,8 +280,8 @@ describe('useProviderUpdates', () => {
     });
 
     expect(
-      result.current.providerUpdateRequest!.entries[0]!.diff,
-    ).not.toHaveProperty('fallbackModel');
+      Object.keys(result.current.providerUpdateRequest!.entries[0]!.diff),
+    ).not.toContain('fallbackModel');
 
     await result.current.providerUpdateRequest!.onConfirm('update');
 
