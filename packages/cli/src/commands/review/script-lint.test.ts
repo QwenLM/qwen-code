@@ -74,6 +74,14 @@ function setup(
 describe('toolFor — dispatch by file type, not by GitHub', () => {
   it.each([
     ['.github/workflows/ci.yml', '', 'actionlint'],
+    // The long `.yaml` workflow spelling — GitHub accepts both.
+    ['.github/workflows/ci.yaml', '', 'actionlint'],
+    // The directory alone must not route: a non-YAML file under
+    // .github/workflows/ is not a workflow (pins the suffix conjunct).
+    ['.github/workflows/README.md', '', null],
+    // A stemless `.yml` dotfile in a NESTED workflows/ directory is
+    // deliberately unrouted — the pathTool comment names the divergence.
+    ['.github/workflows/nested/.yml', '', null],
     ['deploy.sh', '', 'shellcheck'],
     ['scripts/build.bash', '', 'shellcheck'],
     ['Dockerfile', '', 'hadolint'],
