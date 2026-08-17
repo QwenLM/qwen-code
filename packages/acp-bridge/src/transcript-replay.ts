@@ -259,6 +259,31 @@ export function createTranscriptImageUpdate(
   } as SessionUpdate;
 }
 
+function createTranscriptMediaReferenceUpdate(
+  reference: Record<string, unknown>,
+  options: UpdateMetaOptions,
+): SessionUpdate | undefined {
+  if (
+    (reference['type'] !== 'image' && reference['type'] !== 'audio') ||
+    typeof reference['mediaId'] !== 'string' ||
+    typeof reference['mimeType'] !== 'string' ||
+    typeof reference['size'] !== 'number'
+  ) {
+    return undefined;
+  }
+  const meta = buildUpdateMeta(options);
+  return {
+    sessionUpdate: 'user_message_chunk',
+    content: {
+      type: reference['type'],
+      mediaId: reference['mediaId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    },
+    ...(meta ? { _meta: meta } : {}),
+  } as unknown as SessionUpdate;
+}
+
 export function createTranscriptUsageUpdate(
   usageMetadata: TranscriptUsageMetadataInput,
   options: TranscriptUsageUpdateOptions = {},
@@ -550,6 +575,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
+    const replayMeta: UpdateMetaOptions =
+      record.subtype === 'mid_turn_user_message'
+        ? {
+            ...meta,
+            extra: {
+              ...meta.extra,
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : meta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -560,6 +596,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload && typeof payload['displayText'] === 'string'
           ? payload['displayText']
           : undefined;
+      if (record.subtype === 'mid_turn_user_message' && displayText === '') {
+        const media = [
+          ...this.projectUserMediaReferences(payload, emit, replayMeta),
+        ];
+        if (media.length > 0) {
+          yield* media;
+          return;
+        }
+      }
       if (displayText) {
         const isNotification = record.subtype === 'notification';
         const backgroundTask =
@@ -570,7 +615,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           createTranscriptMessageUpdate({
             role: 'user',
             text: displayText,
-            ...meta,
+            ...replayMeta,
             ...(isNotification
               ? {
                   extra: {
@@ -584,6 +629,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
+        yield* this.projectUserMediaReferences(payload, emit, replayMeta);
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
@@ -595,13 +641,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         record,
         'user',
         emit,
-        meta,
+        replayMeta,
         undefined,
         replaceTextPartsForDisplay(
           record.message?.parts,
           projection.displayText,
         ),
       );
+      yield* this.projectUserMediaReferences(payload, emit, replayMeta);
       return;
     }
 
@@ -609,10 +656,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       record,
       'user',
       emit,
-      meta,
+      replayMeta,
       undefined,
       projection.parts,
     );
+    yield* this.projectUserMediaReferences(payload, emit, replayMeta);
+  }
+
+  private *projectUserMediaReferences(
+    payload: Record<string, unknown> | undefined,
+    emit: (update: SessionUpdate) => TranscriptReplayEmission,
+    meta: UpdateMetaOptions,
+  ): Iterable<TranscriptReplayEmission> {
+    const references = payload?.['mediaReferences'];
+    if (!Array.isArray(references)) return;
+    for (const reference of references) {
+      if (!isObjectRecord(reference)) continue;
+      const update = createTranscriptMediaReferenceUpdate(reference, meta);
+      if (update) yield emit(update);
+    }
   }
 
   private *projectAssistantRecord(

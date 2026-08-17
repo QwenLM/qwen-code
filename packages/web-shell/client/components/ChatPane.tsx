@@ -41,7 +41,7 @@ import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTra
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type {
   ComposerSubmitCommit,
   ComposerSubmitMetadata,
@@ -190,8 +190,6 @@ export interface ChatPaneProps {
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
-  /** Allow prompt admission to recover a disconnected SSE stream. */
-  restartSseOnPrompt?: boolean;
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
@@ -226,7 +224,6 @@ export function ChatPane({
   onOpenMonitor,
   onPaneArtifactsChange,
   messageTurnOutputs,
-  restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
   reportCatalogTurnCompletion = true,
@@ -525,6 +522,8 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -542,6 +541,7 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions: actions,
     store,
@@ -566,11 +566,13 @@ export function ChatPane({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
-      if (!trimmed && (images?.length ?? 0) === 0) return false;
+      if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
+        return false;
       if (admissionPayloadLocked) return false;
       if (
         trimmed &&
@@ -582,7 +584,6 @@ export function ChatPane({
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,
           hasSession: Boolean(connection.sessionId),
-          restartSseOnPrompt,
         })
       ) {
         return false;
@@ -605,6 +606,7 @@ export function ChatPane({
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
+            ...(files && files.length ? { files } : {}),
             ...(inputAnnotations ? { inputAnnotations } : {}),
             onAdmissionStarted: () => {
               admissionStarted = true;
@@ -651,10 +653,11 @@ export function ChatPane({
       }
       const queued =
         !trimmed && !inputAnnotations
-          ? enqueuePrompt(trimmed, images)
+          ? enqueuePrompt(trimmed, images, files)
           : enqueuePrompt(
               trimmed,
               images,
+              files,
               undefined,
               inputAnnotations,
               notifyFirstPromptAdmitted,
@@ -675,7 +678,6 @@ export function ChatPane({
       onFirstPromptAdmitted,
       onImageIngestionNotice,
       reportError,
-      restartSseOnPrompt,
       sessionCatalogController,
       t,
     ],
@@ -1054,6 +1056,7 @@ export function ChatPane({
           onEdit={editQueuedPrompt}
           onRestoreUnknown={restoreUnknownQueuedPrompt}
           onDiscardUnknown={discardUnknownQueuedPrompt}
+          onImagePreview={handleImagePreview}
         />
         {unknownPromptAdmission && (
           <div

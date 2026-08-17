@@ -26,6 +26,12 @@ Element.prototype.scrollIntoView = vi.fn();
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
   pastedImages: [] as Array<{ data: string; media_type: string }>,
+  pastedFiles: [] as Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>,
   removeTopTag: vi.fn(),
 }));
 
@@ -150,19 +156,26 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
+const latestComposerCoreOptions = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
+
 vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   const React = await import('react');
   const actual =
     await importOriginal<typeof import('../hooks/useComposerCore')>();
   return {
     ...actual,
-    useComposerCore: (options?: {
-      onFileUploadRequest?: (
-        targetDir: string,
-        restoreQuery?: () => void,
-      ) => void;
-      workspaceUploadBusy?: boolean;
-    }) => {
+    useComposerCore: (
+      options?: Record<string, unknown> & {
+        onFileUploadRequest?: (
+          targetDir: string,
+          restoreQuery?: () => void,
+        ) => void;
+        workspaceUploadBusy?: boolean;
+      },
+    ) => {
+      latestComposerCoreOptions.current = options ?? null;
       composerCoreState.onFileUploadRequest = options?.onFileUploadRequest;
       composerCoreState.workspaceUploadBusy =
         options?.workspaceUploadBusy ?? false;
@@ -177,6 +190,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         hasInput: vi.fn(() => false),
         hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.pastedFiles.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
         hasContent: false,
         canSubmit: false,
@@ -197,10 +211,13 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           submit: vi.fn(),
           hasAttachments: () =>
             mockComposerCoreState.pastedImages.length > 0 ||
+            mockComposerCoreState.pastedFiles.length > 0 ||
             mockComposerCoreState.composerTags.length > 0,
         },
         pastedImages: mockComposerCoreState.pastedImages,
         removeImage: vi.fn(),
+        pastedFiles: mockComposerCoreState.pastedFiles,
+        removeFile: vi.fn(),
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
@@ -301,13 +318,21 @@ afterEach(() => {
   }
   mockComposerCoreState.composerTags = [];
   mockComposerCoreState.pastedImages = [];
+  mockComposerCoreState.pastedFiles = [];
   mockComposerCoreState.removeTopTag.mockReset();
+  latestComposerCoreOptions.current = null;
   vi.useRealTimers();
 });
 
 interface ChatEditorRenderProps {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
+  pastedFiles?: Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -332,6 +357,8 @@ interface ChatEditorRenderProps {
   sessionId?: string;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
+  builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
+  atProviders?: WebShellCustomization['atProviders'];
 }
 
 function renderChatEditorInto(
@@ -342,6 +369,7 @@ function renderChatEditorInto(
   const {
     composerTags,
     pastedImages,
+    pastedFiles,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -352,6 +380,9 @@ function renderChatEditorInto(
   }
   if (pastedImages) {
     mockComposerCoreState.pastedImages = pastedImages;
+  }
+  if (pastedFiles) {
+    mockComposerCoreState.pastedFiles = pastedFiles;
   }
 
   act(() => {
@@ -505,17 +536,16 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
-    // The arrow must be the Radix-positioned element: a pseudo-element pinned
-    // to the content center stops pointing at the trigger once collision
-    // avoidance shifts the content near the viewport edge. jsdom has no
-    // layout, so pin the positioning classes the rendered arrow depends on —
-    // a shadcn regeneration that drops them would detach the arrow visually
-    // while an existence check stayed green.
-    const arrowClass = document
-      .querySelector('[data-slot="tooltip-arrow"]')
-      ?.getAttribute('class');
-    expect(arrowClass).toContain('rotate-45');
-    expect(arrowClass).toContain('translate-y-[calc(-50%_-_2px)]');
+    const arrow = document.querySelector<SVGElement>(
+      '[data-slot="tooltip-arrow"]',
+    );
+    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
+    expect(arrow?.style.transform).toBe(
+      'translateY(var(--floating-arrow-offset))',
+    );
+    expect(
+      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
+    ).toContain('[--floating-arrow-offset:-1px]');
   });
 
   it('escalates the arc color at the /context panel thresholds', () => {
@@ -1455,6 +1485,63 @@ describe('ChatEditor mobile composer quick actions', () => {
       expect(
         container.querySelector('[data-mobile-voice-active="true"]'),
       ).toBeFalsy();
+    });
+  });
+});
+
+describe('ChatEditor at mention context fallback', () => {
+  const tablesProvider = {
+    id: 'tables',
+    label: 'Tables',
+    async search() {
+      return [];
+    },
+  };
+  const hostFilesProvider = {
+    id: 'files-host',
+    label: 'Host files',
+    async search() {
+      return [];
+    },
+  };
+
+  it('uses customization atProviders when ChatEditor props omit them', () => {
+    const contextProviders = [tablesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(
+      contextProviders,
+    );
+  });
+
+  it('prefers explicit atProviders props over customization', () => {
+    const contextProviders = [tablesProvider];
+    const propProviders = [hostFilesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+      atProviders: propProviders,
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(propProviders);
+  });
+
+  it('uses customization builtinAtProviders when ChatEditor props omit them', () => {
+    const builtinAtProviders = { exclude: ['extensions'] as const };
+    renderChatEditor({
+      customization: { builtinAtProviders },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
+      builtinAtProviders,
+    );
+  });
+
+  it('prefers explicit builtinAtProviders props over customization', () => {
+    renderChatEditor({
+      customization: { builtinAtProviders: { exclude: ['extensions'] } },
+      builtinAtProviders: { exclude: ['files'] },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toEqual({
+      exclude: ['files'],
     });
   });
 });

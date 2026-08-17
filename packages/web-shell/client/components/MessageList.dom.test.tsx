@@ -36,6 +36,9 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      showAssistantBranch,
+      onBranchSession,
+      branchRecordId,
       isLocateFlashing,
       assistantTurnFooterInfo,
       sendFailed,
@@ -43,6 +46,9 @@ vi.mock('./MessageItem', async () => {
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      showAssistantBranch?: boolean;
+      onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+      branchRecordId?: string;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
@@ -80,6 +86,12 @@ vi.mock('./MessageItem', async () => {
           ? React.createElement('button', {
               'aria-expanded': 'false',
               'data-testid': `disclosure-${message.id}`,
+            })
+          : null,
+        showAssistantBranch
+          ? React.createElement('button', {
+              'data-testid': `branch-${message.id}`,
+              onClick: () => onBranchSession?.(branchRecordId),
             })
           : null,
         assistantTurnFooter,
@@ -304,6 +316,7 @@ function mount(
       cachedTokens?: number;
     };
     includeSubagentToolUsageInMetrics?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     compactMode?: boolean;
@@ -343,6 +356,7 @@ function mount(
                 includeSubagentToolUsageInMetrics={
                   opts.includeSubagentToolUsageInMetrics
                 }
+                onBranchSession={opts.onBranchSession}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
@@ -412,6 +426,7 @@ function renderInto(
     loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
 ) {
@@ -425,6 +440,7 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
+          onBranchSession={opts.onBranchSession}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -506,7 +522,7 @@ describe('MessageList — failed prompt retry', () => {
 });
 
 describe('MessageList — compact mode', () => {
-  it('hides thinking rows without removing surrounding transcript content', () => {
+  it('keeps thinking without adjacent tools visible in compact mode', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
       undefined,
@@ -517,7 +533,7 @@ describe('MessageList — compact mode', () => {
     );
 
     expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
 
     rerenderMessages(container, [
@@ -526,10 +542,14 @@ describe('MessageList — compact mode', () => {
       thinkingMsg('t2'),
       asstMsg('a1'),
     ]);
+    // With turn collapsing back on, the completed thinking folds behind the
+    // turn summary instead of hiding the surrounding transcript.
     expect(container.querySelector('[data-testid="msg-t2"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
   });
 
-  it('merges tool groups separated only by hidden thinking', () => {
+  it('merges tool groups separated by completed thinking', () => {
     const container = mount(
       [
         userMsg('u1'),
@@ -547,20 +567,24 @@ describe('MessageList — compact mode', () => {
       },
     );
 
-    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-g1"]'),
+    ).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
     expect(
       container
-        .querySelector('[data-testid="msg-g1"]')
+        .querySelector('[data-testid="msg-summary-g1"]')
         ?.getAttribute('data-timestamp'),
     ).toBe('1000');
     expect(
       container
-        .querySelector('[data-testid="msg-g1"]')
+        .querySelector('[data-testid="msg-summary-g1"]')
         ?.getAttribute('data-tool-ids'),
     ).toBe('call-g1,call-g2');
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-g3"]'),
+    ).not.toBeNull();
   });
 
   it('keeps visible thinking and tool groups in transcript order', () => {
@@ -621,7 +645,9 @@ describe('MessageList — compact mode', () => {
         },
       );
 
-      expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="msg-summary-g1"]'),
+      ).not.toBeNull();
       expect(
         container.querySelector('[data-testid="msg-special"]'),
       ).not.toBeNull();
@@ -645,11 +671,19 @@ describe('MessageList — compact mode', () => {
     expect(
       container.querySelector('[data-testid="msg-special"]'),
     ).not.toBeNull();
+    // The completed thinking folds into the adjacent tool group, which keeps
+    // the tool while the standalone group stays separate.
     expect(
       container
-        .querySelector('[data-testid="msg-g2"]')
+        .querySelector('[data-testid="msg-special"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-special');
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-t1"]')
         ?.getAttribute('data-tool-ids'),
     ).toBe('call-g2');
+    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
   });
 });
 
@@ -2196,6 +2230,51 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
     expect(queryToggle(c, 'u1')).toBeNull();
     expect(c.textContent).toContain('Processing 3s');
+  });
+
+  it('folds streaming thinking into the tool summary while it runs', () => {
+    const c = mount(
+      [
+        userMsg('u1'),
+        { ...thinkingMsg('t1'), isStreaming: true },
+        toolMsg('g1'),
+      ],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // Streaming thinking merges into the group like a running tool.
+    expect(
+      c
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1');
+    expect(c.querySelector('[data-testid="msg-g1"]')).toBeNull();
+  });
+
+  it('folds completed thinking into the merged tool summary in compact mode', () => {
+    const c = mount(
+      [userMsg('u1'), thinkingMsg('t1'), toolMsg('g1'), asstMsg('a1')],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // The thinking and the adjacent tool collapse into one group carrying
+    // the tool; the standalone thinking row is gone.
+    expect(
+      c
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1');
+    expect(c.querySelector('[data-testid="msg-g1"]')).toBeNull();
+  });
+
+  it('does not fold completed thinking without adjacent tools', () => {
+    const c = mount(
+      [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // No adjacent tool group: the thinking stays a standalone row.
+    expect(c.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
   });
 
   it('toggle round-trip reveals then re-hides the step', () => {
@@ -3750,6 +3829,53 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows branch only for anchored replies and forwards the checkpoint', () => {
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const c = mount(
+      [userMsg('u1'), anchored, userMsg('u2'), asstMsg('unanchored')],
+      undefined,
+      { onBranchSession },
+    );
+
+    expect(c.querySelector('[data-testid="branch-unanchored"]')).toBeNull();
+    click(c.querySelector('[data-testid="branch-anchored"]')!);
+    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
+  });
+
+  it('hides branch actions while a later turn is responding', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const messages = [userMsg('u1'), anchored, userMsg('u2'), asstMsg('live')];
+
+    renderInto(root, messages, undefined, {
+      isResponding: false,
+      onBranchSession,
+    });
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).not.toBeNull();
+
+    renderInto(root, messages, undefined, {
+      isResponding: true,
+      onBranchSession,
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).toBeNull();
   });
 
   it('reports when the user has scrolled away from the bottom', async () => {
