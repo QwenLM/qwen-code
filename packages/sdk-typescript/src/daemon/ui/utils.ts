@@ -42,6 +42,17 @@ export function stringifyRedactedJson(value: unknown): string {
   return stringifyJson(redactSensitiveFields(value));
 }
 
+const MAX_DETAILS_LENGTH = 4096;
+
+/**
+ * Caps a rendered details string so a single unbounded payload cannot grow a
+ * transcript block without limit.
+ */
+export function capDetails(details: string): string {
+  if (details.length <= MAX_DETAILS_LENGTH) return details;
+  return `${details.slice(0, MAX_DETAILS_LENGTH)}... [truncated]`;
+}
+
 export function redactSensitiveFields(value: unknown, depth = 0): unknown {
   if (depth > 16) return '[truncated]';
   if (Array.isArray(value)) {
