@@ -1455,7 +1455,12 @@ describe('latestLedger — the split trust surface', () => {
     // the constant only to a wide interval, and both a 6 and a 499 mutant
     // left the suite green: one refuses a bot a week ahead (the measured
     // full-diff re-review regression), the other widens the per-hostile-post
-    // counter-inflation bound ~8x. Last admitted:
+    // counter-inflation bound ~8x. The symbolic fixtures cannot kill a value
+    // mutant either — rounds AND expectations both compute from the
+    // constant, so any mutated value satisfies the arithmetic in lockstep;
+    // pin the value itself:
+    expect(FOREIGN_ROUND_HEADROOM).toBe(64);
+    // Last admitted:
     const atBound = latestLedger(
       [
         review('maintainer', '2026-01-05T00:00:00Z', marker(8)),

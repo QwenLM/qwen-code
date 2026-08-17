@@ -742,7 +742,10 @@ const ZH_DONE = '(?:均|都|皆)?(?:已|均已|都已)?(?:完成|完毕|结束|�
 const ZH_BUDGET_TAIL =
   '(?:[，,、]?\\s*(?:未触及|未达到|未超出|未用尽|没有触及|在|不超过)' +
   '(?:工具)?(?:调用)?预算(?:上限|限制|范围内)?)?';
-const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
+// ？ (U+FF1F) and 、 (U+3001) mirror the fold key's trailing strip:
+// a wrapped placeholder's inner text must judge identically to its
+// bare form, which loses those tails before the classifier sees it.
+const ZH_TAIL = '[。．.!！…,，;；:：？、\\s]*$';
 // NO whitespace between the pieces. Four optional groups chained across `\s*`
 // is the overlapping-quantifier shape this module's header bans and its
 // 'stays linear on pathological inputs' test exists for — and Chinese does not

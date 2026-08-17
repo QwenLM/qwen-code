@@ -3297,6 +3297,56 @@ describe('runBuildTest', () => {
       expect(floored.note).not.toContain('completed with no suite to run');
     });
 
+    it('a continuation that runs suites drops the stale endedBeforeTests stamp', () => {
+      // The stamp is a phase-level claim — "the test phase ENTERED and ran
+      // nothing" — and the merge must recompute it for the same staleness
+      // reason it recomputes `ok`, `note`, and `caveat`: a continuation that
+      // runs the starved suites falsifies it. Persisting the stale stamp
+      // beside a non-empty test[] would assert "nothing ran" for a run that
+      // ran — and the stamp exists so a reader never has to parse prose.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a', 'packages/b'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [],
+          ok: true,
+          endedBeforeTests: true,
+          timedOut: [],
+          note:
+            'the whole-call budget (16s) was spent with 3 suite(s) still ' +
+            'to run — not run: packages/a, packages/b, packages/core',
+          testScope: {
+            workspaces: [],
+            notRun: ['packages/a', 'packages/b', 'packages/core'],
+          },
+        }),
+      );
+
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: okResult,
+      });
+
+      expect(rep.test).toHaveLength(3);
+      expect(rep.ok).toBe(true);
+      // Suites ran, so the stamp is now false and must not survive the merge.
+      expect(rep.endedBeforeTests).toBeUndefined();
+      expect(JSON.stringify(rep)).not.toContain('"endedBeforeTests"');
+    });
+
     it('keeps reporting work left when a retry is killed AGAIN by the budget', () => {
       // The ordinary outcome when an expensive suite is admitted late: it is
       // re-clamped rather than finished. Reporting that as a completed run
@@ -3902,13 +3952,23 @@ describe('runBuildTest', () => {
         },
         // The two newest clauses need their own witnesses too: a corrupted
         // stamp must refuse here, not steer the nothing-to-resume message
-        // off a non-boolean truthiness ('"buildOnly": "yes"' fails
-        // `=== true` and would read as a completed zero-suite run).
+        // off a non-boolean truthiness ('"buildOnly": "yes"' or
+        // '"endedBeforeTests": "yes"' fails `=== true` and would read as a
+        // completed zero-suite run).
         {
           toolchain: 'npm',
           affected: ['packages/core'],
           ok: true,
           buildOnly: 'yes',
+          test: [],
+          build: [],
+          timedOut: [],
+        },
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: true,
+          endedBeforeTests: 'yes',
           test: [],
           build: [],
           timedOut: [],

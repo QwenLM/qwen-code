@@ -465,6 +465,13 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);
     }
+    // A wrapped placeholder's inner tail judges identically to the bare
+    // form: bare `无？`/`无、` lose those tails to the fold-key strip before
+    // the classifier sees them, so the wrapped forms drop too — identical
+    // content cannot split bare-vs-wrapped.
+    for (const line of ['Budget gap: （无？）', 'Budget gap: （无、）']) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
     // Only a SYMMETRIC pair unwraps, and a real gap inside full-width
     // parens survives — over-disclosure is the safe direction.
     expect(

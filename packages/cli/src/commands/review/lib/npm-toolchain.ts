@@ -383,6 +383,12 @@ function resumeNpmToolchain(
     // Recomputed, not inherited: the previous `false` may have been nothing
     // but the clamped timeout this call just replaced with a pass.
     ok: previous.build.every(succeeded) && mergedTest.every(succeeded),
+    // Recomputed for the same staleness reason: the stamp claims the test
+    // phase ENTERED and ran nothing, which any suite in `mergedTest`
+    // falsifies. A continuation that ran none keeps it — the claim still
+    // holds then. JSON.stringify drops the undefined key.
+    endedBeforeTests:
+      mergedTest.length === 0 ? previous.endedBeforeTests : undefined,
     timedOut,
     // REPLACED, not appended. The note being continued says things that were
     // true when it was written and are not now — "the whole-call budget was

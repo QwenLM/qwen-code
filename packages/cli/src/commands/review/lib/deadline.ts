@@ -538,7 +538,7 @@ export function budgetStopDisclosure(round: number | undefined): {
     subject: 'reverse audit',
     reason: `stopped before ${which} by the ${BUDGET_STOP_PHRASE}`,
     subjectZh: '反向审计',
-    reasonZh: `评审时间预算不足，未能开始${whichZh}`,
+    reasonZh: `${BUDGET_STOP_PHRASE_ZH}不足，未能开始${whichZh}`,
   };
 }
 
@@ -578,7 +578,7 @@ export function roundCapStopDisclosure(cap: number): {
     subject: 'reverse audit',
     reason: `did not converge within the ${ROUND_CAP_PHRASE} of ${cap}`,
     subjectZh: '反向审计',
-    reasonZh: `在 ${cap} 轮的反审轮数上限内未收敛`,
+    reasonZh: `在 ${cap} 轮的${ROUND_CAP_PHRASE_ZH}内未收敛`,
   };
 }
 

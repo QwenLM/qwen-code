@@ -1022,8 +1022,14 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // the phrase. A substring-of-phrase splice dropped exactly that entry
     // from the posted body: the review capped and withheld the anchor for a
     // security scope the rendered body never named — the module's contract
-    // is that a disclosed gap reaches the author.
-    const plan = coveredPlan();
+    // is that a disclosed gap reaches the author. A PR plan, so a marker can
+    // actually be minted: without prNumber the anchor decision never runs
+    // (`!isPr` returns null first), and the withholding assertion below
+    // passed whatever the decision — vacuous.
+    const plan = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
     writeBudgetStop(
       plan,
       {
@@ -1035,9 +1041,17 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     const freeForm =
       'security — the review time budget ended the round before the security relaunch returned evidence';
-    const r = composeReview(
-      base({ planPath: plan, unreviewedDimensions: [freeForm] }),
-    );
+    // Built directly, not through base(): its default `planPath:
+    // coveredPlan()` rewrites the shared plan.json fixture, dropping this
+    // test's prNumber/fetchedSha before the override takes effect.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [freeForm],
+    });
     // Rendered: the author sees the security scope by name…
     expect(r.body).toContain(`Not reviewed: ${freeForm}.`);
     // …beside the structural stop line, not instead of it…
@@ -1045,8 +1059,11 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       'reverse audit — stopped before round 4 by the review time budget',
     );
     // …and the entry still counts against the anchor (not a relay, not
-    // depth-only): the marker is withheld, exactly as when it was spliced.
-    expect(r.body).not.toContain('"sha"');
+    // depth-only): the minted marker's sha is withheld, exactly as when it
+    // was spliced — asserted on the parsed ledger, so a reclassification
+    // that LET the anchor ride fails here.
+    expect(parseLedger(r.body)?.round).toBe(1);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
   });
 
   it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
