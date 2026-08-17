@@ -91,11 +91,20 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     // file UNDER a directory merely named Dockerfile.* is not a Dockerfile.
     ['Dockerfile.d/README.md', false],
     ['docker/Dockerfile.prod/app.conf', false],
+    // The hadolint arm narrows pathTool's basename-prefix branch for the
+    // brief: a document about Dockerfiles is prose, not a build recipe.
+    ['docs/dockerfile.md', false],
+    ['docs/dockerfile.best-practices.md', false],
     // A test outside the script layer is not handed a shell syllabus, and a
     // document that merely talks about one is not code.
     ['src/pay.test.ts', false],
     ['scripts/build.js', false],
     ['docs/how-to-run.sh.md', false],
+    // The security checklist's script arm stops at the two workflow-helper
+    // conventions under .github: which scripts a workflow calls beyond them
+    // is content-defined, and a path matcher that cannot see run: lines
+    // must not pretend otherwise.
+    ['scripts/triage.py', false],
     // Extensionless hooks are shellchecked by toolFor's shebang branch,
     // which reads content; matches() sees the path alone and cannot tell a
     // hook from a README, so it declines to guess — a visible decision.
@@ -318,6 +327,65 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     // The receipt: a lane and a mechanism, or it is a worry, not a finding.
     expect(out).toMatch(/If you cannot name the lane, you do not have one/);
   });
+
+  it('keeps the lane heading in diff order — no JVM-layout demotion', () => {
+    // The demotion that pushes src/test paths past the heading cap belongs
+    // to the JAVA rule's own scoping. The lane rule's first blocker bullet
+    // is written ABOUT the test scripts, so its heading must keep showing
+    // them — under the cap they are the first files owed the inventory
+    // question, not the first elided.
+    const fixtures = [
+      'src/test/resources/scripts/deploy.sh',
+      'src/test/resources/scripts/provision.sh',
+      'src/test/resources/scripts/teardown.sh',
+    ];
+    const prod = Array.from({ length: 10 }, (_, i) => `scripts/s${i}.sh`);
+    const out = pathRulesFor([...fixtures, ...prod]);
+    const heading =
+      out.split('\n').find((l) => l.startsWith('### Shell and CI scripts')) ??
+      '';
+    for (const f of fixtures) {
+      expect(heading).toContain(f);
+    }
+  });
+});
+
+describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', () => {
+  // A pull request's file paths are attacker-controlled and flow uncapped
+  // into matches() — git accepts a 96,481-character path — so a matcher
+  // that backtracks quadratically stalls every agent-brief build of the
+  // review synchronously: the JAVA checklist in this file grades exactly
+  // that shape Critical. The bound is generous to slow runners; linear
+  // matchers finish these inputs in microseconds.
+  const BOUND_MS = 250;
+
+  const msOf = (fn: () => unknown): number => {
+    const t0 = performance.now();
+    fn();
+    return performance.now() - t0;
+  };
+
+  it("the workflow rule's script arm pays no nested-quantifier cost", () => {
+    // Many segments and no dot anywhere: the arm never matches, and a
+    // nested pair of unbounded quantifiers pays that failed match once per
+    // split point — quadratic in the path length.
+    const path = `.github/actions/${'a/'.repeat(48_000)}a`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it("the lane rule's scripts-test arm pays no per-anchor cost", () => {
+    // A scripts/ directory at every level: a leading anchor followed by a
+    // backtracking suffix pays the failed suffix once per anchor.
+    const path = `scripts/${'scripts/'.repeat(40_000)}x`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it('pathTool pays no per-anchor cost on a repeated workflows prefix', () => {
+    // The lane rule routes every path through pathTool, whose workflow
+    // regex pays its failed suffix once per anchor whose prefix matches.
+    const path = `.github/workflows/${'.github/workflows/'.repeat(16_000)}x`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
 });
 
 describe('pathRulesFor — the Java/JVM rule', () => {

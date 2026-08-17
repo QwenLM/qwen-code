@@ -139,7 +139,14 @@ interface PlanFile {
 export function pathTool(path: string): LintTool | null {
   const p = path.toLowerCase();
   const base = basename(p);
-  if (/(^|\/)\.github\/workflows\/.+\.ya?ml$/.test(p)) {
+  // Two linear checks — a directory test plus an end-anchored suffix — not
+  // one anchored-then-unbounded regex: PR paths are attacker-controlled,
+  // and a repeatable anchor followed by a backtracking quantifier is
+  // quadratic on `.github/workflows/.github/workflows/…` inputs.
+  if (
+    /(?:^|\/)\.github\/workflows\//.test(p) &&
+    /(?:^|\/)[^/]+\.ya?ml$/.test(p)
+  ) {
     return 'actionlint';
   }
   if (

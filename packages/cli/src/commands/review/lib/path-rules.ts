@@ -40,20 +40,27 @@ export interface PathRule {
   title: string;
   /** Does this rule govern `path`? */
   matches(path: string): boolean;
+  /**
+   * Paths the rule's own checklist scopes out. `describePaths` lists them
+   * after the rest so a capped heading spends its names on the paths the
+   * checklist is written for; a rule without one keeps diff order.
+   */
+  outOfScope?(path: string): boolean;
   /** The checklist, agent-facing. */
   checklist: string;
 }
 
 const GITHUB_ACTIONS: PathRule = {
   title: 'GitHub Actions workflows',
-  // Scripts the workflow calls are included — under `.github/scripts/**`
-  // and under the composite actions that invoke them, with one
-  // script-extension class for both so a README or data file there is not
-  // governed — because the checklist's "scripts the workflow calls are
-  // part of the workflow" paragraph is owed to a script-only diff just as
-  // much as to the workflow that calls it.
+  // Scripts under the two workflow-helper conventions — `.github/scripts/**`
+  // and `.github/actions/*/**` — are included, with one script-extension
+  // class for both so a README or data file there is not governed. That is
+  // deliberately narrower than "the scripts the workflow calls": the full
+  // class is content-defined (this repository's own workflows call root
+  // `scripts/*.js`), and a path matcher that cannot see `run:` lines must
+  // not approximate it further than the conventions.
   matches: (p) =>
-    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/action\.ya?ml|(?:actions\/.+\/|scripts\/).+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))$/i.test(
+    /^\.github\/(workflows\/.+\.ya?ml|actions\/.+\/action\.ya?ml|(?:actions\/(?:[^/]+\/)+|scripts\/(?:[^/]+\/)*)[^/]+\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|ksh|dash|ps1|bat|cmd|rb|pl))$/i.test(
       p,
     ),
   checklist: `A workflow is not configuration. It is code that runs on the project's own runners, with the repository's credentials, and some of its inputs come from strangers. The classes below are invisible to a reader looking for "bugs" in YAML.
@@ -90,17 +97,22 @@ const SHELL_LANES: PathRule = {
   // the lane syllabus too — only add such classes there. The zsh/PowerShell
   // extensions stay a deliberate superset of pathTool: shellcheck refuses
   // zsh, but the lanes that run these files are what this syllabus exists
-  // for.
+  // for. The hadolint arm drops pathTool's basename-prefix over-match on
+  // documents (`dockerfile.md`): prose about a Dockerfile has no lanes.
+  // The scripts arm is spelled as end-anchored suffix checks plus a
+  // directory check, not one leading-anchored regex: PR paths are
+  // attacker-controlled, and a `(?:^|\/)scripts\/` anchor followed by a
+  // backtracking `.+` suffix is quadratic on `scripts/scripts/…` paths.
   matches: (p) => {
     const tool = pathTool(p);
     return (
       tool === 'shellcheck' ||
-      tool === 'hadolint' ||
+      (tool === 'hadolint' && !/\.(?:md|txt|ya?ml|json)$/i.test(p)) ||
       /\.(zsh|ps1|bat|cmd)$/i.test(p) ||
       GITHUB_ACTIONS.matches(p) ||
-      /(?:^|\/)scripts\/(?:.+\.(?:test|spec)\.[cm]?[jt]sx?|tests\/vitest\.config\.[cm]?[jt]sx?)$/i.test(
-        p,
-      )
+      /(?:^|\/)scripts\/tests\/vitest\.config\.[cm]?[jt]sx?$/i.test(p) ||
+      (/(?:^|\/)scripts\//i.test(p) &&
+        /(?:^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(p))
     );
   },
   checklist: `A shell script's behaviour is a property of the **host** that runs it, and a test's greenness is a property of the **lanes** that run it. Neither is in the diff, and neither is in your own shell: you are one host, and this pull request's checks are a subset of the lanes. No dimension asks which lanes exist, so a change that is green everywhere you can see it lands red where nobody looked.
@@ -122,6 +134,7 @@ const SHELL_LANES: PathRule = {
 const JAVA: PathRule = {
   title: 'Java / JVM performance',
   matches: (p) => /\.java$/i.test(p),
+  outOfScope: isOutOfScope,
   checklist: `A Java change's most expensive regressions are decided by the JVM, not by anything a reader can see in the source: HotSpot chooses what to inline, what to scalar-replace, and what to compile at all — and a one-line change can flip each of those on a hot path. The general performance lens (N+1, repeated work, data structures) sees none of it.
 
 **You are reviewing this diff, not auditing this file.** A JVM-cost weakness the code already had, on a line this change does not touch, is out of scope — the same rule as everywhere else. What is in scope: a line this diff **adds or changes**, and a cheap path this diff **makes hot** (a new caller in a request loop, a call moved inside a loop). Test sources (\`src/test/**\`), \`package-info\`/\`module-info\`, and generated sources are out of scope for the hot-path items — nothing there is hot.
@@ -195,14 +208,16 @@ function isOutOfScope(p: string): boolean {
  * few and a count; the checklist, not the path list, is what the heading is
  * for.
  */
-function describePaths(which: readonly string[]): string {
+function describePaths(rule: PathRule, which: readonly string[]): string {
   const CAP = 10;
-  // Production paths before out-of-scope paths: the hot-path items this heading
-  // exists to introduce do not apply to test, generated, or info-only sources,
-  // so a PR that is mostly such files must not fill the heading with paths the
-  // rule explicitly scopes out.
-  const prod = which.filter((p) => !isOutOfScope(p));
-  const rest = which.filter((p) => isOutOfScope(p));
+  // Paths a rule's own checklist scopes out (the JAVA rule's test, generated,
+  // and info-only sources) go after the paths the checklist is written for, so
+  // a PR that is mostly such files must not fill the capped heading with them.
+  // A rule without such a scoping keeps diff order — the lane rule's test
+  // scripts are its primary subject, not noise to demote.
+  const demoted = rule.outOfScope ?? (() => false);
+  const prod = which.filter((p) => !demoted(p));
+  const rest = which.filter((p) => demoted(p));
   const ordered = [...prod, ...rest];
   if (ordered.length <= CAP) {
     return ordered.join(', ');
@@ -223,7 +238,12 @@ export function pathRulesFor(paths: readonly string[]): string {
   const parts = ['## Rules for the files in front of you', ''];
   for (const r of hit) {
     const which = paths.filter((p) => r.matches(p));
-    parts.push(`### ${r.title} — ${describePaths(which)}`, '', r.checklist, '');
+    parts.push(
+      `### ${r.title} — ${describePaths(r, which)}`,
+      '',
+      r.checklist,
+      '',
+    );
   }
   return parts.join('\n').trimEnd();
 }
