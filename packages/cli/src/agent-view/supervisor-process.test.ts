@@ -2396,17 +2396,21 @@ describe('Agent View supervisor process helpers', () => {
       ).resolves.toEqual({ sessionId: result.sessionId, respawned: true });
 
       await vi.advanceTimersByTimeAsync(10_000);
-      // The fallback fired for the pids captured at schedule time (the
-      // respawn's own killStoredWorkerPids accounts for the first SIGTERM).
-      await vi.waitFor(() => {
-        const fallbackSignals = killSpy.mock.calls.filter(
-          ([pid, signal]) => pid === 999_999_001 && signal === 'SIGTERM',
-        ).length;
-        expect(fallbackSignals).toBeGreaterThanOrEqual(2);
-      });
+      // The fallback verifies the worker record BEFORE signaling: the
+      // respawn rewrote it with fresh pids, so the stored pids this stop
+      // captured are stale and receive no fallback signal at all.
+      await vi.waitFor(() =>
+        expect(
+          readAgentViewSessionState(result.sessionId, { globalDir }),
+        ).resolves.toMatchObject({
+          sessionState: 'starting',
+          processState: 'starting',
+        }),
+      );
       const signalled = killSpy.mock.calls
         .filter(([, signal]) => signal === 'SIGTERM')
         .map(([pid]) => pid);
+      expect(signalled).not.toContain(999_999_001);
       expect(signalled).not.toContain(999_999_003);
       expect(signalled).not.toContain(999_999_004);
       // …and did not flip the respawned session back to stopped.
@@ -2498,6 +2502,7 @@ describe('Agent View supervisor process helpers', () => {
     const token = await readWorkerTokenForTest(result.sessionId, globalDir);
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let verdict: Awaited<ReturnType<typeof readAgentViewSessionState>>;
     try {
       // A fresh supervisor has no in-memory host, so the stop queues a
       // control and schedules the stored-pid fallback (every stored pid
@@ -2511,6 +2516,13 @@ describe('Agent View supervisor process helpers', () => {
         recoveredHandler.stop?.({ sessionId: result.sessionId }),
       ).resolves.toEqual({ sessionId: result.sessionId, stopped: true });
 
+      // Read the stop verdict before advancing timers: the fallback's
+      // detached markStoppedSession write settles during the advance, and
+      // a drain keyed on a read taken after that write can never observe
+      // a change (ordering race, not a poll-budget problem).
+      verdict = await readAgentViewSessionState(result.sessionId, {
+        globalDir,
+      });
       await vi.advanceTimersByTimeAsync(10_000);
       // The fallback settled the stop against the stored record, so the
       // superseded stop control is gone before any replacement worker polls.
@@ -2526,11 +2538,8 @@ describe('Agent View supervisor process helpers', () => {
     }
 
     // Drain the fallback's detached markStoppedSession write before
-    // deleting the store; the stop verdict itself already landed during
-    // stop(), so key the drain on the fallback's updatedAt bump.
-    const verdict = await readAgentViewSessionState(result.sessionId, {
-      globalDir,
-    });
+    // deleting the store; the verdict read above predates it, so the
+    // updatedAt bump is guaranteed to be observable.
     await waitForSessionState(
       result.sessionId,
       globalDir,
