@@ -2647,9 +2647,10 @@ describe('checkout self-heal', () => {
     // Symmetric half of the invariant: a double checkout failure must stay
     // red so the job never proceeds into review without code.
     expect(retry['continue-on-error']).toBeUndefined();
-    // The wipe step gets no continue-on-error either: its only deliberate
-    // nonzero exit is the `:?` abort on a dropped GITHUB_WORKSPACE, which
-    // must fail the job loud rather than degrade to a log annotation.
+    // The wipe step gets no continue-on-error either: its deliberate nonzero
+    // exits are the `:?` abort on a dropped GITHUB_WORKSPACE and the
+    // plain-directory refusal, both of which must fail the job loud rather
+    // than degrade to a log annotation.
     expect(wipe['continue-on-error']).toBeUndefined();
   });
 
@@ -2825,31 +2826,55 @@ describe('checkout self-heal', () => {
     }
   });
 
+  it('refuses a non-directory workspace instead of wiping nothing', () => {
+    // The symlink test short-circuits at `[ -L ]`, leaving the `[ ! -d ]`
+    // disjunct unpinned: a plain file at the workspace path must hit the
+    // same loud refusal, because find on a non-directory matches nothing
+    // and the step would log a successful wipe while deleting nothing.
+    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-file-'));
+    const file = join(parent, 'workspace');
+    writeFileSync(file, 'x');
+    try {
+      expect(() =>
+        runWipe({ GITHUB_WORKSPACE: file }, { stdio: 'pipe' }),
+      ).toThrow();
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('seals every override channel into the wipe step', () => {
     // With the allowlist gone, the runner-set GITHUB_WORKSPACE is the
     // wipe's only path input and the `find … -exec rm -rf` is unguarded,
     // so this premise carries the whole safety story. Sealed here are the
-    // channels that DO propagate into a later step: declarative `env:`
-    // entries at every scope (the wipe step's own block included),
-    // `BASH_ENV` entries (the wipe's bash sources the pointed-at file
-    // before its `:?` guard runs), `$GITHUB_PATH` writes (PATH promotion
-    // repoints the bare find/rm the user-mode leg resolves), and
-    // `$GITHUB_ENV` writes of unprotected names. `export` in a run block
-    // dies at the step boundary and the runner itself drops `$GITHUB_ENV`
-    // writes of `GITHUB_*` names, so neither is checked here.
+    // channels that DO propagate into the wipe step: declarative `env:`
+    // entries at workflow, job, and wipe-step scope (step-local blocks on
+    // earlier steps die with their step), matched by dangerous name class
+    // because a named list can never enumerate the surface; `$GITHUB_PATH`
+    // and `$GITHUB_ENV` writes in pre-wipe run blocks, in both the bare
+    // and the braced spelling; and the pre-wipe action set, because a
+    // `uses:` step's runtime core.addPath / core.exportVariable writes
+    // have no run text to scan. `export` in a run block dies at the step
+    // boundary, and `$GITHUB_ENV` writes of runtime-context names (e.g.
+    // GITHUB_WORKSPACE) are overwritten when the runner re-applies its
+    // runtime environment at step setup, so neither is checked here.
     const doc = parse(workflow);
-    expect(doc.env?.GITHUB_WORKSPACE).toBeUndefined();
-    expect(doc.jobs['review-pr'].env?.GITHUB_WORKSPACE).toBeUndefined();
-    expect(doc.env?.BASH_ENV).toBeUndefined();
-    expect(doc.jobs['review-pr'].env?.BASH_ENV).toBeUndefined();
-    for (const step of steps.slice(0, nameIndex(WIPE))) {
-      expect(step.env?.GITHUB_WORKSPACE).toBeUndefined();
-      expect(step.env?.BASH_ENV).toBeUndefined();
-      expect(step.run ?? '').not.toContain('$GITHUB_ENV');
-      expect(step.run ?? '').not.toContain('$GITHUB_PATH');
+    const dangerousEnv = (name) =>
+      /^(GITHUB_WORKSPACE|PATH|BASH_ENV|CDPATH|ENV)$/.test(name) ||
+      name.startsWith('LD_') ||
+      name.startsWith('BASH_FUNC_');
+    for (const scope of [doc.env, doc.jobs['review-pr'].env, wipe.env]) {
+      expect(Object.keys(scope ?? {}).filter(dangerousEnv)).toEqual([]);
     }
-    expect(wipe.env?.GITHUB_WORKSPACE).toBeUndefined();
-    expect(wipe.env?.BASH_ENV).toBeUndefined();
+    for (const step of steps.slice(0, nameIndex(WIPE))) {
+      if (step.uses !== undefined) {
+        expect(step.uses).toBe(
+          'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+        );
+      }
+      expect(step.run ?? '').not.toMatch(/\$\{?GITHUB_(ENV|PATH)\b/);
+    }
   });
 });
 
