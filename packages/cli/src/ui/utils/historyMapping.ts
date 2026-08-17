@@ -59,11 +59,19 @@ function isUserTextContent(content: Content): boolean {
   return content.parts.some((part) => 'text' in part && part.text);
 }
 
+/**
+ * Finds the last successful *summarizing* compression marker. Fast
+ * (rule-based) compression markers are excluded: `/compress-fast` removes no
+ * user prompts from the API history and inserts no summary prefix, so its
+ * marker is not a truncation boundary — treating it as one collapses the
+ * rewind anchor and silently drops the pre-marker history.
+ */
 function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
   return history.findLastIndex(
     (item) =>
       item.type === 'compression' &&
-      item.compression.compressionStatus === CompressionStatus.COMPRESSED,
+      item.compression.compressionStatus === CompressionStatus.COMPRESSED &&
+      item.compression.compressionKind !== 'fast',
   );
 }
 

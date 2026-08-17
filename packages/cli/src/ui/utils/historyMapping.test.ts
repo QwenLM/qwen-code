@@ -63,6 +63,7 @@ function geminiItem(id: number): HistoryItem {
 function compressionItem(
   id: number,
   compressionStatus = CompressionStatus.COMPRESSED,
+  compressionKind: 'summarize' | 'fast' = 'summarize',
 ): HistoryItem {
   return {
     type: 'compression',
@@ -72,6 +73,7 @@ function compressionItem(
       originalTokenCount: 100,
       newTokenCount: 40,
       compressionStatus,
+      compressionKind,
     },
   } as HistoryItem;
 }
@@ -346,6 +348,113 @@ describe('computeApiTruncationIndex', () => {
         modelContent('response 2'),
       ];
 
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
+    });
+  });
+
+  describe('with fast (non-summarizing) compression markers', () => {
+    // /compress-fast keeps every user prompt in the API history and inserts
+    // no summary prefix, so its marker must not act as a rewind boundary.
+    // Shaped after the report in #9320: rewinding to the first post-marker
+    // turn used to collapse the anchor to the startup entry and silently
+    // drop the entire pre-marker conversation.
+    const fastCompressedHistory = () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        geminiItem(2),
+        userItem(3, 'pre 2'),
+        geminiItem(4),
+        userItem(5, 'pre 3'),
+        geminiItem(6),
+        compressionItem(7, CompressionStatus.COMPRESSED, 'fast'),
+        userItem(8, 'post 1'),
+        geminiItem(9),
+        userItem(10, 'post 2'),
+        geminiItem(11),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('pre 1'),
+        modelContent('response 1'),
+        userContent('pre 2'),
+        modelContent('response 2'),
+        userContent('pre 3'),
+        modelContent('response 3'),
+        userContent('post 1'),
+        modelContent('response post 1'),
+        userContent('post 2'),
+        modelContent('response post 2'),
+      ];
+      return { ui, api };
+    };
+
+    it('keeps the full pre-marker history when rewinding to the first post-marker turn', () => {
+      const { ui, api } = fastCompressedHistory();
+      // Keep startup + all three pre-marker turns, truncate before 'post 1'.
+      expect(computeApiTruncationIndex(ui, 8, api)).toBe(7);
+    });
+
+    it('maps later post-marker turns against the full history', () => {
+      const { ui, api } = fastCompressedHistory();
+      // 4 real user turns precede 'post 2' → truncate before idx 9.
+      expect(computeApiTruncationIndex(ui, 10, api)).toBe(9);
+    });
+
+    it('allows rewinding to turns before a fast-compression marker', () => {
+      const { ui, api } = fastCompressedHistory();
+      // Fast compression absorbs no prompts, so pre-marker turns stay
+      // reachable (summarizing compression would return -1 here).
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
+    it('still blocks turns absorbed by a later summarizing compression', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre fast'),
+        geminiItem(2),
+        compressionItem(3, CompressionStatus.COMPRESSED, 'fast'),
+        userItem(4, 'between compressions'),
+        geminiItem(5),
+        compressionItem(6, CompressionStatus.COMPRESSED, 'summarize'),
+        userItem(7, 'post summarize'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post summarize'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 7, api)).toBe(3);
+    });
+
+    it('treats legacy markers without a kind as summarizing', () => {
+      const legacyMarker: HistoryItem = {
+        type: 'compression',
+        id: 3,
+        compression: {
+          isPending: false,
+          originalTokenCount: 100,
+          newTokenCount: 40,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      } as HistoryItem;
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre-compression prompt'),
+        geminiItem(2),
+        legacyMarker,
+        userItem(4, 'post compression'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post compression'),
+      ];
+
+      // Pre-marker turns stay unreachable, matching pre-fix behavior for
+      // sessions persisted before compressionKind existed.
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
       expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
     });
   });
