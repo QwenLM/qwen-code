@@ -102,7 +102,12 @@ const OutputCard: FC<{
           <div className="flex justify-center border-t border-[var(--app-input-border)] pt-1">
             <button
               type="button"
-              onClick={() => setIsExpanded(!isExpanded)}
+              onClick={(event) => {
+                event.stopPropagation();
+                setIsExpanded(!isExpanded);
+              }}
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Collapse output' : 'Expand output'}
               className="text-[var(--app-secondary-foreground)] text-[0.8em] hover:text-[var(--app-primary-foreground)] cursor-pointer bg-transparent border-none px-2 py-1 rounded hover:bg-[var(--app-input-background)] transition-colors"
             >
               {isExpanded ? '▲ Collapse' : '▼ Show more'}
