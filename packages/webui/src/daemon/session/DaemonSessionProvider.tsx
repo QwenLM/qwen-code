@@ -168,16 +168,46 @@ const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
 // UI stuck connecting for hours.
 const RESTORE_IN_PROGRESS_RETRY_MAX_MS = 60_000;
 
+const RECORD_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function assistantDoneFromTurnEvent(
   event: DaemonEvent,
   reason: string,
 ): DaemonUiEvent {
   const serverTimestamp = extractServerTimestamp(event);
+  const data = isRecord(event.data) ? event.data : undefined;
+  const rawBranchPoint =
+    event.type === 'turn_complete' &&
+    reason === 'end_turn' &&
+    isRecord(data?.['branchPoint'])
+      ? data['branchPoint']
+      : undefined;
+  const assistantRecordUuid =
+    typeof rawBranchPoint?.['assistantRecordUuid'] === 'string'
+      ? rawBranchPoint['assistantRecordUuid']
+      : undefined;
+  const checkpointUuid =
+    typeof rawBranchPoint?.['checkpointUuid'] === 'string'
+      ? rawBranchPoint['checkpointUuid']
+      : undefined;
+  const branchPointValid =
+    assistantRecordUuid !== undefined &&
+    RECORD_UUID_PATTERN.test(assistantRecordUuid) &&
+    checkpointUuid !== undefined &&
+    RECORD_UUID_PATTERN.test(checkpointUuid);
   return {
     type: 'assistant.done',
     reason,
     eventId: event.id,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(branchPointValid
+      ? {
+          sourceRecordIds: [assistantRecordUuid],
+          branchRecordId: checkpointUuid,
+        }
+      : {}),
   };
 }
 
