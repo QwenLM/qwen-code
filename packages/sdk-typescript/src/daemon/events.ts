@@ -10,6 +10,7 @@ import type {
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionOutcome,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
@@ -664,6 +665,14 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonSettingsChangedData {
+  key: string;
+  value?: unknown;
+  scope?: string;
+  mutation?: DaemonSkillToggleMutation;
+  [key: string]: unknown;
+}
+
 export interface DaemonTrustChangeRequestedData {
   workspaceCwd: string;
   desiredState: 'trusted' | 'untrusted';
@@ -1073,7 +1082,7 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
 >;
 export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
-  Record<string, unknown>
+  DaemonSettingsChangedData
 >;
 export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
   'trust_change_requested',
@@ -1740,11 +1749,8 @@ export function asKnownDaemonEvent(
         ? (event as DaemonToolToggledEvent)
         : undefined;
     case 'settings_changed':
-      return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<
-            'settings_changed',
-            Record<string, unknown>
-          >)
+      return isSettingsChangedData(event.data)
+        ? (event as DaemonSettingsChangedEvent)
         : undefined;
     case 'trust_change_requested':
       return isTrustChangeRequestedData(event.data)
@@ -2996,6 +3002,43 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
     isRecord(value) &&
     isNonEmptyString(value['toolName']) &&
     typeof value['enabled'] === 'boolean'
+  );
+}
+
+function isDaemonSkillToggleMutation(
+  value: unknown,
+): value is DaemonSkillToggleMutation {
+  if (!isRecord(value)) return false;
+  const activation = value['activation'];
+  const skills = value['skills'];
+  return (
+    isNonEmptyString(value['id']) &&
+    value['kind'] === 'skill_toggle' &&
+    Array.isArray(skills) &&
+    skills.length > 0 &&
+    skills.every(
+      (skill) =>
+        isRecord(skill) &&
+        isNonEmptyString(skill['name']) &&
+        typeof skill['enabled'] === 'boolean',
+    ) &&
+    (activation === 'applied' ||
+      activation === 'deferred' ||
+      activation === 'partial') &&
+    isFiniteNumber(value['sessionsRefreshed']) &&
+    isFiniteNumber(value['sessionsFailed'])
+  );
+}
+
+export function isSettingsChangedData(
+  value: unknown,
+): value is DaemonSettingsChangedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    (value['scope'] === undefined || typeof value['scope'] === 'string') &&
+    (value['mutation'] === undefined ||
+      isDaemonSkillToggleMutation(value['mutation']))
   );
 }
 

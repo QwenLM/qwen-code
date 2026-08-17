@@ -2838,6 +2838,76 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes skill-toggle mutation metadata on settings_changed', () => {
+    const mutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_changed', {
+        key: 'skills.disabled',
+        value: [],
+        scope: 'workspace',
+        mutation,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'skills.disabled',
+        scope: 'workspace',
+        value: [],
+        mutation,
+      }),
+    ]);
+  });
+
+  it('keeps settings_changed when skill-toggle mutation metadata is malformed', () => {
+    const validMutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const malformed = [
+      { kind: 'skill_toggle' },
+      { ...validMutation, kind: 'other' },
+      { ...validMutation, activation: 'soon' },
+      { ...validMutation, skills: [] },
+      { ...validMutation, skills: 'not-an-array' },
+      { ...validMutation, sessionsFailed: Number.POSITIVE_INFINITY },
+      { ...validMutation, skills: [{ name: '', enabled: true }] },
+      {
+        ...validMutation,
+        skills: [{ name: 'web-search', enabled: 'yes' }],
+      },
+    ];
+    for (const mutation of malformed) {
+      const events = normalizeDaemonEvent(
+        envelopeOf('settings_changed', {
+          key: 'skills.disabled',
+          value: ['skill-a'],
+          scope: 'workspace',
+          mutation,
+        }),
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'workspace.settings.changed',
+          key: 'skills.disabled',
+          value: ['skill-a'],
+        }),
+      ]);
+      expect(events[0]).not.toHaveProperty('mutation');
+    }
+  });
+
   it('normalizes settings_reloaded as a settings refresh signal', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('settings_reloaded', {
