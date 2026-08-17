@@ -13,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1618,8 +1619,14 @@ describe('qwen-triage verify hardening', () => {
     // The ported guard layers (#9265) — see the post-run wipe test for
     // what each pin catches.
     expect(wipe).toContain('realpath -m');
+    expect(wipe).toContain('realpath -m -- "$RWS"');
     expect(wipe).toContain('RUNNER_WORKSPACE:?');
     expect(wipe).toContain('"$RWS"/*');
+    // RWS-side layers: the '..' arm and the degenerate-root refusal that
+    // keeps a stripped-empty runner workspace from degenerating the
+    // allowlist pattern to `/*`.
+    expect(wipe).toContain("refusing runner workspace path containing '..'");
+    expect(wipe).toContain('runner workspace resolved to /');
   });
 
   // The wipe is the deny-by-default control, so run the real step text
@@ -1652,7 +1659,11 @@ describe('qwen-triage verify hardening', () => {
         writeFileSync(join(ws, 'package.json'), '{}');
         mkdirSync(join(ws, 'node_modules'), { recursive: true });
 
-        const res = spawnSync('bash', ['-c', wipe], {
+        // GitHub Actions runs `shell: bash` steps with `-eo pipefail`,
+        // so the battery must too: bare `bash -c` masks a failing
+        // sweep command into a green test (probed with a failing `find`
+        // stub on PATH: exit 0 here, exit 1 under the real step flags).
+        const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
           encoding: 'utf8',
           env: {
             ...process.env,
@@ -1767,10 +1778,13 @@ describe('qwen-triage verify hardening', () => {
   // The canonicalization layer needs its own pin: every bad path above
   // sits OUTSIDE the recorder dir, so the allowlist refuses them
   // identically whether `realpath -m` ran or not — deleting that line
-  // ships green against the battery. This one string-matches "$RWS"/*
-  // (it sits inside the runner workspace) and canonicalizes OUT of it,
-  // so only the realpath line can refuse it: with the line deleted the
-  // raw path passes the allowlist and reaches rm.
+  // ships green against the battery. A raw '..' spelling does not pin it
+  // either: the '..' case arm refuses that vector first, mutant or not.
+  // A symlink INSIDE the runner workspace pointing outside is the
+  // spelling only the realpath line can catch: canonicalized, it lands
+  // outside and the allowlist refuses it; with the line deleted the raw
+  // link path matches "$RWS"/* and find reaches rm through the link
+  // target.
   const extractRun = (stepName) => {
     const run = stepIn('verify', stepName)
       .match(/run: \|-\n([\s\S]*)$/)?.[1]
@@ -1780,12 +1794,12 @@ describe('qwen-triage verify hardening', () => {
   };
 
   it.skipIf(!hasGnuRealpath)(
-    'refuses an allowlist-escaping .. path via canonicalization',
+    'refuses an allowlist-escaping symlink via canonicalization',
     () => {
       const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-escape-'));
       const outside = mkdtempSync(join(tmpdir(), 'verify-wipe-outside-'));
-      mkdirSync(join(dir, 'sub'));
       writeFileSync(join(outside, 'canary'), 'x');
+      symlinkSync(outside, join(dir, 'link'));
       try {
         const calls = join(dir, 'rm-calls');
         writeFileSync(calls, '');
@@ -1808,10 +1822,10 @@ describe('qwen-triage verify hardening', () => {
               env: {
                 ...process.env,
                 PATH: `${dir}:${process.env.PATH}`,
-                // Keep the '..' spelling raw — resolving it here would
-                // canonicalize the fixture away before the script sees
-                // it.
-                GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+                // A link inside the recorder dir whose target sits
+                // outside it — no '..' component, so only canonicalization
+                // can resolve the escape.
+                GITHUB_WORKSPACE: join(dir, 'link'),
                 RUNNER_WORKSPACE: dir,
                 GITHUB_STEP_SUMMARY: join(dir, 'summary'),
               },
@@ -1846,28 +1860,31 @@ describe('qwen-triage verify hardening', () => {
     writeFileSync(join(ws, 'leftover'), 'x');
     const bin = stubRealpath();
     try {
-      const res = spawnSync(
-        'bash',
-        [
-          '-e',
-          '-o',
-          'pipefail',
-          '-c',
-          extractRun('Wipe workspace before external code'),
-        ],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            PATH: `${bin}:${process.env.PATH}`,
-            GITHUB_WORKSPACE: ws,
-            RUNNER_WORKSPACE: `${parent}/`,
-            GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+      // Both copies carry the fail-closed realpath leg; exercise each so
+      // a fail-open regression of either copy is caught.
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: `${parent}/`,
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
           },
-        },
-      );
-      expect(res.status).not.toBe(0);
-      expect(readdirSync(ws)).toEqual(['leftover']);
+        );
+        expect(res.status, `${stepName} did not fail closed`).not.toBe(0);
+        expect(readdirSync(ws), `${stepName} wiped without realpath`).toEqual([
+          'leftover',
+        ]);
+      }
     } finally {
       rmSync(parent, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
@@ -1960,6 +1977,91 @@ describe('qwen-triage verify hardening', () => {
     }
   });
 
+  // The degenerate-root arm keeps a stripped-empty RUNNER_WORKSPACE from
+  // turning the allowlist pattern into `/*` (which admits every absolute
+  // path). The reference suite covers the review workflow; each backported
+  // copy needs its own case — deleting the arm ships green otherwise.
+  it('refuses a runner workspace that resolves to / without invoking rm', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-root-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    try {
+      const calls = join(parent, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(parent, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${parent}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: '/',
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(readFileSync(calls, 'utf8'), `${stepName} invoked rm`).toBe('');
+        expect(readdirSync(ws), `${stepName} wiped`).toEqual(['leftover']);
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  // The RWS realpath line has no refusal of its own to observe, so pin it
+  // from the happy side: a RUNNER_WORKSPACE spelled with '..' that
+  // canonicalizes back to the real parent must still be allowed to wipe.
+  // Deleting the RWS realpath line leaves the raw spelling to the '..'
+  // arm, which refuses — and this test fails on that mutant.
+  it.skipIf(!hasGnuRealpath)(
+    'canonicalizes a ..-spelled runner workspace instead of refusing it',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-rwsdot-'));
+      const ws = join(parent, 'repo');
+      mkdirSync(ws);
+      try {
+        for (const stepName of [
+          'Wipe workspace before external code',
+          'Wipe workspace after external code',
+        ]) {
+          writeFileSync(join(ws, 'leftover'), 'x');
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: join(ws, '..'),
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName} refused a canonical RWS`).toBe(0);
+          expect(readdirSync(ws), `${stepName} did not wipe`).toEqual([]);
+        }
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
   // The pre-run wipe answers what an external run inherits; the
   // post-run wipe answers what it leaves behind for the next pool job.
   it('wipes the workspace after external code, on every outcome', () => {
@@ -1983,8 +2085,13 @@ describe('qwen-triage verify hardening', () => {
     // workspace. The exec tests below prove behavior; these text pins
     // catch a mutation that deletes a layer from this copy alone.
     expect(postWipe).toContain('realpath -m');
+    expect(postWipe).toContain('realpath -m -- "$RWS"');
     expect(postWipe).toContain('RUNNER_WORKSPACE:?');
     expect(postWipe).toContain('"$RWS"/*');
+    expect(postWipe).toContain(
+      "refusing runner workspace path containing '..'",
+    );
+    expect(postWipe).toContain('runner workspace resolved to /');
   });
 
   // The pre-run guard battery runs the post-run wipe too: it is a

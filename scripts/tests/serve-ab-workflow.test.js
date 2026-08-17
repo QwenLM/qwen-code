@@ -12,6 +12,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,19 @@ const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
 describe('serve-ab pre-checkout workspace wipe', () => {
+  it('runs the wipe before both checkouts', () => {
+    // Both checkouts clone into the wiped workspace; a wipe ordered after
+    // either one deletes what was just cloned, and whichever build runs
+    // first runs on the previous run's leftovers — the exact cross-PR
+    // bleed the step exists to prevent. The sister qwen-triage suite pins
+    // the same property.
+    const names = steps.map((stepItem) => stepItem.name);
+    const wipeAt = names.indexOf(WIPE);
+    expect(wipeAt).toBeGreaterThanOrEqual(0);
+    expect(wipeAt).toBeLessThan(names.indexOf('Checkout PR head'));
+    expect(wipeAt).toBeLessThan(names.indexOf('Checkout the merge-base'));
+  });
+
   it('runs only on self-hosted runners, where workspace state persists', () => {
     expect(wipe).toBeTruthy();
     // Hosted runners are ephemeral; the wipe (and its guard) exist for the
@@ -56,9 +70,17 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     // qwen-code-pr-review.yml; the exec tests below prove the behavior.
     expect(wipe.run).toContain('GITHUB_WORKSPACE:?');
     expect(wipe.run).toContain('realpath -m');
+    expect(wipe.run).toContain('realpath -m -- "$RWS"');
     expect(wipe.run).toContain('refusing to wipe suspicious workspace path');
     expect(wipe.run).toContain('RUNNER_WORKSPACE:?');
     expect(wipe.run).toContain('"$RWS"/*');
+    // RWS-side layers: the '..' arm and the degenerate-root refusal that
+    // keeps a stripped-empty runner workspace from degenerating the
+    // allowlist pattern to `/*`.
+    expect(wipe.run).toContain(
+      "refusing runner workspace path containing '..'",
+    );
+    expect(wipe.run).toContain('runner workspace resolved to /');
     // Exit contract: the wipe stays bare on purpose — under the job's
     // `-eo pipefail` a wipe that cannot clear the workspace fails the job
     // here instead of building both checkouts on top of the leftovers.
@@ -158,19 +180,21 @@ describe('serve-ab pre-checkout workspace wipe', () => {
   });
 
   it.skipIf(!hasGnuRealpath)(
-    'refuses an allowlist-escaping .. path via canonicalization',
+    'refuses an allowlist-escaping symlink via canonicalization',
     () => {
       // The bad paths above all sit outside the recorder dir, so the
       // allowlist refuses them identically whether canonicalization runs
-      // or not — they cannot pin the realpath line. This one
-      // string-matches "$RWS"/* but canonicalizes out of it, so only
-      // `realpath -m` can refuse it: with the line deleted, the raw path
-      // passes the allowlist and reaches rm (executed mutant: exit 0,
-      // canary in the call log).
+      // or not — they cannot pin the realpath line. A raw '..' spelling
+      // does not pin it either: the '..' case arm refuses that vector
+      // first, mutant or not (executed mutant: exit 1 via 'refusing to
+      // wipe path containing ..', rm log empty). A symlink INSIDE the
+      // recorder dir pointing outside is the spelling only `realpath -m`
+      // can catch: with the line deleted the raw link path matches
+      // "$RWS"/* and find reaches rm through the link target.
       const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-escape-'));
       const outside = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-outside-'));
-      mkdirSync(join(dir, 'sub'));
       writeFileSync(join(outside, 'canary'), 'x');
+      symlinkSync(outside, join(dir, 'link'));
       try {
         const calls = join(dir, 'rm-calls');
         writeFileSync(calls, '');
@@ -187,9 +211,10 @@ describe('serve-ab pre-checkout workspace wipe', () => {
             env: {
               ...process.env,
               PATH: `${dir}:${process.env.PATH}`,
-              // Keep the '..' spelling raw — resolving it here would
-              // canonicalize the fixture away before the script sees it.
-              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+              // A link inside the recorder dir whose target sits outside
+              // it — no '..' component, so only canonicalization can
+              // resolve the escape.
+              GITHUB_WORKSPACE: join(dir, 'link'),
               RUNNER_WORKSPACE: dir,
             },
           },
@@ -294,4 +319,62 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       rmSync(bin, { recursive: true, force: true });
     }
   });
+
+  // The degenerate-root arm keeps a stripped-empty RUNNER_WORKSPACE from
+  // turning the allowlist pattern into `/*` (which admits every absolute
+  // path). The reference suite covers the review workflow; this copy needs
+  // its own case — deleting the arm ships green otherwise.
+  it('refuses a runner workspace that resolves to / without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-root-'));
+    const ws = join(dir, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: '/',
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(readFileSync(calls, 'utf8')).toBe('');
+      expect(readdirSync(ws)).toEqual(['leftover']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The RWS realpath line has no refusal of its own to observe, so pin it
+  // from the happy side: a RUNNER_WORKSPACE spelled with '..' that
+  // canonicalizes back to the real parent must still be allowed to wipe.
+  // Deleting the RWS realpath line leaves the raw spelling to the '..'
+  // arm, which refuses — and this test fails on that mutant.
+  it.skipIf(!hasGnuRealpath)(
+    'canonicalizes a ..-spelled runner workspace instead of refusing it',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-rwsdot-'));
+      const ws = join(parent, 'repo');
+      mkdirSync(ws);
+      writeFileSync(join(ws, 'leftover'), 'x');
+      try {
+        runWipe({
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: join(ws, '..'),
+        });
+        expect(readdirSync(ws)).toEqual([]);
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 });
