@@ -407,6 +407,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
+      'workspace_session_live_state',
       'workspace_session_metadata',
       'voice_transcribe',
     ]);

@@ -1361,6 +1361,25 @@ export interface DaemonSessionListPage {
   truncated?: boolean;
 }
 
+export interface DaemonSessionCatalogVersion {
+  generation: string;
+  revision: number;
+}
+
+export interface DaemonSessionLiveState {
+  sessionId: string;
+  clientCount: number;
+  hasActivePrompt: boolean;
+  isWaitingForPermission: boolean;
+  isWaitingForUserQuestion: boolean;
+}
+
+export interface DaemonWorkspaceSessionLiveState {
+  v: 1;
+  catalogVersion: DaemonSessionCatalogVersion;
+  sessions: DaemonSessionLiveState[];
+}
+
 export interface DaemonWorkspaceSessionInfo {
   active: number;
   archived: number;

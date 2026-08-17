@@ -68,6 +68,7 @@ import {
   SessionShellDisabledError,
   type AcpSessionBridge,
   type BridgePromptContentBlock,
+  type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -579,6 +580,19 @@ export function registerSessionRoutes(
       archiveStates,
     });
   };
+  // Combined operation for catalog mutations whose conservative
+  // finally-semantics match (delete/archive/unarchive/close): invalidate the
+  // persisted cache scopes, then advance the runtime bridge's catalog
+  // revision. The ordering guarantees a newly exposed version never precedes
+  // the invalidation. Paths with exact no-op semantics (rename, group
+  // delete) gate the mark on an actual change instead of using this helper.
+  const invalidateSessionListsAndMarkCatalog = (
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+  ): void => {
+    invalidateSessionLists(runtime, archiveStates);
+    runtime.bridge.markSessionCatalogChanged();
+  };
   const runWithSessionListInvalidation = async <T>(
     runtime: WorkspaceRuntime,
     archiveStates: readonly SessionArchiveState[],
@@ -587,7 +601,7 @@ export function registerSessionRoutes(
     try {
       return await mutation();
     } finally {
-      invalidateSessionLists(runtime, archiveStates);
+      invalidateSessionListsAndMarkCatalog(runtime, archiveStates);
     }
   };
   const requestedSessionIdAdmission =
@@ -3569,9 +3583,12 @@ export function registerSessionRoutes(
               .killSession(result.sessionId, { requireZeroAttaches: true })
               .catch(() => false);
             if (killed) {
-              await createWorkspaceRuntimeSessionService(runtime)
+              const removed = await createWorkspaceRuntimeSessionService(
+                runtime,
+              )
                 .removeSession(result.sessionId)
-                .catch(() => {});
+                .catch(() => false);
+              if (removed) runtime.bridge.markSessionCatalogChanged();
             }
           } else {
             await runtime.bridge
@@ -3584,11 +3601,12 @@ export function registerSessionRoutes(
           if (!result.attached) {
             runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })
-              .then((killed) => {
-                if (!killed) return undefined;
-                return createWorkspaceRuntimeSessionService(
+              .then(async (killed) => {
+                if (!killed) return;
+                const removed = await createWorkspaceRuntimeSessionService(
                   runtime,
                 ).removeSession(result.sessionId);
+                if (removed) runtime.bridge.markSessionCatalogChanged();
               })
               .catch(() => {});
           } else {
@@ -5209,6 +5227,11 @@ export function registerSessionRoutes(
               if (!renamed) {
                 throw new SessionNotFoundError(sessionId);
               }
+              // The persisted rename appends a custom_title record the next
+              // catalog scan serves, so this fallback must advance the same
+              // catalog revision the live rename marks — otherwise
+              // version-watching clients keep the stale name.
+              runtime.bridge.markSessionCatalogChanged();
               effective = { displayName: displayName || undefined };
             }
             invalidateSessionLists(runtime, ['active', 'archived']);
@@ -5324,6 +5347,10 @@ export function registerSessionRoutes(
                 ? { color: rawColor as SessionGroupPresetColor | null }
                 : {}),
             });
+            invalidateSessionListsAndMarkCatalog(runtime, [
+              'active',
+              'archived',
+            ]);
             res.status(200).json({ sessionId, ...organization });
           });
         })(),
@@ -5396,6 +5423,7 @@ export function registerSessionRoutes(
           color: body['color'] as SessionGroupColor,
         }),
       );
+      invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
       res.status(201).json({ group });
     } catch (err) {
       if (sendSessionOrganizationError(res, err)) return;
@@ -5429,6 +5457,7 @@ export function registerSessionRoutes(
             },
           ),
         );
+        invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
         res.status(200).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5451,6 +5480,11 @@ export function registerSessionRoutes(
             req.params['groupId'] ?? '',
           ),
         );
+        // A delete that reports `deleted: false` changed nothing and must
+        // not advance the catalog version.
+        if (deleted) {
+          invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
+        }
         res.status(200).json({ deleted });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5493,6 +5527,7 @@ export function registerSessionRoutes(
             color: body['color'] as SessionGroupColor,
           }),
         );
+        invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
         res.status(201).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5526,6 +5561,7 @@ export function registerSessionRoutes(
             },
           ),
         );
+        invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
         res.status(200).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5547,6 +5583,11 @@ export function registerSessionRoutes(
             req.params['groupId'] ?? '',
           ),
         );
+        // A delete that reports `deleted: false` changed nothing and must
+        // not advance the catalog version.
+        if (deleted) {
+          invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
+        }
         res.status(200).json({ deleted });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -5792,6 +5833,54 @@ export function registerSessionRoutes(
     '/workspaces/:workspace/sessions',
     listWorkspaceSessionsHandler('workspace'),
   );
+
+  // Last catalog version successfully exposed per bridge by the live-state
+  // route. A newly observed version synchronously invalidates the persisted
+  // catalog cache scopes before the version is answered, so a client that
+  // reconciles with the `live A -> full catalog -> live B` handshake can
+  // never load a catalog snapshot that predates the version it observed.
+  // WeakMap: replaced bridges (runtime replacement) drop with the instance.
+  const lastExposedCatalogVersions = new WeakMap<
+    AcpSessionBridge,
+    BridgeSessionCatalogVersion
+  >();
+
+  app.get('/workspaces/:workspace/sessions/live-state', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/sessions/live-state';
+    // Strict trust gate: live state is never read from an untrusted
+    // runtime, and an unknown selector never falls back to primary.
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (runtime === null) return;
+    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
+    const bridge = runtime.bridge;
+    try {
+      assertRuntimeOpen?.();
+      const catalogVersion = bridge.getSessionCatalogVersion();
+      const lastExposed = lastExposedCatalogVersions.get(bridge);
+      if (
+        lastExposed === undefined ||
+        lastExposed.generation !== catalogVersion.generation ||
+        lastExposed.revision !== catalogVersion.revision
+      ) {
+        invalidateSessionLists(runtime, ['active', 'archived']);
+      }
+      const sessions = bridge
+        .listWorkspaceSessions(runtime.workspaceCwd)
+        .map((session) => ({
+          sessionId: session.sessionId,
+          clientCount: session.clientCount,
+          hasActivePrompt: session.hasActivePrompt,
+          isWaitingForPermission: session.isWaitingForPermission ?? false,
+          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        }));
+      assertRuntimeOpen?.();
+      lastExposedCatalogVersions.set(bridge, catalogVersion);
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ v: 1, catalogVersion, sessions });
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
 
   const workspaceSessionInfoHandler =
     (paramName: 'id' | 'workspace'): RequestHandler =>
