@@ -11,7 +11,6 @@ import {
   createDebugLogger,
   findGitRoot,
   partToString,
-  SessionService,
   type ChatRecord,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +18,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 
 const STARTUP_CONTEXT_HEADER =
   'Startup context from Qwen Code.\nThis is background context about recent work and machine/workspace layout. It may be incomplete or stale. Use it to inform responses, and do not repeat it back unless relevant.';
@@ -208,9 +208,9 @@ async function loadRecentThreads(
 ): Promise<RecentThread[]> {
   try {
     const pages = await Promise.all(
-      workspaceRegistry.list().map(async (runtime) => {
-        const page = await new SessionService(
-          runtime.workspaceCwd,
+      workspaceRegistry.listAll().map(async (runtime) => {
+        const page = await createWorkspaceRuntimeSessionService(
+          runtime,
         ).listSessions({
           size: MAX_RECENT_THREADS,
           archiveState: 'active',
@@ -382,7 +382,7 @@ function formatSection(
 export async function buildRealtimeStartupContext(
   options: RealtimeStartupContextOptions,
 ): Promise<string | undefined> {
-  const current = await new SessionService(options.runtime.workspaceCwd)
+  const current = await createWorkspaceRuntimeSessionService(options.runtime)
     .loadSession(options.sessionId)
     .catch(() => undefined);
   const currentThread = buildCurrentThreadSection(
