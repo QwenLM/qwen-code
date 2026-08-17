@@ -459,7 +459,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('falls back without querying when the daemon lacks the capability', async () => {
+  it('does not resubmit an accepted message without query capability', async () => {
     const harness = createHarness();
     try {
       await harness.render({
@@ -474,17 +474,14 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         canQueryMidTurn: false,
       });
       expect(sdkMock.actions.getMidTurnMessages).not.toHaveBeenCalled();
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'note',
-        expect.objectContaining({ sessionId: 'session-a' }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
       expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
   });
 
-  it('resubmits when a legacy admission is accepted at idle', async () => {
+  it('does not resubmit when a legacy admission is accepted at idle', async () => {
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
       | undefined;
@@ -510,10 +507,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         resolveAdmission?.({ accepted: true, messageId: 'legacy-late' });
       });
 
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'legacy late response',
-        expect.objectContaining({ sessionId: 'session-a' }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
       expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
@@ -1798,7 +1792,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('falls back after a pending legacy enqueue is accepted at idle', async () => {
+  it('settles after a pending legacy enqueue is accepted at idle', async () => {
     let admissionSignal: AbortSignal | undefined;
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
@@ -1836,10 +1830,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         resolveAdmission?.({ accepted: true, messageId: 'mid-late' });
       });
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'still in flight',
-        expect.objectContaining({ sessionId: 'session-a' }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
       expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();

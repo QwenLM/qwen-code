@@ -362,7 +362,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(signal?.aborted).toBe(false);
   });
 
-  it('resubmits a legacy explicit insert accepted as the turn becomes idle', async () => {
+  it('does not resubmit a legacy explicit insert accepted as the turn becomes idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
@@ -387,12 +387,42 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     });
 
     expect(reportError).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('resubmits a legacy explicit insert after an idle transport failure', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render, reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+
+    act(() => latest.enqueuePrompt('recover after failure'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, false);
+    await act(async () => {
+      admission.reject(new Error('connection lost'));
+      await insertion;
+    });
+
+    expect(reportError).toHaveBeenCalledOnce();
     expect(actions.submitPrompt).toHaveBeenCalledWith(
-      'submit after settle',
+      'recover after failure',
       expect.objectContaining({ sessionId: 'session-1' }),
     );
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
     expect(latest.queuedPrompts).toMatchObject([
-      { text: 'submit after settle', serverState: 'submitting' },
+      { text: 'recover after failure', serverState: 'submitting' },
     ]);
   });
 
@@ -508,13 +538,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     });
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
     expect(actions.submitPrompt).not.toHaveBeenCalled();
-    expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: 'insert exactly once',
-        isInserting: false,
-      },
-    ]);
-    expect(latest.queuedPrompts[0]).not.toHaveProperty('midTurnState');
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('submits locally held Goal follow-ups after the Goal stops', () => {
@@ -1297,7 +1321,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
-  it('resubmits a legacy explicit insert accepted after idle', async () => {
+  it('does not resubmit a legacy explicit insert accepted after idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
@@ -1314,22 +1338,15 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       await insertion;
     });
 
-    expect(latest.queuedPrompts).toMatchObject([{ text: 'do not lose me' }]);
-    expect(latest.queuedPrompts[0]).not.toHaveProperty('midTurnState');
+    expect(latest.queuedPrompts).toEqual([]);
     expect(actions.submitPrompt).not.toHaveBeenCalled();
 
     render('idle', 'session-1', false, false, false);
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: 'do not lose me', serverState: 'submitting' },
-    ]);
-    expect(actions.submitPrompt).toHaveBeenCalledWith(
-      'do not lose me',
-      expect.objectContaining({ sessionId: 'session-1' }),
-    );
-    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
-  it('holds a legacy insert accepted before Goal hold for later submission', async () => {
+  it('does not hold a legacy insert accepted before Goal hold', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -1344,15 +1361,10 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
 
     render('idle', 'session-1', false, false, true);
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: 'already accepted', midTurnState: undefined },
-    ]);
+    expect(latest.queuedPrompts).toEqual([]);
     render('idle', 'session-1', false, false, false);
 
-    expect(actions.submitPrompt).toHaveBeenCalledWith(
-      'already accepted',
-      expect.objectContaining({ sessionId: 'session-1' }),
-    );
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('freezes mid-turn fallback while a session switch is preparing', async () => {
@@ -1375,7 +1387,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 
-  it('resubmits an accepted legacy message when the running turn ends', async () => {
+  it('does not resubmit an accepted legacy message when the running turn ends', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -1390,16 +1402,11 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('idle');
     await act(async () => {});
 
-    expect(actions.submitPrompt).toHaveBeenCalledWith(
-      '继续处理',
-      expect.objectContaining({ sessionId: 'session-1' }),
-    );
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: '继续处理', serverState: 'submitting' },
-    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
-  it('resubmits a late accepted legacy admission at idle', async () => {
+  it('does not resubmit a late accepted legacy admission at idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean }>();
     let signal: AbortSignal | undefined;
@@ -1420,13 +1427,8 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       admission.resolve({ accepted: true, messageId: 'mid-late' }),
     );
 
-    expect(actions.submitPrompt).toHaveBeenCalledWith(
-      '不要重复',
-      expect.objectContaining({ sessionId: 'session-1' }),
-    );
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: '不要重复', serverState: 'submitting' },
-    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('resubmits a legacy admission after a transport failure', async () => {

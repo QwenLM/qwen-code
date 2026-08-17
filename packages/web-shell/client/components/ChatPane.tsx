@@ -694,6 +694,15 @@ export function ChatPane({
         return false;
       if (admissionPayloadLocked) return false;
       if (/^\/goal(?:\s|$)/i.test(trimmed)) {
+        if (
+          (images?.length ?? 0) > 0 ||
+          (files?.length ?? 0) > 0 ||
+          (metadata?.inputAnnotations?.length ?? 0) > 0
+        ) {
+          const message = t('goals.error.attachmentsUnsupported');
+          reportError(new Error(message), message);
+          return false;
+        }
         const operation = parseWebShellGoalCommand(trimmed);
         if (operation.kind === 'status') {
           onOpenGoals?.();

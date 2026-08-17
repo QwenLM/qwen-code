@@ -35,7 +35,8 @@ let latestOnSubmit:
   | ((
       text: string,
       images?: unknown,
-      commit?: () => void,
+      files?: unknown,
+      commitAccepted?: () => void,
       metadata?: unknown,
     ) => boolean)
   | undefined;
@@ -475,6 +476,57 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it.each([
+    [
+      'images',
+      [{ data: 'image-data', media_type: 'image/png' }],
+      undefined,
+      undefined,
+    ],
+    ['files', undefined, [{ name: 'notes.txt' }], undefined],
+    [
+      'input annotations',
+      undefined,
+      undefined,
+      {
+        inputAnnotations: [
+          {
+            start: 15,
+            end: 22,
+            text: '@notes',
+            type: 'file',
+            data: { path: 'notes.txt' },
+          },
+        ],
+      },
+    ],
+  ])(
+    'rejects /goal with %s and preserves the draft',
+    (_kind, images, files, metadata) => {
+      const onError = vi.fn();
+      render({ onError });
+      let returned: boolean | undefined;
+
+      act(() => {
+        returned = latestOnSubmit!(
+          '/goal set inspect the attachment',
+          images,
+          files,
+          undefined,
+          metadata,
+        );
+      });
+
+      expect(returned).toBe(false);
+      expect(onError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'Remove attachments before using /goal.',
+      );
+      expect(controlGoal).not.toHaveBeenCalled();
+      expect(transcriptDispatch).not.toHaveBeenCalled();
+    },
+  );
+
   it('locks goal controls while the current snapshot refresh is in flight', async () => {
     const current = {
       v: 2 as const,
