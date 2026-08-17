@@ -390,6 +390,12 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       "it spends the sentences the author already received in an earlier round — the undecided-blocker list — before this round's body Criticals",
     );
+    // The placement rule is what keeps the last resort bounded: a notice
+    // below the cut has to survive whatever the cut left open, and three
+    // hand models of that shipped three classes of divergence.
+    expect(body).toContain(
+      '**that notice rides above the cut, with the others**',
+    );
     expect(body).toContain('You do not shorten anything yourself to help it');
     // Where a trimmed section can still be read is not uniform, and the
     // generalized promise ("stays whole in the artifact") is false for the
