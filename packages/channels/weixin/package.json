@@ -28,9 +28,11 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.21.11"
+    "@qwen-code/channel-base": "0.21.11",
+    "json-bigint": "^1.0.0"
   },
   "devDependencies": {
+    "@types/json-bigint": "^1.0.4",
     "typescript": "^5.0.0"
   }
 }
