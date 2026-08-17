@@ -197,8 +197,6 @@ export interface ChatPaneProps {
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
-  /** Allow prompt admission to recover a disconnected SSE stream. */
-  restartSseOnPrompt?: boolean;
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
@@ -234,7 +232,6 @@ export function ChatPane({
   onOpenMonitor,
   onPaneArtifactsChange,
   messageTurnOutputs,
-  restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
   reportCatalogTurnCompletion = true,
@@ -553,6 +550,8 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -571,6 +570,7 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     holdQueuedPromptsLocally:
       connection.sessionId !== undefined &&
@@ -724,7 +724,6 @@ export function ChatPane({
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,
           hasSession: Boolean(connection.sessionId),
-          restartSseOnPrompt,
         })
       ) {
         return false;
@@ -825,7 +824,6 @@ export function ChatPane({
       onImageIngestionNotice,
       onOpenGoals,
       reportError,
-      restartSseOnPrompt,
       sessionCatalogController,
       store,
       t,
@@ -1228,6 +1226,7 @@ export function ChatPane({
               onEdit={editQueuedPrompt}
               onRestoreUnknown={restoreUnknownQueuedPrompt}
               onDiscardUnknown={discardUnknownQueuedPrompt}
+              onImagePreview={handleImagePreview}
             />
             {liveGoalSnapshot?.goal && (
               <GoalStatusStrip

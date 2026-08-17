@@ -118,6 +118,7 @@ function mount(
       canMutateMidTurn,
       // This suite pins the legacy local-fallback lifecycle.
       canQueryMidTurn: false,
+      canInjectMidTurnMedia: false,
       streamingState: state,
       holdQueuedPromptsLocally: hold,
       sessionActions,

@@ -2742,6 +2742,20 @@ export interface DaemonToolToggleResult {
 
 export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
 
+export interface DaemonSkillToggleMutationSkill {
+  name: string;
+  enabled: boolean;
+}
+
+export interface DaemonSkillToggleMutation {
+  id: string;
+  kind: 'skill_toggle';
+  skills: DaemonSkillToggleMutationSkill[];
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
 export interface DaemonSkillToggleResult {
   skillName: string;
   enabled: boolean;
@@ -3207,11 +3221,14 @@ export interface DaemonRemoveMidTurnMessageResult {
 
 /**
  * One entry still waiting in the daemon's mid-turn queue (projection of the
- * bridge's `MidTurnQueueEntry`). The queue is session-global.
+ * bridge's `MidTurnQueueEntry`). The queue is session-global. `content` carries
+ * any image blocks attached to the message, so a refreshed client
+ * can rebuild its queued row with the attachments intact.
  */
 export interface DaemonMidTurnMessageSummary {
   messageId: string;
   text: string;
+  content?: PromptContentBlock[];
 }
 
 /**
@@ -3233,11 +3250,14 @@ export interface DaemonMidTurnMessagesResult {
 /**
  * One entry in the daemon's pending prompt queue. The `state` is
  * `'running'` for the currently dispatching prompt and `'queued'`
- * for prompts waiting in the FIFO.
+ * for prompts waiting in the FIFO. `content` carries any image blocks attached
+ * to the prompt, so a refreshed client can restore
+ * the full payload (text + images) instead of just the text.
  */
 export interface DaemonPendingPromptSummary {
   promptId: string;
   text: string;
+  content?: PromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
   originatorClientId?: string;
@@ -3912,6 +3932,18 @@ export interface DaemonEvent {
 export interface PromptTextContent {
   type: 'text';
   text: string;
+}
+
+export type DaemonSessionMediaReference = Record<string, unknown> & {
+  type: 'image';
+  mediaId: string;
+  mimeType: string;
+  size: number;
+};
+
+export interface DaemonSessionMediaData {
+  data: string;
+  mimeType: string;
 }
 
 /**

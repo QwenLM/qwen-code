@@ -11,6 +11,7 @@ export interface MidTurnQueueItem {
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
   isInserting?: boolean;
+  admissionOutcome?: 'unknown';
 }
 
 export interface MidTurnInjectedBatch {
@@ -31,15 +32,16 @@ export interface MidTurnInjectedBatch {
  * `midTurnMessageId` match (the daemon mints an id at admission and echoes it on
  * injection); it wins regardless of array position, so two same-text sends can't
  * steal each other's removal when their admission responses arrive out of order.
- * Only when no id match exists does the second pass fall back to the first
- * text-only entry with matching text — any mid-turn row when the batch carries
- * no ids (older daemon), or a still-`submitting` row that hasn't received its id
- * yet. Matching stays count-based — one removal per injected message — so a
- * queue that holds the same text twice loses one entry per matching injection.
- * Entries carrying images or file attachments are never matched: attachment
- * messages aren't pushed mid-turn (the drain channel carries plain strings),
- * so they stay queued for the next turn. An entry that already fell back to
- * the ordinary path (`midTurnState === undefined`) is never matched.
+ * Image rows are only matched here — the id proves the daemon owns them, while
+ * a text comparison can't verify their attachments. File rows are never
+ * matched — files are not pushed mid-turn, so they stay queued for the next
+ * turn. Only when no id match exists does the second pass fall back to the
+ * first text-only entry with matching text — any mid-turn row when the batch
+ * carries no ids (older daemon), or a still-`submitting` row that hasn't
+ * received its id yet. Matching stays count-based — one removal per injected
+ * message — so a queue that holds the same text twice loses one entry per
+ * matching injection. An entry that already fell back to the ordinary path
+ * (`midTurnState === undefined`) is never matched.
  *
  * Text fallback skips batches from another originator so coincidentally equal
  * messages are not removed. In strict-id mode, an exact id still wins because
@@ -62,6 +64,7 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
   const isTextOnly = (prompt: T) =>
     (!prompt.images || prompt.images.length === 0) &&
     (!prompt.files || prompt.files.length === 0);
+  const hasNoFiles = (prompt: T) => !prompt.files || prompt.files.length === 0;
   let changed = false;
   for (const batch of batches) {
     if (batch.sessionId !== sessionId) continue;
@@ -71,16 +74,24 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
     if (!originatorMatches && !strictMessageIds) continue;
     for (const [messageIndex, message] of batch.messages.entries()) {
       const messageId = batch.messageIds?.[messageIndex];
-      // A strict id match wins regardless of position; the text fallback below
-      // only runs for rows the id can't reach (no ids in the batch, or a row
-      // still awaiting its admission id).
+      // A strict id match wins regardless of position — and is the only pass
+      // that may remove image rows; file rows are never matched because files
+      // are not pushed mid-turn. The text fallback below only runs for rows
+      // the id can't reach (no ids in the batch, or a row still awaiting its
+      // admission id).
+      // An admission-unknown row carries no `midTurnState` (re-added from
+      // the catch path when the admission response was lost), but the daemon
+      // owns it exactly like a queued one — accept it here, mirroring
+      // `applyMidTurnSnapshot`'s membership filter.
       let index =
         messageId !== undefined
           ? remaining.findIndex(
               (prompt) =>
-                (prompt.midTurnState !== undefined || prompt.isInserting) &&
+                (prompt.midTurnState !== undefined ||
+                  prompt.isInserting ||
+                  prompt.admissionOutcome === 'unknown') &&
                 prompt.midTurnMessageId === messageId &&
-                isTextOnly(prompt),
+                hasNoFiles(prompt),
             )
           : -1;
       if (index < 0 && originatorMatches) {

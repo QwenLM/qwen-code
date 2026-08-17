@@ -5070,8 +5070,10 @@ describe('App composer footer renderer', () => {
     rerender({ renderComposerFooter: ComposerFooter });
     await flush();
 
+    // Catch-up no longer disables the composer (only a pending approval or
+    // prompt preparation does).
     expect(composerFooterProps.at(-1)).toEqual({
-      disabled: true,
+      disabled: false,
       isRunning: true,
       currentMode: 'plan',
       currentModel: 'qwen-next',
@@ -8513,9 +8515,9 @@ describe('App session callbacks', () => {
     ).toContain('Visible session title');
   });
 
-  it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
+  it('submits through a disconnected session', async () => {
     mockConnection.status = 'disconnected';
-    renderApp({ restartSseOnPrompt: true });
+    renderApp();
 
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('recover connection');
@@ -9948,7 +9950,6 @@ describe('App session callbacks', () => {
   it('uses configured composer placeholders by state and falls back for blank values', async () => {
     const composerPlaceholders = {
       idle: 'Ask a question',
-      loading: 'Preparing chat',
       processing: 'Working on it',
     };
     const { rerender } = renderApp({ composerPlaceholders });
@@ -9974,8 +9975,10 @@ describe('App session callbacks', () => {
     mockConnection.catchingUp = true;
     rerender({ composerPlaceholders });
     await flush();
+    // Catch-up no longer overrides the streaming placeholder: the composer
+    // keeps its processing text while history replays in the background.
     expect(testState.latestChatEditorProps?.placeholderText).toBe(
-      'Preparing chat',
+      'Working on it',
     );
 
     mockConnection.catchingUp = false;

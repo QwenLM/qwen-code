@@ -39,10 +39,15 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { npmToolchainAdapter } from './lib/npm-toolchain.js';
+import {
+  DEFAULT_COMMAND_TIMEOUT_S,
+  DEFAULT_WHOLE_CALL_BUDGET_S,
+} from './lib/build-budget.js';
+import { failingFilesOf } from './lib/failing-files.js';
+import { npmToolchainAdapter, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
@@ -67,11 +72,40 @@ export interface CommandResult {
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
   /**
+   * Test files the runner named as failing, measured off the UNTRIMMED output
+   * at capture time. Absent when the command named none.
+   *
+   * `output` is bounded, and a failing suite's FAIL lines do not fit inside the
+   * bound: measured on a live review of PR #9113, a `packages/core` run whose
+   * rescued summary line read `Test Files  11 failed` reached `test-delta` with
+   * exactly ONE FAIL line still in the report. Everything downstream that
+   * attributes a failure — `test-delta`'s netNew/shared sets above all — was
+   * re-parsing that bounded text, so ten failing files were invisible to the
+   * measurement: absent from `shared` (understating what is pre-existing) and
+   * absent from `netNew` (the direction that loses a failure the PR caused).
+   * The raw text exists here and nowhere else; record the set while it does.
+   */
+  failingFiles?: string[];
+  /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
    * quote the number that fired, not the flag default.
    */
   deadlineMs?: number;
+  /**
+   * True when the deadline this command got was shortened by the whole-call
+   * budget rather than being its own — i.e. it was started with less time than
+   * `--timeout` allows.
+   *
+   * A clamped timeout is a PROVISIONAL result: the command was not too slow,
+   * the call was too late. Measured on PR #9113, `npm test
+   * --workspace="packages/cli"` was admitted with 286s of a 300s deadline and
+   * killed — half the whole call spent to learn nothing, and the suite was
+   * recorded as timed-out rather than as still-to-run, so nothing downstream
+   * could retry it. `--resume` reads this flag and re-runs those commands with
+   * a full deadline in the next call.
+   */
+  clamped?: boolean;
 }
 
 export interface BuildTestReport {
@@ -116,6 +150,46 @@ export interface BuildTestReport {
   timedOut: string[];
   /** Why the run did what it did, in one line — rendered into the agent's report. */
   note: string;
+  /**
+   * The run this report belongs to: the tree it ran in, and the commit the
+   * plan fetched (absent for a local review, whose plan carries no sha).
+   *
+   * This is what `--resume` verifies, because the report's PATH is not an
+   * identity: `--out` is stable per PR across review rounds, `fetch-pr`'s
+   * stale-sweep removes only the worktree and branch ref, and the review's
+   * own cleanup runs post-review — so a round that dies between the report
+   * write and cleanup (the interrupted state `--resume` exists for) leaves a
+   * well-shaped report behind for the NEXT round to find. Resuming it would
+   * keep the old commit's passing entries on the new round's tree —
+   * certifying old-commit passes for the new commit — and skip the install
+   * the fresh worktree never had.
+   *
+   * `plan` is the per-round discriminator every mode has. A LOCAL review
+   * recreates nothing the other two clauses can see — its plan carries no
+   * sha, and its worktree is the project root, never destroyed — so a stale
+   * report from an interrupted local round matched all three and certified
+   * pre-edit results for the edited tree. Every round writes its plan afresh
+   * (capture-local locally, fetch-pr for a PR), so the plan file's mtime
+   * separates rounds in both modes; within one round nothing rewrites it
+   * between the fresh call and a resume.
+   *
+   * `tree` is the part path and sha cannot supply: `fetch-pr` DESTROYS and
+   * recreates the worktree every round, at the same path, for the same sha —
+   * so a stale report from an interrupted round matches both and is admitted
+   * onto a bare tree with no node_modules and no dist, whose every suite then
+   * fails with resolution errors framed as candidate PR Criticals. The inode
+   * and birth time of the worktree root name the INSTANCE: a recreated
+   * directory keeps the path and changes both. No legitimate continuation
+   * crosses a recreation — the valid resumes all happen inside one round,
+   * on the tree the first call ran in.
+   */
+  run?: {
+    sha?: string;
+    root: string;
+    tree?: { ino: number; birth: number };
+    /** The plan file's mtimeMs, rounded — the per-round discriminator. */
+    plan?: number;
+  };
 }
 
 /** Output kept per command: the head and tail, which is where a failure names itself. */
@@ -213,7 +287,16 @@ export function buildRunEnv(
   };
 }
 
-function run(command: string, cwd: string, timeoutMs: number): CommandResult {
+/**
+ * Exported for the one thing an injected `exec` cannot cover: that the failing
+ * set is measured HERE, off the raw text, and survives a trim that drops the
+ * FAIL lines it was parsed from.
+ */
+export function run(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
   // budget arithmetic can hand it a fractional value (a decimal --timeout
@@ -236,13 +319,21 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
   const timedOut = spawnTimedOut(r);
+  const raw = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  // Parsed from `raw`, not from the trimmed field below — that is the whole
+  // point (see CommandResult.failingFiles). Omitted when empty so an install or
+  // a build, which name no test file, does not carry an empty list; a consumer
+  // reads absent as "this seam supplied no measurement" and falls back to
+  // re-parsing `output`, exactly as it did before this field existed.
+  const failingFiles = failingFilesOf(raw, cwd);
   return {
     command,
     exitCode: r.status,
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
-    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    output: trimOutput(raw),
     deadlineMs,
+    ...(failingFiles.length > 0 ? { failingFiles } : {}),
   };
 }
 
@@ -266,23 +357,50 @@ interface BuildTestArgs {
    */
   buildOnly?: boolean;
   /**
-   * Whole-call wall-clock budget in seconds (default: 2× `timeout` − 30s of
-   * headroom for process startup and the report write, floored at one
-   * per-command deadline). Measured from the top of the call — install and
-   * build time count against it. The closure's per-command deadlines SUM, and
-   * a large one sums past the tool timeout the brief welds onto the call —
-   * whose outer kill discards the report. Each suite is attempted with
-   * whatever of this budget remains (a suite killed at the boundary is
-   * reported as a timeout — infrastructure, not a finding); only suites never
-   * attempted are named in `notRun`.
+   * Whole-call wall-clock budget in seconds. Defaults to what the shell tool's
+   * hard 600s ceiling leaves usable (`DEFAULT_WHOLE_CALL_BUDGET_S`), floored at
+   * one per-command deadline. Measured from the top of the call — install and
+   * build time count against it. The closure's per-command deadlines SUM, and a
+   * large one sums past the tool timeout the brief welds onto the call — whose
+   * outer kill discards the report. Suites the budget cannot reach are named in
+   * `notRun`, and `--resume` continues them in the next call.
    */
   budget?: number;
+  /**
+   * Continue the run recorded in `--out` instead of starting a new one.
+   *
+   * The ceiling is per CALL, not per run: one shell invocation cannot exceed
+   * 600s, and this repo needs more than that to finish its suites (install 24s
+   * + the builds + `packages/core` 106s + `packages/cli` 401s, before four more
+   * suites). A resumed call skips install and build — the tree is already
+   * installed and compiled by the call being continued — and runs the suites
+   * that call could not reach (`testScope.notRun`) plus any it started with a
+   * budget-clamped deadline and killed (`clamped`). Results merge into the same
+   * report, so every consumer keeps reading one artifact.
+   */
+  resume?: boolean;
   /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
    * install that exits non-zero and leaves a working `node_modules` behind.
    */
   exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
+}
+
+/** The plan's fetched commit, when it has one — a local plan does not. */
+function planShaFrom(planPath: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      fetchedSha?: unknown;
+    };
+    return typeof parsed?.fetchedSha === 'string' && parsed.fetchedSha
+      ? parsed.fetchedSha
+      : undefined;
+  } catch {
+    // changedFilesFrom throws the descriptive error for an unreadable plan;
+    // this reader must not race it to a worse one.
+    return undefined;
+  }
 }
 
 /** The changed files, from whichever plan report produced them. */
@@ -311,6 +429,156 @@ function changedFilesFrom(planPath: string): string[] {
     .filter((p): p is string => typeof p === 'string' && p.length > 0);
 }
 
+/**
+ * The report a `--resume` call continues, read from where it will be rewritten.
+ *
+ * Refusing is the whole value: a resume with no report to continue would run
+ * install and build inside a budget the caller sized for suites, and produce a
+ * report that looks like a complete run of a tree it never finished compiling.
+ */
+function previousReport(out: string | undefined): BuildTestReport {
+  if (!out) {
+    throw new Error(
+      'build-test: --resume needs --out — it continues the run recorded there.',
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(out, 'utf8'));
+  } catch (err) {
+    throw new Error(
+      `build-test: --resume cannot read the report it would continue ` +
+        `(${out}): ${(err as Error).message}. Run build-test without ` +
+        `--resume first.`,
+    );
+  }
+  // The base gate FIRST, and nothing may read a field before it: `JSON.parse`
+  // returns `null` for the literal `null`, and reading `.testScope` off that
+  // throws a raw TypeError from inside the function whose entire purpose is to
+  // refuse with a named fix.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `build-test: --resume expected a build-test report at ${out}, and that ` +
+        `file is not one. Run build-test without --resume first.`,
+    );
+  }
+  const shape = parsed as {
+    test?: unknown;
+    build?: unknown;
+    timedOut?: unknown;
+    testScope?: { workspaces?: unknown; notRun?: unknown };
+  };
+  // Every array the continuation walks, and every ELEMENT of the two it walks
+  // per-item. `test: [null]` cleared a gate that checked only `Array.isArray`
+  // and then died on `reading 'clamped'` — the same stack trace the gate
+  // exists to replace, one layer deeper.
+  const commandsOk = (v: unknown): boolean =>
+    Array.isArray(v) &&
+    v.every(
+      (e) =>
+        !!e &&
+        typeof e === 'object' &&
+        !Array.isArray(e) &&
+        typeof (e as { command?: unknown }).command === 'string' &&
+        (e as { command: string }).command.length > 0,
+    );
+  // `testScope` is optional — a build-only or single-root report carries none —
+  // but a PRESENT one is walked for both of its lists, so a truthy non-object
+  // (or a scope whose lists are not lists) has to be refused here rather than
+  // becoming a `.filter of undefined` inside the merge.
+  // The identity the resume gate walks — validated HERE, like every other
+  // field the continuation reads: `tree: null` slipped past a gate that
+  // checked only presence shapes and crashed on `null.ino` inside the very
+  // check that exists to refuse with a named fix.
+  const runShape = (parsed as { run?: unknown }).run;
+  const runOk =
+    runShape === undefined ||
+    (typeof runShape === 'object' &&
+      runShape !== null &&
+      !Array.isArray(runShape) &&
+      typeof (runShape as { root?: unknown }).root === 'string' &&
+      (runShape as { root: string }).root.length > 0 &&
+      ((runShape as { sha?: unknown }).sha === undefined ||
+        typeof (runShape as { sha?: unknown }).sha === 'string') &&
+      ((runShape as { plan?: unknown }).plan === undefined ||
+        typeof (runShape as { plan?: unknown }).plan === 'number') &&
+      ((): boolean => {
+        const tree = (runShape as { tree?: unknown }).tree;
+        return (
+          tree === undefined ||
+          (typeof tree === 'object' &&
+            tree !== null &&
+            !Array.isArray(tree) &&
+            typeof (tree as { ino?: unknown }).ino === 'number' &&
+            typeof (tree as { birth?: unknown }).birth === 'number')
+        );
+      })());
+  // The other fields the continuation walks: `affected` seeds the
+  // affected-first ordering (`new Set(...)` throws on a non-iterable),
+  // `notBuilt` gates the unbuilt-tree refusal (`.length` on `true` skips the
+  // refusal SILENTLY and runs suites against packages that were never
+  // compiled — the worst direction), and the two caveat strings are coerced
+  // into prose the agent's brief quotes.
+  // Element shapes too, not only the lists: `notRun` entries become shell
+  // commands (`npm test --workspace=<dir>`), so a `[null]` that cleared an
+  // arrays-only check crashed in the escaper instead of refusing here.
+  // Non-empty, not merely string-typed: a '' workspace becomes the command
+  // `npm test --workspace=""`, which npm resolves to the root suite — a
+  // different measurement wearing the requested one's name.
+  const strings = (v: unknown): boolean =>
+    Array.isArray(v) && v.every((e) => typeof e === 'string' && e.length > 0);
+  const affectedOk = strings((parsed as { affected?: unknown }).affected);
+  const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
+  const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
+  const scope = shape.testScope;
+  const scopeOk =
+    scope === undefined ||
+    (typeof scope === 'object' &&
+      scope !== null &&
+      !Array.isArray(scope) &&
+      strings(scope.workspaces) &&
+      (scope.notRun === undefined || strings(scope.notRun)) &&
+      ((scope as { caveat?: unknown }).caveat === undefined ||
+        typeof (scope as { caveat?: unknown }).caveat === 'string') &&
+      ((scope as { liveCaveat?: unknown }).liveCaveat === undefined ||
+        typeof (scope as { liveCaveat?: unknown }).liveCaveat === 'string'));
+  if (
+    !commandsOk(shape.test) ||
+    !commandsOk(shape.build) ||
+    !strings(shape.timedOut) ||
+    !affectedOk ||
+    !notBuiltOk ||
+    !scopeOk ||
+    !runOk
+  ) {
+    throw new Error(
+      `build-test: --resume expected a build-test report at ${out}, and that ` +
+        `file is not one. Run build-test without --resume first.`,
+    );
+  }
+  // Shape is not authorship. The identity check pins a report to this run's
+  // tree/sha/plan — an edited-in-place report keeps all three — and the
+  // continuation re-executes clamped `test[].command` strings VERBATIM under
+  // `shell: true`. So the commands themselves are held to the grammar the
+  // emitter can produce, the same policy test-delta applies before re-running
+  // report-derived commands. Checked over every entry, not only the clamped
+  // ones: `clamped` is a field of the same untrusted file, and a report
+  // carrying any command this emitter cannot write is not this emitter's.
+  const alien = (shape.test as Array<{ command: string }>).find(
+    (t) => !TEST_COMMAND_RE.test(t.command),
+  );
+  if (alien) {
+    throw new Error(
+      `build-test: --resume refuses the report at ${out}: test command ` +
+        `${JSON.stringify(alien.command)} is not one build-test itself runs ` +
+        `(npm test [--workspace="<dir>"]), so the report is not a build-test ` +
+        `run this command can continue. Run build-test without --resume ` +
+        `first.`,
+    );
+  }
+  return parsed as BuildTestReport;
+}
+
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
@@ -328,6 +596,104 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
+  const runIdentity: {
+    sha?: string;
+    root: string;
+    tree?: { ino: number; birth: number };
+    plan?: number;
+  } = {
+    ...((sha) => (sha ? { sha } : {}))(planShaFrom(args.plan)),
+    root,
+    ...(() => {
+      try {
+        return { plan: Math.round(statSync(args.plan).mtimeMs) };
+      } catch {
+        // changedFilesFrom already threw the descriptive error for an
+        // unreadable plan; an unstatable one cannot reach here.
+        return {};
+      }
+    })(),
+    ...(() => {
+      try {
+        const st = statSync(root);
+        // birthtimeMs is 0 on filesystems that do not record it, and an
+        // immediate delete-and-recreate at the same path CAN reuse the inode
+        // (measured on ext4) — so on such filesystems this fingerprint may
+        // collide across instances. The plan mtime below is the discriminator
+        // that still separates ROUNDS there; the fingerprint adds instance
+        // separation where the filesystem supports it. Rounded: a serialized
+        // float that re-parses a hair off must not fail an honest same-tree
+        // resume.
+        return { tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) } };
+      } catch {
+        // No tree to fingerprint is no tree to build in; the adapter's own
+        // errors say that better than a stat failure here could.
+        return {};
+      }
+    })(),
+  };
+  // A resumed call continues a report; without one there is nothing to
+  // continue, and silently starting a fresh run would re-install and re-build
+  // inside a budget the caller sized for suites alone. Fail loudly instead.
+  if (args.resume && args.buildOnly) {
+    // The continuation dispatch would win and silently ignore the flag: a
+    // resume runs suites and skips builds, a build-only probe runs builds and
+    // skips suites — together they name no work at all.
+    throw new Error(
+      'build-test: --resume and --build-only contradict each other — a ' +
+        'continuation reuses the build and runs the remaining suites. Drop ' +
+        'one of the two.',
+    );
+  }
+  const previous = args.resume ? previousReport(args.out) : undefined;
+  if (previous) {
+    // The report must be THIS run's, not merely well-shaped: the out path is
+    // stable across rounds and nothing sweeps it on an interrupted round, so a
+    // stale report is exactly what an interrupted round leaves behind. A
+    // report with no identity at all cannot prove it belongs here — it
+    // predates the stamp, or something else wrote it — and the safe reading
+    // is the same as a mismatch.
+    const prev = previous.run;
+    // The tree fingerprint mismatches when EITHER side has one and the other
+    // does not, or both do and they differ. Both-absent passes: a filesystem
+    // that yields no stat cannot be held to a fingerprint it never produced.
+    const treeMismatch =
+      (prev?.tree === undefined) !== (runIdentity.tree === undefined) ||
+      (prev?.tree !== undefined &&
+        runIdentity.tree !== undefined &&
+        (prev.tree.ino !== runIdentity.tree.ino ||
+          prev.tree.birth !== runIdentity.tree.birth));
+    const planMismatch = (prev?.plan ?? null) !== (runIdentity.plan ?? null);
+    if (
+      !prev ||
+      prev.root !== runIdentity.root ||
+      (prev.sha ?? null) !== (runIdentity.sha ?? null) ||
+      treeMismatch ||
+      planMismatch
+    ) {
+      throw new Error(
+        `build-test: --resume found a report at ${args.out} from a different ` +
+          `run (${
+            prev
+              ? treeMismatch && prev.root === runIdentity.root
+                ? `it ran in a PREVIOUS instance of ${prev.root} — the ` +
+                  `worktree has been recreated since (fetch-pr rebuilds it ` +
+                  `every round), so its installed and compiled state is gone`
+                : planMismatch &&
+                    prev.root === runIdentity.root &&
+                    !treeMismatch
+                  ? `it ran against a previous round's plan — each round ` +
+                    `captures its own, so its results describe the tree ` +
+                    `before this round's changes`
+                  : `it ran in ${prev.root}${prev.sha ? ` at ${prev.sha}` : ''}`
+              : 'it records no run identity'
+          }; this run is in ${runIdentity.root}${
+            runIdentity.sha ? ` at ${runIdentity.sha}` : ''
+          }). Continuing it would certify another round's results for this ` +
+          `one. Run build-test without --resume first.`,
+      );
+    }
+  }
   const runArgs = {
     root,
     changedFiles,
@@ -335,6 +701,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     install: args.install,
     buildOnly: args.buildOnly,
     budget: args.budget,
+    previous,
     exec: args.exec ?? run,
   };
   const { adapter, applicable } = selectToolchainAdapter(
@@ -342,6 +709,21 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     toolchainAdapters,
   );
   if (!adapter) {
+    // A continuation must never answer with a FRESH report. The handler writes
+    // whatever this returns to `--out`, which for a resume is the very file
+    // the run was asked to continue — so a wrong or pruned `--worktree` would
+    // replace an in-flight report (its install record, its passed suites, its
+    // clamped entries) with `{"toolchain":"unsupported"}`, and the chain is
+    // dead even after the path is fixed. Throwing reaches the handler's catch,
+    // which writes nothing. The adapter's own refusals already preserve the
+    // input by spreading it; these returns predate `--resume` and do not.
+    if (previous) {
+      throw new Error(
+        `build-test: --resume cannot continue the run recorded at ` +
+          `${args.out}: no supported toolchain applies at ${root}. The report ` +
+          `is left untouched — check --worktree, then resume again.`,
+      );
+    }
     if (applicable.length > 1) {
       // Unreachable with one registered adapter, and deliberately kept: the
       // selection contract is "exactly one, or nothing", and the second
@@ -373,7 +755,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // unsupported report before executing any command on every root where
     // applies() is false.
     if (existsSync(join(root, 'package.json'))) {
-      return npmToolchainAdapter.run(runArgs);
+      return { ...npmToolchainAdapter.run(runArgs), run: runIdentity };
     }
     return {
       toolchain: 'unsupported',
@@ -391,7 +773,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'and give each command a deadline it can actually meet.',
     };
   }
-  return adapter.run(runArgs);
+  return { ...adapter.run(runArgs), run: runIdentity };
 }
 
 export const buildTestCommand: CommandModule = {
@@ -421,25 +803,30 @@ export const buildTestCommand: CommandModule = {
       })
       .option('timeout', {
         type: 'number',
-        default: 300,
+        default: DEFAULT_COMMAND_TIMEOUT_S,
         describe:
           'Per-command deadline in seconds. Kept strictly below the 600s (600000ms) ' +
           "tool timeout the agent's brief welds onto the whole call, so a single hung " +
           "command's own deadline fires — and build-test reports it as data — before " +
-          'the outer shell kill would discard the report. Commands that would SUM ' +
-          'past the whole call are stopped and disclosed instead — see --budget.',
+          'the outer shell kill would discard the report. The default is sized to ' +
+          "this repo's slowest single command (`npm test --workspace=packages/cli`, " +
+          'measured at 401s): a deadline below the slowest suite is not a margin, it ' +
+          'is a guaranteed timeout. Commands that would SUM past the whole call are ' +
+          'stopped and disclosed instead — see --budget and --resume.',
       })
       .option('budget', {
         type: 'number',
         describe:
           'Whole-call wall-clock budget in seconds, measured from the top of ' +
-          'the call — install and build time count against it (default: 2× ' +
-          '--timeout minus 30s of headroom for process startup and the report ' +
-          'write). Each suite is attempted with whatever of the budget ' +
-          'remains — a suite killed at the boundary is a timeout, reported as ' +
-          'infrastructure — and only suites never attempted are named notRun. ' +
-          'A partial report survives where the outer shell kill would discard ' +
-          'the whole one.',
+          'the call — install and build time count against it (default: ' +
+          `${DEFAULT_WHOLE_CALL_BUDGET_S}s, what the shell tool's hard 600s ` +
+          'ceiling leaves after headroom for process startup and the report ' +
+          'write). A suite still gets whatever remains — a partial attempt is ' +
+          'signal where a never-attempted suite is none — but a kill at that ' +
+          'boundary is recorded as clamped: provisional, not "too slow", and ' +
+          '--resume gives it a full deadline in the next call. Only suites the ' +
+          'budget cannot attempt at all are named notRun. A partial report ' +
+          'survives where the outer shell kill would discard the whole one.',
       })
       .option('install', {
         type: 'boolean',
@@ -454,6 +841,17 @@ export const buildTestCommand: CommandModule = {
           "Build, then stop — skip the changed workspaces' tests. For the " +
           'merge-base tree an A/B probe compares against, whose suite says ' +
           'nothing about this PR.',
+      })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue the run recorded in --out instead of starting a new one: ' +
+          'skip install and build (the tree is already installed and compiled) ' +
+          'and run the suites the previous call left in notRun, plus any it ' +
+          'started with a budget-shortened deadline and killed. Results merge ' +
+          'into the same report. The 600s ceiling is per CALL, so this is how a ' +
+          'repo whose suites do not fit one call still finishes them.',
       }),
   handler: (argv) => {
     const args = argv as unknown as BuildTestArgs;

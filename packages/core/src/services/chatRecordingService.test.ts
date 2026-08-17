@@ -328,6 +328,60 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
 
+    it('records mid-turn media references without inline bytes', async () => {
+      const mediaReferences = [
+        {
+          type: 'image' as const,
+          mediaId: 'media-1',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ];
+
+      chatRecordingService.recordMidTurnUserMessage(
+        [{ text: 'inspect image' }],
+        'inspect image',
+        undefined,
+        mediaReferences,
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.message).toEqual({
+        role: 'user',
+        parts: [{ text: 'inspect image' }],
+      });
+      expect(record.systemPayload).toEqual({
+        displayText: 'inspect image',
+        mediaReferences,
+      });
+    });
+
+    it('records media references when the mid-turn display text is empty', async () => {
+      const mediaReferences = [
+        {
+          type: 'image' as const,
+          mediaId: 'media-only',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ];
+
+      chatRecordingService.recordMidTurnUserMessage(
+        [{ text: '[User message received during tool execution]: ' }],
+        '',
+        undefined,
+        mediaReferences,
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        mediaReferences,
+      });
+    });
+
     it('records defensive Goal context on real user messages', async () => {
       const topLevelPermit: GoalTurnPermit = {
         goalId: 'goal-1',
