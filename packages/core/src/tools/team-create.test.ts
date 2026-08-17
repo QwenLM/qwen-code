@@ -74,6 +74,9 @@ describe('TeamCreateTool', () => {
     expect(description.replace(/\s+/g, ' ')).toContain(
       "the runtime forwards that teammate's final answer to you automatically",
     );
+    expect(description.replace(/\s+/g, ' ')).toContain(
+      'if they also called send_message earlier, that earlier report is delivered too',
+    );
     expect(description).not.toContain('without an explicit report');
     expect(description.replace(/\s+/g, ' ')).toContain(
       'There is no summary of teammate-to-teammate messages',

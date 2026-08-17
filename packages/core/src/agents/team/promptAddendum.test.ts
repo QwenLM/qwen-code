@@ -51,8 +51,8 @@ describe('buildTeammatePromptAddendum', () => {
     expect(prompt).toContain(
       'the runtime forwards your final answer to the leader automatically',
     );
-    // Explicit reporting still arrives sooner; it does not suppress
-    // final-answer forwarding.
+    // Explicit reporting arrives sooner; automatic forwarding fires again only
+    // when non-empty round text follows it.
     expect(prompt).toContain('call send_message(to: "leader"');
     expect(prompt).toContain('earlier additionally delivers it sooner');
     expect(prompt).toContain(
