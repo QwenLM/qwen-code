@@ -553,8 +553,11 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
           // the very hosts where this note appears the bare command
           // resolves elsewhere and answers 'no server running' — reading
           // as "already gone" while the orphan runs out its window.
-          `(TMUX_TMPDIR=${JSON.stringify(dirname(dir))} tmux -L ${name} ` +
-          `kill-server to reap it by hand)`,
+          // Shell-single-quoted, never JSON.stringify: a base carrying $
+          // or a backtick expands at paste time and resolves the wrong
+          // base — the same confusion this note exists to prevent.
+          `(TMUX_TMPDIR='${dirname(dir).replaceAll("'", "'\\''")}' ` +
+          `tmux -L ${name} kill-server to reap it by hand)`,
       );
       continue;
     }
@@ -570,6 +573,24 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
 }
 
 export function runCleanup(target: string): void {
+  // --- Orphaned capture servers (capture-tui) ---------------------------
+  // Host-wide and target-agnostic, run BEFORE the lease gate: a SIGKILL'd
+  // or OOM'd harness — the shape this sweep exists for — leaves BOTH the
+  // orphan and a lease held by the dead session, and the lease check is
+  // session-id only, so a gated sweep skipped on exactly the cleanup calls
+  // meant to reclaim the orphan and it lived out its bounded three hours
+  // (probe-reproduced). The sweep only touches servers whose launcher pid
+  // is dead — never a leased worktree — so hoisting it takes nothing from
+  // the lease holder. Its reaps stay off removedAny: they are not
+  // target-scoped facts, and a `cleanup pr-N` that found nothing of
+  // pr-N's still answers "Nothing to clean" for pr-N beside the
+  // host-wide "Reaped" line. Its failures DO still suppress that claim —
+  // stderr saying "could not reap" next to stdout's "nothing to clean" is
+  // the two streams contradicting each other, and stdout is the one a
+  // script reads — but never gate the target-scoped lease release, which
+  // keys on failedDestruction alone.
+  const { failed: sweepFailed } = reapOrphanedCaptureServers();
+
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
   // it, a run that could not delete something goes on to announce "Nothing to
@@ -777,24 +798,6 @@ export function runCleanup(target: string): void {
       writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
       failedAny = true;
     }
-  }
-
-  // --- Orphaned capture servers (capture-tui) ---------------------------
-  // Not target-scoped: any crashed capture on this host left them, and
-  // Step 9's sweep is the only deterministic pass that reliably runs. Its
-  // failure therefore must NOT gate the target-scoped lease below — an
-  // orphan from an UNRELATED review, a wedged server outlasting the belt,
-  // or a host where tmux vanished after the socket dir was created would
-  // otherwise wedge THIS review's worktree lease forever, with nothing in
-  // the output connecting the two. It still suppresses "Nothing to clean":
-  // stderr saying "could not reap" next to stdout's "nothing to clean" is
-  // the two streams contradicting each other, and stdout is the one a
-  // script reads.
-  let sweepFailed = false;
-  {
-    const sweep = reapOrphanedCaptureServers();
-    if (sweep.reaped) removedAny = true;
-    sweepFailed = sweep.failed;
   }
 
   if (!failedDestruction) {

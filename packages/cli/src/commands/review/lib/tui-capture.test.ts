@@ -9,7 +9,9 @@ import {
   captureServerName,
   freezePlan,
   isNothingToKill,
+  isSocketDirNeverCreated,
   isSocketDirUnusable,
+  verdictExaminedBase,
   tmuxPlan,
   tmuxSupportsCaptureN,
   tmuxSupportsCaptureT,
@@ -67,6 +69,71 @@ describe('kill-server stderr classification', () => {
   it('answers neither for an unrecognized failure', () => {
     expect(isNothingToKill('server exited unexpectedly')).toBe(false);
     expect(isSocketDirUnusable('server exited unexpectedly')).toBe(false);
+  });
+});
+
+describe('kill-verdict base attribution', () => {
+  // A goal-state wording establishes death only about the base the client
+  // EXAMINED: tmux falls back to /tmp when the pinned base is unusable and
+  // answers about IT (probe-verified on 3.4 with a mid-window-deleted
+  // base), and crediting that verdict to the pinned base read a live
+  // server as reaped.
+  it('credits a wording naming a path under the pinned base', () => {
+    expect(
+      verdictExaminedBase(
+        'error connecting to /tmp/tmux-501/srv (No such file or directory)',
+        '/tmp',
+      ),
+    ).toBe(true);
+    expect(
+      verdictExaminedBase(
+        'no server running on /scratch/base/tmux-501/srv',
+        '/scratch/base',
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses a wording whose path names the FALLBACK base', () => {
+    expect(
+      verdictExaminedBase(
+        'error connecting to /tmp/tmux-501/srv (No such file or directory)',
+        '/scratch/gone',
+      ),
+    ).toBe(false);
+    expect(
+      verdictExaminedBase(
+        "couldn't create directory /tmp/tmux-501 (Permission denied)",
+        '/scratch/gone',
+      ),
+    ).toBe(false);
+  });
+
+  it('normalizes the base before comparing', () => {
+    expect(
+      verdictExaminedBase('no server running on /tmp/tmux-501/srv', '/tmp/'),
+    ).toBe(true);
+    expect(
+      verdictExaminedBase(
+        'no server running on /scratch/base/tmux-501/srv',
+        '/scratch/base/',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the old meaning for a wording that names no path', () => {
+    expect(verdictExaminedBase('No such file or directory', '/tmp')).toBe(true);
+  });
+
+  it('recognizes every create-directory wording', () => {
+    for (const line of [
+      "couldn't create directory /tmp/tmux-501 (Permission denied)",
+      "can't create directory /tmp/tmux-501: Not a directory",
+      'could not create directory /tmp/tmux-501 (Permission denied)',
+      'cannot create directory /tmp/tmux-501: Permission denied',
+    ]) {
+      expect(isSocketDirNeverCreated(line)).toBe(true);
+    }
+    expect(isSocketDirNeverCreated('no server running on /tmp/x')).toBe(false);
   });
 });
 

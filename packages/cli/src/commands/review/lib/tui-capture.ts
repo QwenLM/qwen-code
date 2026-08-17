@@ -17,6 +17,8 @@
 // unit-testable without tmux, freeze, or a filesystem. The command layer owns
 // the processes.
 
+import { posix } from 'node:path';
+
 /** The one server-name prefix, shared by the producer (captureServerName)
  * and the orphan sweep's matcher (cleanup.ts): as two independent literals,
  * a prefix rename silently turns the sweep into a permanent no-op. */
@@ -63,6 +65,53 @@ export function isSocketDirUnusable(stderr: string): boolean {
     /directory .* has unsafe permissions/i.test(stderr) ||
     /is not a directory/i.test(stderr)
   );
+}
+
+/** The path a goal-state kill wording names, if it names one. `no server
+ * running on <path>`, `error connecting to <path> (…)`, and the
+ * create-directory failures all carry it. The trailing parenthesized errno
+ * is NOT part of the path — a socket base may legally contain spaces
+ * (measured with a padded TMUX_TMPDIR) — so the capture runs to the end of
+ * the line and strips only a final ` (…)` group. */
+function goalStatePath(stderr: string): string | undefined {
+  const m =
+    /(?:no server running on|error connecting to|(?:couldn't|could not|can't|cannot) create directory)[ \t]+(.+)$/im.exec(
+      stderr,
+    );
+  if (!m) return undefined;
+  const path = m[1].replace(/\s*\([^)]*\)$/, '').trim();
+  return path === '' ? undefined : path;
+}
+
+/** Whether a goal-state kill verdict ESTABLISHES anything about the base
+ * the kill was pinned to. tmux resolves the socket base from the client's
+ * environment — but only while it is USABLE: a base that vanished before
+ * the kill sends the client to /tmp, and the nothing-to-kill wording then
+ * names /tmp's path while the kill was pinned elsewhere (probe-verified on
+ * 3.4 with a mid-window-deleted base). Crediting such a verdict to the
+ * pinned base reads a live server as reaped — no WARNING, and invisible to
+ * the orphan sweep once the socket dir went with the base. A wording that
+ * names no path keeps its old meaning: nothing disproves the attribution. */
+export function verdictExaminedBase(stderr: string, base: string): boolean {
+  const named = goalStatePath(stderr);
+  if (named === undefined) return true;
+  const examined = posix.resolve(named);
+  const pinned = posix.resolve(base);
+  return (
+    examined === pinned ||
+    examined.startsWith(pinned === '/' ? '/' : `${pinned}/`)
+  );
+}
+
+/** Whether a failed kill is tmux's `couldn't create directory` wording:
+ * the client could not even create the socket directory, so it examined
+ * nothing behind it. Such a verdict establishes death only where a server
+ * could never have started (the caller knows which bases those were);
+ * where one COULD have started, the directory existed once, and its
+ * absence means it was destroyed mid-window — possibly with the server
+ * still alive behind it. */
+export function isSocketDirNeverCreated(stderr: string): boolean {
+  return /(couldn't|could not|can't|cannot) create directory/i.test(stderr);
 }
 
 /**

@@ -108,7 +108,9 @@ import {
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
   isNothingToKill,
+  isSocketDirNeverCreated,
   isSocketDirUnusable,
+  verdictExaminedBase,
   validGeometry,
   type CaptureManifest,
 } from './lib/tui-capture.js';
@@ -974,22 +976,18 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     return;
   }
 
-  // A unix socket path is bounded by sockaddr_un — 104 bytes on macOS, 108
-  // on Linux — and tmux builds this run's from the socket base, the uid
-  // directory and the private server name. Over the limit, the start
-  // SUCCEEDS and the first control call fails with `error connecting to …
-  // (File name too long)`: a mid-capture refusal, after paying for a
-  // server start, blaming tmux for a path this command chose. Measured
-  // with a TMUX_TMPDIR under a mkdtemp base — not an exotic shape at all,
-  // since that is where a CI job's scratch directory lives.
-  if (process.getuid) {
-    // The base tmux will ACTUALLY use, by tmux's own rule: the first
-    // USABLE one. An unusable TMUX_TMPDIR (nonexistent, unwritable) is not
-    // where the socket lands — measuring it anyway refused runs that were
-    // about to succeed under /tmp, which is how this gate was caught being
-    // wrong the first time.
+  // The base the server will ACTUALLY start under, by tmux's own rule:
+  // the first USABLE one. An unusable TMUX_TMPDIR (nonexistent,
+  // unwritable) is not where the socket lands — measuring the socket path
+  // against it anyway refused runs that were about to succeed under /tmp,
+  // which is how the length gate below was caught being wrong the first
+  // time. Remembered for the reap: whether a base COULD hold the server
+  // decides what a failed kill there establishes, and the reap cannot
+  // re-derive start-time state after a window in which the base itself
+  // can be destroyed.
+  let startBase = '/tmp';
+  {
     const envBase = process.env['TMUX_TMPDIR'];
-    let socketBase = '/tmp';
     if (envBase) {
       try {
         // Directoryness FIRST, like the --cwd gate: a regular file (or a
@@ -1002,13 +1000,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         // the real socket path by the whole cwd — the same split-resolution
         // hazard this file already met one gate earlier with TMPDIR, where
         // the probe and the holder disagreed about what the path meant.
-        socketBase = resolve(envBase);
+        startBase = resolve(envBase);
       } catch {
         // Unusable — tmux falls back to /tmp, and so does this measurement.
       }
     }
+  }
+
+  // A unix socket path is bounded by sockaddr_un — 104 bytes on macOS, 108
+  // on Linux — and tmux builds this run's from the socket base, the uid
+  // directory and the private server name. Over the limit, the start
+  // SUCCEEDS and the first control call fails with `error connecting to …
+  // (File name too long)`: a mid-capture refusal, after paying for a
+  // server start, blaming tmux for a path this command chose. Measured
+  // with a TMUX_TMPDIR under a mkdtemp base — not an exotic shape at all,
+  // since that is where a CI job's scratch directory lives.
+  if (process.getuid) {
     const socketPath = join(
-      socketBase,
+      startBase,
       `tmux-${process.getuid()}`,
       // The nonce is 8 hex chars for every run — its VALUE cannot change
       // the length, so measuring a representative one measures them all.
@@ -1233,6 +1242,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // One retry per base before giving up: a transient client-spawn failure
     // is the named shape, and a second attempt reaps it (measured).
     let unconfirmed = false;
+    let confirmedDead = false;
     let killSpawnFailed = false;
     let killDirUnusable = false;
     const uid = process.getuid?.();
@@ -1262,6 +1272,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         try {
           tmux(plan.kill, { ...process.env, TMUX_TMPDIR: base });
           baseDead = true;
+          // Death established GLOBALLY: the server name is unique to this
+          // run, so a kill that succeeded reaped this server whichever
+          // base answered.
+          confirmedDead = true;
         } catch (e) {
           // A spawn that never ran says nothing about the server: the
           // WARNING has to separate "tmux told us it failed" from "we could
@@ -1278,8 +1292,25 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // both attempts answered `couldn't create directory …` and the
           // one-wording test printed a false orphan WARNING).
           const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
-          baseDead = isNothingToKill(stderrText);
-          // ...but NOT for a refusal the client made before it looked. Those
+          // ...but a goal-state wording establishes death only about the
+          // base the client EXAMINED. Two shapes examine nothing here: a
+          // base destroyed mid-window sends the client to /tmp, whose path
+          // the wording then names while the kill was pinned elsewhere
+          // (probe-verified on 3.4 — the live server under the destroyed
+          // base read as reaped: no WARNING, and invisible to the sweep
+          // once the socket dir went with the base); and a base that HELD
+          // the server at start answers `couldn't create directory` once
+          // destroyed mid-window — the client never looked, and the
+          // server may still be alive. The same wording stays honest
+          // where the server started under the OTHER base: that base
+          // never held it.
+          baseDead =
+            isNothingToKill(stderrText) &&
+            verdictExaminedBase(stderrText, base) &&
+            !(
+              isSocketDirNeverCreated(stderrText) && resolve(base) === startBase
+            );
+          // ...and NOT for a refusal the client made before it looked. Those
           // two wordings were briefly folded into isNothingToKill, which made
           // a LIVE server read as reaped: no WARNING, exit 0, and its socket
           // unlinked under both bases — unreachable forever (probe-verified
@@ -1309,10 +1340,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         }
       }
     }
-    if (unconfirmed) {
+    if (unconfirmed && !confirmedDead) {
       // A presumed-alive private server is never a silent outcome: the
       // holder keeps it up for up to three hours, and the briefs encourage many
-      // captures per review — orphans would accumulate invisibly.
+      // captures per review — orphans would accumulate invisibly. Doubt
+      // stays quiet only when a kill SUCCEEDED: the server name is unique
+      // to this run, so that death is global and outranks a verdict that
+      // could not be placed.
       // SAFE, like refuse()'s writes: process.stderr.write throws
       // synchronously on a closed fd, and reap() runs BOTH from the finally
       // (where a throw turns the exit-3 refusal into an exit-1 stack trace
@@ -1746,17 +1780,23 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       degradations.push(
         `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
       );
-      // A failed render can leave a partial/0-byte png at the very path the
-      // manifest is about to deny — remove it (measured: a fake freeze that
-      // wrote bytes then exited 9 left a torn png behind). Only when the
-      // clear phase left nothing there: freeze can fail without its spawn
-      // ever opening the output (EMFILE, a belt kill), and this SUCCEEDING
-      // run then silently deleted a user's untouched png and reported
-      // ans-only (measured).
-      try {
-        if (changed(pngPath, pngStamp)) rmSync(pngPath, { force: true });
-      } catch {
-        // The degradation entry above is the primary signal.
+      // A failed render leaves whatever now sits at the png path in place.
+      // It can be this run's own torn output (a freeze that wrote bytes
+      // then failed — measured) or a file someone else claimed during the
+      // probe/render window (the captured command is the named planter,
+      // and the window legally runs up to an hour): the empty pre-window
+      // stamp makes changed() reduce to occupied(), so presence alone
+      // cannot tell the two apart. Deleting on presence destroyed the
+      // foreign file on a run that reported success (probe-reproduced) —
+      // the same harm the sibling manifest-write cleanup's `png === null`
+      // guard closes. A leftover is loud, not lost: this manifest denies
+      // the png rung, and the next run's ladder degrades on the occupant.
+      if (occupied(pngPath)) {
+        degradations.push(
+          `${pngPath} holds a file that appeared while the render failed — ` +
+            'left in place: this run cannot tell its own torn output from ' +
+            'a file it did not write, and it deletes neither',
+        );
       }
     }
   }

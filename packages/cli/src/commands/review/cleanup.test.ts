@@ -430,10 +430,45 @@ describe('runCleanup', () => {
           `${dir}/some-other-socket`,
           expect.anything(),
         );
-        // Something WAS cleaned, so the nothing-to-clean claim must not print.
-        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
-          expect.stringContaining('Nothing to clean'),
+        // The orphans were host-wide reaps, not target-scoped removals:
+        // the target-scoped answer stands on target-scoped facts, and
+        // nothing of THIS target's was there to clean.
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          'Nothing to clean for target "local".',
         );
+      });
+
+      it('sweeps orphans even when another session holds the lease', () => {
+        // The harness crash that leaves an orphan leaves the lease too,
+        // held by the dead session — and the lease check is session-id
+        // only. A sweep gated behind the lease skipped on exactly the
+        // cleanup calls meant to reclaim the orphan (probe-reproduced);
+        // the sweep touches only servers whose launcher pid is dead,
+        // never the leased worktree, so the skip and the sweep coexist.
+        const lease = {
+          sessionId: 'session-a',
+          promptId: 'prompt-a',
+          target: 'pr-123',
+          repositoryRoot: '/repo',
+          worktreePath: '/repo/.qwen/tmp/review-pr-123',
+          branch: 'qwen-review/pr-123',
+        };
+        mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+        mocks.reviewLeaseHeldByAnotherSession.mockImplementationOnce(
+          (l: unknown) => l === lease,
+        );
+        runCleanup('pr-123');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining('skipped cleanup for "pr-123"'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+        // The skip still protects the holder's worktree.
+        expect(mocks.releaseWorktree).not.toHaveBeenCalled();
       });
 
       it('notes a server it cannot kill and does not unlink a live server socket', () => {
@@ -459,9 +494,7 @@ describe('runCleanup', () => {
         // the sweep itself needed: without it `-L` resolves elsewhere and
         // answers 'no server running', reading as "already gone".
         expect(mocks.writeStderrLine).toHaveBeenCalledWith(
-          expect.stringContaining(
-            `TMUX_TMPDIR="${dir.replace(/\/tmux-\d+$/, '')}"`,
-          ),
+          expect.stringContaining(`TMUX_TMPDIR='/fake-tmp'`),
         );
         expect(mocks.rmSync).not.toHaveBeenCalledWith(
           `${dir}/${orphan}`,
@@ -500,6 +533,28 @@ describe('runCleanup', () => {
         // contradict the stderr note with a "Nothing to clean" claim.
         expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
           expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('shell-quotes the manual-reap base — $ and backticks survive the paste', () => {
+        // JSON.stringify does not escape $ or backticks: a base carrying
+        // one expanded when the operator pasted the suggested command,
+        // resolving the wrong base and answering 'already gone' while the
+        // orphan ran out its window (probe-verified for a $-carrying
+        // base).
+        const base = '/fake-$tmp';
+        const dollarDir = `${base}/tmux-${String(uid)}`;
+        process.env['TMUX_TMPDIR'] = base;
+        mocks.existsSync.mockImplementation((p: string) => p === dollarDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dollarDir ? [orphan] : [],
+        );
+        mocks.execFileSync.mockImplementation(() => {
+          throw Object.assign(new Error('wedged'), { stderr: 'wedged' });
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`TMUX_TMPDIR='/fake-$tmp'`),
         );
       });
 
