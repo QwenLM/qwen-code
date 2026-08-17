@@ -12,6 +12,7 @@ import type {
   DaemonSessionArtifactChange,
   DaemonSkillToggleMutation,
   PermissionOutcome,
+  PromptContentBlock,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
 // acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
@@ -307,15 +308,21 @@ export interface DaemonArtifactChangedData {
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
- * drain). It is a transient dedupe signal, not a transcript item: consumers
- * move these messages out of their pending queue so they aren't resent as the
- * next turn. They are not rendered from this event — the message already reached
- * the model mid-turn, and the persisted transcript shows it on reload.
+ * drain). Consumers move these messages out of their pending queue so they
+ * aren't resent as the next turn; UI adapters may also render the attached
+ * text/media as the immediate mid-turn echo.
  */
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
   messageIds?: string[];
+  /**
+   * Parallel array to `messages` — one entry per drained message. Each entry
+   * may carry image content blocks the daemon attached to the
+   * original queued payload, so the browser echo renderer can show them
+   * alongside the message text. Older daemons omit this field.
+   */
+  items?: Array<{ content?: PromptContentBlock[] }>;
   /**
    * Present only on events from older daemons. New daemons publish one
    * session-wide batch and clients reconcile it by message id.

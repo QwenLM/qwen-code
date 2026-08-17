@@ -1087,10 +1087,20 @@ export function persistRecoveredLedger(
   }
 }
 
-/** The same ledger with its incremental anchor removed. */
+/**
+ * The same ledger with its incremental anchor removed.
+ *
+ * The PAIR, not just the sha. `model` is the identity that certified that sha
+ * and has no meaning without it: left behind it says a foreign round was
+ * certified by someone while the range it certified is gone, and every reader
+ * of this object — the side file, the rendered section's `by \`model\`` clause
+ * — would have to know to ignore it. They fall together everywhere else (the
+ * serializer writes `model` only beside a `sha`, and `compose-review` withholds
+ * both or neither), so they fall together here.
+ */
 function stripAnchor(ledger: Ledger): Ledger {
-  if (ledger.sha === undefined) return ledger;
-  const { sha: _dropped, ...rest } = ledger;
+  if (ledger.sha === undefined && ledger.model === undefined) return ledger;
+  const { sha: _sha, model: _model, ...rest } = ledger;
   return rest;
 }
 
