@@ -937,6 +937,23 @@ export function latestLedger(
  *   suppress a first-time finding on code changed-and-reverted since the
  *   true previous round (snapshot diffs are not monotonic over intervals),
  *   while dropping it merely fails open to full posting.
+ * - Recovered ANONYMOUSLY (`identityKnown` false — the identity lookup threw
+ *   or answered empty): with no `me`, every marker walked as FOREIGN,
+ *   including this account's own, so the union that protects the certified
+ *   work list never had an own side to merge over — and a wholesale write
+ *   would let any drive-by marker posted at this round REPLACE this
+ *   machine's last known-good list, permanently: the attacker's marker
+ *   stays on the PR, so every later outage reopens the swap. When a
+ *   readable file exists, an anonymous recovery therefore advances only the
+ *   ROUND COUNTER (strictly higher rounds — a stale counter re-issues ids
+ *   the PR already carries) and adopts the winner's `reviewId` for future
+ *   tiebreaks; the findings stay this machine's own, and `sha`/`commitId`
+ *   are dropped — an anonymous round cannot be re-vouched, and an anchor
+ *   now superseded by rounds this account never certified must not scope
+ *   the next review (the healthy foreign-winner path strips it at the
+ *   recovery seam for the same reason). A same-round anonymous winner
+ *   changes nothing. With no readable file there is nothing to protect,
+ *   and the anonymous recovery is written whole, exactly as before.
  *
  * Every write is write-temp-then-rename: a failure mid-write must leave the
  * previous file intact, never a truncated one that parses as no round and
@@ -947,6 +964,7 @@ export function persistRecoveredLedger(
   sideFilePath: string,
   recovered: RecoveredLedger | null,
   noOwnReview: boolean,
+  identityKnown: boolean,
 ): void {
   // Unique per process: two same-PR fetches racing on one fixed `.tmp` can
   // rename each other's bytes (A renames B's write; B's ENOENT is
@@ -975,23 +993,56 @@ export function persistRecoveredLedger(
       // fetch that came back short), and overwriting round 7 with round 2
       // would drop the anchor sha and rewind the posture clock. Compare on
       // `round`, `reviewId` as the tiebreak — both already in the file.
+      let existing: Record<string, unknown> | null = null;
       try {
-        const existing = JSON.parse(readFileSync(sideFilePath, 'utf8')) as {
-          round?: unknown;
-          reviewId?: unknown;
-        };
-        const exRound =
-          typeof existing.round === 'number' ? existing.round : -1;
-        const exId =
-          typeof existing.reviewId === 'number' ? existing.reviewId : -1;
-        if (
-          exRound > recovered.ledger.round ||
-          (exRound === recovered.ledger.round && exId > recovered.reviewId)
-        ) {
-          return;
+        const parsed = JSON.parse(readFileSync(sideFilePath, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          existing = parsed as Record<string, unknown>;
         }
       } catch {
         // No readable existing file: nothing to protect.
+      }
+      const exRound =
+        typeof existing?.['round'] === 'number'
+          ? (existing['round'] as number)
+          : -1;
+      const exId =
+        typeof existing?.['reviewId'] === 'number'
+          ? (existing['reviewId'] as number)
+          : -1;
+      if (
+        exRound > recovered.ledger.round ||
+        (exRound === recovered.ledger.round && exId > recovered.reviewId)
+      ) {
+        return;
+      }
+      if (!identityKnown && existing !== null) {
+        // Anonymous recovery over an existing file: the guard the docblock's
+        // fourth outcome describes. A same-round winner changes nothing (the
+        // drive-by shape: equal round, later review); a strictly higher one
+        // advances the counter and the tiebreak id, keeps the findings, and
+        // drops the anchor and age reference.
+        if (exRound >= recovered.ledger.round) {
+          return;
+        }
+        const {
+          sha: _droppedSha,
+          commitId: _droppedCommitId,
+          ...kept
+        } = existing;
+        mkdirSync(dirname(sideFilePath), { recursive: true });
+        writeAtomic(
+          JSON.stringify(
+            {
+              ...kept,
+              round: recovered.ledger.round,
+              reviewId: recovered.reviewId,
+            },
+            null,
+            2,
+          ),
+        );
+        return;
       }
       mkdirSync(dirname(sideFilePath), { recursive: true });
       writeAtomic(
@@ -1421,6 +1472,11 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     // (A recovered foreign ledger also protects the file, but through the
     // helper's own recovered-first branch, not through this flag.)
     reviews.length > 0 && identityKnown && !recoveryThrew && !sawOwnReview,
+    // Separately from deletion: an ANONYMOUS recovery (identity unknown)
+    // must not replace the persisted work list — the helper's fourth
+    // outcome. Every marker walks as foreign without a `me`, so the union
+    // never protected the own list this run.
+    identityKnown,
   );
 
   // The effective host (explicit --host, else an operator-exported
