@@ -185,6 +185,26 @@ describe('BackgroundShellRegistry', () => {
   });
 
   describe('callbacks', () => {
+    it('clears the status callback only when identities match', () => {
+      const reg = new BackgroundShellRegistry();
+      const installed = vi.fn();
+      const replacement = vi.fn();
+
+      reg.setStatusChangeCallback(installed);
+      reg.clearStatusChangeCallback(replacement);
+      reg.register(makeEntry({ shellId: 'a' }));
+      expect(installed).toHaveBeenCalledOnce();
+
+      reg.setStatusChangeCallback(replacement);
+      reg.clearStatusChangeCallback(installed);
+      reg.register(makeEntry({ shellId: 'b' }));
+      expect(replacement).toHaveBeenCalledOnce();
+
+      reg.clearStatusChangeCallback(replacement);
+      reg.register(makeEntry({ shellId: 'c' }));
+      expect(replacement).toHaveBeenCalledOnce();
+    });
+
     it('fires register callback synchronously when an entry is added', () => {
       const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
@@ -673,6 +693,11 @@ describe('BackgroundShellRegistry', () => {
       expect(e.status).toBe('running');
       expect(e.endTime).toBeUndefined();
       expect(ac.signal.aborted).toBe(true);
+      expect(reg.hasRunningEntries()).toBe(true);
+
+      reg.cancel('a', 2000);
+
+      expect(reg.hasRunningEntries()).toBe(false);
     });
 
     it('is a no-op on a terminal entry', () => {

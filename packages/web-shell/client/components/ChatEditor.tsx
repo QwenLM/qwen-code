@@ -9,9 +9,17 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { ReactNode, RefObject } from 'react';
+import type {
+  ReactNode,
+  RefObject,
+  DragEvent as ReactDragEvent,
+  ChangeEvent as ReactChangeEvent,
+} from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  DAEMON_APPROVAL_MODES,
+  useOptionalWorkspace,
+} from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import type {
@@ -43,6 +51,8 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
+import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
+import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import {
   getComposerTagIconUrl,
@@ -54,6 +64,7 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
 import { formatContextUsageDetail } from '../utils/formatTokenCount';
+import { normalizeImageMediaType } from '../utils/imageIngestion';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -71,7 +82,11 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  FileTextIcon,
   FolderClosedIcon,
+  LoaderCircleIcon,
+  UploadIcon,
+  XIcon,
 } from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
@@ -108,6 +123,23 @@ export type ComposerToolbarAction =
   | 'voice'
   | 'workspace';
 
+// Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
+// items API can tell them apart, and folder uploads are out of scope.
+function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
+  const items = dataTransfer.items;
+  if (!items || items.length === 0) {
+    return Array.from(dataTransfer.files);
+  }
+  const files: File[] = [];
+  for (const item of Array.from(items)) {
+    if (item.kind !== 'file') continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
+}
+
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
   'contextUsage',
@@ -125,6 +157,7 @@ interface ChatEditorProps {
   onSubmit: (
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
+    files?: import('../adapters/promptTypes').PromptFile[],
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
@@ -284,6 +317,12 @@ function isTouchLikeDevice(): boolean {
     (typeof window.matchMedia === 'function' &&
       window.matchMedia('(hover: none), (pointer: coarse)').matches)
   );
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function TopComposerTag({
@@ -1442,7 +1481,97 @@ export const ChatEditor = memo(
       renderComposerTagTooltip,
       onComposerTagClick,
       parseUserMessageContent,
+      builtinAtProviders: contextBuiltinAtProviders,
+      atProviders: contextAtProviders,
+      fileUploadEnabled,
     } = useWebShellCustomization();
+    // Props win when set (main composer). Split-view ChatPane omits them and
+    // falls back to the App-level customization context.
+    const resolvedBuiltinAtProviders =
+      builtinAtProviders ?? contextBuiltinAtProviders;
+    const resolvedAtProviders = atProviders ?? contextAtProviders;
+
+    // File-upload picker. The @ panel's "Upload file" item reports the browsed
+    // directory; we click a hidden <input type="file"> so the browser treats it
+    // as part of the user gesture, then upload into that directory.
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const uploadPickerTargetRef = useRef('.');
+    const uploadPickerTargetKeyRef = useRef('');
+    const uploadPickerRestoreRef = useRef<(() => void) | undefined>(undefined);
+
+    // Resolve the upload target BEFORE useComposerCore so the @ panel's upload
+    // item can be capability-gated (hidden on daemons without the feature).
+    const uploadWorkspace = useOptionalWorkspace();
+    const uploadTarget = useMemo(() => {
+      if (!uploadWorkspace) return undefined;
+      // The host prop can force-disable upload even when the daemon advertises
+      // the capability; it does NOT bypass the capability check. Both must
+      // allow: `fileUploadEnabled === false` short-circuits, otherwise the
+      // `workspace_file_upload` capability is still required.
+      if (fileUploadEnabled === false) return undefined;
+      const features = uploadWorkspace.capabilities?.features ?? [];
+      if (!features.includes('workspace_file_upload')) return undefined;
+      if (atWorkspaceCwd) {
+        if (!features.includes('workspace_qualified_rest_core'))
+          return undefined;
+        // The selected workspace must be present exactly once and trusted.
+        const matches = (uploadWorkspace.capabilities?.workspaces ?? []).filter(
+          (w) => w.cwd === atWorkspaceCwd,
+        );
+        if (matches.length !== 1 || matches[0].trusted === false)
+          return undefined;
+        return {
+          client: uploadWorkspace.client.workspaceByCwd(atWorkspaceCwd),
+          targetKey: atWorkspaceCwd,
+        };
+      }
+      const primaryMatches = (
+        uploadWorkspace.capabilities?.workspaces ?? []
+      ).filter((workspace) => workspace.primary);
+      if (primaryMatches.length !== 1 || primaryMatches[0].trusted !== true)
+        return undefined;
+      return { client: uploadWorkspace.client, targetKey: '<primary>' };
+    }, [uploadWorkspace, atWorkspaceCwd, fileUploadEnabled]);
+    const uploadEnabled = uploadTarget !== undefined;
+    const maxUploadBytes =
+      uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
+      50 * 1024 * 1024;
+    const uploadTargetKey = `${sessionId ?? '<no-session>'}:${
+      uploadTarget?.targetKey ?? '<none>'
+    }`;
+
+    // -- File upload ----------------------------------------------------------
+    // The hook's cancel/reset granularity includes the session: ChatEditor is
+    // shared across sessions (a switch swaps the doc in the same EditorView),
+    // so an upload that survives a same-workspace session switch would append
+    // its @file reference to the other session's draft.
+    const fileUpload = useFileUpload({
+      client: uploadTarget?.client,
+      maxBytes: maxUploadBytes,
+      targetKey: uploadTargetKey,
+    });
+
+    const triggerFilePicker = useCallback(
+      (targetDir: string, restoreQuery?: () => void) => {
+        uploadPickerTargetRef.current = targetDir;
+        uploadPickerTargetKeyRef.current = uploadTargetKey;
+        uploadPickerRestoreRef.current = restoreQuery;
+        fileInputRef.current?.click();
+      },
+      [uploadTargetKey],
+    );
+
+    // A pending picker restore belongs to the CURRENT target's draft. Flush
+    // it before a target change (session switch, capability flip) persists or
+    // replaces the doc: afterwards the editor holds another draft, and the
+    // layout effect runs before the composer's passive session-swap effect
+    // saves the outgoing draft. Also covers the picker being torn down while
+    // the OS dialog is open — no cancel/change event will ever arrive.
+    useLayoutEffect(() => {
+      const restore = uploadPickerRestoreRef.current;
+      uploadPickerRestoreRef.current = undefined;
+      restore?.();
+    }, [uploadTargetKey]);
 
     const core = useComposerCore({
       onSubmit,
@@ -1466,8 +1595,8 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
-      builtinAtProviders,
-      atProviders,
+      builtinAtProviders: resolvedBuiltinAtProviders,
+      atProviders: resolvedAtProviders,
       atWorkspaceCwd,
       composerTagIcons,
       parseUserMessageContent,
@@ -1475,12 +1604,209 @@ export const ChatEditor = memo(
       renderComposerTagTooltip,
       onComposerTagClick,
       onImageIngestionNotice,
+      onFileUploadRequest: uploadEnabled ? triggerFilePicker : undefined,
+      workspaceUploadBusy: fileUpload.isBusy,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
     const { t } = useI18n();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
+
+    const addComposerTags = core.addTags;
+    const clearImageDragState = core.clearImageDragState;
+    const insertUploadReference = useCallback(
+      (path: string) => {
+        const serialized = fileReferenceInsertText(path).trim();
+        addComposerTags(
+          [
+            {
+              id: `file:${serialized}`,
+              kind: 'file',
+              value: path,
+              serialized,
+            },
+          ],
+          { placement: 'inline', position: 'end' },
+        );
+      },
+      [addComposerTags],
+    );
+    const uploadStatusText = (upload: FileUploadItem): string => {
+      switch (upload.status) {
+        case 'pending':
+          return t('composer.upload.pending');
+        case 'uploading':
+          return `${t('composer.upload.uploading')} ${Math.round(
+            upload.progress * 100,
+          )}%`;
+        case 'done':
+          return upload.resultPath !== undefined &&
+            upload.resultPath !== upload.targetPath
+            ? `${t('composer.upload.renamed')} ${upload.resultPath}`
+            : t('composer.upload.done');
+        case 'error':
+          return (
+            upload.error ??
+            (upload.errorCode === 'tooLarge'
+              ? t('composer.upload.error.tooLarge', {
+                  limit: `${Math.round(maxUploadBytes / (1024 * 1024))} MiB`,
+                })
+              : upload.errorCode === 'noDaemon'
+                ? t('composer.upload.error.noDaemon')
+                : upload.errorCode === 'tooManyFiles'
+                  ? t('composer.upload.error.tooManyFiles', {
+                      count: upload.skippedCount ?? 0,
+                    })
+                  : t('composer.upload.error'))
+          );
+      }
+    };
+    const [uploadDragActive, setUploadDragActive] = useState(false);
+    const uploadDragDepthRef = useRef(0);
+    const handleUploadDragEnter = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (
+          !uploadEnabled ||
+          disabled ||
+          !event.dataTransfer.types.includes('Files')
+        )
+          return;
+        event.preventDefault();
+        uploadDragDepthRef.current += 1;
+        setUploadDragActive(true);
+      },
+      [uploadEnabled, disabled],
+    );
+    const handleUploadDragOver = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (
+          !uploadEnabled ||
+          disabled ||
+          !event.dataTransfer.types.includes('Files')
+        )
+          return;
+        event.preventDefault();
+      },
+      [uploadEnabled, disabled],
+    );
+    const handleUploadDragLeave = useCallback(() => {
+      if (uploadDragDepthRef.current === 0) return;
+      uploadDragDepthRef.current = Math.max(0, uploadDragDepthRef.current - 1);
+      if (uploadDragDepthRef.current === 0) setUploadDragActive(false);
+    }, []);
+    const clearUploadDragState = useCallback(() => {
+      uploadDragDepthRef.current = 0;
+      setUploadDragActive(false);
+    }, []);
+    // Shell regions outside the drop-handling surface (e.g. the upload
+    // strip) must still cancel file drags; an uncancelled drop navigates
+    // the tab to the file, tearing down the SPA mid-turn.
+    const cancelShellFileDrag = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+      },
+      [],
+    );
+    // `uploadFiles` is a stable callback from the hook; depend on it (not the
+    // freshly-created `fileUpload` object) so these handlers are not rebuilt
+    // on every render.
+    const uploadFiles = fileUpload.uploadFiles;
+    const handleUploadDrop = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (!event.dataTransfer.types.includes('Files')) {
+          core.imageTransferHandlers.onDropCapture(event);
+          return;
+        }
+        const files = collectDroppedFiles(event.dataTransfer);
+        uploadDragDepthRef.current = 0;
+        setUploadDragActive(false);
+        if (disabled) {
+          // Cancel the drop itself; otherwise the browser navigates the tab
+          // to the dropped file, tearing down the Web Shell SPA mid-turn.
+          event.preventDefault();
+          return;
+        }
+        if (
+          !uploadEnabled ||
+          files.length === 0 ||
+          files.every((file) => normalizeImageMediaType(file.type, file.name))
+        ) {
+          core.imageTransferHandlers.onDropCapture(event);
+          return;
+        }
+        clearImageDragState();
+        event.preventDefault();
+        event.stopPropagation();
+        uploadFiles(files, '.', insertUploadReference);
+      },
+      [
+        core.imageTransferHandlers,
+        clearImageDragState,
+        disabled,
+        uploadEnabled,
+        uploadFiles,
+        insertUploadReference,
+      ],
+    );
+    const handleUploadPickerChange = useCallback(
+      (event: ReactChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(event.target.files ?? []);
+        const targetDir = uploadPickerTargetRef.current;
+        const capturedKey = uploadPickerTargetKeyRef.current;
+        const restore = uploadPickerRestoreRef.current;
+        uploadPickerRestoreRef.current = undefined;
+        event.target.value = '';
+        // Only upload if the target workspace is unchanged since the picker
+        // opened; otherwise a stale directory path would land in the newly
+        // selected workspace (the hook's generation cancel only clears items
+        // already queued, not this fresh call).
+        if (
+          files.length > 0 &&
+          capturedKey !== '' &&
+          capturedKey === uploadTargetKey
+        ) {
+          const queued = uploadFiles(files, targetDir, insertUploadReference);
+          if (queued === 0) {
+            // Every chosen file was rejected locally (e.g. all oversized):
+            // the picker closed without any upload, so give the query back.
+            restore?.();
+          }
+        } else {
+          // The @ panel deleted the mention query before opening the picker.
+          // A blocked or empty selection must give it back, like the native
+          // cancel path does, instead of silently eating the typed text.
+          restore?.();
+        }
+      },
+      [uploadFiles, insertUploadReference, uploadTargetKey],
+    );
+    useEffect(() => {
+      // React only wires `cancel` on <dialog>; the file input needs a native
+      // listener. `cancel` does not bubble, so delegation cannot see it.
+      const input = fileInputRef.current;
+      if (!uploadEnabled || !input) return;
+      const onCancel = () => {
+        const restore = uploadPickerRestoreRef.current;
+        uploadPickerRestoreRef.current = undefined;
+        restore?.();
+      };
+      input.addEventListener('cancel', onCancel);
+      return () => input.removeEventListener('cancel', onCancel);
+    }, [uploadEnabled]);
+
+    useEffect(() => {
+      if (!uploadDragActive) return;
+      window.addEventListener('dragend', clearUploadDragState);
+      window.addEventListener('blur', clearUploadDragState);
+      return () => {
+        window.removeEventListener('dragend', clearUploadDragState);
+        window.removeEventListener('blur', clearUploadDragState);
+      };
+    }, [clearUploadDragState, uploadDragActive]);
+    useEffect(() => {
+      if (disabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
@@ -2118,15 +2444,80 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        onDragOver={cancelShellFileDrag}
+        onDrop={cancelShellFileDrag}
       >
+        {fileUpload.uploads.length > 0 && (
+          <div className={styles.uploadStrip} data-web-shell-upload-strip>
+            {/* One live region per strip, fed only by terminal transitions:
+                per-row regions would announce every >=2% progress tick. */}
+            <div className={styles.srOnly} role="status" aria-live="polite">
+              {fileUpload.uploads
+                .filter(
+                  (upload) =>
+                    upload.status === 'done' || upload.status === 'error',
+                )
+                .map(
+                  (upload) =>
+                    `${upload.file.name}: ${uploadStatusText(upload)}`,
+                )
+                .join(' \u2014 ')}
+            </div>
+            {fileUpload.uploads.map((upload) => {
+              const busy =
+                upload.status === 'pending' || upload.status === 'uploading';
+              return (
+                <div
+                  key={upload.id}
+                  className={styles.uploadRow}
+                  data-status={upload.status}
+                >
+                  {busy ? (
+                    <LoaderCircleIcon
+                      className={styles.uploadRowSpinner}
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <UploadIcon aria-hidden="true" />
+                  )}
+                  <span className={styles.uploadRowName}>
+                    {upload.file.name}
+                  </span>
+                  <span className={styles.uploadRowStatus}>
+                    {uploadStatusText(upload)}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.uploadRowAction}
+                    aria-label={
+                      busy
+                        ? t('composer.upload.cancel')
+                        : t('composer.upload.dismiss')
+                    }
+                    onClick={() => fileUpload.removeUpload(upload.id)}
+                  >
+                    <XIcon aria-hidden="true" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <div
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
+          data-upload-drag-active={uploadDragActive || undefined}
           data-typewriter-visible={showTypewriterPlaceholder || undefined}
-          data-image-drag-active={core.imageDragActive || undefined}
+          data-image-drag-active={
+            (core.imageDragActive && !uploadDragActive) || undefined
+          }
           aria-busy={core.pendingImageBatchCount > 0 || undefined}
           {...core.imageTransferHandlers}
+          onDragEnter={handleUploadDragEnter}
+          onDragOver={handleUploadDragOver}
+          onDragLeave={handleUploadDragLeave}
+          onDropCapture={handleUploadDrop}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -2135,6 +2526,18 @@ export const ChatEditor = memo(
           }}
         >
           <SpecularComposerEffect targetRef={containerRef} />
+          {uploadEnabled && (
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className={styles.hiddenUploadInput}
+              data-web-shell-upload-input
+              onChange={handleUploadPickerChange}
+              tabIndex={-1}
+              aria-hidden="true"
+            />
+          )}
           {searchMode && (
             <div
               ref={searchUiRef}
@@ -2195,7 +2598,9 @@ export const ChatEditor = memo(
             </div>
           )}
           <div className={styles.content}>
-            {(core.composerTags.length > 0 || core.pastedImages.length > 0) && (
+            {(core.composerTags.length > 0 ||
+              core.pastedImages.length > 0 ||
+              core.pastedFiles.length > 0) && (
               <div
                 className={styles.attachments}
                 data-web-shell-composer-attachments
@@ -2296,6 +2701,50 @@ export const ChatEditor = memo(
                     })}
                   </div>
                 )}
+                {core.pastedFiles.length > 0 && (
+                  <div className={styles.files}>
+                    {core.pastedFiles.map((file, i) => (
+                      <div
+                        key={`${file.name}-${i}`}
+                        className={styles.fileChip}
+                      >
+                        <FileTextIcon
+                          size={14}
+                          className={styles.fileChipIcon}
+                          aria-hidden="true"
+                        />
+                        <span className={styles.fileChipName}>{file.name}</span>
+                        {file.size !== undefined && (
+                          <span className={styles.fileChipSize}>
+                            {formatAttachmentSize(file.size)}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className={styles.fileChipRemove}
+                          disabled={disabled}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (disabled) return;
+                            core.removeFile(i);
+                          }}
+                          aria-label={`Remove ${file.name}`}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {uploadDragActive && (
+              <div
+                className={styles.uploadDropOverlay}
+                data-web-shell-upload-drop-overlay
+              >
+                <UploadIcon aria-hidden="true" />
+                <span>{t('composer.upload.drop')}</span>
               </div>
             )}
             {core.slashMenu && (

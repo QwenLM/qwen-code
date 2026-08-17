@@ -28,9 +28,18 @@ import type { Config } from '../../config/config.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import {
   DEFAULT_MAX_AGENTS_PER_RUN,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   MAX_WORKFLOW_AGENTS_ENV,
   MAX_WORKFLOW_CONCURRENCY_ENV,
+  WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+  WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
+import {
+  DEFAULT_STALL_MS,
+  MAX_STALL_ATTEMPTS,
+  MAX_WORKFLOW_STALL_MS_ENV,
+} from '../../agents/runtime/workflow-stall.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import {
   WorkflowRunner,
@@ -84,7 +93,7 @@ const WORKFLOW_PARAM_SCHEMA = {
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, opts?)`, and read `args`. ' +
-        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation? }`. ' +
+        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? }`. ' +
         '`schema` (JSON Schema object): the subagent must deliver its result ' +
         'by calling `structured_output` with arguments matching the schema; ' +
         'agent() resolves to the validated object. Two failed attempts produce ' +
@@ -106,6 +115,25 @@ const WORKFLOW_PARAM_SCHEMA = {
         'in this build" (parity with upstream). isolation=worktree refuses to ' +
         'run when the parent working tree has uncommitted changes (the subagent ' +
         'would see a stale HEAD). ' +
+        '`workingDir` (string): pin the subagent to an EXISTING git worktree of ' +
+        'this repository that the caller owns — nothing is created and nothing ' +
+        'is removed. Use it when the directory the agent must work in already ' +
+        'exists and its uncommitted state is the point (a review worktree, a ' +
+        'checkout a previous step provisioned) — exactly the case isolation ' +
+        'cannot serve. Mutually exclusive with `isolation`. The path must ' +
+        'be a linked worktree of this repository registered via ' +
+        '`git worktree add` (it may live anywhere on disk) — the main ' +
+        'checkout is not eligible. ' +
+        '`stallMs` (number, ms): a no-progress watchdog, not a wall-clock cap. ' +
+        'The dispatch is aborted and retried (up to ' +
+        `${MAX_STALL_ATTEMPTS} attempts total) after this many milliseconds ` +
+        'with no observable subagent progress once progress has begun ' +
+        '(a dispatch that produces no first response is bounded by the ' +
+        'subagent time cap, not this watchdog); the timer is suspended ' +
+        'while a tool is in flight, so a legitimately slow tool is not ' +
+        'a stall. ' +
+        `Default ${DEFAULT_STALL_MS} (override via \`${MAX_WORKFLOW_STALL_MS_ENV}\`, whole seconds); \`0\` disables the watchdog. Wall time ` +
+        'per attempt is bounded separately. ' +
         'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
         'in their disallowed-tool floor regardless of agentType. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
@@ -522,11 +550,17 @@ function safeStringifyDisplayPayload(payload: unknown): string {
  * shape — everything through one `parallel()` barrier, first answer taken at
  * face value. The prose below is therefore load-bearing, not documentation.
  * `script`'s own description carries the exact authoring contract (error
- * strings, serialization rules). The agent cap and the two env knobs are
- * interpolated from the orchestrator's exported constants
- * (`DEFAULT_MAX_AGENTS_PER_RUN`, `MAX_WORKFLOW_AGENTS_ENV`,
- * `MAX_WORKFLOW_CONCURRENCY_ENV`) in both halves, so raising a cap moves
- * every model-visible copy at once — there is no prose to hand-sync.
+ * strings, serialization rules). Every cap and env knob is interpolated
+ * from exported constants, so raising a cap moves every model-visible copy
+ * at once — there is no prose to hand-sync. In both halves:
+ * `DEFAULT_MAX_AGENTS_PER_RUN`, `MAX_WORKFLOW_AGENTS_ENV`,
+ * `MAX_WORKFLOW_CONCURRENCY_ENV` (orchestrator exports). Runtime half only:
+ * the four subagent-bound constants `DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS`,
+ * `WORKFLOW_SUBAGENT_MAX_TURNS_ENV`,
+ * `DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES`,
+ * `WORKFLOW_SUBAGENT_MAX_MINUTES_ENV` (orchestrator exports). Script half
+ * only: `DEFAULT_STALL_MS`, `MAX_STALL_ATTEMPTS`,
+ * `MAX_WORKFLOW_STALL_MS_ENV` (workflow-stall exports).
  * The wall-clock cap is the one exception: `DEFAULT_MAX_WALL_CLOCK_MS` is
  * private to `workflow-sandbox.ts`, so "30-minute" is still a literal here
  * and has to be edited alongside it. The output-token budget and the
@@ -541,7 +575,7 @@ Reach for one to be comprehensive (decompose the work and cover every part in pa
 
 **Runtime** — see the \`script\` parameter for the detailed authoring contract.
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script anywhere. Default \`max(1, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script anywhere. Default \`max(1, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`) — an attempt that hits either becomes \`null\` in \`parallel()\`/\`pipeline()\`, indistinguishable from a missing agent, so raise them for legitimately long work. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree', workingDir, stallMs })\` covers structured-output contracts, declarative-agent selection, model override, git-worktree-isolated subagents, pinning an agent to a caller-owned worktree, and the no-progress stall watchdog (\`stallMs: 0\` disables it). \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
 
 **Scout first, then orchestrate**
 

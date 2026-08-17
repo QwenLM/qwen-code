@@ -6,6 +6,13 @@
 
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+} from './acp-http/pre-attach-budget.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
 import type {
   DaemonLogger,
@@ -43,6 +50,7 @@ import type {
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -149,6 +157,7 @@ type WorkspaceStatusSection = DaemonStatusSection<unknown>;
 
 interface FullDaemonStatus {
   sessions: BridgeDaemonStatusSnapshot['sessions'];
+  acpMounts: AcpHttpSnapshot['mounts'];
   acpConnections: AcpHttpSnapshot['connections'];
   workspace: Record<string, WorkspaceStatusSection>;
   auth: {
@@ -159,6 +168,7 @@ interface FullDaemonStatus {
 
 interface WorkspaceBridgeStatusSnapshot {
   workspaceCwd: string;
+  internal?: boolean;
   snapshot: BridgeDaemonStatusSnapshot;
   lastActivity: number | null;
 }
@@ -186,6 +196,11 @@ interface DaemonStatusLimits {
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
   acpConnectionCap: number | null;
+  acpPreAttachMaxFramesPerStream: number | null;
+  acpPreAttachMaxFramesPerConnection: number | null;
+  acpPreAttachMaxFramesGlobal: number | null;
+  acpPreAttachMaxPayloadBytesPerConnection: number | null;
+  acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
    * The daemon's resolved memory figures. Observed and reported only: nothing
    * consumes them to size a child. `null` on paths that resolve none, such as
@@ -196,12 +211,30 @@ interface DaemonStatusLimits {
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required. Every figure in this section is resolved input or a
-   * model of a policy that does not exist yet; nothing here is applied to a
-   * process. The flag exists so a client can never mistake the `limits`
-   * namespace for enforcement that has not shipped.
+   * False, and required — scoped to the CHILD-HEAP model: every figure in
+   * this section except `journalGrowth` is resolved input or a model of a
+   * policy that does not exist yet; nothing sizes or bounds a child
+   * process. The flag exists so a client can never mistake the modeled
+   * partition for enforcement that has not shipped. Adaptive live-journal
+   * growth IS a runtime effect of the budget and is reported separately
+   * under `journalGrowth`.
    */
   enforced: false;
+  /**
+   * Adaptive live-journal growth derived from this budget — the one figure
+   * in this section with runtime effect: session journal caps really do
+   * grow within this pool mid-turn (per-session effective limits appear on
+   * each session diagnostic in `detail=full`). `null` when growth is
+   * disabled (an operator-pinned journal cap, or a budget that leaves no
+   * usable pool). The pool is owned daemon-wide: every workspace bridge
+   * accounts its sessions against the same single aggregate.
+   */
+  journalGrowth: {
+    poolBytes: number;
+    hardCapBytes: number;
+    baselineMaxEvents: number;
+    baselineMaxBytes: number;
+  } | null;
   /**
    * The per-child heap partition the daemon models but does not apply.
    * `null` when no policy was built.
@@ -266,10 +299,12 @@ export interface DaemonStatusMemoryLimits {
 export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
   childHeap?: ChildHeapPolicySnapshot,
+  journalGrowth?: DaemonStatusMemoryLimits['journalGrowth'],
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
     enforced: false,
+    journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {
           mode: childHeap.mode,
@@ -320,6 +355,16 @@ interface DaemonStatusRuntime {
       sseStreams: number;
       wsStreams: number;
       pendingClientRequests: number;
+      preAttach: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
     };
   };
   rateLimit: {
@@ -540,9 +585,12 @@ export async function buildDaemonStatusResponse(
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const lastActivity = input.bridge.lastActivityAt ?? null;
   const workspaceRuntimes = input.workspaceRegistry?.list();
+  const aggregateRuntimes =
+    input.workspaceRegistry?.listAll?.() ?? workspaceRuntimes;
   const workspaceSnapshots: WorkspaceBridgeStatusSnapshot[] =
-    workspaceRuntimes?.map((runtime) => ({
+    aggregateRuntimes?.map((runtime) => ({
       workspaceCwd: runtime.workspaceCwd,
+      internal: isInternalWorkspaceRuntime(runtime),
       snapshot:
         runtime.bridge === input.bridge
           ? bridgeSnapshot
@@ -586,7 +634,10 @@ export async function buildDaemonStatusResponse(
           .length
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
-      ? input.workspaceRegistry.listEntries().length
+      ? (
+          input.workspaceRegistry.listAllEntries?.() ??
+          input.workspaceRegistry.listEntries()
+        ).length
       : workspaceSnapshots.length;
     // Summed in the SAME synchronous pass that produced `activeAcpChildCount`
     // above, over the same array. Keep it that way: an `await` slipped between
@@ -698,7 +749,7 @@ export async function buildDaemonStatusResponse(
     derivedQueuedPromptsByWorkspace[index] = derivedQueuedPromptsForWorkspace;
   }
   const queuedPrompts =
-    workspaceRuntimes?.reduce(
+    aggregateRuntimes?.reduce(
       (sum, runtime, index) =>
         sum +
         (runtime.bridge.pendingPromptTotal ??
@@ -783,7 +834,9 @@ export async function buildDaemonStatusResponse(
     full = await buildFullStatus(
       input,
       acpAggregate,
-      workspaceSnapshots.flatMap((item) => item.snapshot.sessions),
+      workspaceSnapshots
+        .filter((item) => item.internal !== true)
+        .flatMap((item) => item.snapshot.sessions),
     );
     pushFullIssues(issues, full);
   }
@@ -849,9 +902,32 @@ export async function buildDaemonStatusResponse(
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
+      acpPreAttachMaxFramesPerStream:
+        acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM : null,
+      acpPreAttachMaxFramesPerConnection:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION
+          : null,
+      acpPreAttachMaxFramesGlobal:
+        acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL : null,
+      acpPreAttachMaxPayloadBytesPerConnection:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION
+          : null,
+      acpPreAttachMaxPayloadBytesGlobal:
+        acpSnapshot !== undefined
+          ? ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL
+          : null,
       memory: toDaemonStatusMemoryLimits(
         memoryBudget,
         input.getChildHeapPolicySnapshot?.(),
+        bridgeSnapshot.limits.journalGrowth
+          ? {
+              ...bridgeSnapshot.limits.journalGrowth,
+              baselineMaxEvents: bridgeSnapshot.limits.maxJournalEvents,
+              baselineMaxBytes: bridgeSnapshot.limits.maxJournalBytes,
+            }
+          : null,
       ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
@@ -897,6 +973,17 @@ export async function buildDaemonStatusResponse(
           sseStreams: acpAggregate?.sseStreams ?? 0,
           wsStreams: acpAggregate?.wsStreams ?? 0,
           pendingClientRequests: acpAggregate?.pendingClientRequests ?? 0,
+          preAttach: {
+            bufferedConnectionFrames:
+              acpAggregate?.bufferedConnectionFrames ?? 0,
+            bufferedSessionFrames: acpAggregate?.bufferedSessionFrames ?? 0,
+            pendingDeliveryFrames: acpAggregate?.pendingDeliveryFrames ?? 0,
+            usedFrames: acpAggregate?.preAttach.usedFrames ?? 0,
+            usedBytes: acpAggregate?.preAttach.usedBytes ?? 0,
+            highWaterFrames: acpAggregate?.preAttach.highWaterFrames ?? 0,
+            highWaterBytes: acpAggregate?.preAttach.highWaterBytes ?? 0,
+            guardFailures: acpAggregate?.preAttach.guardFailures ?? 0,
+          },
         },
       },
       rateLimit: {
@@ -909,7 +996,7 @@ export async function buildDaemonStatusResponse(
         : {}),
       activity: {
         activePrompts:
-          workspaceRuntimes?.reduce(
+          aggregateRuntimes?.reduce(
             (sum, runtime) => sum + (runtime.bridge.activePromptCount ?? 0),
             0,
           ) ??
@@ -994,6 +1081,7 @@ async function buildFullStatus(
 
   return {
     sessions,
+    acpMounts: acpSnapshot?.mounts ?? [],
     acpConnections: acpSnapshot?.connections ?? [],
     workspace: {
       mcp,
@@ -1069,7 +1157,7 @@ function pushRuntimeIssues(
   totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
   workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
-  for (const { workspaceCwd, snapshot } of workspaceSnapshots) {
+  for (const { workspaceCwd, internal, snapshot } of workspaceSnapshots) {
     if (
       snapshot.limits.maxSessions !== null &&
       snapshot.limits.maxSessions > 0 &&
@@ -1081,7 +1169,9 @@ function pushRuntimeIssues(
         severity: 'warning',
         message:
           workspaceSnapshots.length > 1
-            ? `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+            ? internal
+              ? `An internal runtime's active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+              : `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
             : `Active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`,
       });
     }
@@ -1147,7 +1237,9 @@ function pushRuntimeIssues(
       severity: 'error',
       message:
         downWorkspaces.length === 1
-          ? `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
+          ? downWorkspaces[0]!.internal
+            ? 'Active sessions exist but the ACP channel is not live for an internal runtime.'
+            : `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
           : `Active sessions exist but the ACP channel is not live for ${downWorkspaces.length} workspace(s).`,
     });
   }
