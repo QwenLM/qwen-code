@@ -750,7 +750,7 @@ jobs:
       ${{
         always() &&
         needs.route.outputs.do_issue == 'true' &&
-        (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
+        (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true'))
       }}
     # Secret-bearing and executes agent-driven code, but the agent runs inside
     # the docker sandbox image and only ever writes a new branch as the
@@ -790,7 +790,7 @@ jobs:
     # triage/tmux jobs.
     concurrency:
       group: >-
-        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
+        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true' && needs.review-scan.outputs.enum_failed != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
       contents: 'read'
@@ -2355,6 +2355,7 @@ jobs:
     outputs:
       targets: '${{ steps.scan.outputs.targets }}'
       has_targets: '${{ steps.scan.outputs.has_targets }}'
+      enum_failed: '${{ steps.scan.outputs.enum_failed }}'
     env:
       REPO: '${{ github.repository }}'
     steps:
@@ -2767,8 +2768,8 @@ jobs:
           # check-run in statusCheckRollup) does not exist yet, so the rollup
           # alone misses a just-triggered review; the runs API sees the run
           # by head SHA before its job starts. Empty on lookup failure — the
-          # gate then degrades to the rollup check only (fail-open, like
-          # BUSY_PRS).
+          # gate then degrades to the rollup check only (fail-open here,
+          # though the BUSY_PRS enumeration below is fail-closed).
           REVIEW_WF_ID="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
           REVIEW_RUNS_JSON='{"workflow_runs":[]}'
           if [[ -n "${REVIEW_WF_ID}" ]] \
@@ -2796,17 +2797,23 @@ jobs:
           # burned one build-cli (~5 min) before cancelling a queued sibling
           # leg through the per-PR group's latest-wins queue. A duplicate
           # costs far more than one skipped scan — the next tick re-inspects
-          # with fresh reads. A forced dispatch keeps its explicit-override
-          # semantics and is NOT emptied by an enumeration failure. The
+          # with fresh reads. Only an EXPLICIT dispatch (workflow_dispatch
+          # with a PR number) keeps its override semantics and is NOT emptied
+          # by an enumeration failure — FORCED_PR is ALSO set for trusted
+          # pull_request_review scans, which are not explicit dispatches. The
+          # step also emits enum_failed: the scan exits 0, and an emptied set
+          # would otherwise read exactly like "no PR needs work" and flip the
+          # scheduled issue phase ON against its declared ordering. The
           # dispatch-pending status check below additionally covers the
           # window where the leg does not exist yet (behind build-cli).
           BUSY_PRS=' '
           BUSY_ENUM_OK=1
           LIVE_RUNS=''
+          BUSY_ENUM_ERR="$(mktemp)"
           for LIVE_STATUS in in_progress queued; do
             if ! PART="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
               --status "${LIVE_STATUS}" --limit 50 --json databaseId \
-              --jq '.[].databaseId' 2> /dev/null)"; then
+              --jq '.[].databaseId' 2>> "${BUSY_ENUM_ERR}")"; then
               BUSY_ENUM_OK=0
               break
             fi
@@ -2816,7 +2823,7 @@ jobs:
             while IFS= read -r LIVE_RUN; do
               [[ -z "${LIVE_RUN}" ]] && continue
               if ! BUSY_OUT="$(gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs \
-                --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)"; then
+                --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2>> "${BUSY_ENUM_ERR}")"; then
                 BUSY_ENUM_OK=0
                 break
               fi
@@ -2826,12 +2833,15 @@ jobs:
             done <<< "$(sort -u <<< "${LIVE_RUNS}")"
           fi
           if [[ "${BUSY_ENUM_OK}" != '1' ]]; then
-            echo "::warning::busy-PR enumeration failed (run list or jobs view unreadable) — failing closed: no scan targets dispatched this pass"
-            fleet_row '-' 'fail-closed' 'busy enumeration unreadable; scan dispatch skipped this pass (next tick retries)'
-            if [[ -z "${FORCED_PR}" ]]; then
+            BUSY_ENUM_ERR_TAIL="$(tail -c 200 "${BUSY_ENUM_ERR}" 2> /dev/null | tr '\r\n' '  ')"
+            echo "::warning::busy-PR enumeration failed (run list or jobs view unreadable) — failing closed: no scan targets dispatched this pass${BUSY_ENUM_ERR_TAIL:+ — last error: ${BUSY_ENUM_ERR_TAIL}}"
+            fleet_row '-' 'fail-closed' "busy enumeration unreadable; scan dispatch skipped this pass (next tick retries)${BUSY_ENUM_ERR_TAIL:+ — last error: ${BUSY_ENUM_ERR_TAIL}}"
+            echo "enum_failed=true" >> "${GITHUB_OUTPUT}"
+            if [[ -z "${FORCED_PR}" || "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
               CANDIDATES=''
             fi
           fi
+          rm -f "${BUSY_ENUM_ERR}"
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
           # Cutoff for the dispatch-pending marker check in the loop below.
@@ -3064,12 +3074,19 @@ jobs:
             # startedAt is the only staleness clock: a check blocks only if it
             # started within the bound; one with no startedAt (queued, not yet
             # running) is not blocking (the next scan re-checks once it starts).
+            # The dispatch-pending marker is exempted by context: it is this
+            # loop's own StatusContext busy signal (no .workflowName/.name, so
+            # it passes the filters above) and its dedicated TTL check above is
+            # the authority on it — the 330-minute horizon here would keep a
+            # stranded marker blocking long past its TTL.
             HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" \
-              --argjson nonblocking "${NON_BLOCKING_CHECKS}" '
+              --argjson nonblocking "${NON_BLOCKING_CHECKS}" \
+              --arg ctx "${DISPATCH_STATUS_CONTEXT}" '
               [ .[]
                 | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
                 | select((.name // "") as $n | ($nonblocking | index($n)) == null)
+                | select((.context // "") != $ctx)
                 | select((.startedAt // $cut) > $cut) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
@@ -3693,8 +3710,12 @@ jobs:
             # a fork head sha cannot carry a status in this repo; fork
             # duplicates stay covered by the address-time revalidation. A
             # failed stamp degrades to a warning: the live-run enumeration
-            # and the address-time gates remain.
-            if [[ "${HEAD_REPO_FULL}" == "${REPO}" ]]; then
+            # and the address-time gates remain. Dry runs stamp nothing: a
+            # dry-run leg can die before any release runs (review-address is
+            # skipped when build-cli fails), and a stranded real PENDING
+            # would then block real scans — duplicate protection degrades to
+            # those same surviving layers.
+            if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO_FULL}" == "${REPO}" ]]; then
               gh api "repos/${REPO}/statuses/${LIVE_HEAD}" -X POST \
                 -f state="pending" -f context="${DISPATCH_STATUS_CONTEXT}" \
                 -f description="review-address dispatched (run ${GITHUB_RUN_ID}); the leg starts once the CLI bundle builds" \
@@ -4466,6 +4487,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
           mkdir -p "${WORKDIR}"
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
@@ -4512,13 +4534,14 @@ jobs:
           # UNKNOWN and discards too (fail closed — the next scan re-emits a
           # still-valid target).
           PR_LIVE="$(gh pr view "${PR}" --repo "${REPO}" \
-            --json state,author,isCrossRepository,baseRefName,headRefName,labels,maintainerCanModify,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+            --json state,author,isCrossRepository,baseRefName,headRefName,labels,maintainerCanModify,headRepositoryOwner,headRepository,headRefOid 2> /dev/null || echo '{}')"
           LIVE_STATE="$(jq -r '.state // ""' <<< "${PR_LIVE}")"
           LIVE_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_LIVE}")"
           LIVE_XREPO="$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_LIVE}")"
           LIVE_CAN_MODIFY="$(jq -r '.maintainerCanModify // false' <<< "${PR_LIVE}")"
           LIVE_BASE="$(jq -r '.baseRefName // ""' <<< "${PR_LIVE}")"
           LIVE_BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_LIVE}")"
+          LIVE_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_LIVE}")"
           # Engagement labels are re-read LIVE too: a takeover label grants a
           # human-authored PR the author exemption, and a skip label applied
           # while this job sat queued withdraws consent — both must hold at
@@ -4559,6 +4582,18 @@ jobs:
           fi
           if [[ -n "${INELIGIBLE}" ]]; then
             echo "🫥 target no longer eligible (${INELIGIBLE}) — discarding without action or marker"
+            # Release the dispatch-pending marker on the way out: this discard
+            # exits before checkout, so the checkout-path release never runs
+            # and a same-repo head would keep being skipped as dispatch-
+            # pending for the full TTL with no leg coming — against the
+            # re-emit promise above. Same-repo heads only (fork heads were
+            # never stamped) and never in a dry run (nothing was stamped).
+            if [[ "${DRY_RUN}" != "true" && "${LIVE_XREPO}" == "false" && -n "${LIVE_HEAD_OID}" ]]; then
+              gh api "repos/${REPO}/statuses/${LIVE_HEAD_OID}" -X POST \
+                -f state="success" -f context="${DISPATCH_STATUS_CONTEXT}" \
+                -f description="address leg discarded (${INELIGIBLE})" \
+                > /dev/null 2>&1 || true
+            fi
             {
               echo "stale=true"
               echo "conflict=false"
@@ -4636,11 +4671,15 @@ jobs:
           # scan's view, and the marker expires by age anyway. A head that
           # moved since the dispatch left the stamp on the old sha; the
           # current head's rollup no longer shows it, so this re-stamp lands
-          # where the next scan actually looks.
-          gh api "repos/${REPO}/statuses/${CHECKED_OUT_HEAD}" -X POST \
-            -f state="success" -f context="${DISPATCH_STATUS_CONTEXT}" \
-            -f description="address leg started (run ${GITHUB_RUN_ID})" \
-            > /dev/null 2>&1 || true
+          # where the next scan actually looks. Same-repo heads only — a fork
+          # head sha is absent from this repo's object store and was never
+          # stamped; dry runs stamp nothing either.
+          if [[ "${DRY_RUN}" != "true" && "${HEAD_REPO:-${REPO}}" == "${REPO}" ]]; then
+            gh api "repos/${REPO}/statuses/${CHECKED_OUT_HEAD}" -X POST \
+              -f state="success" -f context="${DISPATCH_STATUS_CONTEXT}" \
+              -f description="address leg started (run ${GITHUB_RUN_ID})" \
+              > /dev/null 2>&1 || true
+          fi
 
           # Does the branch conflict with base? merge-tree computes the merge
           # without touching the tree; exit 1 means conflicts. UNKNOWN/errors are
