@@ -89,6 +89,23 @@ describe('the review footer and the regex that strips it', () => {
     );
   });
 
+  it('caps an oversized cliVersion — the second interpolated input of the footer', () => {
+    // The cap above closed the modelId hole; the version slot stayed
+    // unbounded — `footerVersion` checks a startup stamp's charset but not
+    // its length, and `getCliVersion` returns `CLI_VERSION` unchecked.
+    // Same hole through the sibling input: an oversized stamp emptied the
+    // rung-3 cut, and past the budget composed a body GitHub rejects whole.
+    const footer = reviewFooter('qwen3.7-max', 'v'.repeat(65_200));
+    expect(footer).toBe(
+      `_— qwen3.7-max via Qwen Code /review (v${'v'.repeat(
+        MODEL_ID_MAX_CHARS - 1,
+      )}…)_`,
+    );
+    expect(`a finding\n\n${footer}`.replace(REVIEW_FOOTER_RE, '')).toBe(
+      'a finding',
+    );
+  });
+
   it('refuses a startup stamp the footer cannot carry', () => {
     expect(footerVersion('0.21.3')).toBe('0.21.3');
     expect(footerVersion('0.21.3-dev.1')).toBe('0.21.3-dev.1');

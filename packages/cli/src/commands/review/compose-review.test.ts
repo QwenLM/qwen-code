@@ -5741,6 +5741,31 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body).toContain('via Qwen Code /review');
   });
 
+  it('bounds the footer the last-resort tail carries — an unbounded version must not post a body GitHub rejects', () => {
+    // The footer interpolates a second input — the CLI version — and both
+    // of its sources are wrapper-reachable: `footerVersion` checks the
+    // startup stamp's charset but not its length, and `getCliVersion`
+    // returns `CLI_VERSION` unchecked. A version-shaped string past the
+    // budget empties the rung-3 cut exactly like the modelId hole the two
+    // tests above pin — and the quieter below-rejection shape fits with
+    // every blocker dropped. One cap, on the interpolation both sources
+    // meet, closes both.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['C'.repeat(80_000)],
+      }),
+      'v'.repeat(70_000),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain('was TRUNCATED to fit');
+    expect(r.body).toContain('C'.repeat(50_000));
+    expect(r.body).toContain('via Qwen Code /review');
+    // A silently truncated stamp names a release that is not the one that
+    // ran, so the clamp is disclosed on the operator's channel like the
+    // modelId clamp beside it.
+    expect(r.remediation.join('\n')).toContain('cliVersion');
+  });
+
   it('keeps the downgrade disclosure through the COMMENT opener merge', () => {
     // The COMMENT path merges clauses 1-4 into one paragraph. The merge
     // copied only `en`/`zh`, so every `keep` tag on those clauses was lost
@@ -5992,7 +6017,13 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body.indexOf('This review body was TRUNCATED')).toBeLessThan(
       r.body.indexOf('The Chinese translation'),
     );
-    expect(r.body).toContain('the English text below is truncated as well');
+    // …and the sentence must point where the notice actually rides: the
+    // truncation notice leads the body now, so "at the end" named a spot
+    // no rung composes a notice at. The prefix-only pin shipped that green.
+    expect(r.body).toContain(
+      'the English text below is truncated as well — see the notice above',
+    );
+    expect(r.body).not.toContain('see the notice at the end');
     expect(r.body).toContain('was TRUNCATED to fit');
     const budget = r.remediation
       .filter((l) => l.startsWith('body budget:'))

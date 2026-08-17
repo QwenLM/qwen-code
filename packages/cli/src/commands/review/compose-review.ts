@@ -1716,6 +1716,13 @@ function composeReviewBody(
           `the posted attribution is truncated`,
       );
     }
+    if (cliVersion.length > MODEL_ID_MAX_CHARS) {
+      remediation.push(
+        `body budget: cliVersion was ${cliVersion.length} characters and ` +
+          `was clamped to the footer's ${MODEL_ID_MAX_CHARS}-character ` +
+          `cap — the posted version stamp is truncated`,
+      );
+    }
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
@@ -2073,7 +2080,7 @@ function composeReviewBody(
                 `GitHub's ${BODY_MAX_CHARS}-character review limit; the ` +
                 `English text below is ${
                   cut
-                    ? 'truncated as well — see the notice at the end'
+                    ? 'truncated as well — see the notice above'
                     : `complete${
                         sections > 0
                           ? ' apart from the sections the notice below names'
@@ -2191,10 +2198,11 @@ function composeReviewBody(
       .map((p) => p.en)
       .join(sep);
     // The tail is the footer, and it is a BOUNDED contributor: the footer
-    // caps `modelId` at `MODEL_ID_MAX_CHARS`, so this subtraction can never
-    // empty the cut. It was unbounded once — caller text interpolated whole
-    // — and an oversized name emptied the cut and posted tail-only, past
-    // the limit, losing every blocker. The cap is where that is fixed;
+    // caps both its interpolations — `modelId` and the CLI version — at
+    // `MODEL_ID_MAX_CHARS`, so this subtraction can never empty the cut.
+    // It was unbounded once — caller text interpolated whole — and an
+    // oversized name emptied the cut and posted tail-only, past the limit,
+    // losing every blocker. The cap is where that is fixed;
     // repeating the defence here would be a branch for a state that can no
     // longer occur.
     let cut = head.slice(0, Math.max(0, bodyBudget - footerTail.length));
