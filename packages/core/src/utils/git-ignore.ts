@@ -54,6 +54,9 @@ export function isGitIgnored(
   // injection, and GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM redirect the config
   // files — any of them can aim core.excludesFile at a foreign rules file,
   // the same leak class.
+  // GIT_LITERAL/GLOB/NOGLOB_PATHSPECS are pathspec-parse modifiers: any one
+  // set makes check-ignore reject every pathspec (fatal, exit 128), which
+  // the catch reads as not-ignored — the GIT_OBJECT_DIRECTORY class.
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['GIT_DIR'];
   delete env['GIT_WORK_TREE'];
@@ -63,6 +66,9 @@ export function isGitIgnored(
   delete env['GIT_CONFIG_COUNT'];
   delete env['GIT_CONFIG_GLOBAL'];
   delete env['GIT_CONFIG_SYSTEM'];
+  delete env['GIT_LITERAL_PATHSPECS'];
+  delete env['GIT_GLOB_PATHSPECS'];
+  delete env['GIT_NOGLOB_PATHSPECS'];
   try {
     execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
       stdio: 'ignore',

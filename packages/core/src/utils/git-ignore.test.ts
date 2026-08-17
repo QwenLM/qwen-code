@@ -262,8 +262,14 @@ describe('isGitIgnored', () => {
     // system file and the SYSTEM scrub line would ship green unpinned.
     const excludes = join(outside, 'foreign-excludes');
     writeFileSync(excludes, '.qwen/\n');
+    // Git config treats backslashes as escapes, so a platform-native
+    // Windows path would leave the fixture unparseable there; git accepts
+    // forward slashes on every platform.
     const foreignConfig = join(outside, 'foreign-gitconfig');
-    writeFileSync(foreignConfig, `[core]\n\texcludesFile = ${excludes}\n`);
+    writeFileSync(
+      foreignConfig,
+      `[core]\n\texcludesFile = ${excludes.split('\\').join('/')}\n`,
+    );
     const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
     const savedSystem = process.env['GIT_CONFIG_SYSTEM'];
     const savedNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
@@ -280,6 +286,27 @@ describe('isGitIgnored', () => {
       if (savedNosystem === undefined)
         delete process.env['GIT_CONFIG_NOSYSTEM'];
       else process.env['GIT_CONFIG_NOSYSTEM'] = savedNosystem;
+    }
+  });
+
+  // The pathspec-magic family is the same fatal-128 → catch →
+  // false-not-ignored class as GIT_OBJECT_DIRECTORY: any one of them makes
+  // check-ignore reject every pathspec outright (exit 128), so each scrub
+  // line needs a pin — set the variable, dir's own rule keeps the expected
+  // verdict true.
+  it.each([
+    'GIT_LITERAL_PATHSPECS',
+    'GIT_GLOB_PATHSPECS',
+    'GIT_NOGLOB_PATHSPECS',
+  ])('answers for the -C worktree even when %s is set', (variable) => {
+    writeFileSync(join(dir, '.gitignore'), '.qwen/\n');
+    const saved = process.env[variable];
+    process.env[variable] = '1';
+    try {
+      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env[variable];
+      else process.env[variable] = saved;
     }
   });
 
@@ -323,7 +350,11 @@ describe('isGitIgnored', () => {
       const savedPath = process.env['PATH'];
       process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
       try {
+        // A 500 ms kill and a 5 s kill both yield false; only the elapsed
+        // time distinguishes the caller deadline from the 5 s default.
+        const start = Date.now();
         expect(isGitIgnored(dir, 'anything.md', 500)).toBe(false);
+        expect(Date.now() - start).toBeLessThan(2500);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;
