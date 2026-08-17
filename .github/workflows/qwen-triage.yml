@@ -2859,13 +2859,28 @@ jobs:
           # swapped for /proc/<pid>/environ (NUL-framed KEY=VALUE is
           # exactly the gate's intake framing, so ACTIONS_RUNTIME_TOKEN
           # lands verbatim in the published log), the round output or the
-          # staged log swapped for any root-readable file. 0700 root:root
-          # removes the capability itself — a directory node cannot enter
-          # is one whose entries it can neither create, unlink, nor
-          # rename. rm -rf first: the entry may already be a plant from an
-          # earlier run on this persistent pool.
-          rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
-          install -d -m 0700 -o root -g root "$RUNNER_TEMP/flake-gate"
+          # staged log swapped for any root-readable file.
+          #
+          # The home lives at the CONTAINER ROOT, not under $RUNNER_TEMP.
+          # That is the whole defence, and it is a property of the PARENT:
+          # rename(2) and unlink(2) need write permission on the directory
+          # holding the entry, never on the entry itself — so a 0700
+          # root:root home inside the uid-1000-writable $RUNNER_TEMP could
+          # always be renamed away wholesale and replaced with a
+          # node-owned lookalike, no matter how the gate validated it
+          # afterwards. Every re-validation we added there (ownership,
+          # mode, inode anchor, run-id marker) only narrowed the window;
+          # each one left the next TOCTOU gap, including the inter-step
+          # window before a `uses:` upload that cannot run shell at all.
+          # `/` is root:root 755 in this container: node can neither
+          # create, unlink, nor rename entries in it, so /flake-gate's
+          # entry — and therefore everything reached through it — is
+          # outside PR-controlled reach by construction, with no window to
+          # re-check. rm -rf first: the container is fresh per job, but a
+          # retried job on a warm image must not adopt an earlier tree.
+          GATE_HOME=/flake-gate
+          rm -rf -- "$GATE_HOME"
+          install -d -m 0700 -o root -g root "$GATE_HOME"
           # Run-freshness marker: staging re-validates it before trusting
           # the home. A stale-but-genuine home left by an earlier run on
           # the persistent pool passes every ownership/mode/shape check —
@@ -2873,7 +2888,7 @@ jobs:
           # can never restage a previous run's evidence under this run's
           # artifact name when the record step itself was skipped (a
           # cancel between steps.pr and record still runs staging).
-          printf '%s-%s' "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" > "$RUNNER_TEMP/flake-gate/run-id"
+          printf '%s-%s' "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" > "$GATE_HOME/run-id"
           # Two statements, not a pipeline: `git diff | grep || true` would
           # swallow a git failure as "no changed test files", silently
           # narrowing the gate to n/a. A git failure here is pre-build
@@ -2891,7 +2906,7 @@ jobs:
           # the runner executes, so it is a changed test file exactly
           # like M — excluding it silently drops the file from the gate.
           git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD^1' HEAD \
-            > "$RUNNER_TEMP/flake-gate/files-all"
+            > "$GATE_HOME/files-all"
           # .mts/.cts included: vitest's default include set collects them.
           # Only a no-match (status 1) may yield an empty list: a grep
           # error (status 2, e.g. ENOSPC opening the output) is
@@ -2899,14 +2914,14 @@ jobs:
           # would narrow the gate to zero files and starve it into n/a.
           grep_status=0
           grep -zE '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$' \
-            "$RUNNER_TEMP/flake-gate/files-all" \
-            > "$RUNNER_TEMP/flake-gate/files" || grep_status=$?
+            "$GATE_HOME/files-all" \
+            > "$GATE_HOME/files" || grep_status=$?
           if [ "$grep_status" -gt 1 ]; then
             echo "flake-gate intake: grep failed with status ${grep_status}" >&2
             exit 1
           fi
-          rm -f "$RUNNER_TEMP/flake-gate/files-all"
-          echo "Recorded $(tr -cd '\0' < "$RUNNER_TEMP/flake-gate/files" | wc -c) changed test file(s) for the flakiness gate."
+          rm -f "$GATE_HOME/files-all"
+          echo "Recorded $(tr -cd '\0' < "$GATE_HOME/files" | wc -c) changed test file(s) for the flakiness gate."
 
       - name: 'Clear stale npm cache'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2944,6 +2959,24 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # ...but NOT .git. The gate's per-invocation reset restores the
+          # tree with `git checkout HEAD -- .`, and git reads its config,
+          # hooks and attributes from this directory as it does so: with
+          # .git node-owned, a lifecycle script could plant a
+          # `filter.<x>.smudge` command plus `info/attributes` and have
+          # ROOT's reset execute it on every round, or rewrite HEAD so the
+          # "restore" installs a tree of its choosing. Read access is all
+          # the build needs (git describe and friends); write access is
+          # what turns the reset into an execution and content primitive.
+          # Defence in depth, not the only line: the reset already runs
+          # git with the GIT_* env stripped, under a timeout, against an
+          # OID pinned before any PR code ran. Non-fatal so a fixture or
+          # a non-root harness cannot abort the build over it.
+          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            chown -R root:root "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not re-own .git to root; the gate reset falls back to its env/timeout/pinned-OID defences"
+            chmod -R go-w "$GITHUB_WORKSPACE/.git" 2>/dev/null || true
+          fi
           # Make the npm cache readable+writable by the build user so
           # `npm ci --prefer-offline --cache …` can use it without
           # touching the Actions cache API (whose credentials were
@@ -3178,7 +3211,7 @@ jobs:
           # it: a plant (symlink, node-owned dir, loosened mode) means the
           # integrity premise never held, and the gate must degrade to the
           # fixed error verdict rather than read attacker-chosen bytes.
-          GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
+          GATE_DIR=/flake-gate
           # -O is the load-bearing test: "owned by the EFFECTIVE user" is
           # root in production, so a directory a PR planted (owned by node)
           # fails it, while the same code stays runnable under a harness.
@@ -3348,7 +3381,11 @@ jobs:
             esac
             case "$f" in
               scripts/tests/*.test.js|scripts/tests/*.test.ts)
-                group_labels+=("$f")
+                # Same substring-collision honesty as the generic arm: one
+                # positional filter collects every path containing it.
+                label="$f"
+                [ -f "${f}x" ] && label="$f + ${f}x"
+                group_labels+=("$label")
                 group_dirs+=('.')
                 group_cmds+=("npx --no-install vitest run --config ./scripts/tests/vitest.config.ts $(printf '%q' "./$f")")
                 ;;
@@ -3546,7 +3583,11 @@ jobs:
               # Fresh per-invocation HOME and temp/cache dirs: samples must
               # not share dotfile/XDG/cache state or caches any more than
               # they share the tree or processes.
-              inv_tmp="$RUNNER_TEMP/flake-inv-tmp"
+              # Node-writable by necessity (the build user cannot enter
+              # the root-only home), so it stays under RUNNER_TEMP — and
+              # :? keeps a missing RUNNER_TEMP from silently relocating
+              # it to the container root.
+              inv_tmp="${RUNNER_TEMP:?}/flake-inv-tmp"
               rm -rf "$inv_tmp"
               mkdir -p "$inv_tmp"
               # -h: never dereference — a planted symlink at this fixed
@@ -4276,7 +4317,7 @@ jobs:
           echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
-      # root-only home ($RUNNER_TEMP/flake-gate/log), which no PR-controlled
+      # root-only home (/flake-gate/log), which no PR-controlled
       # process can enter. This step runs AFTER the agent exits, from an
       # always() root step, and assembles the upload tree there too: an
       # early agent-step abort cannot lose the log, and agent-era PR code
@@ -4369,10 +4410,10 @@ jobs:
           # in place always left the ENTRY itself renameable, so a kill-race
           # survivor could swap the whole hardened tree for a symlink farm
           # that upload-artifact (which follows links) would publish. The
-          # upload now reads from $RUNNER_TEMP/flake-gate/upload, inside the
+          # upload now reads from /flake-gate/upload, inside the
           # 0700 root-only home: a directory node cannot enter is one whose
           # entries it can neither create, unlink, nor rename.
-          GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
+          GATE_DIR=/flake-gate
           UPLOAD_DIR="$GATE_DIR/upload"
           # The run-id conjunct is the RUN-identity check: ownership,
           # mode and shape all pass on a stale-but-genuine home an
@@ -4474,10 +4515,10 @@ jobs:
             # this run's artifact name. rm -rf removes a symlink
             # operand itself, never following it.
             echo "::warning::flake-gate home missing, invalid, or swapped mid-staging; skipping the trusted upload rebuild."
-            rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
+            rm -rf -- "$GATE_DIR"
           fi
 
-      # The always() upload below re-resolves $RUNNER_TEMP/flake-gate in a
+      # The always() upload below re-resolves /flake-gate in a
       # fresh step — staging's anchoring expires at its exit, so a swap
       # between the two hands the upload a plant. Re-validate the entry's
       # identity immediately before the upload and remove it on any
@@ -4502,7 +4543,7 @@ jobs:
             export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           fi
           upload_ok=false
-          GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
+          GATE_DIR=/flake-gate
           if [[ ! -L $GATE_DIR ]] && [[ -d $GATE_DIR ]] && [[ -O $GATE_DIR ]] &&
              [[ $(/usr/bin/stat -c '%a' "$GATE_DIR" 2>/dev/null) == '700' ]] &&
              [[ $(/usr/bin/cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]]; then
@@ -4518,7 +4559,7 @@ jobs:
             # Whatever occupies the entry now is not this run's
             # validated home — remove it so the upload cannot
             # enumerate a plant.
-            /usr/bin/rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
+            /usr/bin/rm -rf -- "$GATE_DIR"
           fi
           echo "upload_ok=$upload_ok" >> "$GITHUB_OUTPUT"
 
@@ -4533,7 +4574,7 @@ jobs:
           # The rebuilt, root-only tree — not the agent-era directory the
           # build user owned. Same inner layout, so the publisher's paths
           # are unchanged.
-          path: '${{ runner.temp }}/flake-gate/upload/'
+          path: '/flake-gate/upload/'
           retention-days: 7
 
       - name: 'Clean up runner workspace'

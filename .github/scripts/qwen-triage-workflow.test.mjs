@@ -1002,7 +1002,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // executes, so it is a changed test file exactly like M.
     assert.match(
       recordStep.run,
-      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD\^1' HEAD \\\n\s*> "\$RUNNER_TEMP\/flake-gate\/files-all"$/m,
+      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD\^1' HEAD \\\n\s*> "\$GATE_HOME\/files-all"$/m,
       'the NUL diff must flow straight into its file — $( ) strips NUL bytes, a pipeline swallows the exit status',
     );
     assert.ok(
@@ -1013,7 +1013,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
     assert.match(
       recordStep.run,
-      /^\s*grep_status=0\n\s*grep -zE '[^']+' \\\n\s*"\$RUNNER_TEMP\/flake-gate\/files-all" \\\n\s*> "\$RUNNER_TEMP\/flake-gate\/files" \|\| grep_status=\$\?$/m,
+      /^\s*grep_status=0\n\s*grep -zE '[^']+' \\\n\s*"\$GATE_HOME\/files-all" \\\n\s*> "\$GATE_HOME\/files" \|\| grep_status=\$\?$/m,
       'the grep must read the raw file and only a no-match may yield an empty list',
     );
     // Every gate working file must live in the root-only home, because
@@ -1022,12 +1022,12 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // replaced with symlinks that root-side consumers follow.
     assert.match(
       recordStep.run,
-      /^\s*install -d -m 0700 -o root -g root "\$RUNNER_TEMP\/flake-gate"$/m,
+      /^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m,
       'the record step must create the root-only home',
     );
     assert.match(
       recordStep.run,
-      /^\s*rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-gate"$/m,
+      /^\s*rm -rf -- "\$GATE_HOME"$/m,
       'a plant left by an earlier run on the persistent pool must be removed first',
     );
     // Run-freshness marker: a stale-but-genuine home from an earlier
@@ -1036,7 +1036,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // runs apart when the record step itself was skipped.
     assert.match(
       recordStep.run,
-      /^\s*printf '%s-%s' "\$\{GITHUB_RUN_ID:\?\}" "\$\{GITHUB_RUN_ATTEMPT:\?\}" > "\$RUNNER_TEMP\/flake-gate\/run-id"$/m,
+      /^\s*printf '%s-%s' "\$\{GITHUB_RUN_ID:\?\}" "\$\{GITHUB_RUN_ATTEMPT:\?\}" > "\$GATE_HOME\/run-id"$/m,
       'the record step must stamp the run identity into the home it creates',
     );
     // Startup-channel scrub: BASH_FUNC_* imports are dropped by a
@@ -1580,7 +1580,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     const uploadStep = verifyJob.steps[uploadIdx];
     assert.equal(
       uploadStep.with.path,
-      '${{ runner.temp }}/flake-gate/upload/',
+      '/flake-gate/upload/',
       'the artifact must ship the REBUILT tree, never the agent-era directory',
     );
     // R12-2 entrance 3: staging's anchoring expires at its exit, and the
@@ -1618,7 +1618,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
     assert.match(
       recheckStep.run,
-      /\/usr\/bin\/rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-gate"/,
+      /\/usr\/bin\/rm -rf -- "\$GATE_DIR"/,
       'a home that fails the re-check must be removed before the upload enumerates the path',
     );
     assert.match(
@@ -1723,9 +1723,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // unconditionally, so a home that failed validation must be removed
     // — a stale tree left in place ships a previous run's evidence
     // under this run's artifact name.
-    const iStaleRemoval = sr.search(
-      /^\s*rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-gate"$/m,
-    );
+    const iStaleRemoval = sr.search(/^\s*rm -rf -- "\$GATE_DIR"$/m);
     // Round 11 (R8-36): the guard and the cd re-resolve verify-results;
     // a kill-loop survivor owning the uid-1000 parent can swap the
     // entry between the two — the opened directory must still BE the
@@ -1939,6 +1937,101 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
   });
 
+  it('the gate home sits at the container root, not in the writable RUNNER_TEMP', () => {
+    // The whole TOCTOU class (R8-1, R8-36, R12-2 and their re-reports)
+    // rests on one property of the PARENT, not the entry: rename(2) and
+    // unlink(2) need write permission on the directory holding the entry.
+    // $RUNNER_TEMP's top level is uid-1000 writable and the container's
+    // node is uid 1000, so a 0700 root home there could always be
+    // renamed away wholesale — every added re-validation only narrowed
+    // the window. `/` is root:root 755, so entries in it are outside
+    // PR-controlled reach with no window to re-check.
+    for (const [label, step] of [
+      ['record', recordStep],
+      ['gate', flakeStep],
+      [
+        'staging',
+        verifyJob.steps.find(
+          (x) => x.name === 'Stage flakiness gate log for upload',
+        ),
+      ],
+      [
+        'upload re-check',
+        verifyJob.steps.find((x) => x.id === 'flake-upload-check'),
+      ],
+    ]) {
+      assert.doesNotMatch(
+        step.run,
+        /\$\{?RUNNER_TEMP:?\??\}?\/flake-gate/,
+        `${label} must not place the gate home under RUNNER_TEMP`,
+      );
+    }
+    assert.match(
+      recordStep.run,
+      /^\s*GATE_HOME=\/flake-gate$/m,
+      'the record step must create the home at the container root',
+    );
+    for (const [label, step] of [
+      ['gate', flakeStep],
+      [
+        'staging',
+        verifyJob.steps.find(
+          (x) => x.name === 'Stage flakiness gate log for upload',
+        ),
+      ],
+      [
+        'upload re-check',
+        verifyJob.steps.find((x) => x.id === 'flake-upload-check'),
+      ],
+    ]) {
+      assert.match(
+        step.run,
+        /^\s*GATE_DIR=\/flake-gate$/m,
+        `${label} must resolve the home to the container-root constant`,
+      );
+    }
+    const uploadStep = verifyJob.steps.find(
+      (x) => x.name === 'Upload verify results',
+    );
+    assert.equal(
+      uploadStep.with.path,
+      '/flake-gate/upload/',
+      'the artifact must ship the tree that lives outside PR-writable space',
+    );
+    // No env knob: $GITHUB_ENV is uid-1000 writable, so an overridable
+    // home would be a PR-reachable channel — and the record step rm -rf's
+    // whatever the home names.
+    for (const step of verifyJob.steps) {
+      assert.doesNotMatch(
+        String(step.run ?? ''),
+        /FLAKE_GATE_HOME/,
+        'the gate home must not be overridable through the environment',
+      );
+    }
+  });
+
+  it('git metadata stays root-owned across the build so the reset cannot be steered', () => {
+    // With .git node-owned, a lifecycle script could plant a smudge
+    // filter plus info/attributes and have ROOT's per-invocation reset
+    // execute it every round, or rewrite HEAD so the "restore" installs
+    // a tree of its choosing (R4-1/R4-2).
+    assert.match(
+      prepareStep.run,
+      /^\s*chown -R root:root "\$GITHUB_WORKSPACE\/\.git"/m,
+      'prepare must re-own .git to root after chowning the workspace',
+    );
+    const wsChown = prepareStep.run.indexOf(
+      'chown -R node:node "$GITHUB_WORKSPACE"',
+    );
+    const gitChown = prepareStep.run.indexOf(
+      'chown -R root:root "$GITHUB_WORKSPACE/.git"',
+    );
+    assert.ok(
+      wsChown !== -1 && gitChown > wsChown,
+      'the .git re-own must come after the workspace chown that would otherwise hand it over',
+    );
+  });
+
   it('the verify job timeout still covers agent + prepare + gate', () => {
     // agent 120m + install/build 15m + gate ~40m (the 15m round budget is
     // checked BEFORE each reset, so the last invocation drags its reset
@@ -1961,7 +2054,18 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   // does NOT clear that inherited -e. That exact blind spot shipped the
   // round-1 blocker — the first failing test invocation killed the step —
   // so every scenario here runs under the wrapper, not under a bare bash.
-  const flakeRun = verifyJob.steps.find((s) => s.id === 'flake').run;
+  const flakeRunVerbatim = verifyJob.steps.find((s) => s.id === 'flake').run;
+  // The gate's home is a hard-coded container-root constant on purpose: an
+  // env-overridable home would be a PR-reachable channel ($GITHUB_ENV is
+  // uid-1000 writable and the record step rm -rf's whatever the home names).
+  // The harness therefore relocates that one constant into its scratch tree
+  // — a fixture substitution, not a production knob. The structural suite
+  // pins the production value separately.
+  const PROD_GATE_HOME = '/flake-gate';
+  assert.ok(
+    flakeRunVerbatim.includes(`GATE_DIR=${PROD_GATE_HOME}`),
+    'the gate must define its home as the container-root constant',
+  );
   const publishRun = doc.jobs['publish-verify'].steps.find(
     (s) => s.name === 'Post verification report comment',
   ).run;
@@ -2154,7 +2258,13 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       chmodSync(join(bin, name), 0o755);
     }
     const gateFile = join(root, 'gate.sh');
-    writeFileSync(gateFile, flakeRun);
+    writeFileSync(
+      gateFile,
+      flakeRunVerbatim.replaceAll(
+        `GATE_DIR=${PROD_GATE_HOME}`,
+        `GATE_DIR=${gateDir}`,
+      ),
+    );
     const out = join(rt, 'github-output');
     writeFileSync(out, '');
     writeFileSync(join(rt, 'github-summary'), '');
@@ -3396,7 +3506,17 @@ describe('qwen-triage: flakiness gate staging/upload — behavioral, under the p
 
   const runStaging = (rt, bin) => {
     const scriptFile = join(rt, 'staging.sh');
-    writeFileSync(scriptFile, stageStep.run);
+    // Same fixture relocation as the gate harness: the home is a
+    // hard-coded container-root constant in production (an env knob there
+    // would be PR-reachable), so the suite moves that one constant into
+    // its scratch tree and pins the production value structurally.
+    writeFileSync(
+      scriptFile,
+      stageStep.run.replaceAll(
+        'GATE_DIR=/flake-gate',
+        `GATE_DIR=${join(rt, 'flake-gate')}`,
+      ),
+    );
     const out = join(rt, 'github-output');
     writeFileSync(out, '');
     return spawnSync(
@@ -3492,7 +3612,18 @@ describe('qwen-triage: flakiness gate staging/upload — behavioral, under the p
     writeFileSync(out, '');
     const res = spawnSync(
       'bash',
-      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', recheckStep.run],
+      [
+        '--noprofile',
+        '--norc',
+        '-e',
+        '-o',
+        'pipefail',
+        '-c',
+        recheckStep.run.replaceAll(
+          'GATE_DIR=/flake-gate',
+          `GATE_DIR=${join(rt, 'flake-gate')}`,
+        ),
+      ],
       {
         env: {
           ...process.env,
