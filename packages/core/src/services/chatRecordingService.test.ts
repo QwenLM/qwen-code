@@ -33,6 +33,7 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
+import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
 
 function branchTestRecord(
   uuid: string,
@@ -72,6 +73,19 @@ vi.mock('node:crypto', () => ({
 }));
 vi.mock('../utils/jsonl-utils.js');
 
+const boundaryObserveMock = vi.hoisted(() =>
+  vi.fn((_observation: ToolResultBoundaryObservation) => false),
+);
+vi.mock(
+  '../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeToolResultBoundary: boundaryObserveMock,
+  }),
+);
+
 describe('ChatRecordingService', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
@@ -81,6 +95,7 @@ describe('ChatRecordingService', () => {
 
   beforeEach(() => {
     uuidCounter = 0;
+    boundaryObserveMock.mockClear();
 
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -326,6 +341,60 @@ describe('ChatRecordingService', () => {
         parts: modelFacingParts,
       });
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
+    });
+
+    it('records mid-turn media references without inline bytes', async () => {
+      const mediaReferences = [
+        {
+          type: 'image' as const,
+          mediaId: 'media-1',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ];
+
+      chatRecordingService.recordMidTurnUserMessage(
+        [{ text: 'inspect image' }],
+        'inspect image',
+        undefined,
+        mediaReferences,
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.message).toEqual({
+        role: 'user',
+        parts: [{ text: 'inspect image' }],
+      });
+      expect(record.systemPayload).toEqual({
+        displayText: 'inspect image',
+        mediaReferences,
+      });
+    });
+
+    it('records media references when the mid-turn display text is empty', async () => {
+      const mediaReferences = [
+        {
+          type: 'image' as const,
+          mediaId: 'media-only',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ];
+
+      chatRecordingService.recordMidTurnUserMessage(
+        [{ text: '[User message received during tool execution]: ' }],
+        '',
+        undefined,
+        mediaReferences,
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        mediaReferences,
+      });
     });
 
     it('records defensive Goal context on real user messages', async () => {
@@ -1686,6 +1755,48 @@ describe('ChatRecordingService', () => {
       expect(record.toolCallResult?.callId).toBe('call-1');
     });
 
+    it('preserves replayable artifacts without diagnostic metadata', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'result' },
+          },
+        },
+      ];
+
+      const artifacts = [
+        {
+          kind: 'link' as const,
+          title: 'Replay artifact',
+          url: 'https://example.com/replayed',
+        },
+      ];
+      chatRecordingService.recordToolResult(toolResultParts, {
+        callId: 'call-1',
+        status: 'success',
+        persistedOutputFiles: ['/private/tool-result.txt'],
+        artifacts,
+        boundaryArtifact: { state: 'reusable', kinds: ['link'] },
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.toolCallResult).not.toHaveProperty('persistedOutputFiles');
+      expect(record.toolCallResult).not.toHaveProperty('boundaryArtifact');
+      expect(
+        JSON.parse(JSON.stringify(record)).toolCallResult.artifacts,
+      ).toEqual(artifacts);
+      expect(JSON.stringify(record)).not.toContain('/private/tool-result.txt');
+      expect(boundaryObserveMock).toHaveBeenCalledTimes(2);
+      for (const [observation] of boundaryObserveMock.mock.calls) {
+        expect(observation.artifacts).toEqual([
+          { state: 'reusable', kinds: ['file', 'link'] },
+        ]);
+      }
+    });
+
     it('should keep small file diff resultDisplay unchanged', async () => {
       const toolResultParts: Part[] = [
         {
@@ -1730,6 +1841,14 @@ describe('ChatRecordingService', () => {
       expect(
         (record.toolCallResult?.resultDisplay as FileDiff).truncatedForSession,
       ).toBeUndefined();
+      const inputObservation = boundaryObserveMock.mock.calls.find(
+        ([observation]) => observation.stage === 'recorder_input',
+      )?.[0];
+      expect(
+        typeof inputObservation?.mutated === 'function'
+          ? inputObservation.mutated()
+          : inputObservation?.mutated,
+      ).toBe(false);
     });
 
     it('compacts large resultDisplay metadata before recording', async () => {
@@ -1884,6 +2003,14 @@ describe('ChatRecordingService', () => {
       expect(resultDisplay.originalContent).toBe(largeOriginal);
       expect(resultDisplay.newContent).toBe(largeNew);
       expect(resultDisplay.truncatedForSession).toBeUndefined();
+      const inputObservation = boundaryObserveMock.mock.calls.find(
+        ([observation]) => observation.stage === 'recorder_input',
+      )?.[0];
+      expect(
+        typeof inputObservation?.mutated === 'function'
+          ? inputObservation.mutated()
+          : inputObservation?.mutated,
+      ).toBe(true);
     });
 
     it('should continue stripping nested tool calls from task execution results', async () => {
@@ -1930,6 +2057,14 @@ describe('ChatRecordingService', () => {
         type: 'task_execution',
         toolCalls: [],
       });
+      const inputObservation = boundaryObserveMock.mock.calls.find(
+        ([observation]) => observation.stage === 'recorder_input',
+      )?.[0];
+      expect(
+        typeof inputObservation?.mutated === 'function'
+          ? inputObservation.mutated()
+          : inputObservation?.mutated,
+      ).toBe(true);
     });
 
     it('should chain tool result correctly with parentUuid', async () => {

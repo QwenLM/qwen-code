@@ -10,6 +10,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionResponse,
 } from '../types.js';
 
@@ -131,6 +132,7 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  meta?: DaemonTextDeltaMeta;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
@@ -484,6 +486,7 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   key: string;
   scope: string;
   value: unknown;
+  mutation?: DaemonSkillToggleMutation;
 }
 
 export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {

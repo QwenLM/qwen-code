@@ -190,6 +190,54 @@ describe('getShellContextEnvVars', () => {
     }
   });
 
+  it('a DIRECTORY entry is filtered — search permission is not executability', () => {
+    // `node <pkg-dir>` makes argv[1] the directory itself, and a directory
+    // passes an X_OK probe. An extension allowlist answered "usable" for it
+    // and every `"${QWEN_CODE_CLI:-qwen}"` died on exit 126; only the
+    // regular-file check can refuse this shape.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-dir-'));
+    try {
+      process.env['QWEN_CODE_CLI'] = dir;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an executable script extension without a shebang is filtered beyond the .js family', () => {
+    // The tsx dev launch hands argv[1] as the source `.ts`. Even executable,
+    // a shebang-less script is exec'd by the kernel as a SHELL script — the
+    // same reason the vendored `.js` bundle is filtered. The gate reads the
+    // header for every known script extension, not an enumerated subset.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-ts-'));
+    try {
+      const entry = join(dir, 'index.ts');
+      writeFileSync(entry, 'export {};\n', { mode: 0o755 });
+      process.env['QWEN_CODE_CLI'] = entry;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a native-binary shape — executable, no extension, no shebang — passes', () => {
+    // The gate demands positive evidence, not a shebang universally: a native
+    // binary has none and must not be filtered. Extensionless-and-executable
+    // is that shape's stand-in here.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-bin-'));
+    try {
+      const entry = join(dir, 'qwen');
+      writeFileSync(entry, '\x7fELF-not-really\n', { mode: 0o755 });
+      process.env['QWEN_CODE_CLI'] = entry;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe(entry);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('omits QWEN_CODE_CLI when the host does not export one', () => {
     // Nothing to override: when the process env has no value, the spread at the
     // spawn sites has nothing to leak either, so absence is correct here. (NOT

@@ -139,6 +139,9 @@ function makeHarness(
     ),
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: vi.fn(),
     getSessionLastEventId: vi.fn(() => 0),
     getSessionSummary: vi.fn(() => ({
       pendingInteractions: options.pendingInteractions ?? [],
@@ -418,6 +421,27 @@ describe('LiveSessionCoordinator', () => {
       new Uint8Array([1, 0]),
     );
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('rolls back a fresh coordinator session and marks the catalog when the setup aborts before admission', async () => {
+    // The coordinator session is spawned fresh, then the host admission step
+    // rejects. The rollback kills the unattached session, removes its
+    // transcript (mocked removal resolves true), and the removal must advance
+    // the catalog clock. `start()` converts the abort into a call failure
+    // rather than rejecting.
+    const harness = makeHarness();
+    harness.host.setCoordinator.mockReturnValueOnce(false);
+
+    await harness.coordinator.start({ epoch: 1, callId: 'call-1', mode: 'new' });
+
+    expect(harness.host.failCall).toHaveBeenCalledWith(
+      1,
+      expect.stringContaining('Live call ended.'),
+    );
+    expect(harness.bridge.killSession).toHaveBeenCalledWith('live-new', {
+      requireZeroAttaches: true,
+    });
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
   });
 
   it('releases completed input and delegation tracking during a long call', async () => {

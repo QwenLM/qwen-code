@@ -6516,6 +6516,49 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('disables model fallback without disabling compression', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-model',
+      ]);
+      const resolveForModel = vi.fn();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      const capacityError = Object.assign(
+        new Error('temporarily unavailable'),
+        {
+          status: 503,
+        },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+      const tryCompress = vi.spyOn(chat, 'tryCompress');
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-no-model-fallback',
+        undefined,
+        { disableModelFallbacks: true },
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(capacityError);
+      expect(tryCompress).toHaveBeenCalled();
+      expect(resolveForModel).not.toHaveBeenCalled();
+    });
+
     it('uses one exact image route across retries and filters history for the next target', async () => {
       const capacityError = Object.assign(
         new Error('temporarily unavailable'),

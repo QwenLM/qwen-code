@@ -11,6 +11,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
+  ContentBlock,
   LoadSessionResponse,
   PromptRequest,
   PromptResponse,
@@ -34,6 +35,7 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
+import type { SessionMediaReference } from './sessionMedia.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
@@ -55,6 +57,12 @@ export interface RewindSnapshotInfo {
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
 }
+
+export type BridgePromptContentBlock = ContentBlock | SessionMediaReference;
+
+export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
+  prompt: BridgePromptContentBlock[];
+};
 
 export interface RewindRequest {
   promptId: string;
@@ -637,6 +645,18 @@ export interface BridgeSessionSummary {
 }
 
 /**
+ * In-memory equality token for daemon-observed session-catalog changes.
+ * `generation` is unique to a bridge instance; `revision` increases
+ * monotonically within it. The only supported operation is equality over
+ * the whole pair — no revision arithmetic, no cross-generation comparison,
+ * and conservative extra increments are allowed.
+ */
+export interface BridgeSessionCatalogVersion {
+  readonly generation: string;
+  readonly revision: number;
+}
+
+/**
  * A session's live canonical Goal state, as reported by the `qwen --acp`
  * child. `active` remains as a compatibility projection for existing hosts.
  */
@@ -755,6 +775,7 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_MEDIA_REFERENCES_META_KEY = 'qwen.daemon.mediaReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -880,6 +901,12 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
 export interface MidTurnQueueEntry {
   messageId: string;
   text: string;
+  /**
+   * Image content blocks attached to the message. The drain
+   * combines them with `text` into structured `items` for the ACP child;
+   * the promotion path sends them alongside the text block.
+   */
+  content?: BridgePromptContentBlock[];
   originatorClientId?: string;
   queueOnly?: boolean;
   onSettledWithoutDrain?: () => void;
@@ -891,7 +918,7 @@ export interface MidTurnQueueEntry {
  * running turn and messages promoted into the normal pending-prompt FIFO.
  */
 export interface BridgeMidTurnMessagesSnapshot {
-  messages: Array<Pick<MidTurnQueueEntry, 'messageId' | 'text'>>;
+  messages: Array<Pick<MidTurnQueueEntry, 'messageId' | 'text' | 'content'>>;
   settledMessageIds: string[];
   promotedMessageIds: string[];
 }
@@ -909,6 +936,12 @@ export interface PendingPromptEntry {
   originatorClientId?: string;
   promotedMidTurn?: true;
   text: string;
+  /**
+   * Image content blocks attached to this prompt. Used by
+   * `getPendingPrompts` so a refreshed client can restore the full payload
+   * (text + images) instead of just the text.
+   */
+  content?: BridgePromptContentBlock[];
   abortController: AbortController;
   state: 'queued' | 'running';
   /**
@@ -942,6 +975,12 @@ export interface PendingPromptEntry {
 export interface PendingPromptSummary {
   promptId: string;
   text: string;
+  /**
+   * Image content blocks attached to this prompt, so a
+   * refreshed client can restore the full payload (text + images) instead
+   * of just the text.
+   */
+  content?: BridgePromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
   originatorClientId?: string;
@@ -1222,7 +1261,7 @@ export interface AcpSessionBridge {
    */
   sendPrompt(
     sessionId: string,
-    req: PromptRequest,
+    req: BridgePromptRequest,
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<PromptResponse>;
@@ -1368,6 +1407,21 @@ export interface AcpSessionBridge {
    * supplied cwd. Empty array (not throw) when no sessions exist.
    */
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Read the current in-memory session-catalog version. The returned value
+   * is an immutable snapshot — a later {@link markSessionCatalogChanged}
+   * call never mutates a previously returned version.
+   */
+  getSessionCatalogVersion(): BridgeSessionCatalogVersion;
+
+  /**
+   * Advance the session-catalog revision. Marks daemon-observed catalog
+   * membership and static-metadata changes that the bridge does not track
+   * internally (e.g. persisted mutations performed by serve-layer helpers).
+   * Conservative extra increments are safe and preferred over a missed mark.
+   */
+  markSessionCatalogChanged(): void;
 
   /**
    * Live status summary for a single session by id — the same shape
@@ -1729,6 +1783,8 @@ export interface AcpSessionBridge {
    * With `options.queueOnly` an idle session rejects instead of promoting. If
    * a busy session settles before draining the message,
    * `onSettledWithoutDrain` lets the caller drive the next turn itself.
+   * `options.content` carries image blocks with the message;
+   * an empty `message` is admitted when media blocks are present.
    */
   enqueueMidTurnMessage(
     sessionId: string,
@@ -1738,8 +1794,28 @@ export interface AcpSessionBridge {
     options?: {
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
+      content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string };
+
+  storeSessionMedia(
+    sessionId: string,
+    data: Uint8Array,
+    mimeType: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionMediaReference>;
+
+  readSessionMedia(
+    sessionId: string,
+    mediaId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{ data: Buffer; mimeType: string } | undefined>;
+
+  removeSessionMedia(
+    sessionId: string,
+    mediaId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<boolean>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(
