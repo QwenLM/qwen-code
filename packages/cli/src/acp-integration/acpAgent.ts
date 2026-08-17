@@ -178,6 +178,7 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
+import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -3301,7 +3302,10 @@ export async function runAcpAgent(
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
     const stream = ndJsonStream(stdout, stdin, {
-      onMessageObserved: ({ direction, message }) => {
+      onMessageObserved: ({ direction, bytes, message }) => {
+        if (direction === 'sent') {
+          observeAcpToolResultWire(message, bytes);
+        }
         if (
           direction === 'received' &&
           'id' in message &&
