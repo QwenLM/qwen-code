@@ -1366,24 +1366,24 @@ export async function runNonInteractive(
           );
         }
         if (!supportsAudio) {
-          const reason = routeResolutionFailed
-            ? 'the active model override could not be resolved'
-            : 'the active model override does not support audio';
-          initialParts = replaceAudioPartsWithUnavailable(initialParts, reason);
-          emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
           if (routeResolutionFailed) {
             inlineModelOverrideResolutionFailed = true;
             inlineModelOverride = undefined;
+          } else {
+            const reason = 'the active model override does not support audio';
+            initialParts = replaceAudioPartsWithUnavailable(
+              initialParts,
+              reason,
+            );
+            emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
           }
         } else {
           initialParts = initialParts.map((part) =>
             hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
           );
         }
-      } else if (
-        inlineModelOverride === undefined &&
-        hasAudioParts(initialParts)
-      ) {
+      }
+      if (inlineModelOverride === undefined && hasAudioParts(initialParts)) {
         const audioBridgeResult = await runAudioBridge({
           config,
           settings,

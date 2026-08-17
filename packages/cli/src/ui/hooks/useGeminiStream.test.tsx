@@ -4572,6 +4572,9 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
     expect(mockRunAudioBridge).toHaveBeenCalledOnce();
+    expect(mockRunAudioBridge.mock.calls[0]?.[0]).not.toHaveProperty(
+      'targetSupportsAudio',
+    );
     expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
     const secondSent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
     expect(secondSent).toContain('[mid-turn audio transcript]');

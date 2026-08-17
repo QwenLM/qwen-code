@@ -1890,7 +1890,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('fails closed when a slash prompt route resolution rejects', async () => {
+  it('bridges audio on the primary route when a slash prompt route resolution rejects', async () => {
     setupMetricsMock();
     const mockCommand = {
       name: 'flaky-model',
@@ -1917,6 +1917,14 @@ describe('runNonInteractive', () => {
     (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
       .fn()
       .mockReturnValue({ resolveForModel });
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'listen to this audio' }, { text: '[audio transcript]' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
     mockGeminiClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
@@ -1928,22 +1936,23 @@ describe('runNonInteractive', () => {
       'prompt-audio-route-rejected',
     );
 
-    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    expect(runAudioBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockSettings,
+      parts: headlessAudioParts,
+      signal: expect.any(AbortSignal),
+    });
     const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
     expect(sentParts).toEqual([
       { text: 'listen to this audio' },
-      expect.objectContaining({
-        text: expect.stringContaining(
-          'active model override could not be resolved',
-        ),
-      }),
+      { text: '[audio transcript]' },
     ]);
     expect(JSON.stringify(sentParts)).not.toContain('audio/wav');
     expect(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
     ).toBeUndefined();
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Audio was not sent'),
+      expect.stringContaining('Converted 1 audio file'),
     );
   });
 
@@ -1991,10 +2000,22 @@ describe('runNonInteractive', () => {
       }),
       getBaseLlmClient: vi.fn().mockReturnValue({ resolveForModel }),
     } as unknown as Config;
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      parts: [mixedParts[0], { text: '[audio transcript]' }, mixedParts[2]],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
     runVisionBridgeSpy.mockResolvedValue({
       applied: true,
       status: 'ok',
-      parts: [mixedParts[0], { text: '[transcribed image]' }],
+      parts: [
+        mixedParts[0],
+        { text: '[audio transcript]' },
+        { text: '[transcribed image]' },
+      ],
       transcript: '[transcribed image]',
       convertedCount: 1,
       omittedCount: 0,
@@ -2016,6 +2037,7 @@ describe('runNonInteractive', () => {
     const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
     expect(JSON.stringify(sentParts)).not.toContain('audio/wav');
     expect(JSON.stringify(sentParts)).not.toContain('image/png');
+    expect(JSON.stringify(sentParts)).toContain('[audio transcript]');
     expect(JSON.stringify(sentParts)).toContain('[transcribed image]');
     expect(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,

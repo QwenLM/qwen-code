@@ -1300,6 +1300,7 @@ export const useGeminiStream = (
               runtimeView.contentGeneratorConfig.modalities?.image === true;
             supportsAudio =
               runtimeView.contentGeneratorConfig.modalities?.audio === true;
+            targetSupportsAudio = supportsAudio;
           } catch (error) {
             modelOverrideResolutionFailed = true;
             debugLogger.warn(
@@ -1308,7 +1309,6 @@ export const useGeminiStream = (
               }`,
             );
           }
-          targetSupportsAudio = supportsAudio;
           if (!supportsAudio) {
             const failClosed = inlineModelOverrideActiveRef.current;
             if (modelOverrideResolutionFailed) {
