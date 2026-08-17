@@ -4088,19 +4088,12 @@ export interface ExtensionOperationResult {
   >;
 }
 
-export interface ExtensionBatchActivationTarget {
-  extensionId: string;
-  name: string;
-}
-
 export interface ExtensionDefaultActivationBatchItem {
-  extensionId: string;
   name: string;
   defaultActivation: ExtensionActivationState;
 }
 
 export interface ExtensionWorkspaceActivationBatchItem {
-  extensionId: string;
   name: string;
   workspaceActivation: ExtensionWorkspaceActivation;
   effectiveActivation: ExtensionActivationState;

@@ -2093,7 +2093,7 @@ describe('extension tests', () => {
         .mockResolvedValue();
 
       const snapshot = await manager.setExtensionDefaultActivations(
-        extensions.map(({ id, name }) => ({ id, name })),
+        extensions.map(({ name }) => name),
         'disabled',
       );
 
@@ -2125,7 +2125,7 @@ describe('extension tests', () => {
         .filter((extension) => extension.name.endsWith('workspace-extension'));
       expect(extensions).toHaveLength(2);
       await manager.setExtensionWorkspaceActivations(
-        extensions.map(({ id, name }) => ({ id, name })),
+        extensions.map(({ name }) => name),
         tempWorkspaceDir,
         'disabled',
       );
@@ -2136,7 +2136,7 @@ describe('extension tests', () => {
         .mockResolvedValue();
 
       const snapshot = await manager.setExtensionWorkspaceActivations(
-        extensions.map(({ id, name }) => ({ id, name })),
+        extensions.map(({ name }) => name),
         tempWorkspaceDir,
         'inherit',
       );
@@ -2169,7 +2169,8 @@ describe('extension tests', () => {
       const loaded = manager
         .getLoadedExtensions()
         .find((extension) => extension.name === 'available-extension')!;
-      const identity = { id: 'cd'.repeat(32), name: 'future-extension' };
+      const declaredName = 'future-extension';
+      const declaredId = hashValue(declaredName);
       const initial = await manager.getExtensionStoreSnapshot();
       const refreshTools = vi
         .spyOn(manager, 'refreshTools')
@@ -2177,14 +2178,14 @@ describe('extension tests', () => {
       const onCommitted = vi.fn();
 
       const snapshot = await manager.setExtensionDefaultActivations(
-        [{ id: loaded.id, name: loaded.name }, identity],
+        [loaded.name, declaredName],
         'disabled',
         onCommitted,
       );
 
       expect(snapshot.generation).toBe(initial.generation + 1);
-      expect(snapshot.extensions[identity.id]).toMatchObject({
-        name: identity.name,
+      expect(snapshot.extensions[declaredId]).toMatchObject({
+        name: declaredName,
         declarationOnly: true,
         defaultActivation: 'disabled',
       });
@@ -2196,8 +2197,8 @@ describe('extension tests', () => {
       expect(onCommitted).toHaveBeenCalledWith(snapshot.generation);
       expect(refreshTools).toHaveBeenCalledOnce();
       await expect(
-        manager.setExtensionDefaultActivation(identity.id, 'enabled'),
-      ).rejects.toThrow(`Extension with id ${identity.id} does not exist.`);
+        manager.setExtensionDefaultActivation(declaredId, 'enabled'),
+      ).rejects.toThrow(`Extension with id ${declaredId} does not exist.`);
     });
 
     it('applies V2 default and workspace activation to loaded extensions', async () => {

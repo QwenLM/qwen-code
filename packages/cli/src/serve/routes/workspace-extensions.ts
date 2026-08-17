@@ -14,7 +14,6 @@ import {
   getErrorMessage,
   SettingScope,
   type Extension,
-  type ExtensionIdentity,
   type ExtensionInstallMetadata,
   type ExtensionManager,
   type ClaudeMarketplaceConfig,
@@ -125,45 +124,27 @@ const parseExtensionScope = (
   return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
 };
 
-const parseExtensionBatchTargets = (
+const parseExtensionBatchNames = (
   req: Request,
   res: Response,
   safeBody: SafeBody,
-): ExtensionIdentity[] | undefined => {
-  const rawExtensions = safeBody(req)['extensions'];
+): string[] | undefined => {
+  const rawNames = safeBody(req)['extensionNames'];
   if (
-    !Array.isArray(rawExtensions) ||
-    rawExtensions.length === 0 ||
-    rawExtensions.length > MAX_EXTENSION_BATCH_SIZE ||
-    !rawExtensions.every(
-      (target) =>
-        !!target &&
-        typeof target === 'object' &&
-        !Array.isArray(target) &&
-        typeof (target as Record<string, unknown>)['extensionId'] ===
-          'string' &&
-        typeof (target as Record<string, unknown>)['name'] === 'string',
-    )
+    !Array.isArray(rawNames) ||
+    rawNames.length === 0 ||
+    rawNames.length > MAX_EXTENSION_BATCH_SIZE ||
+    !rawNames.every((name) => typeof name === 'string')
   ) {
     res.status(400).json({
-      error: `\`extensions\` must be a non-empty identity array (max ${MAX_EXTENSION_BATCH_SIZE})`,
-      code: 'invalid_extensions',
+      error: `\`extensionNames\` must be a non-empty string array (max ${MAX_EXTENSION_BATCH_SIZE})`,
+      code: 'invalid_extension_names',
     });
     return undefined;
   }
-  const identities: ExtensionIdentity[] = [];
-  const namesById = new Map<string, string>();
-  const idsByName = new Map<string, string>();
-  for (const rawTarget of rawExtensions as Array<Record<string, unknown>>) {
-    const extensionId = rawTarget['extensionId'] as string;
-    const name = rawTarget['name'] as string;
-    if (!/^[a-f0-9]{64}$/.test(extensionId)) {
-      res.status(400).json({
-        error: `Invalid extension id "${extensionId}"`,
-        code: 'invalid_extension_id',
-      });
-      return undefined;
-    }
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const name of rawNames as string[]) {
     if (!/^[a-zA-Z0-9-_.]+$/.test(name)) {
       res.status(400).json({
         error: `Invalid extension name "${name}"`,
@@ -171,25 +152,12 @@ const parseExtensionBatchTargets = (
       });
       return undefined;
     }
-    const existingName = namesById.get(extensionId);
     const normalizedName = name.toLowerCase();
-    const existingId = idsByName.get(normalizedName);
-    if (
-      (existingName !== undefined && existingName !== name) ||
-      (existingId !== undefined && existingId !== extensionId)
-    ) {
-      res.status(400).json({
-        error: `Conflicting extension identity for "${name}"`,
-        code: 'conflicting_extension_identity',
-      });
-      return undefined;
-    }
-    if (existingName !== undefined) continue;
-    namesById.set(extensionId, name);
-    idsByName.set(normalizedName, extensionId);
-    identities.push({ id: extensionId, name });
+    if (seen.has(normalizedName)) continue;
+    seen.add(normalizedName);
+    names.push(name);
   }
-  return identities;
+  return names;
 };
 
 const parseExtensionRegistryUrl = (
@@ -1653,8 +1621,8 @@ export function registerWorkspaceExtensionRoutes(
   });
 
   app.put('/extensions/activation', mutate({ strict: true }), (req, res) => {
-    const identities = parseExtensionBatchTargets(req, res, safeBody);
-    if (!identities) return;
+    const names = parseExtensionBatchNames(req, res, safeBody);
+    if (!names) return;
     const state = parseActivationState(req, res);
     if (!state) return;
     const manager = primaryController.createExtensionManager(
@@ -1672,16 +1640,15 @@ export function registerWorkspaceExtensionRoutes(
         await context!.commit(
           async (onCommitted) =>
             await extensionManager.setExtensionDefaultActivations(
-              identities,
+              names,
               state,
               onCommitted,
             ),
         );
         return {
           status: 'updated',
-          results: identities.map((identity) => ({
-            extensionId: identity.id,
-            name: identity.name,
+          results: names.map((name) => ({
+            name,
             defaultActivation: state,
           })),
         };
@@ -2117,8 +2084,8 @@ export function registerWorkspaceExtensionRoutes(
       (req, res) => {
         const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-        const identities = parseExtensionBatchTargets(req, res, safeBody);
-        if (!identities) return;
+        const names = parseExtensionBatchNames(req, res, safeBody);
+        if (!names) return;
         const state = parseWorkspaceBatchActivationState(req, res);
         if (!state) return;
         const manager = primaryController.createExtensionManager(
@@ -2136,7 +2103,7 @@ export function registerWorkspaceExtensionRoutes(
             const snapshot = await context!.commit(
               async (onCommitted) =>
                 await extensionManager.setExtensionWorkspaceActivations(
-                  identities,
+                  names,
                   runtime.workspaceCwd,
                   state,
                   onCommitted,
@@ -2144,13 +2111,12 @@ export function registerWorkspaceExtensionRoutes(
             );
             return {
               status: 'updated',
-              results: identities.map((identity) => ({
-                extensionId: identity.id,
-                name: identity.name,
+              results: names.map((name) => ({
+                name,
                 workspaceActivation: state === 'inherit' ? null : state,
                 effectiveActivation:
-                  extensionManager.getExtensionActivationForIdentityFromSnapshot(
-                    identity,
+                  extensionManager.getExtensionActivationForNameFromSnapshot(
+                    name,
                     snapshot,
                     runtime.workspaceCwd,
                   ).effective,

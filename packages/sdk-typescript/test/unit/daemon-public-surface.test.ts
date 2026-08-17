@@ -84,7 +84,6 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
-  ExtensionBatchActivationTarget,
   ExtensionDefaultActivationBatchItem,
   ExtensionMutationResponse,
   ExtensionWorkspaceActivationBatchItem,
@@ -341,7 +340,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       Parameters<DaemonClient['setExtensionDefaultActivations']>
     >().toEqualTypeOf<
       [
-        extensions: readonly ExtensionBatchActivationTarget[],
+        extensionNames: readonly string[],
         state: 'enabled' | 'disabled',
         clientId?: string,
       ]
@@ -350,7 +349,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       Parameters<WorkspaceDaemonClient['setExtensionActivations']>
     >().toEqualTypeOf<
       [
-        extensions: readonly ExtensionBatchActivationTarget[],
+        extensionNames: readonly string[],
         state: ExtensionWorkspaceBatchActivationState,
         clientId?: string,
       ]
@@ -358,17 +357,11 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<ExtensionWorkspaceBatchActivationState>().toEqualTypeOf<
       'enabled' | 'disabled' | 'inherit'
     >();
-    expectTypeOf<ExtensionBatchActivationTarget>().toEqualTypeOf<{
-      extensionId: string;
-      name: string;
-    }>();
     expectTypeOf<ExtensionDefaultActivationBatchItem>().toEqualTypeOf<{
-      extensionId: string;
       name: string;
       defaultActivation: 'enabled' | 'disabled';
     }>();
     expectTypeOf<ExtensionWorkspaceActivationBatchItem>().toEqualTypeOf<{
-      extensionId: string;
       name: string;
       workspaceActivation: 'enabled' | 'disabled' | null;
       effectiveActivation: 'enabled' | 'disabled';

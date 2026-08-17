@@ -385,10 +385,14 @@ export class ExtensionStore {
         assertIdentity(identity);
         const directPolicy = existing.extensions[identity.id];
         if (directPolicy) {
-          if (directPolicy.name !== identity.name) {
+          if (directPolicy.name.toLowerCase() !== identity.name.toLowerCase()) {
             throw new ExtensionConflictError(
               `Extension id belongs to "${directPolicy.name}", not "${identity.name}".`,
             );
+          }
+          if (directPolicy.name !== identity.name) {
+            directPolicy.name = identity.name;
+            changed = true;
           }
           if (directPolicy.declarationOnly) {
             delete directPolicy.declarationOnly;
@@ -404,9 +408,7 @@ export class ExtensionStore {
         if (staleEntry) {
           const [staleId, policy] = staleEntry;
           if (policy.declarationOnly) {
-            throw new ExtensionConflictError(
-              `Extension name "${identity.name}" is declared with a different id.`,
-            );
+            delete policy.declarationOnly;
           }
           delete existing.extensions[staleId];
           policy.name = identity.name;
@@ -575,21 +577,30 @@ export class ExtensionStore {
       if (input.operation === 'install' && !input.initialActivation) {
         throw new Error('Install requires an initial activation.');
       }
-      if (input.operation !== 'uninstall') {
-        const nameConflict = Object.entries(snapshot.extensions).find(
-          ([extensionId, policy]) =>
-            extensionId !== input.identity.id &&
-            policy.name.toLowerCase() === input.identity.name.toLowerCase(),
+      const nameConflict = Object.entries(snapshot.extensions).find(
+        ([extensionId, policy]) =>
+          extensionId !== input.identity.id &&
+          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
+      );
+      if (
+        input.operation !== 'uninstall' &&
+        nameConflict &&
+        !(
+          input.operation === 'install' &&
+          !snapshot.extensions[input.identity.id] &&
+          nameConflict[1].declarationOnly
+        )
+      ) {
+        throw new ExtensionConflictError(
+          `Extension name "${input.identity.name}" conflicts with an installed extension.`,
         );
-        if (nameConflict) {
-          throw new ExtensionConflictError(
-            `Extension name "${input.identity.name}" conflicts with an installed extension.`,
-          );
-        }
       }
 
       const currentPolicy = snapshot.extensions[input.identity.id];
-      if (currentPolicy && currentPolicy.name !== input.identity.name) {
+      if (
+        currentPolicy &&
+        currentPolicy.name.toLowerCase() !== input.identity.name.toLowerCase()
+      ) {
         throw new ExtensionConflictError(
           `Extension id belongs to "${currentPolicy.name}", not "${input.identity.name}".`,
         );
@@ -618,10 +629,19 @@ export class ExtensionStore {
 
       const targetSnapshot = structuredClone(snapshot);
       if (input.operation === 'install') {
-        if (currentPolicy?.declarationOnly) {
-          const policy = targetSnapshot.extensions[input.identity.id]!;
+        const declarationEntry = currentPolicy?.declarationOnly
+          ? ([input.identity.id, currentPolicy] as const)
+          : nameConflict?.[1].declarationOnly
+            ? nameConflict
+            : undefined;
+        if (declarationEntry) {
+          const [declarationId] = declarationEntry;
+          const policy = targetSnapshot.extensions[declarationId]!;
+          delete targetSnapshot.extensions[declarationId];
           delete policy.declarationOnly;
+          policy.name = input.identity.name;
           policy.artifactGeneration = targetSnapshot.generation + 1;
+          targetSnapshot.extensions[input.identity.id] = policy;
         } else {
           const initial = input.initialActivation!;
           const rules = findLegacyRules(
@@ -975,26 +995,25 @@ export class ExtensionStore {
       for (const identity of identities) {
         let policy = snapshot.extensions[identity.id];
         if (!policy) {
-          const nameConflict = Object.entries(snapshot.extensions).find(
-            ([extensionId, existing]) =>
-              extensionId !== identity.id &&
+          const existingByName = Object.values(snapshot.extensions).find(
+            (existing) =>
               existing.name.toLowerCase() === identity.name.toLowerCase(),
           );
-          if (nameConflict) {
-            throw new ExtensionConflictError(
-              `Extension name "${identity.name}" conflicts with an existing policy.`,
-            );
+          if (existingByName) {
+            policy = existingByName;
+          } else {
+            const rules = findLegacyRules(legacyForImport, identity.name);
+            policy = {
+              name: identity.name,
+              declarationOnly: true,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+              ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+            };
+            snapshot.extensions[identity.id] = policy;
           }
-          const rules = findLegacyRules(legacyForImport, identity.name);
-          policy = {
-            name: identity.name,
-            declarationOnly: true,
-            defaultActivation: 'enabled',
-            workspaceOverrides: {},
-            ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
-          };
-          snapshot.extensions[identity.id] = policy;
-        } else if (
+        }
+        if (
           !policy.declarationOnly &&
           policy.artifactGeneration !== undefined &&
           !(await this.pathExists(path.join(this.extensionsDir, policy.name)))
@@ -1002,7 +1021,7 @@ export class ExtensionStore {
           delete policy.artifactGeneration;
           policy.declarationOnly = true;
         }
-        if (policy.name !== identity.name) {
+        if (policy.name.toLowerCase() !== identity.name.toLowerCase()) {
           throw new ExtensionConflictError(
             `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
           );

@@ -104,12 +104,10 @@ export type ExtensionMutationEvent = {
   states?: Record<string, string>;
   results?: Array<
     | {
-        extensionId: string;
         name: string;
         defaultActivation: 'enabled' | 'disabled';
       }
     | {
-        extensionId: string;
         name: string;
         workspaceActivation: 'enabled' | 'disabled' | null;
         effectiveActivation: 'enabled' | 'disabled';

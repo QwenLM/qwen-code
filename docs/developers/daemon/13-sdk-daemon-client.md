@@ -171,27 +171,21 @@ V2 Extension batch activation retains the asynchronous Extension operation model
 
 ```ts
 const globalHandle = await client.setExtensionDefaultActivations(
-  [
-    { extensionId: formatterId, name: 'formatter' },
-    { extensionId: reviewToolsId, name: 'review-tools' },
-  ],
+  ['formatter', 'review-tools'],
   'disabled',
   'dashboard-1',
 );
 const workspaceHandle = await client
   .workspaceByCwd('/work/secondary')
   .setExtensionActivations(
-    [
-      { extensionId: formatterId, name: 'formatter' },
-      { extensionId: reviewToolsId, name: 'review-tools' },
-    ],
+    ['formatter', 'review-tools'],
     'inherit',
     'dashboard-1',
   );
 const operation = await client.waitForExtensionOperation(workspaceHandle);
 ```
 
-The terminal operation result contains ordered `results`. Targets do not need to be installed: the daemon stores an id/name declaration and preserves that activation policy when the matching Extension is installed later. All targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override and reports the resulting effective activation. Singular activation methods remain installed-only.
+The terminal operation result contains ordered `results`. Targets do not need to be installed: the daemon stores a name declaration and preserves that activation policy when an Extension with that name is installed later. All targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override and reports the resulting effective activation. Singular activation methods remain installed-only.
 
 Workspace display names are optional presentation metadata. Pre-flight `capabilities.features.includes('workspace_display_name')`; workspace ids and canonical paths remain the only selectors, and duplicate display names are valid.
 

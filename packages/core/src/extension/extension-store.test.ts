@@ -273,14 +273,20 @@ describe('ExtensionStore', () => {
 
     const staging = await store.createStagingDirectory();
     await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installedIdentity = { id: 'bd'.repeat(32), name: identity.name };
     const installed = await store.commitArtifact({
       operation: 'install',
-      identity,
+      identity: installedIdentity,
       stagingDirectory: staging,
       destinationDirectory: path.join(extensionsDir, identity.name),
       initialActivation: { scope: 'user' },
     });
 
+    expect(installed.extensions[identity.id]).toBeUndefined();
+    expect(installed.extensions[installedIdentity.id]).toMatchObject({
+      name: identity.name,
+      defaultActivation: 'disabled',
+    });
     expect(installed.legacyProjectionRemainder).toEqual({
       unrelated: { overrides: ['!/unrelated/*'] },
     });
@@ -1278,35 +1284,55 @@ describe('ExtensionStore', () => {
     });
   });
 
-  it('rejects a declaration that conflicts with an existing name atomically', async () => {
+  it('targets an existing policy by name when the supplied id is provisional', async () => {
     const store = makeStore();
     const installed = { id: 'f2'.repeat(32), name: 'demo' };
-    const other = { id: 'f3'.repeat(32), name: 'other' };
-    const conflicting = { id: 'f4'.repeat(32), name: 'DEMO' };
     const initial = await store.ensureInitialized([installed]);
-    const initialProjection = await fsp.readFile(enablementPath, 'utf8');
 
-    await expect(
-      store.setDefaultActivations([other, conflicting], 'disabled'),
-    ).rejects.toMatchObject({ code: 'extension_conflict' });
+    const snapshot = await store.setDefaultActivations(
+      [{ id: 'f4'.repeat(32), name: 'DEMO' }],
+      'disabled',
+    );
 
-    const snapshot = await store.readSnapshot();
-    expect(snapshot.generation).toBe(initial.generation);
-    expect(snapshot.extensions[other.id]).toBeUndefined();
-    expect(await fsp.readFile(enablementPath, 'utf8')).toBe(initialProjection);
+    expect(snapshot.generation).toBe(initial.generation + 1);
+    expect(snapshot.extensions[installed.id]?.defaultActivation).toBe(
+      'disabled',
+    );
+    expect(snapshot.extensions['f4'.repeat(32)]).toBeUndefined();
   });
 
-  it('does not re-key an explicit declaration to a different id', async () => {
+  it('re-keys an explicit name declaration to the discovered id', async () => {
     const store = makeStore();
     const declared = { id: 'f5'.repeat(32), name: 'demo' };
     const discovered = { id: 'f6'.repeat(32), name: 'demo' };
     const initial = await store.setDefaultActivations([declared], 'disabled');
 
-    await expect(store.ensureInitialized([discovered])).rejects.toMatchObject({
-      code: 'extension_conflict',
-    });
+    const promoted = await store.ensureInitialized([discovered]);
 
-    expect(await store.readSnapshot()).toEqual(initial);
+    expect(promoted.generation).toBe(initial.generation + 1);
+    expect(promoted.extensions[declared.id]).toBeUndefined();
+    expect(promoted.extensions[discovered.id]).toEqual({
+      name: discovered.name,
+      defaultActivation: 'disabled',
+      workspaceOverrides: {},
+    });
+  });
+
+  it('promotes a declaration when only the discovered name casing changes', async () => {
+    const store = makeStore();
+    const identity = { id: 'f7'.repeat(32), name: 'Demo' };
+    const declared = await store.setDefaultActivations([identity], 'disabled');
+
+    const promoted = await store.ensureInitialized([
+      { id: identity.id, name: 'demo' },
+    ]);
+
+    expect(promoted.generation).toBe(declared.generation + 1);
+    expect(promoted.extensions[identity.id]).toEqual({
+      name: 'demo',
+      defaultActivation: 'disabled',
+      workspaceOverrides: {},
+    });
   });
 
   it('preserves the original error when rollback also fails', async () => {
@@ -1577,10 +1603,11 @@ describe('ExtensionStore', () => {
       initialActivation: { scope: 'user' },
     });
     await fsp.rm(destination, { recursive: true });
+    const provisional = { id: '9c'.repeat(32), name: identity.name };
 
-    await store.setDefaultActivations([identity], 'disabled');
+    await store.setDefaultActivations([provisional], 'disabled');
     const declared = await store.setWorkspaceActivations(
-      [identity],
+      [provisional],
       workspacePath('disabled'),
       'disabled',
     );

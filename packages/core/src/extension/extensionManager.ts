@@ -762,6 +762,25 @@ export class ExtensionManager {
     };
   }
 
+  getExtensionActivationForNameFromSnapshot(
+    name: string,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
+    const entry = Object.entries(snapshot.extensions).find(
+      ([, policy]) => policy.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (!entry) {
+      throw new Error(`Extension with name ${name} does not exist.`);
+    }
+    const [id, policy] = entry;
+    return this.getExtensionActivationForIdentityFromSnapshot(
+      { id, name: policy.name },
+      snapshot,
+      workspacePath,
+    );
+  }
+
   async setExtensionDefaultActivation(
     extensionId: string,
     activation: ExtensionActivation,
@@ -784,12 +803,13 @@ export class ExtensionManager {
   }
 
   async setExtensionDefaultActivations(
-    identities: readonly ExtensionIdentity[],
+    names: readonly string[],
     activation: ExtensionActivation,
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('setExtensionDefaultActivations');
     try {
+      const identities = this.resolveBatchExtensionIdentities(names);
       const snapshot = await this.extensionStore.setDefaultActivations(
         identities,
         activation,
@@ -850,13 +870,14 @@ export class ExtensionManager {
   }
 
   async setExtensionWorkspaceActivations(
-    identities: readonly ExtensionIdentity[],
+    names: readonly string[],
     workspacePath: string,
     activation: WorkspaceActivation,
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('setExtensionWorkspaceActivations');
     try {
+      const identities = this.resolveBatchExtensionIdentities(names);
       const snapshot =
         activation === 'inherit'
           ? await this.extensionStore.clearWorkspaceActivations(
@@ -877,6 +898,23 @@ export class ExtensionManager {
     } finally {
       endMutation();
     }
+  }
+
+  private resolveBatchExtensionIdentities(
+    names: readonly string[],
+  ): ExtensionIdentity[] {
+    const loadedByName = new Map(
+      this.getLoadedExtensions().map((extension) => [
+        extension.name.toLowerCase(),
+        extension,
+      ]),
+    );
+    return names.map((name) => {
+      const loaded = loadedByName.get(name.toLowerCase());
+      return loaded
+        ? { id: loaded.id, name: loaded.name }
+        : { id: hashValue(name.toLowerCase()), name };
+    });
   }
 
   async clearExtensionWorkspaceActivation(
