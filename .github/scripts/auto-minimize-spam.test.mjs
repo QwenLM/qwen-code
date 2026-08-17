@@ -98,9 +98,14 @@ describe('auto-minimize-spam: event fast path', () => {
 
   it('processes the triggering comment without dropping bursts', () => {
     const jobGuard = String(minimizeJob.if);
+    const flatJobGuard = jobGuard.replace(/\s+/g, ' ');
     assert.match(
       jobGuard,
       /comment\.user\.type != 'Bot'[\s\S]*!contains\([\s\S]*OWNER[\s\S]*MEMBER[\s\S]*COLLABORATOR[\s\S]*github\.event\.comment\.author_association/,
+    );
+    assert.match(
+      flatJobGuard,
+      /author_association \) && \( github\.event_name != 'pull_request_review_comment' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
     );
     assert.match(jobGuard, /head\.repo\.full_name == github\.repository/);
     assert.match(
