@@ -10,6 +10,7 @@ import {
   CompressionStatus,
   getStartupContextLength,
   isSystemReminderContent,
+  MICROCOMPACT_CLEARED_IMAGE_PREFIX,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
@@ -56,7 +57,20 @@ function isUserTextContent(content: Content): boolean {
   // is NOT excluded.
   if (isSystemReminderContent(content)) return false;
 
-  return content.parts.some((part) => 'text' in part && part.text);
+  // Exclude microcompaction media-clear placeholders. `/compress-fast`'s
+  // microcompaction replaces the top-level inlineData/fileData parts of
+  // user entries with text placeholders. A media-only user entry (e.g. an
+  // image-only ACP prompt) never produced a UI user turn, but once cleared
+  // it carries a text part; counting it here desynchronizes the API prompt
+  // count from the UI turn count and makes the walk below truncate one turn
+  // early, silently dropping a turn the UI still shows. An entry that mixes
+  // placeholders with real prompt text still counts (it IS a real turn).
+  return content.parts.some(
+    (part) =>
+      'text' in part &&
+      !!part.text &&
+      !part.text.startsWith(MICROCOMPACT_CLEARED_IMAGE_PREFIX),
+  );
 }
 
 /**

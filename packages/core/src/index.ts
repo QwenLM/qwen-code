@@ -245,6 +245,10 @@ export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
+export {
+  MICROCOMPACT_CLEARED_MESSAGE,
+  MICROCOMPACT_CLEARED_IMAGE_PREFIX,
+} from './services/microcompaction/microcompact.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';

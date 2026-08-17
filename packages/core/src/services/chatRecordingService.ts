@@ -460,6 +460,15 @@ export interface AgentRetryRecordPayload {
 /**
  * Stored payload for chat compression checkpoints. This allows us to rebuild the
  * effective chat history on resume while keeping the original UI-visible history.
+ *
+ * NOTE: the payload carries `ChatCompressionInfo`, which has no
+ * `compressionKind` — the 'summarize' vs 'fast' distinction (see
+ * `CompressionProps.compressionKind` in cli's ui/types.ts) exists only on
+ * ephemeral UI items today. If resume ever reconstructs compression markers
+ * from this record, it must re-derive the kind; rebuilding every marker
+ * kind-less and falling back to 'summarize' would misclassify fast markers
+ * as truncation boundaries and re-introduce the silent pre-marker history
+ * drop of #9320 on any session that ran /compress-fast before being resumed.
  */
 export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */

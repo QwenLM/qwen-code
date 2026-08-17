@@ -459,6 +459,113 @@ describe('computeApiTruncationIndex', () => {
     });
   });
 
+  describe('with microcompaction media-clear placeholders', () => {
+    // /compress-fast's forced microcompaction replaces the top-level
+    // inlineData/fileData parts of user entries with text placeholders
+    // ('[Old inline media cleared: <mime>]'). A media-only user entry
+    // (e.g. an image-only ACP prompt) never produced a UI user turn, but
+    // once cleared it satisfies a naive 'text' in part check — counting it
+    // desynchronizes the API prompt count from the UI turn count and makes
+    // the walk truncate one turn early, silently dropping a turn the UI
+    // still shows (the same hazard this PR's fast-marker change addresses,
+    // newly reachable through cross-fast-marker rewinds).
+
+    function clearedMediaContent(mime = 'image/png'): Content {
+      return {
+        role: 'user',
+        parts: [{ text: `[Old inline media cleared: ${mime}]` } as Part],
+      };
+    }
+
+    function inlineMediaContent(): Content {
+      return {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'abc' } } as Part,
+        ],
+      };
+    }
+
+    it('does not count a cleared media-only entry as a user prompt', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        clearedMediaContent(), // media-only entry, cleared; NOT a UI turn
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      // Witness: with the uncleared inlineData entry the index is 4; the
+      // cleared placeholder must land on the same index, not one turn early.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+
+      const apiUncleared: Content[] = [
+        startupEntry(),
+        inlineMediaContent(),
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      expect(computeApiTruncationIndex(ui, 3, apiUncleared)).toBe(4);
+    });
+
+    it('keeps the full pre-marker history when a cleared entry precedes a fast marker', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        geminiItem(2),
+        compressionItem(3, CompressionStatus.COMPRESSED, 'fast'),
+        userItem(4, 'post 1'),
+        geminiItem(5),
+        userItem(6, 'post 2'),
+        geminiItem(7),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        clearedMediaContent(), // cleared by /compress-fast microcompaction
+        userContent('pre 1'),
+        modelContent('response pre 1'),
+        userContent('post 1'),
+        modelContent('response post 1'),
+        userContent('post 2'),
+        modelContent('response post 2'),
+      ];
+      // 2 real turns precede 'post 2'; the cleared entry must not shift the
+      // count. Without the exclusion the walk stops at 'post 1' (idx 4).
+      expect(computeApiTruncationIndex(ui, 6, api)).toBe(6);
+    });
+
+    it('still counts an entry mixing a placeholder with real prompt text', () => {
+      const mixedTurn: Content = {
+        role: 'user',
+        parts: [
+          { text: '[Old inline media cleared: image/png]' } as Part,
+          { text: 'check this image' } as Part,
+        ],
+      };
+      const ui: HistoryItem[] = [
+        userItem(1, 'check this image'),
+        geminiItem(2),
+        userItem(3, 'world'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        mixedTurn,
+        modelContent('response 1'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+  });
+
   describe('mid-turn user messages (notification type)', () => {
     it('skips notification items so btw merged into functionResponse does not cause mismatch', () => {
       // Mid-turn messages are type 'notification' in UI (not counted by
