@@ -6,11 +6,14 @@
 
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stopChild, waitForJson } from './acceptance-helpers.mjs';
+import {
+  assertPortFree,
+  stopChild,
+  waitForJson,
+} from './acceptance-helpers.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../../../..');
@@ -67,22 +70,6 @@ const waitForExit = (child) => {
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
 };
-const assertPortFree = (portToCheck) =>
-  new Promise((resolveCheck, reject) => {
-    const socket = net.createConnection({
-      host: '127.0.0.1',
-      port: portToCheck,
-    });
-    socket.once('connect', () => {
-      socket.destroy();
-      reject(new Error(`Port ${portToCheck} is already in use`));
-    });
-    socket.once('error', () => resolveCheck());
-    socket.setTimeout(1_000, () => {
-      socket.destroy();
-      resolveCheck();
-    });
-  });
 const waitFor = async (predicate, timeoutMs = 30_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

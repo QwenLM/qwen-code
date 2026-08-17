@@ -110,8 +110,15 @@ async function probeState(baseUrl, token) {
   }
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
+  const webBridgeConnected = features.includes('webbridge')
+    ? (await probeJson(`${baseUrl}/webbridge/status`, token))
+        ?.extension_connected === true
+    : undefined;
   let mcpSnapshot;
-  if (features.includes('browser_automation_mcp')) {
+  if (
+    features.includes('browser_automation_mcp') &&
+    !features.includes('webbridge')
+  ) {
     // `/workspace/mcp` is a cross-process RPC to the ACP child while a channel
     // is live, so refresh it on a slower cadence than health/capabilities and
     // reuse the last snapshot in between. The banner content changes rarely and
@@ -129,7 +136,13 @@ async function probeState(baseUrl, token) {
     mcpProbeCounter = 0;
     cachedMcpSnapshot = undefined;
   }
-  return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl);
+  return deriveCapabilityStatus(
+    true,
+    features,
+    mcpSnapshot,
+    baseUrl,
+    webBridgeConnected,
+  );
 }
 
 /** Render the welcome screen for a non-ready state. */
@@ -144,15 +157,13 @@ function showWelcome(status, command) {
     els.title.textContent = 'Start qwen serve';
     els.desc.textContent =
       'No local qwen serve daemon is reachable. Run this in a terminal and ' +
-      'leave it running, then this panel connects automatically. Set ' +
-      'QWEN_CDP_MCP_COMMAND as well to enable browser automation tools.';
+      'leave it running, then this panel and WebBridge connect automatically.';
   } else {
     els.title.textContent = 'Allow this extension';
     els.desc.textContent =
       'qwen serve is running but is not allowed to load its UI here. Restart ' +
       'it with the flag below (it names this extension), then this panel ' +
-      'connects automatically. Set QWEN_CDP_MCP_COMMAND as well to enable ' +
-      'browser automation tools.';
+      'and WebBridge connect automatically.';
   }
 }
 

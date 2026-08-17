@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import type { Application } from 'express';
 import * as path from 'node:path';
@@ -57,6 +58,8 @@ import {
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
 import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
+import { WebBridgeRegistry } from './web-bridge/web-bridge-registry.js';
+import { WebBridgeService } from './web-bridge/web-bridge-service.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
@@ -90,6 +93,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerWebBridgeRoutes } from './routes/web-bridge.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -412,6 +416,8 @@ function getRuntimeEffectiveEnv(
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /** Per-process credential accepted only by the WebBridge HTTP routes. */
+  webBridgeToken?: string;
   /**
    * Enables resident management of scheduled-task-owned sessions: a periodic
    * keepalive (so their schedulers aren't idle-reaped) and a boot-time
@@ -1778,7 +1784,13 @@ export function createServeApp(
     });
   }
 
-  app.use(bearerAuth(opts.token));
+  const daemonAuth = bearerAuth(opts.token);
+  const webBridgeAuth = bearerAuth(deps.webBridgeToken || randomUUID());
+  app.use((req, res, next) =>
+    /^\/(?:status|command)\/?$/i.test(req.path)
+      ? webBridgeAuth(req, res, next)
+      : daemonAuth(req, res, next),
+  );
 
   // Rate limiter: after auth (only count authenticated requests), except
   // webhook routes which use their own shared-secret auth before bearerAuth.
@@ -1844,6 +1856,15 @@ export function createServeApp(
   // both ends connect (gated by `cdpTunnelOverWs`).
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
+  const webBridgeRegistry = new WebBridgeRegistry();
+  const webBridgeService = new WebBridgeService(
+    webBridgeRegistry,
+    deps.qwenCodeVersion ?? 'unknown',
+  );
+
+  registerWebBridgeRoutes(app, {
+    service: webBridgeService,
+  });
 
   registerDaemonStatusRoutes(app, {
     opts,
@@ -2822,6 +2843,7 @@ export function createServeApp(
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
+    webBridgeRegistry,
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.

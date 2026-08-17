@@ -407,6 +407,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_export',
       'workspace_archived_session_export',
       'voice_transcribe',
+      'webbridge',
     ]);
   });
 });

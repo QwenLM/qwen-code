@@ -4,13 +4,15 @@ Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/iss
 
 ## Authentication
 
-When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every route except `/health` on loopback binds** must carry:
+When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every route except `/health` on loopback binds and the WebBridge extension routes** must carry:
 
 ```
 Authorization: Bearer <token>
 ```
 
 Without a configured token (loopback dev default) the header is optional. Token comparison is constant-time. 401 responses are uniform across `missing header` / `wrong scheme` / `wrong token`.
+
+WebBridge's Kimi-compatible `/status` and `/command` routes use the route-scoped `QWEN_WEBBRIDGE_TOKEN` instead of the daemon bearer, even on loopback. Daemon-bearer clients should read extension readiness from the read-only `/webbridge/status` route.
 
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.1` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` behind the bearer like every other route — see the [`GET /health`](#get-health) section for the rationale.
 
@@ -487,6 +489,8 @@ operator diagnostic snapshot documented below.
 | `realtime_voice`                    | the macOS WebShell daemon has Live Voice enabled and native Host integration active. `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 <!-- conditional-serve-features:end -->
+
+`webbridge` is **not** in this conditional table — it is an always-on baseline tag: presence means the `/status` and `/command` endpoints exist, while `/status` reports dynamic extension readiness (`extension_connected`) and `/command` returns `503` while no extension is connected. Both routes require the route-scoped `QWEN_WEBBRIDGE_TOKEN`; daemon-bearer clients use `/webbridge/status` for read-only extension readiness.
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
