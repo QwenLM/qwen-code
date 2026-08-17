@@ -453,6 +453,37 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('strips full-width parens too — a CJK IME wraps the same no-answer', () => {
+    // The strip knew only the ASCII pair, so `（无 — 所有检查均完成）`
+    // survived as a phantom gap in exactly the output language the ZH
+    // branch exists for — the #9094 incident shape, wearing the paren
+    // form a Chinese keyboard produces by default.
+    for (const line of [
+      'Budget gap: （无 — 所有检查均完成）',
+      'Budget gap: （无）',
+      '预算缺口：（没有跳过的检查）',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+    // Only a SYMMETRIC pair unwraps, and a real gap inside full-width
+    // parens survives — over-disclosure is the safe direction.
+    expect(
+      budgetGapDisclosures('Budget gap: （无法验证 Windows 矩阵的集成测试）'),
+    ).toEqual(['（无法验证 Windows 矩阵的集成测试）']);
+  });
+
+  it('folds a Chinese gap restated with and without a trailing full stop', () => {
+    // The fold key promises one disclosure per gap; a key that stripped only
+    // ASCII trailing punctuation kept `渗透测试未进行。` and `渗透测试未进行`
+    // as two, double-spending MAX_GAPS_PER_AGENT slots.
+    const text = [
+      'Budget gap: 渗透测试未进行。',
+      'some other line',
+      'Budget gap: 渗透测试未进行',
+    ].join('\n');
+    expect(budgetGapDisclosures(text)).toEqual(['渗透测试未进行。']);
+  });
+
   it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {
     // Chinese has no word boundary, so a token is only a token when
     // punctuation, whitespace or end-of-text follows it. `无法验证…`

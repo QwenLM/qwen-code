@@ -3204,6 +3204,51 @@ describe('runBuildTest', () => {
       expect(rep.note).not.toContain('reached every suite');
     });
 
+    it('a COMPLETED zero-suite run is not "ended before its test phase"', () => {
+      // A single-root package with no test script finishes a fresh run
+      // completely: test [], no scope, ok true. Calling that "ended before
+      // its test phase" was self-contradictory beside the report's own note
+      // ("defines no test script, so no tests ran"), and its re-run advice
+      // re-derived the same zero-suite answer at the price of a full fresh
+      // install+build. The split is structural — ok and the buildOnly stamp
+      // — never the note's prose.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const base = {
+        toolchain: 'npm',
+        run: runId(),
+        affected: ['packages/core'],
+        buildSet: ['packages/core'],
+        widenedWith: [],
+        install: okResult('npm ci --no-audit --no-fund'),
+        build: [okResult('npm run build --workspace="packages/core"')],
+        test: [],
+        ok: true,
+        timedOut: [],
+        note: 'the package defines no test script, so no tests ran',
+      };
+      writeFileSync(outPath, JSON.stringify(base));
+      const attempt = () =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        });
+      const completed = attempt();
+      expect(completed.note).toContain('completed with no suite to run');
+      expect(completed.note).not.toContain('ended before its test phase');
+      expect(completed.note).not.toContain('Re-run build-test');
+
+      // The deliberate probe keeps the early-end message: its report has no
+      // tests and no scope BY CHOICE, and only the stamp tells it apart.
+      writeFileSync(outPath, JSON.stringify({ ...base, buildOnly: true }));
+      expect(attempt().note).toContain('ended before its test phase');
+    });
+
     it('keeps reporting work left when a retry is killed AGAIN by the budget', () => {
       // The ordinary outcome when an expensive suite is admitted late: it is
       // re-clamped rather than finished. Reporting that as a completed run
@@ -3337,6 +3382,85 @@ describe('runBuildTest', () => {
 
       expect(rep.note).not.toContain('Every suite in scope has now run');
       expect(rep.note).toContain('npm test --workspace="packages/a"');
+      // Named ONCE. The unattempted retry rides both lists — its command is
+      // still-to-run, its stale clamped entry survives in the merged test[]
+      // — and two additive-looking clauses both naming it made one command
+      // read as two against the continuation budget, with the provisional
+      // clause claiming it was "killed on a deadline the budget shortened"
+      // this call, false for a retry never started. The still-to-run clause
+      // fully describes it; the provisional clause must not repeat it.
+      expect(rep.note).toContain('still to run');
+      expect(rep.note).not.toContain('still provisional');
+    });
+
+    it('the caveat names BOTH halves when work is unattempted AND re-clamped', () => {
+      // An else-if kept the provisional half out of the caveat whenever
+      // outstanding work existed — and the brief quotes the caveat as the
+      // live limitation, so a reader of it alone under-counted what is
+      // left. The two segments stay disjoint: a re-clamped suite killed
+      // again THIS call is provisional; an unreached workspace is still to
+      // run.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/b'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [
+            {
+              command: 'npm test --workspace="packages/core"',
+              exitCode: null,
+              seconds: 100,
+              timedOut: true,
+              output: '',
+              deadlineMs: 100_000,
+              clamped: true,
+            },
+          ],
+          ok: false,
+          timedOut: [],
+          note: 'one clamped, one unreached',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/b'],
+          },
+        }),
+      );
+
+      // The retry is admitted with a budget-shortened deadline and killed
+      // again (exec burns ~6s and reports the timeout); what remains is
+      // below the attempt floor, so packages/b is never started.
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        budget: 20,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6000);
+          return {
+            command,
+            exitCode: null,
+            seconds: 6,
+            timedOut: true,
+            output: '',
+          };
+        },
+      });
+
+      const caveat = rep.testScope?.caveat ?? '';
+      expect(caveat).toContain('still to run');
+      expect(caveat).toContain('packages/b');
+      expect(caveat).toContain('provisional');
+      expect(caveat).toContain('npm test --workspace="packages/core"');
     });
 
     it("runs the AFFECTED pending suite first — the fresh path's invariant", () => {
@@ -3713,6 +3837,12 @@ describe('runBuildTest', () => {
         { toolchain: 'npm', test: [] },
         { toolchain: 'npm', test: [], build: [] },
         { toolchain: 'npm', test: [], timedOut: [] },
+        // The `test` clause needs its own witness: with every fixture above
+        // carrying `test: []`, deleting `!commandsOk(shape.test)` kept all
+        // refusals green (each still failed on build/timedOut) while a
+        // report truncated of its `test` key cleared the gate and died at
+        // `previous.test.filter` — the raw crash the gate exists to replace.
+        { toolchain: 'npm', build: [], timedOut: [] },
       ]) {
         writeFileSync(outPath, JSON.stringify(partial));
         expect(() =>

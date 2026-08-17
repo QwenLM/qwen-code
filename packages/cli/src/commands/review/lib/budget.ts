@@ -818,7 +818,12 @@ function stripWrappers(s: string): string {
   return out;
 }
 
-const TRAILING_GAP_CHAR_RE = /[.!…,;:\s]/;
+// Both scripts' trailing punctuation: the fold key promises that a gap
+// restated with and without a trailing stop discloses once, and a key that
+// stripped only the ASCII set kept `渗透测试未进行。` and `渗透测试未进行` as
+// two gaps — double-spending MAX_GAPS_PER_AGENT slots in exactly the
+// output language the ZH branch exists for.
+const TRAILING_GAP_CHAR_RE = /[.!…,;:\s。，；：！？、]/;
 
 /** Trailing punctuation/whitespace strip for the normalize and fold keys. */
 function stripTrailingGapChars(s: string): string {
@@ -882,8 +887,16 @@ export function budgetGapDisclosures(finalText: string): string[] {
     const normalized = stripTrailingGapChars(raw).trim();
     // Judged on the paren-stripped text, bare and wrapped alike, by the
     // one strict classifier — its doc names why the shapes are narrow.
+    // Both paren shapes: under `outputLanguage: 中文` the full-width pair
+    // （U+FF08/U+FF09）is what an IME produces, and a strip that knew only
+    // the ASCII pair let `（无 — 所有检查均完成）` through as a phantom gap —
+    // the #9094 incident shape this classifier exists to kill, surviving
+    // in exactly the output language the ZH branch was added for. Only a
+    // SYMMETRIC pair is unwrapped, so a mixed or unbalanced wrap stays
+    // whole and errs toward disclosure.
     const unparenthesized =
-      normalized.startsWith('(') && normalized.endsWith(')')
+      (normalized.startsWith('(') && normalized.endsWith(')')) ||
+      (normalized.startsWith('（') && normalized.endsWith('）'))
         ? normalized.slice(1, -1).trim()
         : normalized;
     if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(unparenthesized)) {

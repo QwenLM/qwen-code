@@ -27,6 +27,7 @@ import {
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import { LEDGER_MAX_ROUND, parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
@@ -1000,8 +1001,9 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
 
     // Still once when the relay was RESHAPED — an orchestrator prefix ahead
     // of the subject. The coverage prefix filter cannot see this one (it no
-    // longer starts with `reverse audit — `); only the marker-phrase splice
-    // dedups it, so this is the assertion that fails when the splice goes.
+    // longer starts with `reverse audit — `); only the canonical-entry
+    // splice dedups it, so this is the assertion that fails when the splice
+    // goes.
     const r3 = composeReview(
       base({
         planPath: plan,
@@ -1011,6 +1013,40 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       }),
     );
     expect(r3.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('a free-form disclosure that mentions the budget still reaches the body', () => {
+    // The splice dedups relays of the CANONICAL entry (verbatim or
+    // prefix-reshaped — both contain its full text); it must not retire a
+    // genuine line-coverage disclosure whose free-form reason merely mentions
+    // the phrase. A substring-of-phrase splice dropped exactly that entry
+    // from the posted body: the review capped and withheld the anchor for a
+    // security scope the rendered body never named — the module's contract
+    // is that a disclosed gap reaches the author.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const freeForm =
+      'security — the review time budget ended the round before the security relaunch returned evidence';
+    const r = composeReview(
+      base({ planPath: plan, unreviewedDimensions: [freeForm] }),
+    );
+    // Rendered: the author sees the security scope by name…
+    expect(r.body).toContain(`Not reviewed: ${freeForm}.`);
+    // …beside the structural stop line, not instead of it…
+    expect(r.body).toContain(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+    // …and the entry still counts against the anchor (not a relay, not
+    // depth-only): the marker is withheld, exactly as when it was spliced.
+    expect(r.body).not.toContain('"sha"');
   });
 
   it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
@@ -4969,7 +5005,7 @@ describe('the ledger marker reaches the POSTED body', () => {
 
   it("sees a debt the deterministic gates push in AFTER the caller's entries", () => {
     // `unreviewed` has three writers, at three different points: the caller's
-    // own entries, the budget-phrase splice that removes some of them, and the
+    // own entries, the canonical-relay splice that removes some of them, and the
     // script-lint / layer-audit gates that push machine-owed debts later. A
     // decision that reads any single snapshot misses one of them — an earlier
     // fix read too late and missed the splice, its replacement read too early
@@ -4988,13 +5024,28 @@ describe('the ledger marker reaches the POSTED body', () => {
     ).toBe(true);
   });
 
-  it('sees a lens gap the budget-phrase splice removes from the rendered list', () => {
-    // The splice keeps the body from saying one gap twice, and it matches on a
-    // PHRASE — so an entry that merely mentions the review time budget in its
-    // free-form reason leaves `unreviewedDimensions` before anything else reads
-    // it. Harmless while every cap withheld the anchor; not harmless once one
-    // cap does not, because the spliced entry is the line-coverage claim the
-    // anchor decision exists to respect.
+  it('stays tied to the briefs: every readsDiff flag round-trips the exemption', () => {
+    // The exempt heads are DERIVED from BRIEFS (`readsDiff: false` roles by
+    // their publicLabel), and this pins the tie in both directions: a label
+    // rename or a new non-diff role that broke the derivation would fail
+    // here loudly instead of silently re-opening the full-diff re-review
+    // loop (exemption lost) or widening the anchor past a whiffed lens
+    // (exemption over-granted).
+    for (const brief of Object.values(BRIEFS)) {
+      expect(
+        isNonDiffDimensionGap(`${brief.publicLabel} — some reason`),
+        `publicLabel ${JSON.stringify(brief.publicLabel)} (readsDiff: ${String(brief.readsDiff)})`,
+      ).toBe(!brief.readsDiff);
+    }
+  });
+
+  it('sees a lens gap that merely mentions the budget in its reason', () => {
+    // A free-form entry whose reason mentions the review time budget is a
+    // line-coverage claim, not a relay of the machine's stop entry — the
+    // splice (now matching the full canonical text) leaves it alone, and the
+    // anchor decision must read it as the whiffed lens it names. This pins
+    // the marker-less shape; the marker-present sibling lives beside the
+    // splice tests ('a free-form disclosure … still reaches the body').
     const r = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], {
         prNumber: 8255,

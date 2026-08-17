@@ -37,11 +37,8 @@ import {
   type Severity,
   type Source,
 } from './findings.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
-  BUDGET_STOP_PHRASE,
-  BUDGET_STOP_PHRASE_ZH,
-  ROUND_CAP_PHRASE,
-  ROUND_CAP_PHRASE_ZH,
   budgetStopDisclosure,
   budgetStopEntry,
   budgetStopEntryZh,
@@ -569,22 +566,49 @@ export interface ComposeReviewResult {
 }
 
 /**
+ * A dimension head reduced to its comparable core: lowercased, `&` read as
+ * `and`, hyphen/space runs collapsed to one hyphen, and the label dressing
+ * (`the …`, `… check`, `… verification`) stripped — so the orchestrator's
+ * prose variants (`build-and-test`, `build & test`, `the build-and-test
+ * check`) all reduce to the same core as the brief's `publicLabel`.
+ */
+function canonicalDimensionHead(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[-\s]+/g, '-')
+    .replace(/^the-/, '')
+    .replace(/-(?:check|verification)$/, '');
+}
+
+/**
+ * The exempt heads, DERIVED from the briefs rather than restated: every role
+ * whose brief sets `readsDiff: false`, by its `publicLabel`. A hardcoded
+ * head list drifted from the machine source of truth it documented — a
+ * label rename (or a second non-diff role) would silently stop or fail to
+ * extend the exemption, and every budget-stopped round on a large repo
+ * would withhold the incremental anchor again: the full-diff re-review loop
+ * this exemption exists to kill, back by way of a string.
+ */
+const NON_DIFF_DIMENSION_HEADS: ReadonlySet<string> = new Set(
+  Object.values(BRIEFS)
+    .filter((b) => !b.readsDiff)
+    .map((b) => canonicalDimensionHead(b.publicLabel)),
+);
+
+/**
  * Does this `unreviewedDimensions` entry name a dimension that reads no diff?
  *
  * Entries are prose the orchestrator writes, in the shape the skill documents:
  * a dimension name, optionally followed by its own reason after an em-dash
  * (`build-and-test — the integration suite never ran`). Only the head is
- * matched, and only against the ONE dimension whose brief sets
- * `readsDiff: false`.
+ * matched, and only against dimensions whose brief sets `readsDiff: false`
+ * (English labels only — the entries are the orchestrator's English prose;
+ * `publicLabelZh` is a rendering concern).
  */
 export function isNonDiffDimensionGap(entry: string): boolean {
-  const head = entry
-    .split(/[—–-]{1,2}\s/)[0]
-    .trim()
-    .toLowerCase();
-  return /^(?:the\s+)?build[-\s]?(?:and|&)[-\s]?test(?:\s+check|\s+verification)?$/.test(
-    head,
-  );
+  const head = entry.split(/[—–-]{1,2}\s/)[0].trim();
+  return NON_DIFF_DIMENSION_HEADS.has(canonicalDimensionHead(head));
 }
 
 /**
@@ -875,9 +899,11 @@ export function composeReview(
  * The previous posted round's number, recovered from the side file
  * `pr-context` wrote — never from the model. 0 when the plan names no PR or
  * no previous round was recovered: this is round 1. Shared by the marker
- * (which stamps `prevRound + 1`) and the deferred-suggestions clause (which
- * names the round the posture engaged on), so the two cannot disagree about
- * which round this is.
+ * (which stamps `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`) and the
+ * deferred-suggestions clause (which names the round the posture engaged on,
+ * clamped identically), so the two cannot disagree about which round this
+ * is — at the cap included, where an unclamped `prevRound + 1` on either
+ * side would name round 10001 beside a round-10000 marker.
  */
 function prevRoundFor(planPath: string | undefined): number {
   try {
@@ -1093,27 +1119,31 @@ function composeReviewBody(
   // (the stderr instruction asks for one) is a courtesy to the terminal
   // reader, and a run that drops the sentence still cannot approve past a
   // truncated audit. Rendered STRUCTURAL, both languages, like every other
-  // coverage entry — the orchestrator's relayed copy is English-only prose,
-  // so the marker's phrase dedups it out and the two channels never say it
-  // twice.
+  // coverage entry — the orchestrator's compliant relay is byte-identical
+  // canonical text, so the canonical-entry splice dedups it out and the two
+  // channels never say it twice.
   // The marker's entry is tracked by reference: its relays are deduped by
-  // the phrase splice here, so the caller-echo filter below must NOT also
+  // the canonical-entry splice here, so the caller-echo filter below must NOT also
   // prefix-match on its `reverse audit` subject — that shadow silently
   // dropped every OTHER reverse-audit scope the orchestrator disclosed
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
   // likeliest.
   /**
-   * Entries the budget-phrase splice below removes from the rendered list.
+   * Entries the canonical-relay splice below removes from the rendered list.
    *
    * The splice exists so the body does not say the same gap twice, and it
-   * matches on a PHRASE — so an entry that merely mentions the review time
+   * matches entries CONTAINING a full canonical stop entry — verbatim relays
+   * and prefix-reshaped ones alike ("step 5 — " ahead of the subject), which
+   * the coverage prefix filter cannot see. An earlier match on the bare stop
+   * PHRASE spliced more: an entry that merely mentioned the review time
    * budget in its free-form reason ("security — the review time budget ended
-   * the round before the security relaunch returned evidence") is spliced out
-   * too. Harmless while every cap withheld the anchor; not harmless now that
-   * one cap does not, because the spliced entry is exactly the line-coverage
-   * claim the anchor decision must see. Kept here so the decision can read the
-   * list AS DISCLOSED while the body renders the spliced one.
+   * the round before the security relaunch returned evidence") was dropped
+   * from the posted body, though it is exactly the line-coverage claim both
+   * the author and the anchor decision must see. Such entries now stay in
+   * `unreviewed` — rendered and capping. The spliced relays are kept here so
+   * the decision can read the list AS DISCLOSED while the body renders the
+   * structural stop line once.
    *
    * Collected rather than snapshotted: the deterministic gates push their own
    * machine-owed debts into `unreviewed` AFTER this point, and a snapshot
@@ -1150,20 +1180,29 @@ function composeReviewBody(
               budgetStopEntryZh(stop.round ?? undefined),
             ]);
       // A round-cap stop and a time-budget stop both cap the verdict, but
-      // read differently and dedup against a different relayed phrase. The
-      // marker's `cause` picks which; an absent cause is a time stop, for
-      // markers written before the cause field existed.
+      // read differently. The marker's `cause` picks which pair of canonical
+      // entries exists; an absent cause is a time stop, for markers written
+      // before the cause field existed.
       const isRoundCap = stop.cause === 'round-cap';
-      // BOTH languages: the exemption admits the Chinese pair as a compliant
-      // relay, so the splice must retire it too — an English-only phrase let
-      // a relayed `budgetStopEntryZh` survive into the whiffed-dimension
-      // rendering beside the structural stop line, the same gap said twice
-      // with the wrong cause on one of them.
-      const phrases = isRoundCap
-        ? [ROUND_CAP_PHRASE, ROUND_CAP_PHRASE_ZH]
-        : [BUDGET_STOP_PHRASE, BUDGET_STOP_PHRASE_ZH];
+      // Spliced on the FULL canonical entry text (both languages: the
+      // exemption admits the Chinese pair as a compliant relay, so the
+      // splice must retire it too, or the same gap renders twice beside the
+      // structural stop line) — as a substring, because an orchestrator
+      // relay arrives verbatim OR reshaped with a prefix ("step 5 — " ahead
+      // of the subject), and the coverage prefix filter cannot see the
+      // reshaped one. What the predicate must NOT be is the bare stop
+      // PHRASE: that retired more than the relays — a genuine line-coverage
+      // disclosure that merely mentions the budget in its free-form reason
+      // ("security — the review time budget ended the round before the
+      // security relaunch returned evidence") was dropped from the posted
+      // body, and the module's contract is that a disclosed gap reaches the
+      // author. Such entries now stay in `unreviewed` — rendered AND
+      // capping. (The anchor DECISION below stays exact-text: a reshaped
+      // relay spliced here still withholds, over-withholding being the safe
+      // direction.)
+      const entries = [...canonicalStopEntries];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (phrases.some((ph) => unreviewed[i].includes(ph))) {
+        if (entries.some((c) => unreviewed[i].includes(c))) {
           splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
@@ -1721,7 +1760,8 @@ function composeReviewBody(
   // both before this line (the orchestrator's own entries) and after the
   // snapshot an earlier fix took (the script-lint and layer-audit gates, whose
   // debts are machine-owed line-coverage claims). Reading it here plus the
-  // entries the phrase splice removed is the only list that sees every writer.
+  // entries the canonical-entry splice removed is the only list that sees
+  // every writer.
   //
   // The stop's own relayed entry classifies as DEPTH, and only against the
   // marker. A budget/round-cap stop truncates how many audit PASSES ran over
@@ -1736,9 +1776,10 @@ function composeReviewBody(
   // head-plus-phrase, and that shape also covers a genuine line-coverage claim
   // whose whiffed scope IS the reverse audit — `reverse audit — the review
   // time budget ended the round before the chunk-2 relaunch returned
-  // evidence` — which the phrase splice then also removes from the rendered
-  // body, so the anchor rode past a whiffed audit while the posted review
-  // showed only the benign disclosure. The machinery mints its entries from
+  // evidence` — which the then-substring splice also removed from the
+  // rendered body, so the anchor rode past a whiffed audit while the posted
+  // review showed only the benign disclosure (both predicates are exact
+  // now). The machinery mints its entries from
   // one generator pair, the stderr instruction relays them verbatim, and only
   // that text is exempt: marker-anchored (no marker, no exemption) AND
   // text-anchored (an edited or paraphrased entry withholds — over-withholding
@@ -2267,7 +2308,12 @@ function composeReviewBody(
     .map(renderDeferredEntry)
     .map(boundDeferredLine);
   const deferredMore = deferredSuggestions.length - deferredShown.length;
-  const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
+  // Clamped exactly as the marker stamp is: `prevRound` can BE the cap
+  // (parseLedger accepts round == LEDGER_MAX_ROUND), and an unclamped +1
+  // here named a past-cap round beside a round-at-cap marker.
+  const deferredRound = deferredSuggestions.length
+    ? Math.min(prevRound + 1, LEDGER_MAX_ROUND)
+    : 0;
   // The unlicensed-deferral disclosure precedes the list it disclaims: the
   // findings stay visible, but nothing may read the paragraph below as a
   // sanctioned deferral when the posture never licensed one.

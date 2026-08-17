@@ -129,6 +129,13 @@ export interface BuildTestReport {
   build: CommandResult[];
   test: CommandResult[];
   /**
+   * True when the run was a deliberate `--build-only` probe. Structural,
+   * because `--resume`'s nothing-to-resume answer keys on it: a probe's
+   * report has no tests and no scope BY CHOICE, and without the stamp that
+   * shape is indistinguishable from a completed zero-suite run.
+   */
+  buildOnly?: boolean;
+  /**
    * What the test phase covered, so the review can state exactly what was and
    * was not run: `workspaces` lists exactly the suites the run executes, and
    * `caveat` — when present — says why that set may be incomplete. Only set
@@ -528,6 +535,16 @@ function previousReport(out: string | undefined): BuildTestReport {
   const strings = (v: unknown): boolean =>
     Array.isArray(v) && v.every((e) => typeof e === 'string' && e.length > 0);
   const affectedOk = strings((parsed as { affected?: unknown }).affected);
+  // Read by the nothing-to-resume split (deliberate probe vs completed
+  // zero-suite run) — validated like every other field the continuation
+  // reads, so a corrupted stamp refuses here instead of steering the
+  // message off a non-boolean truthiness.
+  const buildOnlyShape = (parsed as { buildOnly?: unknown }).buildOnly;
+  const buildOnlyOk =
+    buildOnlyShape === undefined || typeof buildOnlyShape === 'boolean';
+  // Same rule for `ok`, which the split reads beside it: required on the
+  // report, so undefined is refused too.
+  const okOk = typeof (parsed as { ok?: unknown }).ok === 'boolean';
   const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
   const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
   const scope = shape.testScope;
@@ -547,6 +564,8 @@ function previousReport(out: string | undefined): BuildTestReport {
     !commandsOk(shape.build) ||
     !strings(shape.timedOut) ||
     !affectedOk ||
+    !buildOnlyOk ||
+    !okOk ||
     !notBuiltOk ||
     !scopeOk ||
     !runOk
