@@ -4965,6 +4965,11 @@ export function registerSessionRoutes(
               if (!renamed) {
                 throw new SessionNotFoundError(sessionId);
               }
+              // The persisted rename appends a custom_title record the next
+              // catalog scan serves, so this fallback must advance the same
+              // catalog revision the live rename marks — otherwise
+              // version-watching clients keep the stale name.
+              runtime.bridge.markSessionCatalogChanged();
               effective = { displayName: displayName || undefined };
             }
             invalidateSessionLists(runtime, ['active', 'archived']);

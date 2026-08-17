@@ -10,9 +10,10 @@ endpoint and reload `GET /workspaces/:workspace/sessions` only when the catalog
 version changes or when a local mutation already requires a refresh.
 
 This document defines the server protocol and implementation contract. The
-server implementation and TypeScript SDK belong in one follow-up feature PR.
-Web Shell adoption is a separate follow-up PR so the additive protocol can be
-reviewed and shipped independently from client behavior.
+server implementation and TypeScript SDK ship together with this document in
+one atomic feature PR (see Implementation Boundaries). Web Shell adoption is a
+separate follow-up PR so the additive protocol can be reviewed and shipped
+independently from client behavior.
 
 ## Motivation
 

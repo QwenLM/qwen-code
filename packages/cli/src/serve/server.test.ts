@@ -23678,6 +23678,7 @@ describe('createServeApp', () => {
         });
 
         try {
+          const versionBefore = secondaryBridge.getSessionCatalogVersion();
           const res = await auth(
             request(app).patch(
               `/workspaces/ws-secondary/session/${sessionId}/metadata`,
@@ -23691,6 +23692,11 @@ describe('createServeApp', () => {
           expect(await fsp.readFile(filePath, 'utf8')).toContain(
             'Persisted rename',
           );
+          // A persisted rename changes what the catalog serves, so it must
+          // advance the same revision the live rename path marks.
+          expect(
+            secondaryBridge.getSessionCatalogVersion().revision,
+          ).toBeGreaterThan(versionBefore.revision);
         } finally {
           await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
         }
@@ -23718,6 +23724,7 @@ describe('createServeApp', () => {
         ).send({ displayName: 'Rename' });
 
       try {
+        const versionBefore = secondaryBridge.getSessionCatalogVersion();
         expect((await patchMetadata()).status).toBe(404);
 
         const chatsDir = path.join(
@@ -23748,6 +23755,11 @@ describe('createServeApp', () => {
           code: 'session_conflict',
           sessionId,
         });
+        // Neither the 404 nor the 409 path renames anything, so neither may
+        // advance the catalog revision.
+        expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(
+          versionBefore.revision,
+        );
       } finally {
         await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
       }

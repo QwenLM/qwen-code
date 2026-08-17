@@ -2017,9 +2017,13 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
-      // The child persists the automatic title before notifying, so this is
-      // a daemon-observed catalog change. Mark before the SSE publish so the
-      // revision never trails the client-visible event.
+      // The child appends the automatic title as a `custom_title` record to
+      // the session's JSONL — the same file the persisted catalog scan reads
+      // — before notifying, so this is a daemon-observed catalog change. The
+      // live-state route invalidates the catalog cache when it first exposes
+      // the bumped revision, so the next full-catalog reload serves this
+      // title. Mark before the SSE publish so the revision never trails the
+      // client-visible event.
       this.onSessionCatalogChanged?.();
       try {
         entry.events.publish({
