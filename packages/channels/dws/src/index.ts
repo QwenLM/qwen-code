@@ -99,9 +99,10 @@ export const plugin: ChannelPlugin = {
       if (
         config['approvalMode'] !== undefined &&
         config['approvalMode'] !== 'default' &&
-        config['approvalMode'] !== 'plan'
+        config['approvalMode'] !== 'plan' &&
+        config['approvalMode'] !== 'yolo'
       ) {
-        return 'DWS channels require approvalMode "default" or "plan".';
+        return 'DWS channels require approvalMode "default", "plan", or "yolo".';
       }
       if (
         config['watchTodos'] !== undefined &&

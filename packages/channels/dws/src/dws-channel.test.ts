@@ -156,6 +156,7 @@ class FakeDwsClient implements DwsClientLike {
   };
   streams: FakeStream[] = [];
   directMessages: DwsImMessage[] = [];
+  mentionedMessages: DwsImMessage[] = [];
   todoTasks: DwsTodoTask[] = [];
   assertAuthenticated = vi.fn(async () => Promise.resolve(this.identity));
   sendImMessage = vi
@@ -177,6 +178,10 @@ class FakeDwsClient implements DwsClientLike {
   listDirectMessages = vi.fn(
     async (_startTime: number, _endTime: number, _signal?: AbortSignal) =>
       Promise.resolve({ messages: this.directMessages }),
+  );
+  listMentionedMessages = vi.fn(
+    async (_startTime: number, _endTime: number, _signal?: AbortSignal) =>
+      Promise.resolve({ messages: this.mentionedMessages }),
   );
   readDocument = vi.fn(async (_documentId: string, _signal?: AbortSignal) =>
     Promise.resolve('# Plan\nUse DWS.'),
@@ -273,6 +278,14 @@ class TestableDwsChannel extends DwsChannel {
 
   notificationCheckpoint(): unknown {
     return this.cursor.notificationCheckpoint;
+  }
+
+  mentionCheckpoint(): unknown {
+    return this.cursor.mentionCheckpoint;
+  }
+
+  mentionWatermark(): number | undefined {
+    return this.cursor.mentionWatermark;
   }
 
   resolveSession(): Promise<string> {
@@ -537,7 +550,7 @@ describe('DwsChannel', () => {
     expect(client.streams).toHaveLength(0);
   });
 
-  it('requires manual tool approval for document-triggered sessions', async () => {
+  it('defaults new sessions to the default approval mode', async () => {
     const client = new FakeDwsClient();
     const bridge = makeBridge();
     const channel = new TestableDwsChannel(
@@ -557,14 +570,41 @@ describe('DwsChannel', () => {
       { approvalMode: 'default', sourceId: 'test-dws' },
       expect.any(Object),
     );
-    await expect(
-      readyChannel(
-        client,
-        makeConfig({
-          approvalMode: 'yolo',
-        }),
-      ),
-    ).rejects.toThrow('require approvalMode');
+  });
+
+  it('rejects unsupported approval modes', () => {
+    expect(
+      () =>
+        new TestableDwsChannel(
+          'auto-dws',
+          makeConfig({ approvalMode: 'auto' }),
+          makeBridge(),
+          undefined,
+          new FakeDwsClient(),
+        ),
+    ).toThrow('require approvalMode');
+  });
+
+  it('propagates yolo approval mode to sessions', async () => {
+    const client = new FakeDwsClient();
+    const bridge = makeBridge();
+    const channel = new TestableDwsChannel(
+      'yolo-dws',
+      makeConfig({ approvalMode: 'yolo' }),
+      bridge,
+      undefined,
+      client,
+    );
+    channels.push(channel);
+    await channel.connect();
+    await channel.resolveImSession();
+
+    expect(channel.approvalMode()).toBe('yolo');
+    expect(bridge.newSession).toHaveBeenCalledWith(
+      '/tmp/test',
+      { approvalMode: 'yolo', sourceId: 'yolo-dws' },
+      expect.any(Object),
+    );
   });
 
   it('gives workspace actions the pinned DWS profile', async () => {
@@ -684,7 +724,9 @@ describe('DwsChannel', () => {
 
     await client.emit(
       0,
-      message('user_im_message_receive_at', 'message-1', 'please help'),
+      message('user_im_message_receive_at', 'message-1', 'please help', {
+        referencedText: 'Qwen Code is slow after connecting over SSH.',
+      }),
     );
     await channel.sendMessage('cid-1', 'done');
 
@@ -696,12 +738,34 @@ describe('DwsChannel', () => {
         text: 'please help',
         isGroup: true,
         isMentioned: true,
+        isReplyToBot: false,
+        referencedText: 'Qwen Code is slow after connecting over SSH.',
       }),
     ]);
     expect(client.sendImMessage).toHaveBeenCalledWith(
       { kind: 'group', conversationId: 'cid-1' },
       'done',
       expect.any(String),
+    );
+  });
+
+  it('adds live quoted text to the agent prompt as reply context', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'quoted-message', 'please help', {
+        referencedText: 'Qwen Code is slow after connecting over SSH.',
+      }),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining(
+        '[Replying to: "Qwen Code is slow after connecting over SSH."]',
+      ),
+      expect.any(Object),
     );
   });
 
@@ -1255,6 +1319,71 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('dispatches a group mention when the event stream misses it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.mentionedMessages = [
+      message('user_im_message_receive_at', 'history-mention', '@QwenBot hi', {
+        conversationId: 'external-group',
+        eventTime: Date.now(),
+        referencedText: 'Qwen Code is slow after connecting over SSH.',
+      }),
+    ];
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'external-group',
+        messageId: 'history-mention',
+        text: '@QwenBot hi',
+        isGroup: true,
+        isMentioned: true,
+        referencedText: 'Qwen Code is slow after connecting over SSH.',
+      }),
+    ]);
+  });
+
+  it('deduplicates a mention delivered by history and the live stream', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const mention = message(
+      'user_im_message_receive_at',
+      'history-and-live',
+      '@QwenBot hi',
+      { eventTime: Date.now() },
+    );
+    client.mentionedMessages = [mention];
+
+    await channel.poll();
+    await client.emit(0, mention);
+
+    expect(channel.inbound).toHaveLength(1);
+  });
+
+  it('starts group pairing for a mention recovered from history', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ groupPolicy: 'pairing' }),
+    );
+    client.mentionedMessages = [
+      message('user_im_message_receive_at', 'history-pairing', 'please help', {
+        conversationId: 'external-group',
+        eventTime: Date.now(),
+      }),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'group', conversationId: 'external-group' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
+  });
+
   it('resumes a bounded notification-history checkpoint after restart', async () => {
     const firstClient = new FakeDwsClient();
     firstClient.listDirectMessages.mockResolvedValueOnce({
@@ -1285,6 +1414,100 @@ describe('DwsChannel', () => {
       'cursor-100',
     );
     expect(second.notificationCheckpoint()).toBeUndefined();
+  });
+
+  it('resumes a bounded mention-history checkpoint after restart', async () => {
+    const firstClient = new FakeDwsClient();
+    firstClient.listMentionedMessages.mockResolvedValueOnce({
+      messages: [],
+      nextCursor: 'mention-cursor-100',
+    });
+    const first = await readyChannel(
+      firstClient,
+      makeConfig(),
+      'mention-checkpoint-dws',
+    );
+
+    await first.poll();
+    expect(first.mentionCheckpoint()).toEqual(
+      expect.objectContaining({ cursor: 'mention-cursor-100' }),
+    );
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    const second = await readyChannel(
+      secondClient,
+      makeConfig(),
+      'mention-checkpoint-dws',
+    );
+    await second.poll();
+
+    expect(secondClient.listMentionedMessages.mock.calls[0]?.[3]).toBe(
+      'mention-cursor-100',
+    );
+    expect(second.mentionCheckpoint()).toBeUndefined();
+  });
+
+  it('keeps other polling healthy when mention history is unavailable', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-17T05:00:00Z'));
+      const client = new FakeDwsClient();
+      client.listMentionedMessages.mockRejectedValue(
+        new Error('mention history unavailable'),
+      );
+      const channel = await readyChannel(
+        client,
+        makeConfig({ watchTodos: true }),
+      );
+      const initialWatermark = channel.mentionWatermark();
+      vi.setSystemTime(new Date('2026-08-17T05:01:00Z'));
+
+      await expect(channel.poll()).resolves.toBeUndefined();
+
+      expect(client.listTodoTasks).toHaveBeenCalledOnce();
+      expect(channel.mentionWatermark()).toBe(initialWatermark);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recovers group mentions when direct-message history is unavailable', async () => {
+    const client = new FakeDwsClient();
+    client.listDirectMessages.mockRejectedValue(
+      new Error('direct history unavailable'),
+    );
+    const channel = await readyChannel(client);
+    client.mentionedMessages = [
+      message(
+        'user_im_message_receive_at',
+        'mention-during-direct-outage',
+        'hi',
+        {
+          conversationId: 'external-group',
+          eventTime: Date.now(),
+        },
+      ),
+    ];
+
+    await expect(channel.poll()).resolves.toBeUndefined();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ messageId: 'mention-during-direct-outage' }),
+    ]);
+  });
+
+  it('polls group mentions before direct-message history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+
+    await channel.poll();
+
+    expect(client.listMentionedMessages).toHaveBeenCalledOnce();
+    expect(client.listDirectMessages).toHaveBeenCalledOnce();
+    expect(
+      client.listMentionedMessages.mock.invocationCallOrder[0],
+    ).toBeLessThan(client.listDirectMessages.mock.invocationCallOrder[0] ?? 0);
   });
 
   it('deduplicates the same document notification across different message IDs', async () => {

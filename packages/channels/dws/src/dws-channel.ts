@@ -89,7 +89,9 @@ interface DwsCursor {
   selfSenderIds: string[];
   documentIds?: string[];
   notificationWatermark?: number;
+  mentionWatermark?: number;
   notificationCheckpoint?: PersistedNotificationCheckpoint;
+  mentionCheckpoint?: PersistedNotificationCheckpoint;
   pendingDocumentNotifications?: PersistedDocumentNotification[];
   processedMessages: string[];
   imTargets: PersistedImTarget[];
@@ -446,9 +448,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (
       config.approvalMode !== undefined &&
       config.approvalMode !== 'default' &&
-      config.approvalMode !== 'plan'
+      config.approvalMode !== 'plan' &&
+      config.approvalMode !== 'yolo'
     ) {
-      throw new Error('DWS channels require approvalMode "default" or "plan".');
+      throw new Error(
+        'DWS channels require approvalMode "default", "plan", or "yolo".',
+      );
     }
     config.approvalMode ??= 'default';
 
@@ -473,6 +478,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       selfSenderIds: [],
       documentIds: [],
       notificationWatermark: undefined,
+      mentionWatermark: undefined,
+      mentionCheckpoint: undefined,
       pendingDocumentNotifications: [],
       processedMessages: [],
       imTargets: [],
@@ -510,8 +517,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         (typeof cursor.notificationWatermark !== 'number' ||
           !Number.isSafeInteger(cursor.notificationWatermark) ||
           cursor.notificationWatermark < 0)) ||
+      (cursor.mentionWatermark !== undefined &&
+        (typeof cursor.mentionWatermark !== 'number' ||
+          !Number.isSafeInteger(cursor.mentionWatermark) ||
+          cursor.mentionWatermark < 0)) ||
       (cursor.notificationCheckpoint !== undefined &&
         !isNotificationCheckpoint(cursor.notificationCheckpoint)) ||
+      (cursor.mentionCheckpoint !== undefined &&
+        !isNotificationCheckpoint(cursor.mentionCheckpoint)) ||
       (cursor.pendingDocumentNotifications !== undefined &&
         (!Array.isArray(cursor.pendingDocumentNotifications) ||
           !cursor.pendingDocumentNotifications.every(
@@ -539,7 +552,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         -MAX_PROCESSED_ITEMS,
       ),
       notificationWatermark: cursor.notificationWatermark,
+      mentionWatermark: cursor.mentionWatermark,
       notificationCheckpoint: cursor.notificationCheckpoint,
+      mentionCheckpoint: cursor.mentionCheckpoint,
       pendingDocumentNotifications: (
         cursor.pendingDocumentNotifications ?? []
       ).slice(-MAX_PROCESSED_ITEMS),
@@ -584,7 +599,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
       this.cursor.notificationWatermark = undefined;
+      this.cursor.mentionWatermark = undefined;
       this.cursor.notificationCheckpoint = undefined;
+      this.cursor.mentionCheckpoint = undefined;
     }
     this.documentSet.clear();
     for (const documentId of this.cursor.documentIds ?? []) {
@@ -628,6 +645,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         throw new Error('DWS channel connection was cancelled.');
       }
       this.cursor.notificationWatermark ??= this.connectionStartedAt;
+      this.cursor.mentionWatermark ??= this.connectionStartedAt;
       this.saveCursor();
       this.startPollLoop();
     } catch (error) {
@@ -886,46 +904,91 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const endTime = Date.now();
     await this.replayPendingDocumentNotifications(signal);
     if (signal.aborted || !this.connected) return;
-    const checkpoint = this.cursor.notificationCheckpoint ?? {
-      startTime: Math.max(
-        0,
-        (this.cursor.notificationWatermark ?? endTime) -
-          NOTIFICATION_HISTORY_OVERLAP_MS,
-      ),
-      endTime,
-      cursor: '0',
-    };
-    const page = await this.client.listDirectMessages(
-      checkpoint.startTime,
-      checkpoint.endTime,
-      signal,
-      checkpoint.cursor,
-    );
-    page.messages.sort(
-      (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
-    );
-    for (const message of page.messages) {
-      if (signal.aborted || !this.connected) return;
-      if (this.isSelfMessage(message)) {
-        this.markProcessedMessage(messageKey(message));
-        continue;
-      }
-      const key = messageKey(message);
-      if (this.cursor.processedMessages.includes(key)) {
-        continue;
-      }
-      const notification = parseDocumentMentionNotification(message.content);
-      if (!notification) continue;
-      await this.processDocumentNotification(message, key, notification);
-    }
-    if (page.nextCursor) {
-      this.cursor.notificationCheckpoint = {
-        ...checkpoint,
-        cursor: page.nextCursor,
+    try {
+      const mentionCheckpoint = this.cursor.mentionCheckpoint ?? {
+        startTime: Math.max(
+          0,
+          (this.cursor.mentionWatermark ?? endTime) -
+            NOTIFICATION_HISTORY_OVERLAP_MS,
+        ),
+        endTime,
+        cursor: '0',
       };
-    } else {
-      this.cursor.notificationCheckpoint = undefined;
-      this.cursor.notificationWatermark = checkpoint.endTime;
+      const mentions = await this.client.listMentionedMessages(
+        mentionCheckpoint.startTime,
+        mentionCheckpoint.endTime,
+        signal,
+        mentionCheckpoint.cursor,
+      );
+      mentions.messages.sort(
+        (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
+      );
+      for (const message of mentions.messages) {
+        if (signal.aborted || !this.connected) return;
+        await this.handleImMessage({ kind: 'at' }, message, true);
+      }
+      if (mentions.nextCursor) {
+        this.cursor.mentionCheckpoint = {
+          ...mentionCheckpoint,
+          cursor: mentions.nextCursor,
+        };
+      } else {
+        this.cursor.mentionCheckpoint = undefined;
+        this.cursor.mentionWatermark = mentionCheckpoint.endTime;
+      }
+    } catch (error) {
+      if (signal.aborted || !this.connected) return;
+      process.stderr.write(
+        `[Channel:${this.name}] failed to poll DWS mention history: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+      );
+    }
+    try {
+      const checkpoint = this.cursor.notificationCheckpoint ?? {
+        startTime: Math.max(
+          0,
+          (this.cursor.notificationWatermark ?? endTime) -
+            NOTIFICATION_HISTORY_OVERLAP_MS,
+        ),
+        endTime,
+        cursor: '0',
+      };
+      const page = await this.client.listDirectMessages(
+        checkpoint.startTime,
+        checkpoint.endTime,
+        signal,
+        checkpoint.cursor,
+      );
+      page.messages.sort(
+        (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
+      );
+      for (const message of page.messages) {
+        if (signal.aborted || !this.connected) return;
+        if (this.isSelfMessage(message)) {
+          this.markProcessedMessage(messageKey(message));
+          continue;
+        }
+        const key = messageKey(message);
+        if (this.cursor.processedMessages.includes(key)) {
+          continue;
+        }
+        const notification = parseDocumentMentionNotification(message.content);
+        if (!notification) continue;
+        await this.processDocumentNotification(message, key, notification);
+      }
+      if (page.nextCursor) {
+        this.cursor.notificationCheckpoint = {
+          ...checkpoint,
+          cursor: page.nextCursor,
+        };
+      } else {
+        this.cursor.notificationCheckpoint = undefined;
+        this.cursor.notificationWatermark = checkpoint.endTime;
+      }
+    } catch (error) {
+      if (signal.aborted || !this.connected) return;
+      process.stderr.write(
+        `[Channel:${this.name}] failed to poll DWS direct-message history: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+      );
     }
     this.saveCursor();
     if (
@@ -1162,6 +1225,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private async handleImMessage(
     source: DwsImSource,
     message: DwsImMessage,
+    fromHistory = false,
   ): Promise<void> {
     if (!this.connected) return;
     if (this.isSelfMessage(message)) {
@@ -1170,6 +1234,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     if (
+      !fromHistory &&
       message.eventTime !== undefined &&
       message.eventTime < this.connectionStartedAt - 5_000
     ) {
@@ -1252,6 +1317,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       chatName: message.conversationId,
       messageId: message.messageId,
       text,
+      ...(message.referencedText
+        ? { referencedText: message.referencedText }
+        : {}),
       isGroup,
       isMentioned: source.kind === 'at',
       isReplyToBot: false,

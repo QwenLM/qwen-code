@@ -46,6 +46,7 @@ export interface DwsImMessage {
   content: string;
   senderId: string;
   senderName: string;
+  referencedText?: string;
   eventTime?: number;
 }
 
@@ -93,6 +94,12 @@ export interface DwsClientLike {
     reactionName: string,
   ): Promise<void>;
   listDirectMessages(
+    startTime: number,
+    endTime: number,
+    signal?: AbortSignal,
+    cursor?: string,
+  ): Promise<DwsMessageHistoryPage>;
+  listMentionedMessages(
     startTime: number,
     endTime: number,
     signal?: AbortSignal,
@@ -241,6 +248,36 @@ function findScalar(
     }
   }
   return undefined;
+}
+
+function findExactOpenDingTalkId(
+  value: unknown,
+  userId: string,
+): string | undefined {
+  const matches = new Set<string>();
+  const pending = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (Array.isArray(current)) {
+      for (let index = current.length - 1; index >= 0; index--) {
+        pending.push(current[index]);
+      }
+      continue;
+    }
+    if (!isRecord(current)) continue;
+    if (firstString(current, ['userId', 'user_id']) === userId) {
+      const openDingTalkId = firstString(current, [
+        'openDingTalkId',
+        'open_dingtalk_id',
+      ]);
+      if (openDingTalkId) matches.add(openDingTalkId);
+    }
+    const values = Object.values(current);
+    for (let index = values.length - 1; index >= 0; index--) {
+      pending.push(values[index]);
+    }
+  }
+  return matches.size === 1 ? [...matches][0] : undefined;
 }
 
 interface DwsProfileEntry {
@@ -453,6 +490,16 @@ function messageContent(value: unknown, structured = false): string {
   }
 }
 
+function quotedMessageText(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const quoted = record?.[key];
+  if (!isRecord(quoted)) return undefined;
+  const content = messageContent(quoted['content'], true).trim();
+  return content || undefined;
+}
+
 function eventTime(
   ...records: Array<Record<string, unknown> | undefined>
 ): number | undefined {
@@ -539,6 +586,11 @@ export function parseDwsImEvent(line: string): DwsImMessage {
       firstString(event, ['sender', 'sender_name', 'senderName']) ??
       (body ? firstString(body, ['sender', 'senderName']) : undefined) ??
       senderId,
+    referencedText:
+      quotedMessageText(event, 'quoted_message') ??
+      quotedMessageText(event, 'quotedMessage') ??
+      quotedMessageText(body, 'quoted_message') ??
+      quotedMessageText(body, 'quotedMessage'),
     eventTime: eventTime(event, body, outerRecord),
   };
 }
@@ -613,7 +665,7 @@ export class DwsClient implements DwsClientLike {
         'DWS is not authenticated. Run `dws auth login` for the selected profile.',
       );
     }
-    const selfSenderId = findScalar(
+    const resolvedSelfSenderId = findScalar(
       response,
       new Set([
         'openDingTalkId',
@@ -622,12 +674,36 @@ export class DwsClient implements DwsClientLike {
         'sender_open_dingtalk_id',
       ]),
     );
+    let selfSenderId =
+      typeof resolvedSelfSenderId === 'string' && resolvedSelfSenderId.trim()
+        ? resolvedSelfSenderId
+        : undefined;
+    if (!selfSenderId) {
+      const userId = findScalar(response, new Set(['userId', 'user_id']));
+      const userName = findScalar(response, new Set(['userName', 'user_name']));
+      if (
+        typeof userId === 'string' &&
+        userId.trim() &&
+        typeof userName === 'string' &&
+        userName.trim()
+      ) {
+        const exactUserId = userId.trim();
+        const query = userName.trim();
+        let contacts: unknown;
+        try {
+          contacts = await this.run(
+            ['contact', 'user', 'search', '--query', query],
+            signal,
+          );
+        } catch {
+          signal?.throwIfAborted();
+        }
+        selfSenderId = findExactOpenDingTalkId(contacts, exactUserId);
+      }
+    }
     return {
       profile: this.profile,
-      selfSenderIds:
-        typeof selfSenderId === 'string' && selfSenderId.trim()
-          ? [selfSenderId]
-          : undefined,
+      selfSenderIds: selfSenderId ? [selfSenderId] : undefined,
     };
   }
 
@@ -814,6 +890,84 @@ export class DwsClient implements DwsClientLike {
       cursor = next;
     }
     return { messages };
+  }
+
+  async listMentionedMessages(
+    startTime: number,
+    endTime: number,
+    signal?: AbortSignal,
+    cursor = '0',
+  ): Promise<DwsMessageHistoryPage> {
+    const response = await this.run(
+      [
+        'chat',
+        'message',
+        'list-mentions',
+        '--start',
+        formatDwsDateTime(startTime),
+        '--end',
+        formatDwsDateTime(endTime),
+        '--limit',
+        '50',
+        '--cursor',
+        cursor,
+      ],
+      signal,
+    );
+    const conversations = findConversationList(response);
+    if (!conversations) {
+      if (
+        findScalar(response, new Set(['success'])) === true &&
+        findScalar(response, new Set(['hasMore'])) !== true
+      ) {
+        return { messages: [] };
+      }
+      throw new Error(
+        'DWS mention-history response did not contain a conversation list.',
+      );
+    }
+    const messages: DwsImMessage[] = [];
+    for (const conversation of conversations) {
+      if (!isRecord(conversation) || conversation['singleChat'] !== false) {
+        continue;
+      }
+      const entries = conversation['messages'];
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!isRecord(entry)) continue;
+        const messageId = firstString(entry, ['openMessageId', 'messageId']);
+        const conversationId = firstString(entry, [
+          'openConversationId',
+          'conversationId',
+        ]);
+        const senderId = firstString(entry, [
+          'senderOpenDingTalkId',
+          'senderId',
+        ]);
+        if (!messageId || !conversationId || !senderId) continue;
+        messages.push({
+          type: 'user_im_message_receive_at',
+          eventId: messageId,
+          messageId,
+          conversationId,
+          content: messageContent(entry['content']),
+          senderId,
+          senderName: firstString(entry, ['sender', 'senderName']) ?? senderId,
+          referencedText: quotedMessageText(entry, 'quotedMessage'),
+          eventTime: eventTime(entry),
+        });
+      }
+    }
+    const next = findScalar(response, new Set(['nextCursor']));
+    if (findScalar(response, new Set(['hasMore'])) !== true) {
+      return { messages };
+    }
+    if (typeof next !== 'string' || !next || next === cursor) {
+      throw new Error(
+        'DWS mention-history response did not contain a valid next cursor.',
+      );
+    }
+    return { messages, nextCursor: next };
   }
 
   async readDocument(

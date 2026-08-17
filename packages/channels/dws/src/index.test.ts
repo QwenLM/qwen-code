@@ -59,12 +59,18 @@ describe('DWS channel plugin', () => {
     ).toBeUndefined();
   });
 
-  it('rejects ambiguous profiles and unsafe approval modes', () => {
+  it('allows yolo approval mode', () => {
     expect(
       plugin.management?.validateConfig?.({
         approvalMode: 'yolo',
       }),
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({ approvalMode: 'auto' }),
     ).toContain('require approvalMode');
+  });
+
+  it('rejects ambiguous profiles and invalid todo inputs', () => {
     expect(
       plugin.management?.validateConfig?.({ profile: 'corp:a,corp:b' }),
     ).toContain('exactly one login profile');

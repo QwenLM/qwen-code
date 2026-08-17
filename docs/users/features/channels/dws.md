@@ -45,6 +45,26 @@ Add a channel to `~/.qwen/settings.json`:
 }
 ```
 
+YOLO approval mode is available for answer bots that should run tool calls
+without interactive confirmations:
+
+```json
+{
+  "channels": {
+    "dws-answers": {
+      "type": "dws",
+      "senderPolicy": "pairing",
+      "groupPolicy": "pairing",
+      "approvalMode": "yolo",
+      "cwd": "/path/to/answer-bot"
+    }
+  }
+}
+```
+
+YOLO mode auto-approves every tool call. Use it only for a trusted bot account
+and workspace.
+
 `senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. Approve a user or group with the code returned by the channel:
 
 ```bash
@@ -54,6 +74,10 @@ qwen channel pairing approve dws-work CODE
 `senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
+
+Group mentions use the real-time personal event stream first. The channel also checks recent `@` message history every five seconds, so mentions from external groups are recovered when DingTalk omits them from the personal event stream. Messages are deduplicated by conversation and message ID across both paths.
+
+When a message quotes another DingTalk message, the quoted text is included as reply context for the agent on both the real-time and history fallback paths.
 
 ## Document Mentions
 
@@ -65,7 +89,7 @@ There is no document or knowledge-base watch list. To start a document task:
 
 The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds DingTalk's `暗中观察` eyes reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
 
-Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and require `approvalMode` `default` or `plan`; `default` is used when omitted.
+Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
 
 ## Native Todo Changes
 

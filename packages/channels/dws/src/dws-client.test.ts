@@ -97,6 +97,145 @@ describe('DwsClient', () => {
     ]);
   });
 
+  it('resolves the current openDingTalkId from an exact contact match', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({ profiles: [{ profile: 'corp:bot', isCurrent: true }] }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          authenticated: true,
+          user_id: 'AI574',
+          user_name: 'QwenBot',
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          result: [
+            {
+              userId: 'someone-else',
+              openDingTalkId: 'open-someone-else',
+            },
+            { userId: 'AI574', openDingTalkId: 'open-qwen-bot' },
+          ],
+        }),
+        stderr: '',
+      });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:bot' },
+      runner,
+    );
+
+    await expect(client.assertAuthenticated()).resolves.toEqual({
+      profile: 'corp:bot',
+      selfSenderIds: ['open-qwen-bot'],
+    });
+    expect(runner).toHaveBeenNthCalledWith(3, '/opt/dws', [
+      '--profile',
+      'corp:bot',
+      'contact',
+      'user',
+      'search',
+      '--query',
+      'QwenBot',
+      '--format',
+      'json',
+    ]);
+  });
+
+  it('keeps group-only identity usable when contact lookup fails', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({ profiles: [{ profile: 'corp:bot', isCurrent: true }] }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          authenticated: true,
+          user_id: 'AI574',
+          user_name: 'QwenBot',
+        }),
+        stderr: '',
+      })
+      .mockRejectedValueOnce(new Error('contact unavailable'));
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:bot' },
+      runner,
+    );
+
+    await expect(client.assertAuthenticated()).resolves.toEqual({
+      profile: 'corp:bot',
+    });
+  });
+
+  it('does not select conflicting openDingTalkIds for the current user', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({ profiles: [{ profile: 'corp:bot', isCurrent: true }] }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          authenticated: true,
+          user_id: 'AI574',
+          user_name: 'QwenBot',
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          result: [
+            { userId: 'AI574', openDingTalkId: 'open-one' },
+            { userId: 'AI574', openDingTalkId: 'open-two' },
+          ],
+        }),
+        stderr: '',
+      });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:bot' },
+      runner,
+    );
+
+    await expect(client.assertAuthenticated()).resolves.toEqual({
+      profile: 'corp:bot',
+    });
+  });
+
+  it('propagates cancellation during contact identity lookup', async () => {
+    const abortController = new AbortController();
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({ profiles: [{ profile: 'corp:bot', isCurrent: true }] }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          authenticated: true,
+          user_id: 'AI574',
+          user_name: 'QwenBot',
+        }),
+        stderr: '',
+      })
+      .mockImplementationOnce(async () => {
+        abortController.abort();
+        throw new Error('contact lookup cancelled');
+      });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:bot' },
+      runner,
+    );
+
+    await expect(
+      client.assertAuthenticated(abortController.signal),
+    ).rejects.toThrow('aborted');
+  });
+
   it('rejects an unauthenticated DWS profile', async () => {
     const runner = vi
       .fn<DwsCommandRunner>()
@@ -375,6 +514,43 @@ describe('DwsClient', () => {
     ).toBe(content);
   });
 
+  it('preserves quoted message text in a normalized live event', () => {
+    expect(
+      parseDwsImEvent(
+        json({
+          type: 'user_im_message_receive_at',
+          message_id: 'message-1',
+          conversation_id: 'cid-1',
+          content: '@QwenBot help with this',
+          quoted_message: {
+            content: 'Qwen Code is slow after connecting over SSH.',
+          },
+          sender_open_dingtalk_id: 'open-alice',
+        }),
+      ),
+    ).toMatchObject({
+      referencedText: 'Qwen Code is slow after connecting over SSH.',
+    });
+  });
+
+  it.each([null, 'quoted text', {}, { content: '   ' }, { content: 42 }])(
+    'ignores invalid or empty quoted message payloads: %j',
+    (quotedMessage) => {
+      expect(
+        parseDwsImEvent(
+          json({
+            type: 'user_im_message_receive_at',
+            message_id: 'message-1',
+            conversation_id: 'cid-1',
+            content: '@QwenBot help with this',
+            quoted_message: quotedMessage,
+            sender_open_dingtalk_id: 'open-alice',
+          }),
+        ).referencedText,
+      ).toBeUndefined();
+    },
+  );
+
   it('extracts message identity from the nested DWS payload body', () => {
     expect(
       parseDwsImEvent(
@@ -387,6 +563,9 @@ describe('DwsClient', () => {
                 openMessageId: 'message-1',
                 openConversationId: 'cid-1',
                 content: '{"content":"check this"}',
+                quotedMessage: {
+                  content: 'Original message from the nested payload.',
+                },
                 senderOpenDingTalkId: 'open-alice',
                 sender: 'Alice',
               },
@@ -402,6 +581,7 @@ describe('DwsClient', () => {
       content: 'check this',
       senderId: 'open-alice',
       senderName: 'Alice',
+      referencedText: 'Original message from the nested payload.',
     });
   });
 
@@ -557,6 +737,113 @@ describe('DwsClient', () => {
         'json',
       ],
     ]);
+  });
+
+  it('lists mentioned group messages for history fallback', async () => {
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        result: {
+          conversationMessagesList: [
+            {
+              singleChat: false,
+              messages: [
+                {
+                  content: '@QwenBot hi',
+                  createTime: '2026-08-17 12:56:28',
+                  openConversationId: 'external-group',
+                  openMessageId: 'mention-1',
+                  quotedMessage: {
+                    content: 'Qwen Code is slow after connecting over SSH.',
+                  },
+                  sender: 'Alice',
+                  senderOpenDingTalkId: 'open-alice',
+                },
+              ],
+            },
+          ],
+          hasMore: false,
+        },
+        success: true,
+      }),
+      stderr: '',
+    });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:bot' },
+      runner,
+    );
+
+    await expect(client.listMentionedMessages(1, 2)).resolves.toEqual({
+      messages: [
+        {
+          type: 'user_im_message_receive_at',
+          eventId: 'mention-1',
+          messageId: 'mention-1',
+          conversationId: 'external-group',
+          content: '@QwenBot hi',
+          senderId: 'open-alice',
+          senderName: 'Alice',
+          referencedText: 'Qwen Code is slow after connecting over SSH.',
+          eventTime: new Date(2026, 7, 17, 12, 56, 28).getTime(),
+        },
+      ],
+    });
+    expect(runner).toHaveBeenCalledWith('/opt/dws', [
+      '--profile',
+      'corp:bot',
+      'chat',
+      'message',
+      'list-mentions',
+      '--start',
+      '1970-01-01 08:00:00',
+      '--end',
+      '1970-01-01 08:00:00',
+      '--limit',
+      '50',
+      '--cursor',
+      '0',
+      '--format',
+      'json',
+    ]);
+  });
+
+  it('treats a successful mention-history response without conversations as empty', async () => {
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        result: { hasMore: false, nextCursor: 'unused' },
+        success: true,
+      }),
+      stderr: '',
+    });
+
+    await expect(
+      new DwsClient({ executable: '/opt/dws' }, runner).listMentionedMessages(
+        1,
+        2,
+      ),
+    ).resolves.toEqual({ messages: [] });
+  });
+
+  it('rejects an invalid next cursor when mention history has more pages', async () => {
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        result: {
+          conversationMessagesList: [],
+          hasMore: true,
+          nextCursor: 'page-1',
+        },
+        success: true,
+      }),
+      stderr: '',
+    });
+
+    await expect(
+      new DwsClient({ executable: '/opt/dws' }, runner).listMentionedMessages(
+        1,
+        2,
+        undefined,
+        'page-1',
+      ),
+    ).rejects.toThrow('next cursor');
   });
 
   it('paginates recent direct-message history for notification fallback', async () => {
