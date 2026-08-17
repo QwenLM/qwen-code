@@ -12,6 +12,107 @@ import type {
   BaseInfo,
 } from './types.js';
 
+// ── Large-integer-safe JSON parsing ───────────────────────────────
+
+/** String form of Number.MAX_SAFE_INTEGER (9007199254740991). */
+const MAX_SAFE_INTEGER_DIGITS = '9007199254740991';
+
+/** True when an unsigned decimal digit string exceeds Number.MAX_SAFE_INTEGER. */
+function exceedsMaxSafeInteger(digits: string): boolean {
+  const stripped = digits.replace(/^0+/, '') || '0';
+  return (
+    stripped.length > MAX_SAFE_INTEGER_DIGITS.length ||
+    (stripped.length === MAX_SAFE_INTEGER_DIGITS.length &&
+      stripped > MAX_SAFE_INTEGER_DIGITS)
+  );
+}
+
+/**
+ * Quote integer literals whose magnitude exceeds Number.MAX_SAFE_INTEGER so
+ * the native JSON parser cannot silently round them. String contents are
+ * skipped (including escaped quotes), and fractional/exponent numbers are
+ * left untouched. All other values pass through unchanged, so a subsequent
+ * `JSON.parse` yields the same result as before except that out-of-range
+ * integers become strings carrying the exact decimal representation.
+ */
+export function quoteUnsafeIntegerLiterals(rawJson: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < rawJson.length; ) {
+    const ch = rawJson[i] as string;
+
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i++;
+      continue;
+    }
+
+    const isDigit = ch >= '0' && ch <= '9';
+    if (ch === '-' || isDigit) {
+      let j = i;
+      if (rawJson[j] === '-') j++;
+      const intStart = j;
+      while (j < rawJson.length && rawJson[j] >= '0' && rawJson[j] <= '9') {
+        j++;
+      }
+      const intDigits = rawJson.slice(intStart, j);
+
+      if (intDigits.length === 0) {
+        // Lone '-' or malformed token; emit unchanged and let JSON.parse
+        // surface the syntax error, matching native behavior.
+        out += ch;
+        i++;
+        continue;
+      }
+
+      // Consume a possible fractional/exponent suffix.
+      let k = j;
+      while (k < rawJson.length && '+-.eE0123456789'.includes(rawJson[k]!)) {
+        k++;
+      }
+      const isPlainInteger = k === j;
+
+      if (isPlainInteger && exceedsMaxSafeInteger(intDigits)) {
+        out += `"${rawJson.slice(i, j)}"`;
+      } else {
+        out += rawJson.slice(i, k);
+      }
+      i = k;
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+/**
+ * Parse JSON while preserving integers above Number.MAX_SAFE_INTEGER as
+ * exact decimal strings (native `JSON.parse` rounds them, and a reviver
+ * cannot help because it receives the already-rounded values).
+ */
+export function parseJsonPreservingLargeIntegers<T>(rawJson: string): T {
+  return JSON.parse(quoteUnsafeIntegerLiterals(rawJson)) as T;
+}
+
 // ── Error handling ────────────────────────────────────────────────
 
 /** Structured error from WeChat iLink Bot API. */
@@ -123,6 +224,7 @@ async function post<T>(
   token?: string,
   timeoutMs = 40000,
   signal?: AbortSignal,
+  preserveLargeIntegers = false,
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -160,7 +262,10 @@ async function post<T>(
         : `WeChat API error (HTTP ${resp.status})`;
       throw new WeixinApiError(message, resp.status, ret, errcode);
     }
-    return (await resp.json()) as T;
+    const rawBody = await resp.text();
+    return preserveLargeIntegers
+      ? parseJsonPreservingLargeIntegers<T>(rawBody)
+      : (JSON.parse(rawBody) as T);
   } finally {
     clearTimeout(timeout);
   }
@@ -178,6 +283,8 @@ export async function getUpdates(
     base_info: baseInfo(),
   };
   try {
+    // message_id can exceed Number.MAX_SAFE_INTEGER; parse it losslessly so
+    // the platform identifier is not rounded before dedup/tracing uses it.
     return await post<GetUpdatesResp>(
       baseUrl,
       '/ilink/bot/getupdates',
@@ -185,6 +292,7 @@ export async function getUpdates(
       token,
       timeoutMs,
       signal,
+      true,
     );
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AbortError') {

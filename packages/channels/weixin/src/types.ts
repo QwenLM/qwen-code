@@ -79,7 +79,12 @@ export interface MessageItem {
 
 export interface WeixinMessage {
   seq?: number;
-  message_id?: number;
+  /**
+   * Platform message identifier. Values above Number.MAX_SAFE_INTEGER arrive
+   * as exact decimal strings (see parseJsonPreservingLargeIntegers); smaller
+   * values stay numbers.
+   */
+  message_id?: string | number;
   from_user_id?: string;
   to_user_id?: string;
   client_id?: string;
