@@ -2796,21 +2796,31 @@ describe('checkout self-heal', () => {
     ).toThrow();
   });
 
-  it('keeps GITHUB_WORKSPACE runner-owned before the wipe', () => {
+  it('seals every override channel into the wipe step', () => {
     // With the allowlist gone, the runner-set GITHUB_WORKSPACE is the
-    // wipe's only path input, so this premise carries the whole safety
-    // story: nothing ordered before the wipe may override it — no
-    // workflow-, job-, or step-level `env:` entry, no `$GITHUB_ENV` or
-    // `export` write in an earlier run block — or the unguarded
-    // `find … -exec rm -rf` deletes the overridden path and nothing left
-    // in the heal chain refuses it.
+    // wipe's only path input and the `find … -exec rm -rf` is unguarded,
+    // so this premise carries the whole safety story. Sealed here are the
+    // channels that DO propagate into a later step: declarative `env:`
+    // entries at every scope (the wipe step's own block included),
+    // `BASH_ENV` entries (the wipe's bash sources the pointed-at file
+    // before its `:?` guard runs), `$GITHUB_PATH` writes (PATH promotion
+    // repoints the bare find/rm the user-mode leg resolves), and
+    // `$GITHUB_ENV` writes of unprotected names. `export` in a run block
+    // dies at the step boundary and the runner itself drops `$GITHUB_ENV`
+    // writes of `GITHUB_*` names, so neither is checked here.
     const doc = parse(workflow);
     expect(doc.env?.GITHUB_WORKSPACE).toBeUndefined();
     expect(doc.jobs['review-pr'].env?.GITHUB_WORKSPACE).toBeUndefined();
+    expect(doc.env?.BASH_ENV).toBeUndefined();
+    expect(doc.jobs['review-pr'].env?.BASH_ENV).toBeUndefined();
     for (const step of steps.slice(0, nameIndex(WIPE))) {
       expect(step.env?.GITHUB_WORKSPACE).toBeUndefined();
-      expect(step.run ?? '').not.toContain('GITHUB_WORKSPACE=');
+      expect(step.env?.BASH_ENV).toBeUndefined();
+      expect(step.run ?? '').not.toContain('$GITHUB_ENV');
+      expect(step.run ?? '').not.toContain('$GITHUB_PATH');
     }
+    expect(wipe.env?.GITHUB_WORKSPACE).toBeUndefined();
+    expect(wipe.env?.BASH_ENV).toBeUndefined();
   });
 });
 
