@@ -19,9 +19,22 @@
 /** The attribution marker the strip regex anchors on. */
 export const FOOTER_MARKER = 'via Qwen Code /review';
 
+/**
+ * The widest modelId the footer interpolates. The footer rides the body's
+ * last-resort tail, which the body budget can only hold as a BOUNDED
+ * contributor: a modelId with no length cap emptied the rung-3 cut — and
+ * past the budget composed a body GitHub rejects whole, blockers included.
+ * Real model names are a few dozen characters.
+ */
+export const MODEL_ID_MAX_CHARS = 200;
+
 /** The footer naming the reviewing model and the CLI version it ran under. */
 export function reviewFooter(modelId: string, cliVersion: string): string {
-  return `_— ${modelId} ${FOOTER_MARKER} (v${cliVersion})_`;
+  const name =
+    modelId.length <= MODEL_ID_MAX_CHARS
+      ? modelId
+      : `${modelId.slice(0, MODEL_ID_MAX_CHARS - 1)}…`;
+  return `_— ${name} ${FOOTER_MARKER} (v${cliVersion})_`;
 }
 
 /**

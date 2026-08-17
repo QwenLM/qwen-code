@@ -90,6 +90,7 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
+  MODEL_ID_MAX_CHARS,
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
@@ -2398,6 +2399,13 @@ function composeReviewBody(
       );
     }
     footer = reviewFooter(modelId, cliVersion);
+    if (modelId.length > MODEL_ID_MAX_CHARS) {
+      remediation.push(
+        `body budget: modelId was ${modelId.length} characters and was ` +
+          `clamped to the footer's ${MODEL_ID_MAX_CHARS}-character cap — ` +
+          `the posted attribution is truncated`,
+      );
+    }
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.

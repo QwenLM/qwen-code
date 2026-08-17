@@ -5758,6 +5758,46 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     );
   });
 
+  it('bounds the footer the last-resort tail carries — an unbounded modelId must not post a body GitHub rejects', () => {
+    // The protected tail — truncation notice plus footer — is the one
+    // rung-3 contributor the budget never measured, and the footer
+    // interpolates modelId verbatim with no length cap: a single-line
+    // modelId past the budget empties the cut and the rung returns the
+    // tail itself, OVER budget — the POST GitHub rejects whole, blockers
+    // included, which is the exact failure the budget exists to prevent.
+    const r = composeReview(
+      base({
+        modelId: 'M'.repeat(70_000),
+        bodyCriticals: ['C'.repeat(80_000)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain('was TRUNCATED to fit');
+    // A bounded footer leaves the blockers the room the budget holds: the
+    // cut keeps most of them instead of posting tail-only.
+    expect(r.body).toContain('C'.repeat(50_000));
+    // A silently truncated attribution names a model that is not the one
+    // that ran, so the clamp is disclosed on the operator's channel.
+    expect(r.remediation.join('\n')).toContain('modelId');
+  });
+
+  it('a below-rejection oversized modelId must not empty the cut of every blocker', () => {
+    // Under the rejection boundary the same hole was quieter: the 56k
+    // tail alone fit, the POST succeeded — and carried almost nothing but
+    // itself, every blocker dropped although the budget had room for
+    // almost all of them. A bounded footer fits the blocker and the
+    // attribution together, no cut at all.
+    const r = composeReview(
+      base({
+        modelId: 'M'.repeat(56_000),
+        bodyCriticals: ['C'.repeat(60_000)],
+      }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.body).toContain('C'.repeat(50_000));
+    expect(r.body).toContain('via Qwen Code /review');
+  });
+
   it('keeps the downgrade disclosure through the COMMENT opener merge', () => {
     // The COMMENT path merges clauses 1-4 into one paragraph. The merge
     // copied only `en`/`zh`, so every `keep` tag on those clauses was lost
