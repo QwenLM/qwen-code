@@ -13,13 +13,21 @@ export default defineConfig({
     include: ['scripts/tests/**/*.test.{js,ts}'],
     // Script tests that drive Linux-only CI (ubuntu-latest workflow jobs, or
     // bash/shell fixtures Windows cannot express) fail on a Windows runner.
-    // Linux CI remains their authoritative coverage.
+    // Linux CI remains their authoritative coverage. The list is by name, so
+    // a new suite of this kind must be added here — `serve-ab-workflow` does
+    // not match the `qwen-*` glob, and the POSIX paths its guard fixtures
+    // build (`/home/`, `$RUNNER_WORKSPACE/…`) mean nothing under a Windows
+    // shell. This exclusion is Windows-only on purpose and is NOT a
+    // portability gate in general: a suite is off Windows here and still runs
+    // on macOS, where a BSD userland can fail assertions a GNU host passes —
+    // gate those on a host capability probe inside the suite (#9220).
     exclude:
       process.platform === 'win32'
         ? [
             ...configDefaults.exclude,
             'scripts/tests/pr-self-report-label.test.js',
             'scripts/tests/qwen-*-workflow.test.js',
+            'scripts/tests/serve-ab-workflow.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],

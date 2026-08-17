@@ -80,7 +80,31 @@ jobs:
           # could bleed into the builds and silently change the posted A/B
           # diff. Hosted runners are ephemeral and never see this. After the
           # ownership-restore step everything is user-owned, so no sudo.
-          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          #
+          # This wipe used to run unguarded — `set -u` stopped an UNSET
+          # workspace and nothing else, so an empty or mangled one reached
+          # `rm -rf` unchallenged. The layers below are the reference
+          # implementation from the review workflow's heal chain (#9220),
+          # ported here in #9265: canonicalize (kernel-resolvable spellings
+          # like `/home/.` and `//usr` must not slip past the exact-match
+          # arms; `-m` is GNU-only, and off-GNU the strip loop and the
+          # allowlist still hold), strip trailing slashes, refuse the known
+          # roots, and refuse anything outside the runner workspace.
+          WS="${GITHUB_WORKSPACE:?}"
+          WS="$(realpath -m -- "$WS" 2>/dev/null || printf '%s' "$WS")"
+          while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
+          case "$WS" in
+            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          RWS="${RUNNER_WORKSPACE:?}"
+          RWS="$(realpath -m -- "$RWS" 2>/dev/null || printf '%s' "$RWS")"
+          while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          case "$WS" in
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS}"; exit 1 ;;
+          esac
+          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
