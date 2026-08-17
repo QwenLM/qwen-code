@@ -74,6 +74,7 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import { roundModelIdFrom } from './lib/round-model.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -596,25 +597,6 @@ function cleanStale(prNumber: string): void {
       execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
     );
   }
-}
-
-/**
- * The identity this round runs under, read from the runtime's published slots.
- *
- * Prefers the PROVIDER-QUALIFIED id (`<model>@<8-hex of authType+baseUrl>`):
- * a bare model id is unique only inside one provider configuration, so two of
- * them exposing the same name would otherwise pass each other's same-model
- * gate and skip code neither reviewed. Falls back to the bare id for a runtime
- * that publishes no identity, and to `''` — meaning "unknown", which the
- * composer reads as a mismatch rather than as agreement — for one that
- * publishes neither.
- */
-export function roundModelIdFrom(env: NodeJS.ProcessEnv): string {
-  return (
-    env['QWEN_CODE_MODEL_IDENTITY'] ??
-    env['QWEN_CODE_MODEL'] ??
-    ''
-  ).trim();
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {

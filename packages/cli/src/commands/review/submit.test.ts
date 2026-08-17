@@ -1456,6 +1456,14 @@ describe('the ledger marker on the body that reaches GitHub', () => {
     const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
     const prevSession = process.env['QWEN_CODE_SESSION_ID'];
     const prevModel = process.env['QWEN_CODE_MODEL'];
+    // Cleared, not just saved: the boundary PREFERS the qualified identity
+    // over the bare id, so an ambient one — which this PR's own Config now
+    // publishes, and the shell tool injects into every subprocess — would
+    // override the model this test sets. Running the suite inside a Qwen
+    // Code session is the dogfooding path, so the ambient value is the
+    // normal case, not the exotic one.
+    const prevIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
     process.env['QWEN_CODE_PROJECT_DIR'] = dir;
     process.env['QWEN_CODE_SESSION_ID'] = SESSION;
     process.env['QWEN_CODE_MODEL'] = 'the-session-model';
@@ -1469,6 +1477,7 @@ describe('the ledger marker on the body that reaches GitHub', () => {
         ['QWEN_CODE_PROJECT_DIR', prevDir],
         ['QWEN_CODE_SESSION_ID', prevSession],
         ['QWEN_CODE_MODEL', prevModel],
+        ['QWEN_CODE_MODEL_IDENTITY', prevIdentity],
       ] as const) {
         if (prev === undefined) delete process.env[key];
         else process.env[key] = prev;
