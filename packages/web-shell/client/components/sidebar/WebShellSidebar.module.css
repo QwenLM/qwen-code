@@ -143,6 +143,7 @@
 }
 
 .navIcon {
+  position: relative;
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
@@ -875,13 +876,33 @@
 }
 
 .sessionStatusDot {
+  color: var(--agent-blue-500);
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--agent-blue-500);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--agent-blue-500) 14%, transparent);
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
   animation: sidebarPulse 1.6s ease-in-out infinite;
+}
+
+.collapsedSessionStatusDot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  color: var(--agent-blue-500);
+  animation: sidebarPulse 1.6s ease-in-out infinite;
+}
+
+.collapsedSessionStatusApproval {
+  color: color-mix(in srgb, var(--success-color) 95%, var(--foreground));
+}
+
+.collapsedSessionStatusQuestion {
+  color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
 }
 
 .sessionTitlePin {
@@ -1039,15 +1060,13 @@
 @keyframes sidebarPulse {
   0%,
   100% {
-    box-shadow: 0 0 0 2px
-      color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 16%, transparent);
     opacity: 0.72;
     transform: scale(0.9);
   }
 
   50% {
-    box-shadow: 0 0 0 6px
-      color-mix(in srgb, var(--agent-blue-500) 0%, transparent);
+    box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent);
     opacity: 1;
     transform: scale(1);
   }

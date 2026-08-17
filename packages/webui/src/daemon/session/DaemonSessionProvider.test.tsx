@@ -8908,6 +8908,84 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('keeps an imperatively loaded session when controlled workspace props catch up', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(undefined, { status: 204 })),
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        workspaceCwd: '/work/a',
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-b',
+        workspaceCwd: '/work/b',
+      }),
+    );
+
+    let loadSession: Promise<void> | undefined;
+    act(() => {
+      loadSession = requireActions(actions).loadSession('session-b', {
+        workspaceCwd: '/work/b',
+      });
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await act(async () => {
+      await loadSession;
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+    });
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect={true}
+          sessionId="session-b"
+          workspaceCwd="/work/b"
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+      missingSession: false,
+    });
+  });
+
   it('clears transcript loading after replay before metadata finishes', async () => {
     const providers = createDeferred<unknown>();
     const commands =

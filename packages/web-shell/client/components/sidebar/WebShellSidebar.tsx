@@ -570,6 +570,8 @@ function SessionMenu({
 function SidebarSessionSurface({
   collapsed,
   label,
+  status,
+  statusLabel,
   width,
   open,
   onOpenChange,
@@ -578,6 +580,8 @@ function SidebarSessionSurface({
 }: {
   collapsed: boolean;
   label: string;
+  status?: 'approval' | 'question' | 'completed';
+  statusLabel?: string;
   width: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -586,6 +590,7 @@ function SidebarSessionSurface({
 }) {
   const closeTimerRef = useRef<number | undefined>(undefined);
   const pointerOpenRef = useRef(false);
+  const interactionOpenRef = useRef(false);
   const focusInsideSurfaceRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -603,6 +608,7 @@ function SidebarSessionSurface({
   );
   const closeAfterDelay = useCallback(() => {
     cancelClose();
+    if (!pointerOpenRef.current) return;
     closeTimerRef.current = window.setTimeout(() => {
       // A hover-out must not unmount the surface while it holds keyboard
       // focus (search or rename inputs): the close would drop focus to body.
@@ -662,7 +668,7 @@ function SidebarSessionSurface({
             ref={triggerRef}
             className={styles.pluginButton}
             type="button"
-            aria-label={label}
+            aria-label={statusLabel ? `${label}: ${statusLabel}` : label}
             data-web-shell-collapsed-session-trigger
             onPointerEnter={() => {
               // Only an open initiated by the pointer uses hover semantics;
@@ -687,6 +693,19 @@ function SidebarSessionSurface({
           >
             <span className={styles.navIcon}>
               <FolderClosedIcon size={16} strokeWidth={1.2} />
+              {status && (
+                <span
+                  className={cx(
+                    styles.collapsedSessionStatusDot,
+                    status === 'approval' &&
+                      styles.collapsedSessionStatusApproval,
+                    status === 'question' &&
+                      styles.collapsedSessionStatusQuestion,
+                  )}
+                  data-web-shell-collapsed-session-status={status}
+                  aria-hidden="true"
+                />
+              )}
             </span>
           </button>
         </PopoverTrigger>
@@ -720,12 +739,21 @@ function SidebarSessionSurface({
               event.preventDefault();
             }
             pointerOpenRef.current = false;
+            interactionOpenRef.current = false;
             focusInsideSurfaceRef.current = false;
+          }}
+          onEscapeKeyDown={() => {
+            interactionOpenRef.current = false;
           }}
           onPointerEnter={cancelClose}
           onPointerLeave={closeAfterDelay}
+          onPointerDownCapture={() => {
+            interactionOpenRef.current = true;
+            cancelClose();
+          }}
           onInteractOutside={(event) => {
-            const originalTarget = event.detail.originalEvent.composedPath()[0];
+            const originalEvent = event.detail.originalEvent;
+            const originalTarget = originalEvent.composedPath()[0];
             const target = (originalTarget as Node | undefined) ?? event.target;
             if (
               target instanceof Element &&
@@ -734,6 +762,13 @@ function SidebarSessionSurface({
               )
             ) {
               event.preventDefault();
+            } else if (
+              interactionOpenRef.current &&
+              originalEvent.type === 'focusin'
+            ) {
+              event.preventDefault();
+            } else {
+              interactionOpenRef.current = false;
             }
           }}
         >
@@ -1111,10 +1146,16 @@ export function WebShellSidebar({
     event.preventDefault();
   }, []);
   const isCollapsedCloseBlocked = useCallback(
-    () => sessionMenuOpenRef.current || groupMenu !== null,
-    [groupMenu],
+    () =>
+      sessionMenuOpenRef.current ||
+      groupMenu !== null ||
+      deleteCandidate !== null,
+    [deleteCandidate, groupMenu],
   );
   const previousRunningBySourceRef = useRef<
+    Record<SidebarSessionSource, Map<string, boolean> | null>
+  >({ default: null, channel: null });
+  const previousSecondaryRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
   >({ default: null, channel: null });
   const lastTrackedSessionSourceRef = useRef(sessionSource);
@@ -1165,6 +1206,39 @@ export function WebShellSidebar({
         .filter((entry) => !entry.primary && entry.trusted)
         .map((entry) => entry.cwd),
     [displayedWorkspaces],
+  );
+  const secondaryActiveQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'active',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          ...(organizationEnabled
+            ? { view: 'organized' as const, group: 'all' }
+            : {}),
+        },
+      })),
+    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryActiveSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryActiveQueries,
+    {
+      autoLoad: collapsed,
+      pollIntervalMs: collapsed ? ACTIVE_SESSION_POLL_INTERVAL_MS : undefined,
+    },
+  );
+  const secondaryActiveSessions = useMemo(
+    () =>
+      secondaryActiveSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryActiveSnapshots],
   );
   const secondaryPinnedQueries = useMemo<SessionCatalogQuery[]>(
     () =>
@@ -1752,6 +1826,38 @@ export function WebShellSidebar({
     () => sessions.some((session) => session.hasActivePrompt),
     [sessions],
   );
+  const statusSessions = useMemo(() => {
+    const byIdentity = new Map<string, DaemonSessionSummary>();
+    for (const session of [...sessions, ...secondaryActiveSessions]) {
+      byIdentity.set(getIdentityForSession(session), session);
+    }
+    return [...byIdentity.values()];
+  }, [getIdentityForSession, secondaryActiveSessions, sessions]);
+  const collapsedSessionStatus = useMemo(() => {
+    if (statusSessions.some((session) => session.isWaitingForPermission)) {
+      return 'approval' as const;
+    }
+    if (statusSessions.some((session) => session.isWaitingForUserQuestion)) {
+      return 'question' as const;
+    }
+    if (
+      statusSessions.some((session) =>
+        completedUnreadIds.has(getIdentityForSession(session)),
+      )
+    ) {
+      return 'completed' as const;
+    }
+    return undefined;
+  }, [completedUnreadIds, getIdentityForSession, statusSessions]);
+  const collapsedSessionStatusLabel = collapsedSessionStatus
+    ? t(
+        collapsedSessionStatus === 'approval'
+          ? 'sidebar.waitingForApproval'
+          : collapsedSessionStatus === 'question'
+            ? 'sidebar.userInputNeeded'
+            : 'sidebar.completedUnread',
+      )
+    : undefined;
   const sessionPollInterval =
     projectExpanded || hasRunningSession || selectedSessionSource === 'channel'
       ? (hasRunningSession || selectedSessionSource === 'channel') && !error
@@ -1851,6 +1957,68 @@ export function WebShellSidebar({
     selectedSessionSource,
     sessionSource,
     sessions,
+  ]);
+
+  useEffect(() => {
+    if (
+      !collapsed ||
+      secondaryActiveSnapshots.length !== secondaryActiveQueries.length ||
+      secondaryActiveSnapshots.some(
+        (snapshot) => snapshot.loading || snapshot.error,
+      )
+    ) {
+      return;
+    }
+    const runningBySessionId = new Map(
+      secondaryActiveSessions
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        )
+        .map((session) => [
+          getIdentityForSession(session),
+          Boolean(session.hasActivePrompt),
+        ]),
+    );
+    const previousRunningBySessionId =
+      previousSecondaryRunningBySourceRef.current[sessionSource];
+    previousSecondaryRunningBySourceRef.current[sessionSource] =
+      runningBySessionId;
+    if (previousRunningBySessionId === null) return;
+
+    setCompletedUnreadIds((current) => {
+      const next = new Set(current);
+      let changed = false;
+      for (const [sessionIdentity, wasRunning] of previousRunningBySessionId) {
+        const isRunning = runningBySessionId.get(sessionIdentity);
+        if (
+          wasRunning &&
+          isRunning === false &&
+          sessionIdentity !== currentSessionIdentity &&
+          !next.has(sessionIdentity)
+        ) {
+          next.add(sessionIdentity);
+          changed = true;
+        } else if (
+          next.has(sessionIdentity) &&
+          (sessionIdentity === currentSessionIdentity ||
+            !runningBySessionId.has(sessionIdentity) ||
+            isRunning)
+        ) {
+          next.delete(sessionIdentity);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [
+    collapsed,
+    currentSessionIdentity,
+    getIdentityForSession,
+    secondaryActiveQueries.length,
+    secondaryActiveSessions,
+    secondaryActiveSnapshots,
+    selectedSessionSource,
+    sessionSource,
   ]);
 
   const reconcileRemovedWorkspace = useCallback(
@@ -2068,7 +2236,6 @@ export function WebShellSidebar({
 
   const handleLoadSession = useCallback(
     (sessionId: string, workspaceCwd?: string) => {
-      setCollapsedSessionsOpen(false);
       const sessionIdentity = getSessionIdentity(
         sessionId,
         workspaceCwd || primaryWorkspaceCwd,
@@ -2144,8 +2311,8 @@ export function WebShellSidebar({
       // A stale open search or rename editor would otherwise mount its
       // autofocused input inside the collapsed hover popover and steal
       // focus from the composer on every hover-open, so reset it whenever
-      // the collapsed surface is not showing (sidebar collapse, session
-      // click, hover-out, or dismissal). Radix's outside-interaction
+      // the collapsed surface is not showing (sidebar collapse, hover-out,
+      // or dismissal). Radix's outside-interaction
       // dismissal unmounts a focused input without firing blur. A stale
       // group picker would likewise block dismissal of the next
       // hover-opened switcher.
@@ -4593,6 +4760,8 @@ export function WebShellSidebar({
           <SidebarSessionSurface
             collapsed={collapsed}
             label={t('sidebar.project')}
+            status={collapsedSessionStatus}
+            statusLabel={collapsedSessionStatusLabel}
             width={sidebarWidth}
             open={collapsedSessionsOpen}
             onOpenChange={setCollapsedSessionsOpen}
