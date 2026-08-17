@@ -217,16 +217,27 @@ export function buildReviewPrompt(args: {
   comment?: boolean;
 }): string {
   const parts = ['/review'];
-  if (args.target) {
+  // Presence, not truthiness: an EMPTY target is a target the caller named
+  // and got wrong — `qwen review run "$TARGET"` with `TARGET` unset — and
+  // treating it as "no target given" silently launches a full local review
+  // on the caller's tree, at the 120-minute default timeout and real model
+  // spend, instead of the error its siblings `/`, `//`, `\` now get.
+  if (args.target !== undefined) {
     // The child re-tokenizes this string; a target carrying whitespace or a
     // leading dash would split into extra tokens (`123 --comment` would
     // silently authorise posting), and a quote is stripped by the tokenizer
     // (`src/it's.ts` would re-target to `src/its.ts`) — refuse anything but a
     // single clean token.
     if (
+      args.target.trim() === '' ||
       /\s/.test(args.target) ||
       args.target.startsWith('-') ||
-      /['"]/.test(args.target)
+      /['"]/.test(args.target) ||
+      // A separators-only path (`/`, `//`, `\`) names no file: it survives
+      // basename extraction as the empty string, which pins the unmatchable
+      // `qwen-review--composed.json` and burns a whole child review before
+      // reporting "no composed verdict". Refuse it here instead.
+      /^[\\/]+$/.test(args.target)
     ) {
       throw new Error(
         `Invalid review target ${JSON.stringify(args.target)}: expected a single PR number, PR URL, or file path`,

@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitRawTolerateDiff, releaseWorktree } from './git.js';
+import { gitProbe, gitRawTolerateDiff, releaseWorktree } from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -185,5 +185,113 @@ describe('gitRawTolerateDiff', () => {
         'subdir',
       ),
     ).toThrow();
+  });
+});
+
+describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
+  // Every fetch-pr test mocks this module, so nothing else consumes the real
+  // `status`. A rewrite returning `{status: 1}` for every failure, or
+  // dropping the field, would reclassify every deterministic anchor refusal
+  // as retryable infrastructure (and vice versa) with the whole suite green.
+  it('reports 0, the predicate NO, and an error apart from each other', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gitprobe-'));
+    try {
+      execFileSync('git', ['init', '-q', repo], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'config', 'user.email', 'a@b.c']);
+      execFileSync('git', ['-C', repo, 'config', 'user.name', 'a']);
+      writeFileSync(join(repo, 'f.txt'), 'x\n');
+      execFileSync('git', ['-C', repo, 'add', 'f.txt'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'commit', '-qm', 'one'], {
+        stdio: 'pipe',
+      });
+      const head = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+
+      // 0: the object is here.
+      expect(gitProbe('-C', repo, 'cat-file', '-e', head).status).toBe(0);
+      // 1: a well-formed FULL sha this history does not hold — the
+      // definitive no.
+      expect(
+        gitProbe('-C', repo, 'cat-file', '-e', '0'.repeat(40)).status,
+      ).toBe(1);
+      // 128: not a valid object NAME — what git says for an abbreviation
+      // that resolves to nothing. Deterministic too, which is why
+      // `commitExists` treats it as absence rather than as a failure.
+      expect(gitProbe('-C', repo, 'cat-file', '-e', '0000000').status).toBe(
+        128,
+      );
+      // The predicate's own yes, its no, and its error — all three, from
+      // real git. `--is-ancestor` is the one probe whose three answers the
+      // reason taxonomy splits three ways, and this describe is the only
+      // consumer of a REAL status anywhere (every fetch-pr test mocks
+      // `./lib/git.js`), so a wrapper change that surfaced the predicate's
+      // NO as an error status would rename every deterministic
+      // `not-an-ancestor` refusal to the retryable `capture-failed` with
+      // nothing red.
+      writeFileSync(join(repo, 'f.txt'), 'y\n');
+      execFileSync('git', ['-C', repo, 'add', 'f.txt'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'commit', '-qm', 'two'], {
+        stdio: 'pipe',
+      });
+      const newer = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+
+      // 0: yes — a commit is its own ancestor, and the older is the newer's.
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, head).status,
+      ).toBe(0);
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, newer).status,
+      ).toBe(0);
+      // 1: no — the newer commit is not an ancestor of the older.
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', newer, head).status,
+      ).toBe(1);
+      // 128: not a valid object name — an ERROR, not a no. This is the
+      // status `commitExists`/`resolveCommit` must settle before ancestry is
+      // ever asked, since the predicate cannot answer it.
+      expect(
+        gitProbe(
+          '-C',
+          repo,
+          'merge-base',
+          '--is-ancestor',
+          '0'.repeat(40),
+          head,
+        ).status,
+      ).toBe(128);
+
+      // The `out` half, from real git. `resolveCommit` returns this value
+      // verbatim as the anchor's `diffBase`, so the trim is load-bearing: a
+      // refactor dropping it makes `resolved === fetchedSha` false and
+      // `merge-base --is-ancestor "<sha>\n" <head>` exit 128 → the anchor is
+      // called `capture-failed` and retried forever. On Windows, where
+      // rev-parse output carries CRLF, that is the DEFAULT shape, not a mutant.
+      expect(gitProbe('-C', repo, 'rev-parse', `${head}^{commit}`).out).toBe(
+        head,
+      );
+
+      // `status: null` — no exit code at all, which is what a spawn failure
+      // or a timeout kill leaves. It is the whole reason the probe returns a
+      // nullable status instead of a number: this is the retryable half of
+      // the split, and every fetch-pr test mocks `./lib/git.js`, so nothing
+      // else exercises the real catch. A mutant returning a number here reads
+      // a killed probe as the predicate's answer and permanently retires a
+      // valid anchor on a transient fault.
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = join(repo, 'no-such-bin');
+        expect(gitProbe('-C', repo, 'rev-parse', 'HEAD')).toEqual({
+          out: null,
+          status: null,
+        });
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });

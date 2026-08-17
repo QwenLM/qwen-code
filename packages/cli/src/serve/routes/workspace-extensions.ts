@@ -41,6 +41,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   createExtensionsController,
@@ -233,6 +234,7 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   captureGenerationAssertion?: () => (() => void) | undefined;
   // Enables V2 workspace projection and targeted reconciliation routes.
   workspaceRegistry?: WorkspaceRegistry;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 /**
@@ -435,7 +437,11 @@ export function registerWorkspaceExtensionRoutes(
       run: async <T>(run: () => Promise<T>): Promise<T> => {
         if (used) throw new Error('Runtime reconciliation already released');
         used = true;
-        provideTask(run);
+        provideTask(
+          deps.conversationRuntimeActivity
+            ? () => deps.conversationRuntimeActivity!.run(run)
+            : run,
+        );
         return (await queued) as T;
       },
       release: () => {
@@ -455,7 +461,7 @@ export function registerWorkspaceExtensionRoutes(
   const globalReconciliationOptions = () =>
     workspaceRegistry
       ? {
-          refreshRuntimes: () => workspaceRegistry.list(),
+          refreshRuntimes: () => workspaceRegistry.listAll(),
           reserveRuntimeReconciliation,
           onRuntimeReconciled,
         }
@@ -475,7 +481,7 @@ export function registerWorkspaceExtensionRoutes(
   ): readonly AcpSessionBridge[] =>
     (typeof runtimes === 'function'
       ? runtimes()
-      : (runtimes ?? workspaceRegistry?.list())
+      : (runtimes ?? workspaceRegistry?.listAll())
     )?.map((runtime) => runtime.bridge) ?? [bridge];
 
   if (workspaceRegistry) {
@@ -492,7 +498,7 @@ export function registerWorkspaceExtensionRoutes(
         const generation = (await manager.getExtensionStoreSnapshot())
           .generation;
         const pendingRuntimes = workspaceRegistry
-          .list()
+          .listAll()
           .filter(
             (runtime) =>
               (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) !==
@@ -502,25 +508,29 @@ export function registerWorkspaceExtensionRoutes(
           return;
         const runtimes = pendingRuntimes;
         if (runtimes.length === 0) return;
-        const results = await runtimeReconciliationQueue.run(
-          async () =>
-            await Promise.allSettled(
-              runtimes.map(async (runtime) => {
-                runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                try {
-                  const result =
-                    await runtime.bridge.refreshExtensionsForAllSessions();
-                  if (result.failed > 0) {
-                    throw new Error(
-                      `${result.failed} extension session refresh(es) failed`,
-                    );
-                  }
-                } finally {
+        const reconcile = () =>
+          runtimeReconciliationQueue.run(
+            async () =>
+              await Promise.allSettled(
+                runtimes.map(async (runtime) => {
                   runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                }
-              }),
-            ),
-        );
+                  try {
+                    const result =
+                      await runtime.bridge.refreshExtensionsForAllSessions();
+                    if (result.failed > 0) {
+                      throw new Error(
+                        `${result.failed} extension session refresh(es) failed`,
+                      );
+                    }
+                  } finally {
+                    runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                  }
+                }),
+              ),
+          );
+        const results = deps.conversationRuntimeActivity
+          ? await deps.conversationRuntimeActivity.run(reconcile)
+          : await reconcile();
         results.forEach((result, index) => {
           if (result.status === 'fulfilled') {
             const workspaceId = runtimes[index]!.workspaceId;
@@ -1620,7 +1630,7 @@ export function registerWorkspaceExtensionRoutes(
         },
         {
           ...(workspaceRegistry
-            ? { refreshRuntimes: () => workspaceRegistry.list() }
+            ? { refreshRuntimes: () => workspaceRegistry.listAll() }
             : {}),
         },
       );
@@ -1780,7 +1790,7 @@ export function registerWorkspaceExtensionRoutes(
       {
         deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
         ...(workspaceRegistry
-          ? { refreshRuntimes: () => workspaceRegistry.list() }
+          ? { refreshRuntimes: () => workspaceRegistry.listAll() }
           : {}),
       },
     );
@@ -1889,7 +1899,7 @@ export function registerWorkspaceExtensionRoutes(
         {
           deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
           ...(workspaceRegistry
-            ? { refreshRuntimes: () => workspaceRegistry.list() }
+            ? { refreshRuntimes: () => workspaceRegistry.listAll() }
             : {}),
         },
       );
@@ -1943,7 +1953,7 @@ export function registerWorkspaceExtensionRoutes(
           },
           {
             ...(workspaceRegistry
-              ? { refreshRuntimes: () => workspaceRegistry.list() }
+              ? { refreshRuntimes: () => workspaceRegistry.listAll() }
               : {}),
           },
         );

@@ -9,10 +9,10 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
-  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  goalLimitKindForReason,
   isGoalEvidenceProofKind,
+  isGoalLimitKind,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -106,6 +106,7 @@ export function reduceGoalControl(
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
       lastReason: undefined,
+      limitKind: undefined,
     });
   }
 
@@ -131,11 +132,7 @@ export function reduceGoalControl(
       snapshotOf(current),
     );
   }
-  if (
-    current.status === 'usage_limited' &&
-    (current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON ||
-      current.lastReason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON)
-  ) {
+  if (current.status === 'usage_limited' && isEvidenceLimited(current)) {
     throw new GoalInvalidTransitionError(
       'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
       snapshotOf(current),
@@ -343,6 +340,21 @@ function normalizeObjective(
   return normalized;
 }
 
+/**
+ * Whether a stopped Goal was stopped by one of the evidence bounds.
+ *
+ * `limitKind` is the field of record. The `lastReason` comparison behind it
+ * reads Goals persisted before `limitKind` existed, where the sentinel prose
+ * was the only marker a transition could key off.
+ */
+function isEvidenceLimited(goal: GoalRecord): boolean {
+  return (
+    goal.limitKind !== undefined ||
+    (goal.lastReason !== undefined &&
+      goalLimitKindForReason(goal.lastReason) !== undefined)
+  );
+}
+
 function transitionGoal(
   goal: GoalRecord,
   now: number,
@@ -399,6 +411,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'updatedAt',
       'evidenceCheckpoint',
       'lastReason',
+      'limitKind',
     ]) ||
     typeof value['goalId'] !== 'string' ||
     !value['goalId'] ||
@@ -414,7 +427,10 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isFiniteNumber(value['updatedAt']) ||
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['lastReason'] !== undefined &&
-      typeof value['lastReason'] !== 'string')
+      typeof value['lastReason'] !== 'string') ||
+    (value['limitKind'] !== undefined &&
+      (!isGoalLimitKind(value['limitKind']) ||
+        value['status'] !== 'usage_limited'))
   ) {
     return undefined;
   }
@@ -443,6 +459,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     ...(value['lastReason'] === undefined
       ? {}
       : { lastReason: value['lastReason'] }),
+    ...(value['limitKind'] === undefined
+      ? {}
+      : { limitKind: value['limitKind'] }),
   };
 }
 
