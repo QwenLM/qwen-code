@@ -170,6 +170,10 @@ export class TaskListTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: TaskListParams,
   ): ToolInvocation<TaskListParams, ToolResult> {
-    return new TaskListInvocation(this.config, params);
+    return new TaskListInvocation(this.config, {
+      ...params,
+      owner: params.owner === '' ? undefined : params.owner,
+      blockedBy: params.blockedBy === '' ? undefined : params.blockedBy,
+    });
   }
 }
