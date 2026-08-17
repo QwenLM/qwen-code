@@ -76,6 +76,11 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           RELEASE_TAG: '${{ github.event.release.tag_name || '''' }}'
           RELEASE_PRERELEASE: '${{ github.event.release.prerelease || false }}'
+          INPUT_EXECUTION_BACKEND: '${{ inputs.execution_backend }}'
+          INPUT_INSTANCE_LIMIT: '${{ inputs.instance_limit }}'
+          INPUT_INSTANCE_ID: '${{ inputs.instance_id }}'
+          INPUT_TERMINAL_BENCH_LIMIT: '${{ inputs.terminal_bench_limit }}'
+          INPUT_TERMINAL_BENCH_INSTANCE_ID: '${{ inputs.terminal_bench_instance_id }}'
         run: |-
           should_run='false'
           execution_backend='eas-harbor'
@@ -85,20 +90,20 @@ jobs:
           terminal_bench_instance_id=''
           if [[ "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
             should_run='true'
-            execution_backend='${{ inputs.execution_backend }}'
-            instance_limit='${{ inputs.instance_limit }}'
+            execution_backend="${INPUT_EXECUTION_BACKEND}"
+            instance_limit="${INPUT_INSTANCE_LIMIT}"
             if [[ "${instance_limit}" == '1' ]]; then
-              instance_id='${{ inputs.instance_id }}'
+              instance_id="${INPUT_INSTANCE_ID}"
             fi
-            terminal_bench_limit='${{ inputs.terminal_bench_limit }}'
+            terminal_bench_limit="${INPUT_TERMINAL_BENCH_LIMIT}"
             if [[ "${terminal_bench_limit}" == '1' ]]; then
-              terminal_bench_instance_id='${{ inputs.terminal_bench_instance_id }}'
+              terminal_bench_instance_id="${INPUT_TERMINAL_BENCH_INSTANCE_ID}"
             fi
           elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-smoke-[0-9A-Za-z._-]+$ ]]; then
+            # This tag intentionally exercises the production-sized EAS chain.
             should_run='true'
-            execution_backend='eas-smoke'
-            instance_limit='1'
-            instance_id='astropy__astropy-12907'
+            execution_backend='eas-harbor'
+            instance_limit='500'
           elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-tb-smoke-[0-9A-Za-z._-]+$ ]]; then
             # A release-event smoke must exercise the same persistent EAS
             # Harbor and Publisher chain as the full 500 + 89 benchmark.
