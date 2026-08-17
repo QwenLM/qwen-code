@@ -11,6 +11,9 @@ name: 'Qwen Autofix'
 #   • every 10m            → review phase; issue phase only if no PR needs work
 #   • issues:labeled        → issue phase when ready label, state, and sender match
 #   • pull_request_review   → review phase for submitted feedback on bot PRs
+#                             (open PRs only: reviews on closed/merged PRs
+#                             drop at the route gate; the scheduled scan is
+#                             the backstop for anything missed)
 #   • pull_request:labeled  → maintainer applies autofix/takeover → the loop
 #                             manages that PR (human-authored included, and
 #                             maintainer FORKS too: the fork's author must
@@ -292,8 +295,16 @@ jobs:
     # branch would trim it — fail closed, command must start the comment.
     # Both commands are prefiltered here (/takeover toggles the label, /retry
     # re-arms a stranded PR); everything else never starts a job.
+    # The pull_request_review clause drops reviews on closed/merged PRs at the
+    # gate: a PR that can no longer receive commits has nothing to address.
+    # Finding-reply bursts on just-merged PRs otherwise start one no-op run
+    # per reply (observed 2026-08-16: 24+ reply reviews on merged #9222 and
+    # 26 runs on merged #9189 within minutes — issue #9296). The fleet never
+    # loses a legitimate target from this: the schedule scan engages any open
+    # PR with review context on its next tick, and address-time revalidation
+    # already drops targets whose PR closed after dispatch.
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') && (github.event_name != 'pull_request_review' || github.event.pull_request.state == 'open') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:

@@ -4396,6 +4396,33 @@ describe('DaemonClient', () => {
       expect(result.accepted).toBe(false);
     });
 
+    it('includes media content blocks in the POST body when provided', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true, messageId: 'mid-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.enqueueMidTurnMessage('s-1', 'see this', {
+        messageId: 'client-mid-1',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'see this',
+        messageId: 'client-mid-1',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+    });
+
+    it('omits the content field when no media blocks are attached', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { accepted: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.enqueueMidTurnMessage('s-1', 'plain', { content: [] });
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        message: 'plain',
+      });
+    });
+
     it('URL-encodes the session id, forwards client id, and propagates the abort signal', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { accepted: true }),
@@ -7365,6 +7392,54 @@ describe('DaemonClient', () => {
       for (const call of calls) {
         expect(JSON.parse(call.body!)).toEqual({ sessionIds: ['s-1'] });
       }
+    });
+
+    it('workspace metadata update uses encoded direct REST and client identity', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 'session/1',
+          displayName: 'Renamed',
+        }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'transport route not mapped' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client
+          .workspaceByCwd('/tmp/work space')
+          .updateSessionMetadata(
+            'session/1',
+            { displayName: 'Renamed' },
+            'client-1',
+          ),
+      ).resolves.toEqual({
+        sessionId: 'session/1',
+        displayName: 'Renamed',
+      });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]).toMatchObject({
+        method: 'PATCH',
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/session/session%2F1/metadata',
+        headers: { 'x-qwen-client-id': 'client-1' },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        displayName: 'Renamed',
+      });
     });
 
     it('workspace transcript paging forces direct REST transport', async () => {

@@ -131,6 +131,11 @@ describe('runIssueContext', () => {
       dirname(resolve('/tmp/issue-context.md')),
       { recursive: true },
     );
+    // The write TARGET, not just the content: a redirected write that still
+    // reported the right body used to ship green (#9194).
+    expect(writeFileSyncMock.mock.calls[0][0]).toBe(
+      resolve('/tmp/issue-context.md'),
+    );
     expect(written).toContain('untrusted user input');
     expect(written).toContain('## Issue #9078 of QwenLM/qwen-code: the bug');
     expect(written).toContain('repro steps');
@@ -250,7 +255,9 @@ describe('runIssueContext', () => {
     mockIssue('five');
     runIssueContext({ ...ARGS, extraIssues: ex(555) });
     const written = writeFileSyncMock.mock.calls[0][1] as string;
-    expect(written).toContain('the closing set could not be checked');
+    expect(written).toContain(
+      'Additionally fetched issues (referenced by the PR context; the closing set could not be checked)',
+    );
     expect(written).not.toContain('NOT in the closing set');
   });
 
@@ -279,7 +286,12 @@ describe('runIssueContext', () => {
       'title,body,comments',
     );
     const written = writeFileSyncMock.mock.calls[0][1] as string;
-    expect(written).toContain('Additionally fetched issues');
+    // Pin the FULL header wording, not a prefix: the 'NOT in the closing
+    // set' clause is the claim a reader acts on, and only the negative
+    // (discovery-failed) case used to be asserted (#9194).
+    expect(written).toContain(
+      'Additionally fetched issues (referenced by the PR context, NOT in the closing set)',
+    );
     expect(written).toContain(
       '## Issue #555 of QwenLM/qwen-code: referenced only',
     );
@@ -492,6 +504,10 @@ describe('issueContextCommand handler', () => {
     // status`), so the ordering must hold against it too, not just the
     // data call.
     expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
+    // The other half of the invariant (#9194): the data fetch must not
+    // precede authentication — a gh call that beats `gh auth status` races
+    // the very credential it depends on.
+    expect(authOrder).toBeLessThan(ghOrder);
   });
 
   it('exits 2 on a usage error (malformed --repo)', () => {
@@ -521,6 +537,7 @@ describe('issueContextCommand handler', () => {
       out: '/tmp/ic.md',
     });
     expect(process.exitCode).toBeUndefined();
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
     expect(writeStdoutLineMock).toHaveBeenCalledWith(
       expect.stringContaining('"discoveryError":"HTTP 500"'),
     );
@@ -614,6 +631,22 @@ describe('issueContextCommand handler', () => {
       repo: 'QwenLM/qwen-code',
       out: '/tmp/ic.md',
       issue: [0],
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a fractional pr_number — the isInteger half of the guard (#9194)', () => {
+    // The non-positive cases above exercise `<= 0`; the `Number.isInteger`
+    // half used to be untested, so a guard that only checked positivity
+    // would ship green and let `1.5` reach the gh call.
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1.5,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
     });
     expect(process.exitCode).toBe(2);
     expect(ghMock).not.toHaveBeenCalled();
