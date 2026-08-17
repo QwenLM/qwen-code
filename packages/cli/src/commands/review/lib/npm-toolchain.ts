@@ -222,10 +222,18 @@ function resumeNpmToolchain(
     // `buildOnly` marks the deliberate probe, `ok: false` marks the runs
     // that died early (failed install, disk gate, budget in the build);
     // an `ok: true` non-probe with no scope and no results ran to
-    // completion and simply had nothing to run.
+    // completion and simply had nothing to run. The third signal,
+    // `endedBeforeTests`, covers the shape the other two cannot: a
+    // single-root run whose budget fell below the attempt floor before the
+    // first suite — build green (`ok: true`), no probe, no scope — where
+    // only the fresh path's own stamp knows the phase ran nothing it was
+    // supposed to run.
     const neverTested = previous.test.length === 0 && !previous.testScope;
     const endedEarly =
-      neverTested && (previous.buildOnly === true || previous.ok === false);
+      neverTested &&
+      (previous.buildOnly === true ||
+        previous.ok === false ||
+        previous.endedBeforeTests === true);
     return withNote(
       endedEarly
         ? 'Nothing to resume: the run being continued ended before its test ' +
@@ -618,6 +626,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       build: [],
       test: [],
       ...(testScope ? { testScope } : {}),
+      // The probe stamp rides EVERY producer path: this return already
+      // branches on args.buildOnly for its note, and a probe report without
+      // the stamp lost its probe answer on --resume.
+      ...(args.buildOnly ? { buildOnly: true } : {}),
       ok: true,
       timedOut: [],
       note: args.buildOnly
@@ -1060,6 +1072,16 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     if (r.exitCode !== 0) results.ok = false;
   }
 
+  // The test phase ran NOTHING and left work behind: stamp it. A single-root
+  // run in this state writes no testScope and keeps ok: true (the build
+  // passed), so the stamp is the only structural evidence separating "ended
+  // before its test phase" from "completed with no suite to run" — the
+  // resume split reads it, and without it a --resume certified the one
+  // existing suite as finished (multi-root runs carry the same fact in
+  // testScope.notRun; the stamp is simply the phase-level truth either way).
+  if (results.test.length === 0 && notRun.length > 0) {
+    results.endedBeforeTests = true;
+  }
   // A budget stop is STRUCTURAL, not just prose: `testScope.workspaces` is
   // documented (and quoted by the agent's brief) as exactly the suites that
   // ran, so the trimmed suites leave it, and `notRun` names them. Sorted, so

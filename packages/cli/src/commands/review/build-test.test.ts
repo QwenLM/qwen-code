@@ -449,6 +449,30 @@ describe('runBuildTest', () => {
     expect(rep.testScope?.caveat).toBeUndefined();
     expect(rep.note).toContain('no package to build');
     expect(rep.note).toContain('complete answer');
+    // Not a probe: the stamp must not appear on an ordinary zero-affected run.
+    expect(rep.buildOnly).toBeUndefined();
+
+    // The probe stamp rides the zero-affected return too — this producer
+    // path branches on buildOnly for its note but used to drop the stamp,
+    // so a resumed probe report lost its probe answer.
+    const probe = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      buildOnly: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(probe.buildOnly).toBe(true);
   });
 
   it('runs nothing but discloses the caveat for out-of-workspace files that are not inert', () => {
@@ -1577,6 +1601,11 @@ describe('runBuildTest', () => {
     expect(rep.note).not.toContain('defines no test script');
     expect(rep.note).toContain('not run: .');
     expect(rep.ok).toBe(true);
+    // The structural stamp: build green, no probe, no scope — without it the
+    // resume split read this exact report as COMPLETED with no suite to run,
+    // certified the one existing suite as finished, and dropped the fresh
+    // re-run advice that is the only path to ever running it.
+    expect(rep.endedBeforeTests).toBe(true);
   });
 
   it('runs the AFFECTED workspace first, so the budget trims dependents, never the changed suite', () => {
@@ -3247,6 +3276,19 @@ describe('runBuildTest', () => {
       // tests and no scope BY CHOICE, and only the stamp tells it apart.
       writeFileSync(outPath, JSON.stringify({ ...base, buildOnly: true }));
       expect(attempt().note).toContain('ended before its test phase');
+
+      // And the budget-floor shape keeps it too — build green, ok true, no
+      // scope, but the fresh path stamped that the test phase ran nothing.
+      // This is the shape whose real suite the false-completion answer
+      // certified as finished.
+      writeFileSync(
+        outPath,
+        JSON.stringify({ ...base, endedBeforeTests: true }),
+      );
+      const floored = attempt();
+      expect(floored.note).toContain('ended before its test phase');
+      expect(floored.note).toContain('Re-run build-test without --resume');
+      expect(floored.note).not.toContain('completed with no suite to run');
     });
 
     it('keeps reporting work left when a retry is killed AGAIN by the budget', () => {

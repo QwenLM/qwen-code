@@ -136,6 +136,17 @@ export interface BuildTestReport {
    */
   buildOnly?: boolean;
   /**
+   * True when the test phase was ENTERED and ran nothing — the whole-call
+   * budget fell below the attempt floor (or the unbuilt closure covered
+   * every suite) before the first test command started. Structural for the
+   * same reason `buildOnly` is: a single-root run in this state carries no
+   * `testScope` and keeps `ok: true` (the build passed), so without the
+   * stamp `--resume` read it as a COMPLETED zero-suite run — certifying an
+   * existing, unrun suite as finished and dropping the re-run advice that
+   * is the only path to ever running it.
+   */
+  endedBeforeTests?: boolean;
+  /**
    * What the test phase covered, so the review can state exactly what was and
    * was not run: `workspaces` lists exactly the suites the run executes, and
    * `caveat` — when present — says why that set may be incomplete. Only set
@@ -542,6 +553,10 @@ function previousReport(out: string | undefined): BuildTestReport {
   const buildOnlyShape = (parsed as { buildOnly?: unknown }).buildOnly;
   const buildOnlyOk =
     buildOnlyShape === undefined || typeof buildOnlyShape === 'boolean';
+  const endedBeforeShape = (parsed as { endedBeforeTests?: unknown })
+    .endedBeforeTests;
+  const endedBeforeOk =
+    endedBeforeShape === undefined || typeof endedBeforeShape === 'boolean';
   // Same rule for `ok`, which the split reads beside it: required on the
   // report, so undefined is refused too.
   const okOk = typeof (parsed as { ok?: unknown }).ok === 'boolean';
@@ -565,6 +580,7 @@ function previousReport(out: string | undefined): BuildTestReport {
     !strings(shape.timedOut) ||
     !affectedOk ||
     !buildOnlyOk ||
+    !endedBeforeOk ||
     !okOk ||
     !notBuiltOk ||
     !scopeOk ||
