@@ -792,6 +792,39 @@ export function createChannelWorkerManager(
     }
   };
 
+  // reloadWorkspace's reconcile is scoped to ONE workspace
+  // (forceWorkspaceCwd): entries owned by other workspaces are preserved
+  // as-is, so names the GLOBAL reload filter dropped but a PRESERVED
+  // workspace owns must stay committed — committing the globally
+  // filtered selection trims them while their workers keep running,
+  // desyncing committedGroups from committedSelection: a later
+  // per-channel stop then hits the disable early-return with nothing to
+  // tear down, and the channel runs unmanaged until the next GLOBAL
+  // reconcile (reload/refreshWorkspaces) re-filters with a full
+  // reconcile and stops it coherently. Names owned by the reconciled
+  // workspace itself stay filtered — re-adding the requested workspace's
+  // own dropped name would resurrect an explicitly stopped channel
+  // (R15-38). Never changes a mode-`all` selection (R17-3).
+  const scopeCommitSelection = (
+    selection: ServeChannelSelection,
+    workspaceCwd: string,
+  ): ServeChannelSelection => {
+    if (selection.mode !== 'names') return selection;
+    const kept = new Set(selection.names);
+    let changed = false;
+    for (const committedGroup of committedGroups) {
+      if (committedGroup.workspaceCwd === workspaceCwd) continue;
+      if (committedGroup.selection.mode !== 'names') continue;
+      for (const name of committedGroup.selection.names) {
+        if (!kept.has(name)) {
+          kept.add(name);
+          changed = true;
+        }
+      }
+    }
+    return changed ? { mode: 'names', names: [...kept] } : selection;
+  };
+
   // Reporting a terminal-failed worker's names as committed makes a
   // per-channel start early-return `{changed: false}` on the dead worker
   // instead of relaunching it — silently swallowing the natural recovery
@@ -1069,10 +1102,18 @@ export function createChannelWorkerManager(
           );
         }
         setTransition('reconciling', committedSelection);
-        // Resolve AND commit the filtered selection (see reload(): the
-        // committed state must stay coherent with what was reconciled,
-        // or the next reload resurrects the filtered name) (R14).
+        // Resolve the filtered selection and commit its workspace-scoped
+        // form (see reload(): the committed state must stay coherent with
+        // what was reconciled, or the next reload resurrects the filtered
+        // name) (R14). The scoping keeps names owned by PRESERVED other
+        // workspaces committed — this reconcile cannot touch them
+        // (forceWorkspaceCwd below), so trimming them here desyncs the
+        // bookkeeping while their workers keep running (R17-3).
         const filteredSelection = reloadSelection(committedSelection);
+        const scopedSelection = scopeCommitSelection(
+          filteredSelection,
+          workspaceCwd,
+        );
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
           targetGroups = await opts.resolveGroups(filteredSelection, 'reload');
@@ -1113,7 +1154,7 @@ export function createChannelWorkerManager(
             ? targetGroup
             : committedGroup,
         );
-        commit(filteredSelection, nextCommittedGroups);
+        commit(scopedSelection, nextCommittedGroups);
         const worker = group
           .snapshots()
           .find((snapshot) => snapshot.workspaceCwd === workspaceCwd);

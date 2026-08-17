@@ -113,6 +113,22 @@ export interface ChannelStartResult extends ChannelMutationResult {
   statePersistFailedWorkspaces?: string[];
 }
 
+export interface ChannelRemoveResult extends ChannelMutationResult {
+  /**
+   * Present (and `false`) only when the removal's stop succeeded but its
+   * `stopped` record failed to persist: a later `--channel all` restart
+   * may bring the removed channels back, and a re-issued remove finds the
+   * group already cleared so it can never re-record — callers must
+   * surface the failure. Absent on the happy path (#8975, R17-2).
+   */
+  statePersisted?: boolean;
+  /**
+   * Present alongside `statePersisted: false`: the workspaces whose
+   * state write failed, so a retry can be targeted (R14/R17-2).
+   */
+  statePersistFailedWorkspaces?: string[];
+}
+
 export interface ChannelPairingRequestsSnapshot {
   requests: PairingRequest[];
 }
@@ -143,10 +159,7 @@ export interface ChannelManagementService {
     name: string,
     request: ChannelUpsertRequest,
   ): Promise<ChannelMutationResult>;
-  remove(
-    name: string,
-    request: RevisionRequest,
-  ): Promise<ChannelMutationResult>;
+  remove(name: string, request: RevisionRequest): Promise<ChannelRemoveResult>;
   setStartup(
     name: string,
     request: ChannelStartupRequest,
@@ -683,6 +696,15 @@ export function createChannelManagementService(
       const persisted = await opts.store.upsert(name, request);
       diagnostics.delete(name);
       if (active) {
+        // Mirror the start/restart entry points: the reload resolves
+        // through the stopped-record filter, which drops names carrying a
+        // persisted `stopped` record — with a surviving record (the
+        // statePersisted:false loss mode this PR models) the filtered
+        // resolve throws channel_runtime_owner_mismatch and the fallback
+        // below STOPS the live channel a config update should only
+        // reconfigure. Clear the record first so the reload sees the
+        // channel as startable (#8975, R17-5).
+        clearStoppedRecord(name);
         try {
           await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
         } catch (error) {
@@ -714,6 +736,7 @@ export function createChannelManagementService(
       // a ghost in the committed selection, failing every later reload-op
       // resolve until daemon restart (R15-17). The disable re-commits the
       // trimmed selection, which is what removes the ghost.
+      let stopPersistFailedWorkspaces: string[] = [];
       if (
         workspaceCommittedNames().includes(name) ||
         workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd)
@@ -726,8 +749,17 @@ export function createChannelManagementService(
           // the per-workspace tear-down set. Persist it like stop()'s
           // success path, both stop() catch branches and the DELETE route
           // do, or the removed channels resurrect on the next `--channel
-          // all` start (#8975, R16-16).
-          recordStopForName(name, stopped.stoppedChannels);
+          // all` start (#8975, R16-16). The persistence result is
+          // surfaced on the response like stop()'s success path does:
+          // dropping it returns a clean 200 with no loss signal and no
+          // retry handle — a re-issued remove finds the group already
+          // cleared and can never re-record, so the next `--channel all`
+          // resurrects exactly the channels #8975 must keep stopped
+          // (R17-2).
+          stopPersistFailedWorkspaces = recordStopForName(
+            name,
+            stopped.stoppedChannels,
+          );
         } catch (error) {
           // A failed stop can still have torn down channels (lease release
           // can fail after a successful tear-down): the manager carries the
@@ -745,13 +777,51 @@ export function createChannelManagementService(
               error.statePersisted = false;
               error.statePersistFailedWorkspaces = failedWorkspaces;
             }
+          } else if (
+            error instanceof ChannelWorkerControlError &&
+            error.code === 'channel_worker_start_failed' &&
+            error.rolledBack === false
+          ) {
+            // Mirror stop()'s SECOND catch branch: the per-channel
+            // disable via applySelection stopped this channel's worker
+            // entry, the replacement selection failed to start, and the
+            // rollback restart also failed — the channel is confirmed
+            // dead, but this error shape carries no stoppedChannels set.
+            // Record the stop anyway (same restoredWorkspaces guard as
+            // stop(): an entry restored in THIS workspace is relaunching,
+            // so a `stopped` record would skip a live channel), or the
+            // failed DELETE leaves the channel configured and the next
+            // `--channel all` restarts it — silently undoing the
+            // tear-down the DELETE performed (#8975, R17-6).
+            const restoredHere = (error.restoredWorkspaces ?? []).some(
+              (workspaceCwd) =>
+                canonicalForGuard(workspaceCwd) ===
+                canonicalForGuard(opts.workspaceCwd),
+            );
+            if (!restoredHere) {
+              const failedWorkspaces = recordStopForName(name, undefined);
+              if (failedWorkspaces.length > 0) {
+                error.statePersisted = false;
+                error.statePersistFailedWorkspaces = failedWorkspaces;
+              }
+            }
           }
           throw error;
         }
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
-      return resultFor(name, persisted);
+      return {
+        ...(await resultFor(name, persisted)),
+        // Only on failure: the happy-path response shape stays unchanged,
+        // mirroring stop()'s success path (R17-2).
+        ...(stopPersistFailedWorkspaces.length === 0
+          ? {}
+          : {
+              statePersisted: false,
+              statePersistFailedWorkspaces: stopPersistFailedWorkspaces,
+            }),
+      };
     },
     async setStartup(name, request) {
       assertManageableInstanceName(name);
@@ -968,10 +1038,24 @@ export function createChannelManagementService(
       // set only holds connected channels, so a never-connected requested
       // channel would otherwise get no `stopped` record and resurrect
       // (R14).
-      const persistFailedWorkspaces = recordStopForName(
-        name,
-        result.stoppedChannels,
-      );
+      // Union BOTH loss sources: this name's own record write AND the
+      // manager's disable result — the names-mode commit inside
+      // applySelection clears committed names' persisted `stopped`
+      // records, and a clear failure rides `statePersisted` /
+      // `statePersistFailedWorkspaces` on the disable result. start()
+      // surfaces that identical signal (R16-2); stop() used to build the
+      // response only from recordStopForName's own write failures, so a
+      // sibling workspace's surviving record trimmed the committed
+      // selection on the next reload-op with no loss signal ever emitted
+      // (R17-4).
+      const persistFailedWorkspaces = [
+        ...new Set([
+          ...(result.statePersisted === false
+            ? (result.statePersistFailedWorkspaces ?? [])
+            : []),
+          ...recordStopForName(name, result.stoppedChannels),
+        ]),
+      ];
       diagnostics.delete(name);
       return {
         ...(await resultFor(name, persisted)),

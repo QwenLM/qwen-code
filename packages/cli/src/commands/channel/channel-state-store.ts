@@ -252,21 +252,28 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     const raw = readFileSync(legacyPath, 'utf-8');
     const parsed = parseStateFile(raw);
     // A legacy file that reads successfully but no longer parses is
-    // silently coerced to empty otherwise: the stops it carried are lost
-    // with no trace, so warn like every other discard path (#8975).
+    // UNKNOWN content, not empty: coercing it to an empty map would
+    // persist that emptiness as the new adoptedLegacy baseline,
+    // destroying the recorded snapshot — when the legacy content is
+    // later restored, the sync sees an empty snapshot and merges the
+    // stale legacy stops over explicit restarts recorded since (the
+    // R9-3 direction the contract keeps closed). Skip this sync like
+    // the target-read failure path: adoption runs on every start, so
+    // the next one retries once the condition clears (#8975, R17-1).
     if (!parsed) {
       writeStderrLineBestEffort(
-        `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
+        `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; legacy adoption skipped for this start.`,
       );
+      return;
     }
-    legacyChannels = parsed?.channels ?? Object.create(null);
+    legacyChannels = parsed.channels ?? Object.create(null);
     // A generation-less legacy file predates the watermark (tolerated):
     // record -1 so the NEXT rewrite — the first one stamping a real
     // generation — is visible as a change (R11-14).
-    legacyGeneration = parsed?.generation ?? -1;
+    legacyGeneration = parsed.generation ?? -1;
     // Absent on pre-epoch legacy files: adoption falls back to the
     // generation arithmetic for this sync (R15-15).
-    legacyEntryEpochs = parsed?.entryEpochs;
+    legacyEntryEpochs = parsed.entryEpochs;
   } catch {
     // ENOENT can still race the existsSync above; anything else is a real
     // open/read failure (EACCES/EIO/EISDIR on a shared ~/.qwen): the

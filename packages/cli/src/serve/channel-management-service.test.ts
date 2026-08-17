@@ -629,6 +629,49 @@ describe('createChannelManagementService', () => {
     expect(result.instance.runtime).toEqual({ state: 'connected' });
   });
 
+  it('clears a persisted stopped record before an active upsert reload (R17-5)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // A surviving `stopped` record (the statePersisted:false loss mode
+    // this PR models) makes the reload's filtered resolve throw
+    // channel_runtime_owner_mismatch, and upsert's fallback then STOPS
+    // the live channel a config update should only reconfigure. Mirror
+    // the start/restart entry points: clear before the reload.
+    mockChannelStateStorePrune.mockReturnValue({ bot: 'stopped' });
+
+    await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: { type: 'dingtalk', clientId: 'updated' },
+    });
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'active');
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+    // The clear must happen BEFORE the reload: a clear after the resolve
+    // still sees the surviving record and takes the fallback stop.
+    const clearOrder = mockChannelStateStoreSet.mock.invocationCallOrder[0]!;
+    const reloadOrder = vi.mocked(manager.reloadWorkspace).mock
+      .invocationCallOrder[0]!;
+    expect(clearOrder).toBeLessThan(reloadOrder);
+  });
+
+  it('rejects an active upsert when the stopped-record pre-read fails (R17-5)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Fail-closed like the start/restart entry points: an unknown-content
+    // pre-read cannot rule out a surviving record, so the reload must not
+    // run (R15-2).
+    mockChannelStateStorePrune.mockImplementation(() => {
+      throw new Error('EIO');
+    });
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: { type: 'dingtalk', clientId: 'updated' },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_state_persist_failed' });
+
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
   it('does not delete config when worker stop is unconfirmed', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['bot'],
@@ -843,6 +886,50 @@ describe('createChannelManagementService', () => {
     expect(result.statePersisted).toBe(false);
     // Attribution names exactly the workspace whose write failed, so a
     // retry can target the affected channels (R14).
+    expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
+  });
+
+  it('unions the manager disable loss into the stop result (R17-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // The names-mode commit inside applySelection clears committed names'
+    // persisted stopped records; a clear failure rides statePersisted /
+    // statePersistFailedWorkspaces on the disable result — the loss a
+    // sibling workspace's surviving record produces. stop() used to build
+    // the response only from recordStopForName's own write failures, so
+    // the loss never reached the client while the surviving record lets
+    // the next reload-op resolve trim the committed selection. start()
+    // surfaces the identical signal (R16-2).
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      statePersisted: false,
+      statePersistFailedWorkspaces: ['/ws/other'],
+    });
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    expect(result.statePersisted).toBe(false);
+    expect(result.statePersistFailedWorkspaces).toEqual(['/ws/other']);
+  });
+
+  it('dedupes overlapping loss attribution on the stop result (R17-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Both loss sources name the SAME workspace: the manager's clear
+    // failure and this name's own record write failure (the correlated
+    // disk condition). The union must dedupe, or the retry handle lists
+    // one workspace twice.
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      statePersisted: false,
+      statePersistFailedWorkspaces: [WORKSPACE],
+    });
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const result = await service.stop('bot');
+
+    expect(result.statePersisted).toBe(false);
     expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
   });
 
@@ -2930,6 +3017,117 @@ describe('createChannelManagementService', () => {
     );
     // …and the config entry stays put on the failed stop.
     expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('reports statePersisted false when the remove() stop record fails to persist (R17-2)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // remove() used to discard recordStopForName's return — the only one
+    // of its call sites that did — so a persistence failure during
+    // deletion returned a clean 200 with no loss signal and no retry
+    // handle: a re-issued remove finds the group already cleared and can
+    // never re-record, and the next `--channel all` resurrects exactly
+    // the channels #8975 must keep stopped. Surface it like stop()'s
+    // success path does.
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      stoppedChannels: [
+        { workspaceCwd: WORKSPACE, names: ['bot'] },
+        { workspaceCwd: '/ws/other', names: ['aux'] },
+      ],
+    });
+    mockChannelStateStoreTrySetMany.mockReturnValueOnce(false);
+
+    const result = await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    expect(result.instance.name).toBe('bot');
+    // The second group must still be attempted before reporting the loss.
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
+    expect(result.statePersisted).toBe(false);
+    expect(result.statePersistFailedWorkspaces).toEqual([WORKSPACE]);
+  });
+
+  it('keeps the happy-path remove shape free of the loss fields (R17-2)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      stoppedChannels: [{ workspaceCwd: WORKSPACE, names: ['bot'] }],
+    });
+
+    const result = await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    // Only-on-failure: the happy-path response shape stays unchanged,
+    // mirroring the stop/start convention.
+    expect(result.instance.name).toBe('bot');
+    expect(result).not.toHaveProperty('statePersisted');
+    expect(result).not.toHaveProperty('statePersistFailedWorkspaces');
+  });
+
+  it('persists the stop when remove() fails with a confirmed-dead disable (R17-6)', async () => {
+    const { service, manager, store } = setup({ committedNames: ['bot'] });
+    // The per-channel disable via applySelection stopped the worker
+    // entry, the replacement selection failed to start, and the rollback
+    // restart also failed (rolledBack: false, no stoppedChannels set):
+    // the channel is confirmed dead. remove()'s catch used to mirror only
+    // stop()'s FIRST catch branch, so nothing persisted — the failed
+    // DELETE leaves the channel configured, and the next `--channel all`
+    // restarts it, silently undoing the tear-down the DELETE performed.
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_worker_start_failed' });
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+    // …and the config entry stays put on the failed stop.
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('marks the rethrown remove() error when the confirmed-dead record fails to persist (R17-6)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+    // The same disk condition that broke startup/rollback can also fail
+    // this write: the 502 body must carry the loss or the client has no
+    // retry handle.
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      statePersisted: false,
+      statePersistFailedWorkspaces: [path.resolve(WORKSPACE)],
+    });
+  });
+
+  it('does not persist the remove() stop when the failed disable restored THIS workspace (R17-6)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Same restoredWorkspaces guard as stop(): `rolledBack` is aggregate
+    // across workspaces — an entry restored in THIS workspace is
+    // relaunching, so recording `stopped` would skip a live channel on
+    // the next `--channel all` start (R9-4).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+        restoredWorkspaces: [WORKSPACE],
+      }),
+    );
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_worker_start_failed' });
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
   });
 
   it('rejects mutations when two same-name workers run in the same workspace', async () => {

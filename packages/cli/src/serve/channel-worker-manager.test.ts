@@ -911,6 +911,124 @@ describe('createChannelWorkerManager', () => {
       });
     });
 
+    it('keeps preserved other-workspace names committed on reloadWorkspace (R17-3)', async () => {
+      // reloadWorkspace's reconcile is scoped to ONE workspace
+      // (forceWorkspaceCwd): entries owned by other workspaces are
+      // preserved as-is. When the global filter drops a name owned by a
+      // PRESERVED workspace (a surviving `stopped` record), committing
+      // the globally filtered selection trims it while its worker keeps
+      // running — committedGroups desyncs from committedSelection, a
+      // later per-channel stop hits the disable early-return with
+      // nothing to tear down, and the channel runs unmanaged until the
+      // next global reconcile. The commit must stay scoped to what was
+      // reconciled; the resolve itself stays globally filtered.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter(
+                (name) => name !== 'secondary-feishu',
+              ),
+            }
+          : selection,
+      );
+      const group = fakeGroup();
+      const resolveGroups = vi.fn(async (selection: ServeChannelSelection) =>
+        splitWorkspaceGroups(selection),
+      );
+      const manager = createChannelWorkerManager({
+        resolveGroups,
+        createGroup: vi.fn(() => group),
+        reserveLease: vi.fn(),
+        releaseLease: vi.fn(),
+        filterReloadSelection: filter,
+      });
+      await manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'secondary-feishu'],
+      });
+
+      await manager.reloadWorkspace(PRIMARY, 'telegram');
+
+      // The resolve ran against the globally filtered selection…
+      expect(resolveGroups).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['telegram'] },
+        'reload',
+      );
+      // …and the reconcile only touched the requested workspace…
+      expect(group.reconcile).toHaveBeenLastCalledWith(
+        [
+          {
+            workspaceCwd: PRIMARY,
+            selection: { mode: 'names', names: ['telegram'] },
+          },
+        ],
+        expect.objectContaining({ forceWorkspaceCwd: PRIMARY }),
+      );
+      // …but the commit keeps the preserved workspace's name, staying
+      // coherent with committedGroups (both entries still live).
+      expect(manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['telegram', 'secondary-feishu'],
+      });
+      expect(manager.committedChannelNames()).toEqual([
+        'telegram',
+        'secondary-feishu',
+      ]);
+
+      // A second scoped reload is stable: the filter drops the foreign
+      // name again and the scoped commit restores it again.
+      await manager.reloadWorkspace(PRIMARY, 'telegram');
+      expect(manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['telegram', 'secondary-feishu'],
+      });
+    });
+
+    it('still drops the reconciled workspace own filtered names on reloadWorkspace (R17-3 boundary)', async () => {
+      // The scoped commit must NOT re-add names owned by the reconciled
+      // workspace itself: that would resurrect an explicitly stopped
+      // channel through reloadWorkspace (the R15-38 hazard). The filter
+      // drops one PRIMARY-owned and one SECONDARY-owned name; only the
+      // foreign one may come back. A blanket "keep everything committed"
+      // regression turns red on telegram, a plain R15-38-style global
+      // commit on secondary-feishu.
+      const filter = vi.fn((selection: ServeChannelSelection) =>
+        selection.mode === 'names'
+          ? {
+              mode: 'names' as const,
+              names: selection.names.filter(
+                (name) => name !== 'telegram' && name !== 'secondary-feishu',
+              ),
+            }
+          : selection,
+      );
+      const group = fakeGroup();
+      const manager = createChannelWorkerManager({
+        resolveGroups: vi.fn(async (selection: ServeChannelSelection) =>
+          splitWorkspaceGroups(selection),
+        ),
+        createGroup: vi.fn(() => group),
+        reserveLease: vi.fn(),
+        releaseLease: vi.fn(),
+        filterReloadSelection: filter,
+      });
+      await manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu', 'secondary-feishu'],
+      });
+
+      await manager.reloadWorkspace(PRIMARY, 'feishu');
+
+      // telegram (owned by the reconciled workspace) stays dropped;
+      // secondary-feishu (owned by the preserved workspace) stays
+      // committed.
+      expect(manager.state().selection).toEqual({
+        mode: 'names',
+        names: ['feishu', 'secondary-feishu'],
+      });
+    });
+
     it('passes EVERY committed group to the filter in multi-workspace resolves (R15-37)', async () => {
       // Per-workspace attribution is the filter's core contract: passing
       // only the first committed group (or keying the state cache on a

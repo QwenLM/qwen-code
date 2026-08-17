@@ -1081,8 +1081,11 @@ describe('adoptLegacyChannelState (#8975)', () => {
 
   it('warns when the legacy file reads but no longer parses (R10-24)', () => {
     // A legacy file that readFileSync reads successfully but parses to
-    // undefined is coerced to an empty map: the stops it carried are
-    // silently lost unless the sync warns like every other discard path.
+    // undefined is UNKNOWN content, not empty: seeding the workspace file
+    // from an empty view would persist that emptiness as the new
+    // adoptedLegacy baseline, destroying any recorded snapshot. The sync
+    // warns like every other discard path and skips, mirroring the
+    // target-read failure path (#8975, R17-1).
     writeFileSync(legacyPath, '{not json', 'utf-8');
     const writeSpy = vi
       .spyOn(process.stderr, 'write')
@@ -1094,19 +1097,14 @@ describe('adoptLegacyChannelState (#8975)', () => {
       expect(writeSpy).toHaveBeenCalledWith(
         expect.stringContaining('could not parse legacy channel state file'),
       );
-      // Still seeds (empty) and records the snapshot, so the sync after
-      // the file is repaired merges the restored stops normally.
-      expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
-        version: 1,
-        channels: {},
-        adoptedLegacy: {},
-        adoptedLegacyGeneration: expect.any(Number),
-      });
+      // No target seeded: the sync aborted before any write.
+      expect(existsSync(workspacePath)).toBe(false);
     } finally {
       writeSpy.mockRestore();
     }
 
-    // Repair: the restored stops are merged on the next start.
+    // Repair: adoption runs on every start, so the restored stops are
+    // adopted on the next one.
     writeFileSync(
       legacyPath,
       JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
@@ -1115,6 +1113,60 @@ describe('adoptLegacyChannelState (#8975)', () => {
     adoptLegacyChannelState(workspace);
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
+    });
+  });
+
+  it('preserves the recorded baseline when the legacy file reads but no longer parses (R17-1)', () => {
+    // The workspace file holds an explicit restart over an adopted stop,
+    // with the snapshot recorded. Coercing an unparseable legacy file to
+    // empty would stamp adoptedLegacy:{} / generation -1 (baseline gone);
+    // restoring the legacy content afterwards would then merge the stale
+    // stop over the explicit restart — the exact R9-3 direction the
+    // contract keeps closed.
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    writeFileSync(
+      workspacePath,
+      JSON.stringify({
+        version: 1,
+        channels: { telegram: 'active' },
+        adoptedLegacy: { telegram: 'stopped' },
+        adoptedLegacyGeneration: 3,
+      }),
+      'utf-8',
+    );
+    writeFileSync(legacyPath, '{not json', 'utf-8');
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    try {
+      adoptLegacyChannelState(workspace);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // The target survives intact: baseline preserved, restart kept.
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'active' },
+      adoptedLegacy: { telegram: 'stopped' },
+      adoptedLegacyGeneration: 3,
+    });
+
+    // Restored legacy content does not re-merge the stale stop: the
+    // intact snapshot sees a snapshot-identical entry at the recorded
+    // generation — no merge, no re-stop.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        generation: 3,
+        channels: { telegram: 'stopped' },
+      }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
     });
   });
 
