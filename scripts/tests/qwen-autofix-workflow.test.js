@@ -16534,6 +16534,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     noIdentity = false,
     baselineNoIdentity = false,
     trackedDirt = false,
+    dirtyTree = '',
     commFail = false,
     workdirFiles = { 'address-summary.md': 'summary\n' },
   }) => {
@@ -16578,6 +16579,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         } else {
           g('echo agent > f.txt && git commit -qam agent');
         }
+      }
+      if (dirtyTree === 'tracked') {
+        // Uncommitted tracked edit left beside the verdict files — the
+        // ref-level commit diff is blind to it.
+        g('echo dirt >> f.txt');
+      } else if (dirtyTree === 'untracked') {
+        g('echo leftover > leftover.txt');
       }
       const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
       const failShas = failAt.map(shaOf).join(' ');
@@ -17040,6 +17048,19 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(nothing.status).toBe(1);
     expect(nothing.outputs).toContain('outcome=failed');
 
+    // Pins the guard's committed-side clause: with a round commit present,
+    // the handoff branch must NOT fire even though handoff.md exists — the
+    // round falls through to the address-summary gate instead. Deleting the
+    // `git diff --quiet` clause flips this to exit 0 / outcome=handoff,
+    // skipping every structural check on the committed diff.
+    const committedWithHandoff = runGate({
+      agentCommit: true,
+      workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+    });
+    expect(committedWithHandoff.status).toBe(1);
+    expect(committedWithHandoff.outputs).toContain('outcome=failed');
+    expect(committedWithHandoff.outputs).not.toContain('outcome=handoff');
+
     // The handoff note is agent-written and lands in the privileged job's
     // step log: a line-start `::` would parse as a workflow command, so the
     // gate neutralizes it. Pin the mutation — removing the sed must fail.
@@ -17051,6 +17072,39 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.outputs).toContain('outcome=handoff');
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
+  });
+
+  it('rejects a handoff written over a dirty workspace, non-retryably', () => {
+    // A handoff claims the round deliberately changed NOTHING; dirt beside
+    // it is a brake-violating partial patch that would otherwise be
+    // reported as a clean stop and die silently with the runner. Both dirt
+    // shapes matter: the ref-level commit diff is blind to uncommitted
+    // tracked edits AND untracked files.
+    for (const dirtyTree of ['tracked', 'untracked']) {
+      const r = runGate({
+        agentCommit: false,
+        dirtyTree,
+        workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+      });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('outcome=handoff');
+      // The rejection must stay non-retryable: retryable=true engages the
+      // repair pass, which deletes handoff.md and may commit against the
+      // brake's stop.
+      expect(r.outputs).not.toContain('retryable=true');
+    }
+
+    // Without handoff.md the dirt still takes the ordinary dirty assert —
+    // retryable, so the new guard has not swallowed that path.
+    const dirtWithoutHandoff = runGate({
+      agentCommit: false,
+      dirtyTree: 'tracked',
+      workdirFiles: {},
+    });
+    expect(dirtWithoutHandoff.status).toBe(1);
+    expect(dirtWithoutHandoff.outputs).toContain('retryable=true');
+    expect(dirtWithoutHandoff.outputs).not.toContain('outcome=handoff');
   });
 
   it('classifies a no-commit handoff before the structural checks', () => {

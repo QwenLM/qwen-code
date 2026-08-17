@@ -75,6 +75,21 @@ if [[ -f "${WORKDIR}/failure.md" ]]; then
   exit 1
 fi
 
+# A handoff claims the round changed NOTHING — dirt beside it is a
+# brake-violating partial patch (otherwise reported as a clean stop and
+# discarded silently with the runner), and untracked leftovers would trip
+# the NEXT round's dirty assert on the persistent pool. The ref-level
+# commit diff below is blind to both. Rejected the same non-retryable way
+# failure.md+dirty is above: a retryable rejection would engage the repair
+# pass, which deletes handoff.md and may commit against the brake.
+if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" ]]; then
+  echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
+  git status --short
+  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  exit 1
+fi
+
 # No-commit brake handoff, classified BEFORE the structural checks below:
 # those judge the PR's OWN diff (core rebuild, schema freshness, contracts)
 # and reject_fix on failure, and the growth brake fires on exactly the red
