@@ -74,7 +74,10 @@ describe('classifyRunTarget — canonical file pins', () => {
     // the child, which canonicalises, wrote `src_foo.ts`. The poll then never
     // matched and the run reported "no composed verdict was produced" over a
     // review that had already run.
-    const link = join(realpathSync(mkdtempSync(join(tmpdir(), 'rc-link-'))), 'l');
+    const link = join(
+      realpathSync(mkdtempSync(join(tmpdir(), 'rc-link-'))),
+      'l',
+    );
     symlinkSync(repo, link);
     try {
       writeFileSync(join(repo, 'src/foo.ts'), 'export const a = 1;\n');
