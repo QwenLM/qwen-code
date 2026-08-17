@@ -16393,13 +16393,17 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeWorkdirStub(dir, [
-        "writeFileSync(`${workdir}/handoff.md`, 'needs a maintainer decision\\n');",
+        "writeFileSync(`${workdir}/handoff.md`, '::error::forged\\nneeds a maintainer decision\\n');",
       ]);
 
       const result = runAddressReview(dir, stub);
       expect(result.status).toBe(0);
       expect(result.stderr).toContain('handoff.md:');
       expect(result.stderr).toContain('needs a maintainer decision');
+      // Agent-written content reaches the privileged job's step log: pin
+      // the `::` workflow-command neutralization (removing it must fail).
+      expect(result.stderr).toContain(';;error;;forged');
+      expect(result.stderr).not.toContain('::error::forged');
       expect(existsSync(join(dir, 'failure.md'))).toBe(false);
     });
   });
@@ -17035,6 +17039,35 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     const nothing = runGate({ agentCommit: false, workdirFiles: {} });
     expect(nothing.status).toBe(1);
     expect(nothing.outputs).toContain('outcome=failed');
+
+    // The handoff note is agent-written and lands in the privileged job's
+    // step log: a line-start `::` would parse as a workflow command, so the
+    // gate neutralizes it. Pin the mutation — removing the sed must fail.
+    const neutralized = runGate({
+      agentCommit: false,
+      workdirFiles: { 'handoff.md': '::error::forged\n' },
+    });
+    expect(neutralized.status).toBe(0);
+    expect(neutralized.outputs).toContain('outcome=handoff');
+    expect(neutralized.stdout).toContain(';;error;;forged');
+    expect(neutralized.stdout).not.toContain('::error::forged');
+  });
+
+  it('classifies a no-commit handoff before the structural checks', () => {
+    // The growth brake fires on red, non-converging PRs — exactly the
+    // diffs that trip the structural pre-checks (a stale schema here). A
+    // compliant handoff commits nothing, so classifying it AFTER those
+    // checks would let the stale schema reject the round as retryable and
+    // engage the repair pass — committing after the brake said commit
+    // nothing.
+    const r = runGate({
+      agentCommit: false,
+      schemaFail: true,
+      workdirFiles: { 'handoff.md': 'needs a maintainer decision\n' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=handoff');
+    expect(r.outputs).not.toContain('retryable=true');
   });
 
   it('never A/Bs the dist-coupled and stdin-fed checks', () => {

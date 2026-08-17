@@ -75,6 +75,26 @@ if [[ -f "${WORKDIR}/failure.md" ]]; then
   exit 1
 fi
 
+# No-commit brake handoff, classified BEFORE the structural checks below:
+# those judge the PR's OWN diff (core rebuild, schema freshness, contracts)
+# and reject_fix on failure, and the growth brake fires on exactly the red
+# PRs whose diff trips them. A compliant handoff commits nothing, so
+# running the checks first would reclassify it as a retryable failure —
+# the repair pass would delete handoff.md and commit against the brake's
+# stop. A handoff claims nothing (acted=false, deferred to a human), so
+# the checks' false-no-action rationale does not apply. failure.md
+# coexistence keeps the failed classification via the exits above.
+if git diff --quiet "origin/${BRANCH}...${BRANCH}" \
+  && [[ -s "${WORKDIR}/handoff.md" ]]; then
+  echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
+  # Agent-written content: a line-start `::` would be parsed as a workflow
+  # command (::error::, ::add-mask::), the same reason 'Show run artifacts'
+  # neutralizes these files.
+  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
+  exit 0
+fi
+
 # Convention: hooks are severed at EVERY host checkout of the PR
 # branch (no secret sits in this step's env, but a post-checkout
 # hook still runs branch code on the host).
@@ -337,7 +357,8 @@ fi
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
 # feedback as evaluated (acted=false) while CI stays red — the exact bug
-# this PR fixes. So it runs on EVERY path. The gate is shared with the
+# this PR fixes. So it runs on every path but the no-commit handoff,
+# which claims nothing and exits above. The gate is shared with the
 # issue-fix verify step (rationale + the generator crash guard live in
 # the script); the write is on a tracked file compared by `git status`,
 # not the commit-level no-op git-diff below, and it is restored on
@@ -354,22 +375,8 @@ run_check_no_ab 'cross-package contract verification failed' \
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-  # No new commit. A handoff with no failure.md is the deliberate kind: the
-  # agent stopped under instruction (the growth-brake BLOCKED stop) and
-  # deferred this item to a human. Name it — "produced nothing" is what a
-  # crash looks like, and the report must tell the two apart. (When
-  # failure.md coexists, the round came through a failure path — harness
-  # death or a pre-verdict crash — and keeps the failed classification.)
-  if [[ -s "${WORKDIR}/handoff.md" && ! -s "${WORKDIR}/failure.md" ]]; then
-    echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
-    # Agent-written content: a line-start `::` would be parsed as a workflow
-    # command (::error::, ::add-mask::), the same reason 'Show run artifacts'
-    # neutralizes these files.
-    sed 's/::/;;/g' "${WORKDIR}/handoff.md"
-    echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
-    exit 0
-  fi
-  # Otherwise no commit is only legitimate as a deliberate no-action.
+  # No new commit. That is only legitimate as a deliberate no-action; the
+  # no-commit handoff was classified before the structural checks above.
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
     cat "${WORKDIR}/no-action.md"
