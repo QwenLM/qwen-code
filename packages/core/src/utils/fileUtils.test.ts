@@ -1179,6 +1179,23 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Simulated image read error');
     });
 
+    it('omits provider-unsupported image formats instead of forwarding raw bytes (#9291)', async () => {
+      // A MIME type the model endpoint cannot safely consume (image/heic on
+      // Responses-compatible routes) must not be forwarded verbatim: the
+      // provider rejects it with a 400 that aborts the whole session. The
+      // read must stay in-band — a text notice, no inline image, no error.
+      const heicPath = path.join(tempRootDir, 'photo.heic');
+      actualNodeFs.writeFileSync(heicPath, 'not decodable heic bytes');
+      mockMimeGetType.mockReturnValue('image/heic');
+
+      const result = await processSingleFileContent(heicPath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('image/heic');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
     it('should process an image file', async () => {
       await sharp({
         create: {
@@ -1266,7 +1283,10 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('100 MB source limit');
     });
 
-    it('forwards a corrupt canonical image verbatim instead of failing the read', async () => {
+    it('omits a corrupt canonical image instead of forwarding undecodable bytes (#9291)', async () => {
+      // Forwarding undecodable bytes lets the provider reject the whole
+      // request with a session-aborting 400; the read stays in-band with a
+      // notice instead.
       const corruptPath = path.join(tempRootDir, 'corrupt.png');
       const bytes = Buffer.from('not a real png');
       await fsPromises.writeFile(corruptPath, bytes);
@@ -1275,14 +1295,8 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(corruptPath, mockConfig);
 
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: bytes.toString('base64'),
-          mimeType: 'image/png',
-          displayName: 'corrupt.png',
-        },
-      });
-      expect(result.returnDisplay).toContain('Read image file: corrupt.png');
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.returnDisplay).toContain('corrupt.png');
     });
 
     it('forwards an animated canonical image verbatim instead of failing the read', async () => {
@@ -1308,7 +1322,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: animated.webp');
     });
 
-    it('forwards non-canonical content behind a canonical extension verbatim', async () => {
+    it('omits non-canonical content behind a canonical extension (#9291)', async () => {
       const gifBytes = Buffer.from(
         '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
         'hex',
@@ -1320,13 +1334,8 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(mismatchPath, mockConfig);
 
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: gifBytes.toString('base64'),
-          mimeType: 'image/png',
-          displayName: 'mismatch.png',
-        },
-      });
+      expect(typeof result.llmContent).toBe('string');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
     it('applies EXIF orientation before describing and rendering an overview', async () => {
@@ -1388,24 +1397,50 @@ describe('fileUtils', () => {
       ]);
     });
 
-    it.each([
-      ['animated GIF', 'animation.gif', 'image/gif'],
-      ['BMP', 'bitmap.bmp', 'image/bmp'],
-    ])('keeps %s image bytes unchanged', async (_label, name, mimeType) => {
-      const filePath = path.join(tempRootDir, name);
-      const bytes = Buffer.from('unchanged image bytes');
-      actualNodeFs.writeFileSync(filePath, bytes);
-      mockMimeGetType.mockReturnValue(mimeType);
+    it('keeps animated GIF image bytes unchanged', async () => {
+      // A real, decodable GIF: forwarded verbatim (never re-encoded).
+      const gifBytes = Buffer.from(
+        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
+        'hex',
+      );
+      const filePath = path.join(tempRootDir, 'animation.gif');
+      actualNodeFs.writeFileSync(filePath, gifBytes);
+      mockMimeGetType.mockReturnValue('image/gif');
 
       const result = await processSingleFileContent(filePath, mockConfig);
 
       expect(result.llmContent).toEqual({
         inlineData: {
-          data: bytes.toString('base64'),
-          mimeType,
-          displayName: name,
+          data: gifBytes.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'animation.gif',
         },
       });
+    });
+
+    it('omits a corrupt GIF instead of forwarding undecodable bytes (#9291)', async () => {
+      const filePath = path.join(tempRootDir, 'broken.gif');
+      actualNodeFs.writeFileSync(filePath, Buffer.from('not a real gif'));
+      mockMimeGetType.mockReturnValue('image/gif');
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+    });
+
+    it('omits BMP image bytes the provider cannot safely consume (#9291)', async () => {
+      const filePath = path.join(tempRootDir, 'bitmap.bmp');
+      const bytes = Buffer.from('unchanged image bytes');
+      actualNodeFs.writeFileSync(filePath, bytes);
+      mockMimeGetType.mockReturnValue('image/bmp');
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('image/bmp');
     });
 
     it('should reject image files when model does not support image', async () => {
