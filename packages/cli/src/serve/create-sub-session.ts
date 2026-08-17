@@ -1002,9 +1002,10 @@ export function createSubSessionLauncher(
         if (sessionClosed) {
           if (!promptDispatched) {
             try {
-              await new SessionService(boundWorkspace).removeSession(
-                spawnedSession.sessionId,
-              );
+              const transcriptRemoved = await new SessionService(
+                boundWorkspace,
+              ).removeSession(spawnedSession.sessionId);
+              if (transcriptRemoved) bridge.markSessionCatalogChanged();
             } catch (cleanupError) {
               log.debug(
                 'sub-session: isolated transcript cleanup failed',
