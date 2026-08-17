@@ -400,6 +400,52 @@ describe('runTestDelta', () => {
     expect(r.shared).toEqual(['src/a.test.ts', 'src/b.test.ts']);
   });
 
+  it("prefers the PR side's capture-time set, so a trimmed netNew survives", () => {
+    // The direction that matters: `src/z.test.ts` fails on the PR side only.
+    // Re-parsing the trimmed report finds only `src/a.test.ts` and reports an
+    // EMPTY netNew — a failure the PR caused, measured away. The report that
+    // carries `failingFiles` was measured before the trim, so it still says so.
+    const r = runWith(
+      [
+        cmd({
+          output: 'FAIL src/a.test.ts\n\n... [120000 characters omitted] ...\n',
+          failingFiles: ['src/a.test.ts', 'src/z.test.ts'],
+        }),
+      ],
+      'FAIL src/a.test.ts',
+    );
+
+    expect(r.netNew).toEqual(['src/z.test.ts']);
+    expect(r.shared).toEqual(['src/a.test.ts']);
+    // The trim marker is still in `output`; the disclosure would be a false
+    // alarm now that the set no longer comes from there.
+    expect(r.entries[0].prTruncated).toBe(false);
+    expect(r.note ?? '').not.toContain('may be partial');
+  });
+
+  it('treats a malformed failingFiles as no measurement, not a crash', () => {
+    // The report is a file anything may have edited. A field that is not a
+    // string array must read as "this seam supplied no measurement" — the
+    // fallback an absent field has always taken — never reach `.filter` as-is.
+    // `[]` too: the producer omits the field when nothing parsed, so an empty
+    // array can only be hand-made — taken as authoritative it would skip the
+    // reparse and understate both sets.
+    for (const bad of ['a string', [null], [{ file: 'x' }], 42, []]) {
+      const r = runWith(
+        [
+          cmd({
+            output: 'FAIL src/a.test.ts',
+            failingFiles: bad as unknown as string[],
+          }),
+        ],
+        'FAIL src/a.test.ts',
+      );
+      // The reparse fallback still measures off the stored output.
+      expect(r.shared).toEqual(['src/a.test.ts']);
+      expect(r.netNew).toEqual([]);
+    }
+  });
+
   it('discloses a PR-side output that was already trimmed', () => {
     // build-test trimmed it before this command ran, so the PR failing set may
     // be short. That understates `shared`; it cannot invent a netNew. Say so.
