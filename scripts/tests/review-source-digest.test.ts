@@ -134,6 +134,15 @@ describe('the build stamp and the staleness check agree', () => {
         join(services, 'review-worktree-lease.ts'),
         'leases the worktree',
       );
+      // The lifted review helpers are file-shaped roots outside `commands/`,
+      // same as the lease. Materialized here so their pins are local: the
+      // repo-tree case holds them only through the real files, and would
+      // silently drop the pins the day those files moved.
+      const utils = join(root, 'packages', 'cli', 'src', 'utils');
+      mkdirSync(utils, { recursive: true });
+      writeFileSync(join(utils, 'findings.ts'), 'validates the findings');
+      writeFileSync(join(utils, 'shell-args.ts'), 'tokenizes the args');
+      writeFileSync(join(utils, 'paths.ts'), 'flattens the slug');
       writeFileSync(join(cli, 'review', 'drive.ts'), 'drives');
       writeFileSync(join(cli, 'review', 'lib', 'ledger.ts'), 'ledgers');
       // One production file per admitted code extension: dropping a member
@@ -152,13 +161,13 @@ describe('the build stamp and the staleness check agree', () => {
       mkdirSync(join(skillDir, '__fixtures__'), { recursive: true });
       writeFileSync(join(skillDir, '__fixtures__', 'example.md'), '# fixture');
       // DESIGN.md is the copier's deliberate skip, so it must move neither
-      // side of the digest — pinned by the count below staying at 12.
+      // side of the digest — pinned by the count below staying at 15.
       writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
 
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(12);
+      expect(reviewSourceDigestForBuild(root).count).toBe(15);
 
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
@@ -207,7 +216,7 @@ describe('the build stamp and the staleness check agree', () => {
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(12);
+      expect(reviewSourceDigestForBuild(root).count).toBe(15);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -250,6 +259,18 @@ describe('the build stamp and the staleness check agree', () => {
       }
     },
   );
+
+  it('digests the review helpers lifted into utils/', () => {
+    // findings.ts and its two helpers were lifted out of commands/review/,
+    // which the digest covered. Root lists that lost them would keep both
+    // copies equal while a skipped rebuild silently runs the bundle's old
+    // validator — name the files so the omission fails here.
+    const roots = reviewSourceRoots(repoRoot).map((r) => r.path);
+    const utils = join(repoRoot, 'packages', 'cli', 'src', 'utils');
+    expect(roots).toContain(join(utils, 'findings.ts'));
+    expect(roots).toContain(join(utils, 'shell-args.ts'));
+    expect(roots).toContain(join(utils, 'paths.ts'));
+  });
 
   it('the skill allowlist covers everything the copier would ship', () => {
     // The copier copies all of a bundled skill but test files, DESIGN.md and

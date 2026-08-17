@@ -23,6 +23,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
@@ -172,40 +173,9 @@ function isPrShapedToken(token: string): boolean {
   );
 }
 
-/**
- * Split a raw argument string on whitespace, honouring double- and
- * single-quoted segments so file paths with spaces survive.
- */
-export function tokenizeArgs(raw: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let sawAny = false;
-  for (const ch of raw) {
-    if (quote) {
-      if (ch === quote) {
-        quote = null;
-      } else {
-        current += ch;
-      }
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      sawAny = true;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (current || sawAny) tokens.push(current);
-      current = '';
-      sawAny = false;
-      continue;
-    }
-    current += ch;
-  }
-  if (current || sawAny) tokens.push(current);
-  return tokens;
-}
+// tokenizeArgs lives in the CLI-level shared home (utils/shell-args.ts) so
+// /audit consumes it without importing across command groups.
+export { tokenizeArgs } from '../../utils/shell-args.js';
 
 /**
  * `'invalid-url'` marks a token that looks like a URL but is not a valid PR
