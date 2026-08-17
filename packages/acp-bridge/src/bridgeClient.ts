@@ -822,6 +822,13 @@ export class BridgeClient implements Client {
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
     private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
+    /**
+     * Catalog-clock mark forwarded from the bridge factory. Invoked when a
+     * child-side notification changes persisted catalog metadata the bridge
+     * never sees directly (currently: automatic title updates). Trailing and
+     * optional so existing direct constructors stay source-compatible.
+     */
+    private readonly onSessionCatalogChanged?: () => void,
   ) {}
 
   async requestPermission(
@@ -2109,6 +2116,14 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      // The child appends the automatic title as a `custom_title` record to
+      // the session's JSONL — the same file the persisted catalog scan reads
+      // — before notifying, so this is a daemon-observed catalog change. The
+      // live-state route invalidates the catalog cache when it first exposes
+      // the bumped revision, so the next full-catalog reload serves this
+      // title. Mark before the SSE publish so the revision never trails the
+      // client-visible event.
+      this.onSessionCatalogChanged?.();
       try {
         entry.events.publish({
           type: 'session_metadata_updated',

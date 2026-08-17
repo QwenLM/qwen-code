@@ -177,6 +177,17 @@ class FakeBridge {
   cancelled: string[] = [];
   workspaceEvents: BridgeEvent[] = [];
   knownClientIdSet = new Set<string>();
+  catalogRevision = 0;
+  readonly catalogGeneration = 'transport-fake-catalog-generation';
+  getSessionCatalogVersion() {
+    return {
+      generation: this.catalogGeneration,
+      revision: this.catalogRevision,
+    };
+  }
+  markSessionCatalogChanged() {
+    this.catalogRevision += 1;
+  }
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
@@ -4898,6 +4909,112 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 221,
         result: { archived: [sessionId], errors: [] },
       });
+      reader.close();
+    });
+  });
+
+  it('ACP catalog mutations advance the bridge catalog revision with exact no-op semantics', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+      await writeStoredSession(sessionId);
+      const revision = () => bridge.getSessionCatalogVersion().revision;
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const v0 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 230,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 230,
+        result: { archived: [sessionId], errors: [] },
+      });
+      expect(revision()).toBeGreaterThan(v0);
+
+      const v1 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 231,
+        method: '_qwen/sessions/unarchive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 231,
+        result: { unarchived: [sessionId], errors: [] },
+      });
+      expect(revision()).toBeGreaterThan(v1);
+
+      const v2 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 232,
+        method: '_qwen/session/update_organization',
+        params: { sessionId, isPinned: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 232,
+        result: { sessionId, isPinned: true },
+      });
+      expect(revision()).toBeGreaterThan(v2);
+
+      const v3 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 233,
+        method: '_qwen/workspace/session_groups/create',
+        params: { name: 'acp-group', color: 'blue' },
+      });
+      const created = (await reader.next()) as {
+        result?: { group?: { id?: string } };
+      };
+      const groupId = created.result?.group?.id;
+      expect(typeof groupId).toBe('string');
+      expect(revision()).toBeGreaterThan(v3);
+
+      const v4 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 236,
+        method: '_qwen/workspace/session_groups/update',
+        params: { groupId, name: 'acp-group-renamed' },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 236,
+        result: { group: { id: groupId, name: 'acp-group-renamed' } },
+      });
+      expect(revision()).toBeGreaterThan(v4);
+
+      // A group delete that reports `deleted: false` changes nothing.
+      const v5 = revision();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 234,
+        method: '_qwen/workspace/session_groups/delete',
+        params: { groupId: 'missing-group' },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 234,
+        result: { deleted: false },
+      });
+      expect(revision()).toBe(v5);
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 235,
+        method: '_qwen/workspace/session_groups/delete',
+        params: { groupId },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 235,
+        result: { deleted: true },
+      });
+      expect(revision()).toBeGreaterThan(v5);
+
       reader.close();
     });
   });
