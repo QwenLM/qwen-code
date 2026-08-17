@@ -988,6 +988,8 @@ function ledgerMarkerFor(
       prNumber?: unknown;
       fetchedSha?: unknown;
       srcDiffLines?: unknown;
+      fullSrcDiffLines?: unknown;
+      incremental?: { effective?: unknown };
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -1033,7 +1035,10 @@ function ledgerMarkerFor(
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
         : undefined;
-    const measured = Number(plan.srcDiffLines ?? 0);
+    const measured = Number(
+      plan.fullSrcDiffLines ??
+        (plan.incremental?.effective === true ? 0 : (plan.srcDiffLines ?? 0)),
+    );
     const src0 =
       prevSrc0 > 0
         ? prevSrc0
@@ -1064,9 +1069,10 @@ function ledgerMarkerFor(
         ],
       ),
       ...(sha ? { sha } : {}),
-      // Carry the baseline forward unchanged once one exists; only measure when
-      // there is none. Re-measuring every round would let a diff that shrinks
-      // rewrite its own baseline and erase the growth it already accumulated.
+      // Carry the baseline forward unchanged once one exists; only measure a
+      // full-range diff when there is none. Re-measuring every round would let
+      // a diff that shrinks rewrite its own baseline and erase the growth it
+      // already accumulated.
       ...(src0 > 0 ? { src0 } : {}),
     });
   } catch {
@@ -1956,8 +1962,15 @@ function composeReviewBody(
       try {
         const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
           srcDiffLines?: unknown;
+          fullSrcDiffLines?: unknown;
+          incremental?: { effective?: unknown };
         };
-        src = Number(plan.srcDiffLines ?? 0);
+        src = Number(
+          plan.fullSrcDiffLines ??
+            (plan.incremental?.effective === true
+              ? 0
+              : (plan.srcDiffLines ?? 0)),
+        );
       } catch {
         // Unreadable plan, no disclosure — same posture as `lowSignal`.
       }

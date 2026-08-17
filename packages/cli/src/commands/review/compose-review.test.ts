@@ -140,6 +140,7 @@ function plan(
     effort?: 'low' | 'medium' | 'high';
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
+    fullSrcDiffLines?: number;
     repositoryContext?: unknown;
     /** The PR identity fetch-pr records — anchors and bilingual recovery. */
     ownerRepo?: string;
@@ -147,6 +148,7 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
+    incremental?: { since: string; effective: boolean };
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -167,7 +169,13 @@ function plan(
       ...(opts.ownerRepo === undefined ? {} : { ownerRepo: opts.ownerRepo }),
       ...(opts.prNumber === undefined ? {} : { prNumber: opts.prNumber }),
       ...(opts.host === undefined ? {} : { host: opts.host }),
+      ...(opts.incremental === undefined
+        ? {}
+        : { incremental: opts.incremental }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
+      ...(opts.fullSrcDiffLines === undefined
+        ? {}
+        : { fullSrcDiffLines: opts.fullSrcDiffLines }),
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       // Real plans carry each chunk's files (`DiffChunk.files`) — the body
@@ -433,11 +441,13 @@ function coveredPlan(
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
+    fullSrcDiffLines?: number;
     repositoryContext?: unknown;
     ownerRepo?: string;
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
+    incremental?: { since: string; effective: boolean };
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -6443,6 +6453,87 @@ describe('composeReview — approach signal', () => {
       severityFloor: 'auto',
     });
     expect(r.body).toMatch(/"src0":228/);
+  });
+
+  it('compares the full-range size on an incremental round', () => {
+    const planPath = ballooned({
+      srcDiffLines: 138,
+      fullSrcDiffLines: 920,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({
+      src0: 228,
+      srcDiffLines: 920,
+    });
+  });
+
+  it('baselines from the full-range size on an incremental round', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 80,
+      fullSrcDiffLines: 950,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 1, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toMatch(/"src0":950/);
+    expect(r.body).not.toMatch(/"src0":80/);
+  });
+
+  it('does not compare a large incremental delta as cumulative growth', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 350,
+      fullSrcDiffLines: 120,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 100 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  it('stays silent for a legacy incremental plan with no full-range size', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 350,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('"src0"');
   });
 
   it('baselines from this round when the previous ledger carries none', () => {

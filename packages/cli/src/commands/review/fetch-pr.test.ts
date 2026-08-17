@@ -26,6 +26,7 @@ import {
 import { classifyHeavy } from './lib/heavy.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, worktreePath } from './lib/paths.js';
+import { buildDiffPlan } from './lib/diff-plan.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -882,6 +883,7 @@ describe('fetch-pr report assembly', () => {
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(DELTA_DIFF.trimEnd().split('\n').length);
+    expect(report.fullSrcDiffLines).toBe(buildDiffPlan(FULL_DIFF).srcDiffLines);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed

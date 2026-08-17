@@ -173,6 +173,8 @@ type FetchPrResult = PlanReport & {
    * local review's plan has no such field: nothing is posted there.
    */
   prDescriptionHasHan: boolean;
+  /** Source diff lines in the full merge-base range, including on an incremental round. */
+  fullSrcDiffLines?: number;
   /**
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
@@ -1124,6 +1126,22 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
+    let fullSrcDiffLines: number | undefined;
+    if (fullText !== null) {
+      if (!scopedDelta) {
+        fullSrcDiffLines = plan.srcDiffLines;
+      } else {
+        try {
+          fullSrcDiffLines = buildDiffPlan(
+            fullText,
+            args.maxChunkLines,
+          ).srcDiffLines;
+        } catch {
+          // Advisory measurement only; compose-review stays silent without it.
+        }
+      }
+    }
+
     // 6. Emit the report. The window opening survives drift restarts: this
     // command overwrites its own report, and a reset boundary would hide any
     // bypass write made during the abandoned attempt from cleanup's audit.
@@ -1261,6 +1279,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       diffPathAbsolute,
       diffSha256,
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+      ...(fullSrcDiffLines === undefined ? {} : { fullSrcDiffLines }),
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
