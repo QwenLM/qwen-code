@@ -529,7 +529,7 @@ export function runSubmit(
       typeof payload.state?.planPath === 'string'
         ? payload.state.planPath
         : undefined,
-    fallbackPr: args.pr,
+    callerPr: args.pr,
     callerRepo: args.repo,
     callerHost: resolveGhHost(args.host),
     defaultSeverityFloor: opts.defaultSeverityFloor,

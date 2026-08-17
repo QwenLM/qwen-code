@@ -208,13 +208,17 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
  * SAME identity source — is what keeps the registered artifact and the
  * posted review describing the same floor.
  *
- * **The identity is the PLAN'S**, not each caller's own notion of the PR.
- * Binding compose to the plan's number while submit bound a skill-typed
- * `--pr` let the two recoveries bind different pull requests and reopen the
- * archive/post split on exactly the `--user-authorized` flow where no gate
- * cross-checks them; the plan is CLI-written by fetch-pr, both boundaries
- * hold the same one, so it is the shared source. `fallbackPr` (submit's own
- * target) applies only when the plan names no PR.
+ * **The identity is the CALLER'S CLI-typed one first; the plan only fills
+ * the axes the caller did not supply.** The plan's CONTENT is CLI-written,
+ * but its PATH arrives through the model-written state JSON — the same
+ * document whose floor copy this recovery exists to outrank — so a
+ * plan-first precedence let a parseable-but-wrong plan choose which
+ * identity the operator's verbatim record was tested against and silently
+ * stand the recovery down. Caller-first closes that: at submit the caller
+ * pr is additionally gate-bound to the recorded target on the `--comment`
+ * path, and both boundaries are fed the same caller identity by the skill
+ * (`--pr`/`--repo`/`--host` at compose mirroring submit's own flags), so
+ * the two recoveries still resolve one floor for one review.
  *
  * The record is bound to that identity at the SAME bar the `--comment`
  * authorisation applies to the same record: the number always, and — for a
@@ -237,12 +241,14 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
  * only when no session id is present.
  */
 export function recordedSeverityFloor(opts: {
-  /** The CLI-written plan of the review being composed or posted. */
+  /** The plan of the review being composed or posted — CLI-written content
+   * behind a model-written path, so it only FILLS identity axes the caller
+   * did not supply, never overrides them. */
   planPath?: string;
-  /** The caller's own PR number, used only when the plan names none. */
-  fallbackPr?: number;
-  /** The caller's repo / effective host, used for the URL-record bar when
-   * the plan carries none. */
+  /** The caller's CLI-typed PR number — the identity's first source. */
+  callerPr?: number;
+  /** The caller's repo / effective host — first sources for the URL-record
+   * bar, plan values filling in when absent. */
   callerRepo?: string;
   callerHost?: string;
   defaultSeverityFloor?: string;
@@ -276,10 +282,10 @@ export function recordedSeverityFloor(opts: {
   } catch {
     /* the identity falls back to the caller's, exactly as with no plan */
   }
-  const pr = planPr ?? opts.fallbackPr;
+  const pr = opts.callerPr ?? planPr;
   if (pr === undefined) return undefined;
-  const repo = planRepo ?? opts.callerRepo;
-  const host = (planHost ?? opts.callerHost ?? 'github.com').toLowerCase();
+  const repo = opts.callerRepo ?? planRepo;
+  const host = (opts.callerHost ?? planHost ?? 'github.com').toLowerCase();
   const path =
     currentSessionId() === '' && opts.skillArgs
       ? opts.skillArgs

@@ -2086,8 +2086,10 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     /** Omit the plan from the state — the R4-1 shape: the recovery must
      * fall back to the handler's own --pr, exactly as submit does. */
     noPlan?: boolean;
-    /** The handler's --pr fallback identity. */
+    /** The handler's caller identity — --pr / --repo / --host. */
     pr?: number;
+    repo?: string;
+    host?: string;
   }): Promise<{
     written: ComposeReviewResult;
     stderrHasOverride: boolean;
@@ -2133,6 +2135,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         out: outPath,
         skillArgs: argsPath,
         ...(opts.pr === undefined ? {} : { pr: opts.pr }),
+        ...(opts.repo === undefined ? {} : { repo: opts.repo }),
+        ...(opts.host === undefined ? {} : { host: opts.host }),
       });
       written = JSON.parse(readFileSync(outPath, 'utf8'));
     } finally {
@@ -2206,6 +2210,30 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(
       stderr.some((l) => l.includes('the recorded `--severity-floor` flag')),
     ).toBe(true);
+  });
+
+  it('binds a URL-shaped GHE record with the caller identity — full submit symmetry', async () => {
+    // R5-1's split: submit passed repo/host while compose did not, so on
+    // the plan-less shape a GHE URL record recovered at one boundary and
+    // not the other. The compose handler now feeds --repo and the
+    // effective --host into the same bar.
+    const prevHost = getGhHost();
+    try {
+      const { written } = await composeWithRecordedFloor({
+        stateFloor: 'suggestion',
+        argsLine:
+          'https://ghe.corp.example/QwenLM/qwen-code/pull/8255 --severity-floor critical',
+        noPlan: true,
+        pr: 8255,
+        repo: 'QwenLM/qwen-code',
+        host: 'ghe.corp.example',
+      });
+      expect(written.floorEnforced).toEqual([0]);
+    } finally {
+      // The handler routes gh via setGhHost; undo it so later tests do not
+      // inherit the Enterprise host.
+      setGhHost(prevHost);
+    }
   });
 
   it('stays silent when the recovered floor equals the state — normalised', async () => {

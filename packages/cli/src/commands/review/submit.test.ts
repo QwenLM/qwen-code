@@ -182,7 +182,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     const argsFile = join(dir, `floor-args-${floorSeq++}.txt`);
     writeFileSync(argsFile, `${line}\n`);
     return recordedSeverityFloor({
-      fallbackPr: 123,
+      callerPr: 123,
       skillArgs: argsFile,
       ...opts,
     } as never);
@@ -244,27 +244,27 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
         { callerRepo: 'o/r' },
       ),
     ).toBeUndefined();
-    // The plan is the identity source; the caller's own pr only the
-    // fallback — divergent identities between the two boundaries were the
-    // archive/post split's reopening.
-    expect(
-      recoverFloor('123 --severity-floor critical', {
-        planPath: floorPlan({ prNumber: 123 }),
-        fallbackPr: 456,
-      }),
-    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // The caller's CLI-typed pr outranks the plan's — the plan's path is
+    // model-written, and a parseable-but-wrong plan must not choose which
+    // identity the operator's record is tested against.
     expect(
       recoverFloor('456 --severity-floor critical', {
         planPath: floorPlan({ prNumber: 123 }),
-        fallbackPr: 456,
+        callerPr: 456,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({ prNumber: 123 }),
+        callerPr: 456,
       }),
     ).toBeUndefined();
-    // Digit-string plan numbers bind like their numeric siblings — the
-    // shape every other plan reader tolerates.
+    // Digit-string plan numbers fill a caller-less identity like their
+    // numeric siblings — the shape every other plan reader tolerates.
     expect(
       recoverFloor('123 --severity-floor critical', {
         planPath: floorPlan({ prNumber: '123' }),
-        fallbackPr: 456,
+        callerPr: undefined,
       }),
     ).toEqual({ floor: 'critical', source: 'explicit' });
     // The plan's ownerRepo binds a URL record even without a caller repo.
@@ -277,7 +277,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     // Absent record and plan-less caller both fail open, never throw.
     expect(
       recordedSeverityFloor({
-        fallbackPr: 123,
+        callerPr: 123,
         skillArgs: join(dir, 'no-such-record.txt'),
       }),
     ).toBeUndefined();
@@ -301,7 +301,9 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
         { callerRepo: 'o/r', callerHost: 'ghe.corp.example' },
       ),
     ).toEqual({ floor: 'critical', source: 'explicit' });
-    // …and the PLAN's identity outranks the caller's on every axis: repo…
+    // …and the CALLER's identity outranks the plan's on every axis — repo:
+    // a mis-transcribed planPath naming another repo must not stand the
+    // CLI-typed repo's bar down…
     expect(
       recoverFloor(
         'https://github.com/other/repo/pull/123 --severity-floor critical',
@@ -310,8 +312,9 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
           callerRepo: 'other/repo',
         },
       ),
-    ).toBeUndefined();
-    // …and host (which also pins the plan.host read itself).
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // …and host: the caller's effective host wins, and the plan's host
+    // fills only a caller-less axis (which also pins the plan.host read).
     expect(
       recoverFloor(
         'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
@@ -325,13 +328,26 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
           callerHost: 'github.com',
         },
       ),
+    ).toBeUndefined();
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({
+            prNumber: 123,
+            ownerRepo: 'o/r',
+            host: 'ghe.corp.example',
+          }),
+          callerRepo: 'o/r',
+        },
+      ),
     ).toEqual({ floor: 'critical', source: 'explicit' });
     // A plan that parses but names no PR falls back to the caller's pr —
     // the diff-only/local plan shape must not suppress the fallback.
     expect(
       recoverFloor('123 --severity-floor critical', {
         planPath: floorPlan({}),
-        fallbackPr: 123,
+        callerPr: 123,
       }),
     ).toEqual({ floor: 'critical', source: 'explicit' });
     // A corrupt plan file reads as no plan (the catch's documented
@@ -341,7 +357,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(
       recoverFloor('123 --severity-floor critical', {
         planPath: corrupt,
-        fallbackPr: 123,
+        callerPr: 123,
       }),
     ).toEqual({ floor: 'critical', source: 'explicit' });
   });
@@ -358,7 +374,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     process.env['QWEN_CODE_SESSION_ID'] = 'floor-sess';
     try {
       expect(
-        recordedSeverityFloor({ fallbackPr: 123, skillArgs: argsFile }),
+        recordedSeverityFloor({ callerPr: 123, skillArgs: argsFile }),
       ).toBeUndefined();
     } finally {
       if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];

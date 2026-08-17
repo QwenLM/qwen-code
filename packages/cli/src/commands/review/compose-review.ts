@@ -3227,10 +3227,13 @@ interface ComposeReviewCliArgs {
   out: string | undefined;
   /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
   host?: string;
-  /** The PR being composed for — the recovery's plan-less fallback identity,
+  /** The PR being composed for — the recovery's first identity source,
    * mirroring `submit`'s own `--pr` so the two boundaries share one formula
-   * (plan ?? caller) even when the state's planPath is absent or unusable. */
+   * (caller ?? plan) whatever the state's planPath does. */
   pr?: number;
+  /** The reviewed repo, `owner/repo` — the URL-record bar's first repo
+   * source, mirroring `submit`'s `--repo`. */
+  repo?: string;
   /** Test seam for the recorded-floor recovery — same rule as `submit`'s:
    * honoured only when no session id is present. */
   skillArgs?: string;
@@ -3319,9 +3322,16 @@ export const composeReviewCommand: CommandModule = {
       .option('pr', {
         type: 'number',
         describe:
-          'The PR this compose is for — the recorded-floor recovery falls ' +
-          'back to it when the plan names no PR, exactly as submit falls ' +
-          'back to its own --pr. Pass it on every PR review.',
+          'The PR this compose is for — the recorded-floor recovery binds ' +
+          'the record to it first, exactly as submit binds its own --pr. ' +
+          'Pass it on every PR review.',
+      })
+      .option('repo', {
+        type: 'string',
+        describe:
+          '<owner>/<repo> under review — the URL-shaped record bar binds ' +
+          'it first, exactly as submit binds its own --repo. Pass it on ' +
+          'every PR review.',
       })
       .option('skill-args', {
         type: 'string',
@@ -3332,7 +3342,7 @@ export const composeReviewCommand: CommandModule = {
           'session-scoped record, exactly as submit does.',
       }),
   handler: async (argv) => {
-    const { input, comments, out, host, pr, skillArgs } =
+    const { input, comments, out, host, pr, repo, skillArgs } =
       argv as unknown as ComposeReviewCliArgs;
     // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
     // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
@@ -3388,24 +3398,29 @@ export const composeReviewCommand: CommandModule = {
     }
     // The operator's floor, from the CLI's verbatim record — resolved through
     // the SAME shared helper `submit` uses, with the SAME identity formula:
-    // the plan's identity (number, ownerRepo, host — binding a URL-shaped
-    // record to all three) first, this command's own `--pr` as the
-    // plan-less fallback, exactly mirroring submit's `--pr`. The symmetric
-    // fallback is what keeps the two boundaries resolving one floor even
-    // when the state's planPath is absent or unusable — a compose bound to
-    // the plan alone recovered nothing there while submit still recovered,
-    // and the archived composed JSON described a different review than the
-    // post. A plan-less local target with no --pr recovers nothing; every
-    // failure mode returns undefined and leaves the state's value standing.
-    // The note names the true source (flag vs setting), and its guard
-    // compares the NORMALISED state floor — a case-drifted transcription of
-    // the same floor is agreement, not an override to announce.
+    // the caller's CLI-typed identity first (this command's --pr/--repo and
+    // the effective --host, mirroring submit's own flags), the plan only
+    // filling axes the caller did not supply. Caller-first because the
+    // plan's PATH arrives through the model-written state — a
+    // parseable-but-wrong plan must not choose which identity the record is
+    // tested against; symmetric inputs because an asymmetric axis (submit
+    // passing repo/host while compose did not) let a URL-shaped record
+    // recover at one boundary and not the other — the archive/post split
+    // both call sites exist to prevent. A plan-less local target with no
+    // --pr recovers nothing; every failure mode returns undefined and
+    // leaves the state's value standing. The note names the true source
+    // (flag vs setting), and its guard compares the NORMALISED state floor
+    // — a case-drifted transcription of the same floor is agreement, not an
+    // override to announce.
     const recovered = recordedSeverityFloor({
       planPath: parsed.planPath,
-      fallbackPr:
+      callerPr:
         typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0
           ? pr
           : undefined,
+      callerRepo:
+        typeof repo === 'string' && isOwnerRepo(repo) ? repo : undefined,
+      callerHost: resolveGhHost(host),
       defaultSeverityFloor: operatorReviewSettings().severityFloor,
       skillArgs,
     });
