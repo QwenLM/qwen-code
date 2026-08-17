@@ -2328,6 +2328,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('caps oversized generic key_value preview values', () => {
+    // A generic tool input whose only usable field is one large primitive
+    // string must not embed the full value in the preview row — the row value
+    // is capped like other rendered detail strings.
+    const preview = createDaemonToolPreview({
+      someBigTextField: 'x'.repeat(100_000),
+    });
+    expect(preview.kind).toBe('key_value');
+    const row = (
+      preview as { rows?: Array<{ label: string; value: string }> }
+    ).rows?.find((entry) => entry.label === 'someBigTextField');
+    expect(row).toBeDefined();
+    expect(row?.value.length).toBeLessThanOrEqual(
+      4096 + '... [truncated]'.length,
+    );
+    expect(row?.value.endsWith('... [truncated]')).toBe(true);
+  });
+
   it('recognizes common secret-key aliases before rendering previews', () => {
     expect(
       [

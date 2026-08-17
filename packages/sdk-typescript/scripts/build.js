@@ -92,7 +92,10 @@ const rootDir = join(__dirname, '..');
 // metadata (#9180).
 // Bumped from 195KB to 196KB for transient-vs-gone media hydration errors and
 // the reference-only replay placeholder.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 196 * 1024;
+// Bumped from 196KB to 197KB for the daemon transcript-retention work
+// (replay-snapshot release + capped debug payloads, #9303) landing on top of
+// the session media references bundle.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 197 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
