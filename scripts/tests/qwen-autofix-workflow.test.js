@@ -3772,6 +3772,8 @@ describe('qwen-autofix workflow', () => {
       author = 'fork-owner',
       postFails = '',
       deleteFails = '',
+      cmdFrom = '',
+      commentFails = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3797,7 +3799,7 @@ describe('qwen-autofix workflow', () => {
             // universally exiting 0.
             `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[{"name":"Tracks HTTP 5xx flakes"}]'; fi`,
-            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT-ATTEMPT" >> '${join(dir, 'writes.log')}'; if [[ -n "\${TOGGLE_COMMENT_FAILS:-}" && ! -f '${join(dir, 'comment-failed')}' ]]; then touch '${join(dir, 'comment-failed')}'; printf '%s' "\${TOGGLE_COMMENT_FAILS}" >&2; exit 1; fi; echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
         );
@@ -3813,7 +3815,7 @@ describe('qwen-autofix workflow', () => {
             '-eo',
             'pipefail',
             '-c',
-            `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
+            `sleep() { :; }\n${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
           ],
           {
             env: {
@@ -3830,6 +3832,9 @@ describe('qwen-autofix workflow', () => {
               GITHUB_TOKEN: 'x',
               TOGGLE_POST_FAILS: postFails,
               TOGGLE_DELETE_FAILS: deleteFails,
+              TOGGLE_COMMENT_FAILS: commentFails,
+              CMD_FROM: cmdFrom,
+              CRITICAL_ONLY_AFTER_ROUND: '5',
             },
             encoding: 'utf8',
           },
@@ -3893,6 +3898,58 @@ describe('qwen-autofix workflow', () => {
     );
     expect(rearm.writes.match(/^API /gm) ?? []).toHaveLength(1);
     expect(rearm.log).toContain('re-armed');
+    // The seed marker's WRITE side: a valid 'from N' appends the marker on
+    // its own line after the untouched engage literal on BOTH ack paths, so
+    // the seed reads see exactly what the parser captured.
+    const seededEngage = runToggle({ cmd: 'add', cmdFrom: '3' });
+    expect(seededEngage.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 3 -->',
+    );
+    // Engage wording stays before-takeover (there it is true), and the
+    // remainder arithmetic reads the harness's CRITICAL_ONLY_AFTER_ROUND=5.
+    expect(seededEngage.writes).toContain(
+      'the rounds this PR spent in review before takeover',
+    );
+    expect(seededEngage.writes).toContain(
+      'engages after 2 more change-producing round(s) instead of a full fresh 5',
+    );
+    // A seeded RE-ARM must not contradict itself: the earlier rounds DO
+    // count toward the cap (they are the seed), so the unseeded "previous
+    // rounds no longer count" clause cannot ship next to the seed note, and
+    // the note names rounds already spent on the PR, not pre-takeover
+    // review (from 60 leaves zero remainder before the brake).
+    const seededRearm = runToggle({
+      cmd: 'add',
+      labels: ['autofix/takeover'],
+      cmdFrom: '60',
+    });
+    expect(seededRearm.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 60 -->',
+    );
+    expect(seededRearm.writes).toContain(
+      'earlier rounds count toward the cap only via this seed',
+    );
+    expect(seededRearm.writes).not.toContain(
+      'previous rounds no longer count toward the cap',
+    );
+    expect(seededRearm.writes).toContain('rounds already spent on this PR');
+    expect(seededRearm.writes).not.toContain(
+      'the rounds this PR spent in review before takeover',
+    );
+    expect(seededRearm.writes).toContain(
+      'engages after 0 more change-producing round(s) instead of a full fresh 5',
+    );
+    // The unseeded re-arm keeps the original fresh-window clause…
+    expect(rearm.writes).toContain(
+      'previous rounds no longer count toward the cap',
+    );
+    // …and no path emits a marker for the guard values: the explicit
+    // no-seed spelling '0', empty, or a non-number.
+    for (const from of ['', '0', 'abc']) {
+      expect(runToggle({ cmd: 'add', cmdFrom: from }).writes).not.toContain(
+        'autofix-round-start',
+      );
+    }
     // remove + present → label removed, through the URI-encoded path segment
     // (real jq runs in the substitution, so the %2F is the executed truth).
     const removePresent = runToggle({
@@ -4020,6 +4077,23 @@ describe('qwen-autofix workflow', () => {
     }
     expect(engageFailure).toBeTruthy();
     expect(engageFailure.writes).not.toContain('takeover-ack engaged');
+    // A TRANSIENT engage-ack failure retries once before the heal-path
+    // warning: the seed marker's only copy lives in the failed body, and
+    // the heal ack has no slot to recover it — the retry is the only thing
+    // that keeps a 'from N' seed alive across a 5xx.
+    const transientAckFailure = runToggle({
+      cmd: 'add',
+      cmdFrom: '12',
+      commentFails: 'HTTP 502',
+    });
+    expect(transientAckFailure.done).toBe(true);
+    expect(
+      transientAckFailure.writes.match(/^COMMENT-ATTEMPT$/gm) ?? [],
+    ).toHaveLength(2);
+    expect(transientAckFailure.writes).toContain(
+      '<!-- takeover-ack engaged -->\n<!-- autofix-round-start 12 -->',
+    );
+    expect(transientAckFailure.log).not.toContain('::warning::');
     // The release DELETE tolerates the 404 race (a concurrent removal
     // already reached the end state): the release ack still posts, no
     // warning.
@@ -4226,7 +4300,18 @@ describe('qwen-autofix workflow', () => {
             '-c',
             `set -uo pipefail\nWORKDIR='${dir}'\n${trio.replace(/\n {12}/g, '\n')}\nprintf '\\n%s' "$ROUND"`,
           ],
-          { env: { ...process.env, AUTOFIX_BOT: BOT }, encoding: 'utf8' },
+          {
+            // EFF_MAX_ROUNDS is SET so both clamp branches execute in the
+            // fixtures below; PR is the clamp echo's only other expansion
+            // under set -u.
+            env: {
+              ...process.env,
+              AUTOFIX_BOT: BOT,
+              EFF_MAX_ROUNDS: '10',
+              PR: '1',
+            },
+            encoding: 'utf8',
+          },
         )
           .split('\n')
           .at(-1);
@@ -4250,6 +4335,18 @@ describe('qwen-autofix workflow', () => {
     // CRITICAL_ONLY_AFTER_ROUND=5 the brake is two managed rounds away
     // instead of five.
     expect(roundOf([ack(K1, 3)])).toBe('3');
+    // Last marker wins: a hand-written marker prepended by an edit loses to
+    // the workflow's own final-line marker (GitHub edits preserve user.login
+    // and created_at, so the edited ack still passes both filter halves).
+    expect(
+      roundOf([
+        {
+          user: { login: BOT },
+          created_at: K1,
+          body: 'edited <!-- autofix-round-start 99 -->\n<!-- takeover-ack engaged -->\n<!-- autofix-round-start 3 -->',
+        },
+      ]),
+    ).toBe('3');
     // Real markers outrank the seed as soon as one exists — the seed is a
     // FLOOR for an empty window, not an offset added to every round.
     expect(
@@ -4297,6 +4394,14 @@ describe('qwen-autofix workflow', () => {
     // Shape gate: the marker reader takes 1-2 digits, so a longer number is
     // not silently truncated to its first two digits.
     expect(roundOf([ack(K1, 100)])).toBe('0');
+    // Read-site clamp (cap 10 from the harness env): a seed at or past the
+    // cap lands strictly below it…
+    expect(roundOf([ack(K1, 15)])).toBe('9');
+    // …and a seed just under the cap passes through unclamped. Same value
+    // out, different path — together they pin both clamp branches against
+    // deletion and against a -ge→-le flip (which would clamp every seeded
+    // window to cap−1).
+    expect(roundOf([ack(K1, 9)])).toBe('9');
     // The ack literal the other seven read sites match must survive verbatim
     // next to the seed marker.
     expect(ack(K1, 3).body).toContain('<!-- takeover-ack engaged -->');
@@ -7906,6 +8011,25 @@ exit 1
     expect(seeded[0]).not.toBe('5 change-producing rounds are complete');
     expect(seeded[1]).toContain('从第 3 轮起算');
     expect(seeded[1]).toContain('又完成 2 个产生改动的轮次');
+    // A seed that hit the read-site clamp must still cite the number as
+    // TYPED: quoting the post-clamp value renders a command nobody sent
+    // while the engage ack above still shows the original (from 12,
+    // clamped to 9 under cap 10 — the label-removal path the clamp's own
+    // comment names).
+    const clampedSeed = causeFor(
+      'true',
+      'false',
+      0,
+      0,
+      'LIVE_ROUND_START_RAW=12\nLIVE_ROUND_START=9\nROUND=14\nMAX_ROUNDS=10',
+    );
+    expect(clampedSeed[0]).toContain('seeded at round 12');
+    expect(clampedSeed[0]).toContain('@qwen-code /takeover from 12');
+    expect(clampedSeed[0]).toContain('clamped to 9 under the effective cap 10');
+    expect(clampedSeed[0]).toContain('plus 5 change-producing round(s) since');
+    expect(clampedSeed[0]).not.toContain('from 9');
+    expect(clampedSeed[1]).toContain('从第 12 轮起算');
+    expect(clampedSeed[1]).toContain('收敛为 9');
 
     // The batch-budget sentence must describe the policy actually in force:
     // the OVER_BUDGET census only builds spans in round-brake territory, so
@@ -10199,6 +10323,7 @@ exit 1
         outcome = 'fixed',
         maxRounds = '100',
         commentExit = 0,
+        roundStart = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'milestone-'));
@@ -10233,6 +10358,7 @@ exit 1
               PR: '1',
               TAKEOVER_LABEL: 'autofix/takeover',
               TAKEOVER_COMMAND: '@qwen-code /takeover',
+              ROUND_START: roundStart,
             },
             encoding: 'utf8',
           },
@@ -10320,6 +10446,29 @@ exit 1
       { nextRound: 11 },
     );
     expect(freshWindow.body).toContain('round 11/100');
+    // Seeded windows count rounds IN THE WINDOW: the window opens at the
+    // seed, so "10+ accumulated" is measured from the seed — a takeover
+    // 'from 60' must not digest on its first managed rounds just because
+    // the absolute counter already reads 61+…
+    expect(
+      runDigest([evalC(HEADS.noop, K, '2026-07-02T00:00:00Z')], {
+        nextRound: 61,
+        roundStart: '60',
+      }).body,
+    ).toBe('');
+    expect(
+      runDigest([evalC(HEADS.noop, K, '2026-07-02T00:00:00Z')], {
+        nextRound: 10,
+        roundStart: '8',
+      }).body,
+    ).toBe('');
+    // …and once 10 managed rounds HAVE accumulated past the seed, it posts.
+    expect(
+      runDigest([evalC(HEADS.push, K, '2026-07-02T00:00:00Z')], {
+        nextRound: 70,
+        roundStart: '60',
+      }).body,
+    ).toContain('round 70/100');
 
     // WINDOW=none says what it counts instead of claiming a window.
     const noWindow = runDigest(
@@ -14475,7 +14624,7 @@ exit 1
       created_at: at,
       body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
     });
-    const run = (comments) => {
+    const run = (comments, { maxRounds } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'rearm-live-'));
       writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
       const out = execFileSync(
@@ -14485,7 +14634,12 @@ exit 1
           `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$LIVE_EVAL_WM" "$LIVE_REARM_KEY" "$LIVE_MAX_ROUND"`,
         ],
         {
-          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          env: {
+            ...process.env,
+            WORKDIR: dir,
+            AUTOFIX_BOT: BOT,
+            ...(maxRounds === undefined ? {} : { MAX_ROUNDS: maxRounds }),
+          },
           encoding: 'utf8',
         },
       );
@@ -14534,6 +14688,20 @@ exit 1
       },
     ]);
     expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+
+    // Seeded windows compare too: the LIVE copy honors a marker on the
+    // window anchor and clamps a seed at/past the cap exactly like the
+    // scan-side twin (cap 10: 15 clamps to 9; 9 passes through), so the two
+    // copies cannot drift on a seeded window.
+    const seededAck = (at, seed) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `🤝 … <!-- takeover-ack engaged -->\n<!-- autofix-round-start ${seed} -->`,
+    });
+    const SEEDED_AT = '2026-07-20T12:00:00Z';
+    expect(run([seededAck(SEEDED_AT, 3)], { maxRounds: '10' })[2]).toBe('3');
+    expect(run([seededAck(SEEDED_AT, 15)], { maxRounds: '10' })[2]).toBe('9');
+    expect(run([seededAck(SEEDED_AT, 9)], { maxRounds: '10' })[2]).toBe('9');
   });
 
   it('routes @qwen-code /retry through the takeover command authorization', () => {

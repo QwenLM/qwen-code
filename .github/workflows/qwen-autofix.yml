@@ -2014,10 +2014,23 @@ jobs:
           FROM_MARKER=''
           FROM_NOTE=''
           FROM_NOTE_ZH=''
+          FROM_NOTE_REARM=''
+          FROM_NOTE_REARM_ZH=''
+          # A seeded RE-ARM must not keep the unseeded fresh-window clause:
+          # the seed makes the earlier rounds count toward the cap (they ARE
+          # the seed), and on a re-arm they were typically already-managed
+          # rounds, not pre-takeover review — both wordings flip below.
+          REARM_FRESH_CLAUSE=' (previous rounds no longer count toward the cap)'
+          REARM_FRESH_CLAUSE_ZH='（此前轮次不再计入上限）'
           if [[ -n "${CMD_FROM}" && "${CMD_FROM}" =~ ^[0-9]{1,2}$ && "${CMD_FROM}" != '0' ]]; then
             FROM_MARKER="$(printf '\n<!-- autofix-round-start %s -->' "${CMD_FROM}")"
-            FROM_NOTE="$(printf ' This window'"'"'s round counter starts at %s (the rounds this PR spent in review before takeover), so the Critical-only brake engages after %s more change-producing round(s) instead of a full fresh %s.' "${CMD_FROM}" "$(( CRITICAL_ONLY_AFTER_ROUND > CMD_FROM ? CRITICAL_ONLY_AFTER_ROUND - CMD_FROM : 0 ))" "${CRITICAL_ONLY_AFTER_ROUND}")"
-            FROM_NOTE_ZH="$(printf '本窗口轮次计数从 %s 起算（即本 PR 托管前已进行的评审轮数），因此再经过 %s 个产生改动的轮次即进入 Critical-only，而非重新计满 %s 轮。' "${CMD_FROM}" "$(( CRITICAL_ONLY_AFTER_ROUND > CMD_FROM ? CRITICAL_ONLY_AFTER_ROUND - CMD_FROM : 0 ))" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            REARM_FRESH_CLAUSE=' (earlier rounds count toward the cap only via this seed)'
+            REARM_FRESH_CLAUSE_ZH='（此前轮次仅通过该种子计入上限）'
+            FROM_REMAIN="$(( CRITICAL_ONLY_AFTER_ROUND > CMD_FROM ? CRITICAL_ONLY_AFTER_ROUND - CMD_FROM : 0 ))"
+            FROM_NOTE="$(printf ' This window'"'"'s round counter starts at %s (the rounds this PR spent in review before takeover), so the Critical-only brake engages after %s more change-producing round(s) instead of a full fresh %s.' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            FROM_NOTE_ZH="$(printf '本窗口轮次计数从 %s 起算（即本 PR 托管前已进行的评审轮数），因此再经过 %s 个产生改动的轮次即进入 Critical-only，而非重新计满 %s 轮。' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            FROM_NOTE_REARM="$(printf ' This window'"'"'s round counter restarts at %s (rounds already spent on this PR), so the Critical-only brake engages after %s more change-producing round(s) instead of a full fresh %s.' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
+            FROM_NOTE_REARM_ZH="$(printf '本窗口轮次计数从 %s 重启（即本 PR 已消耗的轮次），因此再经过 %s 个产生改动的轮次即进入 Critical-only，而非重新计满 %s 轮。' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
           fi
           if [[ "${CMD}" == 'add' ]]; then
             if [[ "${HAS}" == 'true' ]]; then
@@ -2027,7 +2040,7 @@ jobs:
               # a PR that exhausted its rounds continues under management —
               # no label churn needed. The watermark is untouched: feedback
               # already addressed is never replayed.
-              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${FROM_NOTE}" "${FROM_NOTE_ZH}" "${FROM_MARKER}")"
+              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window%s; management continues.%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口%s，托管继续。%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${REARM_FRESH_CLAUSE}" "${FROM_NOTE_REARM}" "${REARM_FRESH_CLAUSE_ZH}" "${FROM_NOTE_REARM_ZH}" "${FROM_MARKER}")"
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
               # Management resumed — the escalation label is stale. 404 is
               # the common case (the PR was never paused).
@@ -2069,7 +2082,14 @@ jobs:
                 FORK_NOTE=' This is a fork PR, so the first round comes from the next scheduled scan (usually within minutes).'
                 FORK_NOTE_ZH='本 PR 来自 fork，首轮处理将由下一次定时扫描执行（通常几分钟内）。'
               fi
-              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${FORK_NOTE}" "${FROM_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${FROM_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FROM_MARKER}")" \
+              # Body built ONCE so the retry posts byte-identical text.
+              # One retry before the heal-path warning: the seed marker's
+              # only copy lives in this body, and the heal ack has no slot
+              # to recover it — a transient 5xx must not silently un-seed
+              # the window.
+              ENGAGE_BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${FORK_NOTE}" "${FROM_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${FROM_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FROM_MARKER}")"
+              gh pr comment "${PR}" --repo "${REPO}" --body "${ENGAGE_BODY}" \
+                || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body "${ENGAGE_BODY}"; } \
                 || echo "::warning::engage ack comment failed on #${PR}; the scan's first-pickup ack heals it"
               # Engaged (possibly re-engaging an auto-released PR) — the
               # escalation label is stale. 404 is the common case.
@@ -4754,6 +4774,10 @@ jobs:
               | ((.body // "") | [ scan("<!-- autofix-round-start ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
             | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
           [[ "${LIVE_ROUND_START}" =~ ^[0-9]{1,2}$ ]] || LIVE_ROUND_START=0
+          # The PRE-clamp value is what the maintainer typed; the Critical-only
+          # audit clause cites it so a clamped seed never renders a command
+          # nobody sent while the engage ack still shows the original number.
+          LIVE_ROUND_START_RAW="${LIVE_ROUND_START}"
           if [[ "${MAX_ROUNDS:-0}" -gt 0 && "${LIVE_ROUND_START}" -ge "${MAX_ROUNDS}" ]]; then
             LIVE_ROUND_START=$(( MAX_ROUNDS - 1 ))
           fi
@@ -5163,6 +5187,7 @@ jobs:
           fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
           echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
+          echo "round_start=${LIVE_ROUND_START}" >> "${GITHUB_OUTPUT}"
 
           rm -f "${WORKDIR}/deferred-feedback.md"
           if [[ "${CRITICAL_ONLY}" == "true" ]]; then
@@ -5185,8 +5210,18 @@ jobs:
             # '0' under string comparison, so a bare `!= '0'` renders the
             # seeded wording on every ordinary PR.
             if [[ "${LIVE_ROUND_START:-0}" != '0' ]]; then
-              ROUNDS_CLAUSE_EN="the round counter reached ${CRITICAL_ONLY_AFTER_ROUND} (this window was seeded at round ${LIVE_ROUND_START} by \`${TAKEOVER_COMMAND} from ${LIVE_ROUND_START}\`, plus $(( ROUND - LIVE_ROUND_START )) change-producing round(s) since)"
-              ROUNDS_CLAUSE_ZH="轮次计数已达 ${CRITICAL_ONLY_AFTER_ROUND}（本窗口由 \`${TAKEOVER_COMMAND} from ${LIVE_ROUND_START}\` 从第 ${LIVE_ROUND_START} 轮起算，此后又完成 $(( ROUND - LIVE_ROUND_START )) 个产生改动的轮次）"
+              # Cite the seed as TYPED, not as clamped: when the read-site
+              # clamp fired, quoting the clamped value renders a command
+              # nobody sent while the engage ack still shows the original.
+              SEED_AS_TYPED="${LIVE_ROUND_START_RAW:-${LIVE_ROUND_START}}"
+              CLAMP_NOTE_EN=''
+              CLAMP_NOTE_ZH=''
+              if [[ "${SEED_AS_TYPED}" != "${LIVE_ROUND_START}" ]]; then
+                CLAMP_NOTE_EN=", clamped to ${LIVE_ROUND_START} under the effective cap ${MAX_ROUNDS}"
+                CLAMP_NOTE_ZH="，已按有效上限 ${MAX_ROUNDS} 收敛为 ${LIVE_ROUND_START}"
+              fi
+              ROUNDS_CLAUSE_EN="the round counter reached ${CRITICAL_ONLY_AFTER_ROUND} (this window was seeded at round ${SEED_AS_TYPED} by \`${TAKEOVER_COMMAND} from ${SEED_AS_TYPED}\`${CLAMP_NOTE_EN}, plus $(( ROUND - LIVE_ROUND_START )) change-producing round(s) since)"
+              ROUNDS_CLAUSE_ZH="轮次计数已达 ${CRITICAL_ONLY_AFTER_ROUND}（本窗口由 \`${TAKEOVER_COMMAND} from ${SEED_AS_TYPED}\` 从第 ${SEED_AS_TYPED} 轮起算${CLAMP_NOTE_ZH}，此后又完成 $(( ROUND - LIVE_ROUND_START )) 个产生改动的轮次）"
             fi
             if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' && "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
               CAUSE_EN="${ROUNDS_CLAUSE_EN} and ${GROWTH_CLAUSE_EN}"
@@ -5944,6 +5979,10 @@ jobs:
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          # The seed the window opened at (prepare's clamped read; 0 when
+          # unseeded): the milestone crossing trigger counts rounds
+          # accumulated in the window, not seed-inflated absolute ones.
+          ROUND_START: '${{ steps.prepare.outputs.round_start }}'
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -6524,12 +6563,16 @@ jobs:
             # would skip an exact %10 check forever — and a failure-heavy
             # PR is the very PR the digest exists for. Post on the first
             # PUSHED round once 10+ rounds have accumulated since the last
-            # digest in THIS window (or since the window opened).
-            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+            # digest in THIS window (or since the window opened). The
+            # window opens at the round SEED, not at zero: a '/takeover
+            # from 60' counter starts at 60, so the no-digest-yet baseline
+            # is the seed — otherwise the seed-inflated counter digests on
+            # the window's first push with a 1-2 round census.
+            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" --argjson start "${ROUND_START:-0}" '
               [ .[] | select((.user.login // "") == $ab) | (.body // "")
                 | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]
                 | select(.[1] == $win) | (.[0] | tonumber) ]
-              | max // 0' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+              | max // $start' "${WORKDIR}/ic.json" 2> /dev/null || echo "${ROUND_START:-0}")"
             if [[ "$(( NEXT_ROUND - MS_LAST ))" -ge 10 ]]; then
               WIN_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
                 [.[] | select((.user.login // "") == $ab)
