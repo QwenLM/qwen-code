@@ -14,7 +14,7 @@
 // was based against. The next round re-hashes the same paths and compares:
 // under the same HEAD and the same model, a file whose bytes are identical to
 // what the previous clean round reviewed is skipped, one import hop of
-// dependents re-enters (same widening, same reasons as `rescope`), and the
+// dependents re-enters (same widening, same reasons as `fetch-pr --since`), and the
 // rest is the delta.
 //
 // HEAD equality is a hard gate, not a convenience. The captured diff is

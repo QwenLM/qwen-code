@@ -181,8 +181,23 @@ describe('bundled review skill', () => {
     expect(body).toContain('`upToDate: true` **but** model differs');
     // Recovery path: the marker carries the certifying identity now, so the
     // "no `lastModelId` in the marker" premise main wrote against is gone.
-    expect(body).toContain('the marker now carries `model` beside its `sha`');
+    expect(body).toContain('the marker carries `model` beside its `sha`');
     expect(body).not.toContain('there is no `lastModelId` in the marker');
+    // …and, unlike the cache path, its gate is RULED BY THE CLI. The two
+    // identities are not comparable in prompt text — the marker's is
+    // provider-qualified, `{{model}}` is the bare id — so an instruction to
+    // compare them by hand is the bug, not the fix. Reverting to one must
+    // fail here.
+    expect(body).toContain(
+      '**the same-model gate on this path is RULED FOR YOU',
+    );
+    expect(body).toContain('do not compare the two identities yourself');
+    expect(body).not.toMatch(
+      /side file's anchor is passed as `--since` only when that `model` equals/,
+    );
+    // A section with no verdict at all is a mismatch, not a pass: the side
+    // file can outlive the round that vouched for it.
+    expect(body).toContain('A ledger section that states no verdict');
     // The work list crosses models even when the anchor does not.
     expect(body).toContain('the work list carries across models');
   });

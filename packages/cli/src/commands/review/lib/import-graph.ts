@@ -42,7 +42,7 @@
 
 import * as nodePath from 'node:path';
 
-/** File-reading seam: rescope passes worktree reads, tests pass a map. */
+/** File-reading seam: callers pass worktree reads, tests pass a map. */
 export type SourceReader = (repoRelPath: string) => string | null;
 
 /**

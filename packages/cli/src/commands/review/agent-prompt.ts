@@ -163,12 +163,12 @@ interface PlanReport {
   srcDiffLines?: unknown;
   diffLines?: unknown;
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
-  /** Present only on a plan `rescope` rewrote — see incrementalScopeOf. */
+  /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
   incremental?: unknown;
 }
 
 /**
- * The `incremental` block a rescoped plan carries, re-validated field by
+ * The `incremental.scope` block a `--since`-scoped plan carries, re-validated field by
  * field: the plan is parsed off disk with an unchecked cast, and a malformed
  * block must degrade to "not an incremental round" (full-scope briefs, which
  * are always safe) rather than render `undefined` into an agent's contract.
@@ -255,7 +255,16 @@ function scopeFileLists(incremental: IncrementalScope): string[] {
 }
 
 function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
-  const raw = report.incremental as
+  // `incremental.scope`, not `incremental`: the outer block is the anchor
+  // RULING (`since`/`effective`/`reason`), and the scope it produced is
+  // nested under it — absent on every refusal and every up-to-date round, so
+  // reading the outer object for these fields would find nothing anyway. Both
+  // levels stay defensively parsed: the plan is `JSON.parse`d with an
+  // unchecked cast, and a malformed block must degrade to "not an incremental
+  // round" (full-scope briefs, which are always safe) rather than render
+  // `undefined` into an agent's contract.
+  const raw = (report.incremental as { scope?: unknown } | undefined | null)
+    ?.scope as
     | {
         anchor?: unknown;
         deltaFiles?: unknown;

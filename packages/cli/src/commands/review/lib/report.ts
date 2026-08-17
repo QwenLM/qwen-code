@@ -254,8 +254,8 @@ export function stringifyPlanReport(report: unknown): string {
 
 /**
  * The `incremental` block an incrementally-scoped plan carries. Two producers
- * write it — `rescope` (PR flow, commit anchor or transferred content
- * verdicts) and `capture-local` (local
+ * write it — `fetch-pr --since` (PR flow, commit anchor or transferred
+ * content verdicts) and `capture-local` (local
  * flow, content anchor) — and every consumer reads one shape. It lives HERE,
  * beside the other plan-report shapes, and not in a module of its own: a
  * types-only module is erased by esbuild at every import site, and the

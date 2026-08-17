@@ -68,7 +68,7 @@ export interface RosterPlan {
   worktreePath?: unknown;
   prNumber?: unknown;
   untrackedFiles?: unknown;
-  /** Present only on a rescoped plan — see incrementalInteractionPaths. */
+  /** Present only on a `--since`-scoped plan — see incrementalInteractionPaths. */
   incremental?: unknown;
   /**
    * The review's effort, as the capturing command recorded it (`--effort`).
@@ -160,12 +160,15 @@ function heavyFiles(plan: RosterPlan): string[] {
 }
 
 /**
- * The interaction-file paths of a rescoped plan, defensively parsed — the
+ * The interaction-file paths of a `--since`-scoped plan, defensively parsed — the
  * plan is disk JSON, and a malformed block must widen the roster (invariant
  * agents run), never narrow it.
  */
 function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
-  const raw = plan.incremental as
+  // `incremental.scope`, for the reason `incrementalScopeOf` records: the
+  // outer block is the anchor ruling, the scope it produced is nested.
+  const raw = (plan.incremental as { scope?: unknown } | null | undefined)
+    ?.scope as
     | { interaction?: unknown; deltaFiles?: unknown }
     | null
     | undefined;

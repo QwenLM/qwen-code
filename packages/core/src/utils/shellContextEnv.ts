@@ -30,6 +30,7 @@ import {
   sessionIdContext,
   getSessionProjectDir,
   getSessionModel,
+  getSessionModelIdentity,
 } from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
@@ -166,20 +167,29 @@ export function getShellContextEnvVars(): Record<string, string> {
   // The same model qualified by WHERE it resolves (`<model>@<8-hex of
   // authType+baseUrl>`), for consumers that must not treat one id exposed by
   // two provider configurations as one model — /review's incremental anchor
-  // above all.
+  // above all. Keyed per session exactly as the model above is, and for a
+  // sharper reason: the process-global slot belongs to whichever session
+  // claimed it, and handing that to another session is worse than handing it
+  // nothing — a confidently WRONG identity passes a gate the bare id would
+  // have failed. The global slot stays the single-session CLI's fallback.
   //
-  // The slot itself is process-global (Config republishes it beside the model
-  // on every change), so unlike the model above it cannot be keyed per
-  // session — and in daemon mode the global one belongs to whichever session
-  // last wrote it. Handing that to another session's subprocess would be
-  // worse than handing it nothing: a confidently WRONG identity passes a gate
-  // the bare id would have failed. So it rides only while it still describes
-  // the model resolved for THIS session, and a mismatch withholds it — the
-  // subprocess then falls back to the bare id, which is coarser but true.
-  const modelIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
-  if (modelIdentity && model && identityDescribes(modelIdentity, model)) {
-    env['QWEN_CODE_MODEL_IDENTITY'] = modelIdentity;
-  }
+  // Written as `''` on a miss rather than omitted, for the reason the agent
+  // and prompt ids below are: every spawn site composes the child env as
+  // `{...process.env, ...getShellContextEnvVars()}`, so an omitted key is not
+  // a withheld value — the parent's stale one rides the spread. Only an
+  // explicit empty string overwrites it, and `roundModelIdFrom` reads an
+  // empty identity as "unpublished" and falls back to the bare model id.
+  //
+  // The fallback is guarded too: a global identity that does not describe
+  // THIS session's model qualifies the wrong one, so it is dropped rather
+  // than passed down.
+  const globalIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  const modelIdentity =
+    (sessionId ? getSessionModelIdentity(sessionId) : undefined) ??
+    (globalIdentity && model && identityDescribes(globalIdentity, model)
+      ? globalIdentity
+      : undefined);
+  env['QWEN_CODE_MODEL_IDENTITY'] = modelIdentity ?? '';
 
   // For agent/prompt IDs: explicitly set empty string when no ALS context
   // exists, so that stale values inherited from a parent qwen-code process

@@ -429,11 +429,13 @@ describe('requiredAgents — Step 3B', () => {
     const incremental = {
       ...base,
       incremental: {
-        anchor: 'abc1234def567890',
-        deltaFiles: ['src/delta.ts'],
-        interaction: [
-          { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
-        ],
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: ['src/delta.ts'],
+          interaction: [
+            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+          ],
+        },
       },
     };
     const k = keys(incremental as typeof base);
@@ -443,28 +445,35 @@ describe('requiredAgents — Step 3B', () => {
     const junkDelta = {
       ...base,
       incremental: {
-        anchor: 'abc1234def567890',
-        deltaFiles: [null, 42],
-        interaction: [
-          { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
-        ],
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: [null, 42],
+          interaction: [
+            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+          ],
+        },
       },
     };
     expect(keys(junkDelta as typeof base)).toContain(
       'invariant-a--src/seam.ts',
     );
-    const mangled = { ...base, incremental: { interaction: 'nope' } };
+    const mangled = {
+      ...base,
+      incremental: { scope: { interaction: 'nope' } },
+    };
     expect(keys(mangled as typeof base)).toContain('invariant-a--src/seam.ts');
     // A path in BOTH lists is a DELTA file (its change is live): the delta
     // classification wins and the invariant agents stay.
     const both = {
       ...base,
       incremental: {
-        anchor: 'abc1234def567890',
-        deltaFiles: ['src/seam.ts'],
-        interaction: [
-          { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
-        ],
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: ['src/seam.ts'],
+          interaction: [
+            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+          ],
+        },
       },
     };
     expect(keys(both as typeof base)).toContain('invariant-a--src/seam.ts');
