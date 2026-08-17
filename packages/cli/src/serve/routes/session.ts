@@ -4856,27 +4856,6 @@ export function registerSessionRoutes(
       if (sessionId === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
-      // A session live in another runtime keeps its title from that bridge;
-      // renaming the addressed workspace's file here would answer 200 while
-      // the live session never changes, so reject like the restore path does.
-      const liveOwner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
-      if (liveOwner.kind === 'ambiguous') {
-        sendAmbiguousSessionOwner(res, route, sessionId, liveOwner.runtimes);
-        return;
-      }
-      if (
-        liveOwner.kind === 'found' &&
-        liveOwner.runtime.workspaceCwd !== runtime.workspaceCwd
-      ) {
-        sendSessionWorkspaceConflict(
-          res,
-          route,
-          sessionId,
-          runtime,
-          liveOwner.runtime,
-        );
-        return;
-      }
       const rawDisplayName = safeBody(req)['displayName'];
       if (typeof rawDisplayName !== 'string') {
         res.status(400).json({
@@ -4907,7 +4886,38 @@ export function registerSessionRoutes(
             'must not contain control characters',
           );
         }
-        await archiveCoordinator.runSharedMany([sessionId], async () => {
+        await archiveCoordinator.runExclusiveMany([sessionId], async () => {
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return;
+          }
+          if (
+            liveOwner.kind === 'found' &&
+            liveOwner.runtime.workspaceCwd !== runtime.workspaceCwd
+          ) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return;
+          }
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
             let effective: { displayName?: string };
             try {
@@ -4916,22 +4926,25 @@ export function registerSessionRoutes(
                 { displayName },
                 clientId !== undefined ? { clientId } : undefined,
               );
+              assertRuntimeGenerationOpen?.();
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;
               const service = createWorkspaceRuntimeSessionService(runtime);
               const location = await service.getSessionLocation(sessionId);
+              assertRuntimeGenerationOpen?.();
               if (location === 'conflict') {
                 throw new SessionConflictError(sessionId);
               }
-              if (
-                !location ||
-                !(await service.renameSession(
-                  sessionId,
-                  displayName,
-                  'manual',
-                  location,
-                ))
-              ) {
+              const renamed = location
+                ? await service.renameSession(
+                    sessionId,
+                    displayName,
+                    'manual',
+                    location,
+                  )
+                : false;
+              assertRuntimeGenerationOpen?.();
+              if (!renamed) {
                 throw new SessionNotFoundError(sessionId);
               }
               effective = { displayName: displayName || undefined };

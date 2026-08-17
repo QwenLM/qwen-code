@@ -2423,6 +2423,53 @@ describe('WebShellSidebar workspace removal', () => {
     expect(survivor!.value).toBe('Second renamed');
   });
 
+  it('does not reopen a rename editor while that session is saving', async () => {
+    active.sessions.push({
+      sessionId: 'other-session',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Other session',
+    });
+    let resolveRename!: (value: unknown) => void;
+    updateSessionMetadata.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRename = resolve;
+        }),
+    );
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await expandWorkspace('project');
+    await act(async () => {
+      click(inlineSessionAction('Other session', 'Rename')!);
+      await Promise.resolve();
+    });
+    const input = container.querySelector<HTMLInputElement>('input');
+    expect(input).not.toBeNull();
+    act(() => {
+      input!
+        .closest('form')
+        ?.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+
+    act(() => click(inlineSessionAction('Other session', 'Rename')!));
+    expect(container.querySelector<HTMLInputElement>('input')).toBeNull();
+
+    await act(async () => {
+      resolveRename({ displayName: 'Other session' });
+      await updateSessionMetadata.mock.results[0]?.value;
+      await Promise.resolve();
+    });
+    act(() => click(inlineSessionAction('Other session', 'Rename')!));
+    expect(container.querySelector<HTMLInputElement>('input')).not.toBeNull();
+  });
+
   it('keeps a persisted workspace collapse when sections remount', async () => {
     connection.workspaceCwd = '/tmp/other';
     connection.sessionId = 'secondary-session';
@@ -4252,6 +4299,44 @@ describe('WebShellSidebar session list notices', () => {
     expect(showAll).toBeDefined();
     act(() => click(showAll!));
     expect(container.textContent).toContain('Preview session 6');
+  });
+
+  it('keeps an edited session visible when the preview order changes', async () => {
+    active.sessions = Array.from({ length: 6 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Preview session ${index + 1}`,
+      workspaceCwd: '/tmp/project',
+    }));
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    await act(async () => {
+      click(inlineSessionAction('Preview session 5', 'Rename')!);
+      await Promise.resolve();
+    });
+    const input = container.querySelector<HTMLInputElement>('input');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      setInputValue(input!, 'Renaming five');
+      active.sessions = [
+        {
+          sessionId: 'session-fresh',
+          displayName: 'A fresh session',
+          workspaceCwd: '/tmp/project',
+        },
+        ...active.sessions,
+      ];
+      renderSidebar({
+        sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+      });
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector<HTMLInputElement>('input')?.value).toBe(
+      'Renaming five',
+    );
   });
 
   it('keeps a settled filtered-empty view while a refresh is in flight', async () => {

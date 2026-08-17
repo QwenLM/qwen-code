@@ -1003,6 +1003,45 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(reopened!.querySelector('input')).toBeNull();
   });
 
+  it('resets collapsed search state when the sidebar expands', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const search = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    act(() =>
+      search!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    await flushSidebar();
+    const input = switcher!.querySelector<HTMLInputElement>('input');
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'no-match');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    renderSidebar(false);
+    await flushSidebar();
+
+    expect(container.querySelector('[class*="projectSearch"]')).toBeNull();
+    expect(container.textContent).toContain('API review');
+    expect(container.textContent).not.toContain('No matching sessions.');
+  });
+
   it('keeps keyboard semantics when a pointer grazes the open switcher', async () => {
     renderSidebar(true);
     await flushSidebar();

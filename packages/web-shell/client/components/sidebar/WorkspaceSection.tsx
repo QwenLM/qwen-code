@@ -108,6 +108,7 @@ interface WorkspaceSectionProps {
   deleteGroupLabel?: string;
   groupActionsDisabled?: boolean;
   excludePinned?: boolean;
+  limitSessions?: boolean;
   /**
    * Open the working-tree Changes dialog for this workspace. When provided, the
    * folder header shows a live git chip (branch + dirty/ahead-behind state) that
@@ -145,6 +146,7 @@ export function WorkspaceSection({
   deleteGroupLabel,
   groupActionsDisabled,
   excludePinned = false,
+  limitSessions = true,
   onOpenGitDiff,
   onOpenCommit,
 }: WorkspaceSectionProps) {
@@ -402,7 +404,7 @@ export function WorkspaceSection({
     });
   }, [excludePinned, searchQuery, sessions]);
   const directSessions =
-    searchActive || showAllSessions
+    searchActive || showAllSessions || !limitSessions
       ? visibleSessions
       : visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
 
@@ -541,7 +543,7 @@ export function WorkspaceSection({
                     key={group.id}
                     label={group.label}
                     count={group.sessions.length}
-                    limitSessions={!searchActive}
+                    limitSessions={limitSessions && !searchActive}
                     expanded={!collapsedGroupIds.has(group.id)}
                     onToggle={() => {
                       setCollapsedGroupIds((current) => {
@@ -564,7 +566,7 @@ export function WorkspaceSection({
                     key={`${group.id}:${sourceType ?? ''}`}
                     label={group.name}
                     count={sessions.length}
-                    limitSessions={!searchActive}
+                    limitSessions={limitSessions && !searchActive}
                     color={group.color}
                     expanded={!collapsedGroupIds.has(group.id)}
                     onToggle={() => {
@@ -598,7 +600,7 @@ export function WorkspaceSection({
                     id="ungrouped"
                     label={ungroupedLabel}
                     count={groupedSessions.ungrouped.length}
-                    limitSessions={!searchActive}
+                    limitSessions={limitSessions && !searchActive}
                     expanded={!collapsedGroupIds.has('ungrouped')}
                     onToggle={() => {
                       setCollapsedGroupIds((current) => {
@@ -653,7 +655,8 @@ export function WorkspaceSection({
                     row
                   );
                 })}
-                {!searchActive &&
+                {limitSessions &&
+                  !searchActive &&
                   !showAllSessions &&
                   visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
                     <button

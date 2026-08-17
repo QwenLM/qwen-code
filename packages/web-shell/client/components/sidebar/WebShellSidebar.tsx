@@ -2112,6 +2112,7 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) => {
       if (!canRenameSession(session)) return;
       const identity = getIdentityForSession(session);
+      if (busySessionIdsRef.current.has(identity)) return;
       setEditingSession(session);
       setEditingSessionIdentity(identity);
       editingSessionIdentityRef.current = identity;
@@ -2135,6 +2136,10 @@ export function WebShellSidebar({
   useEffect(() => {
     if (!collapsed) {
       setCollapsedSessionsOpen(false);
+      setSearchOpen(false);
+      setSearchQuery('');
+      cancelRename();
+      setGroupMenu(null);
     } else if (!collapsedSessionsOpen) {
       // A stale open search or rename editor would otherwise mount its
       // autofocused input inside the collapsed hover popover and steal
@@ -3828,7 +3833,10 @@ export function WebShellSidebar({
 
   const body = useMemo(() => {
     const renderFlatSessions = () => {
-      const showAll = showAllProjectSessions || Boolean(searchQuery.trim());
+      const showAll =
+        editingSessionIdentity !== null ||
+        showAllProjectSessions ||
+        Boolean(searchQuery.trim());
       const displayedSessions = showAll
         ? filteredSessions
         : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
@@ -3884,7 +3892,7 @@ export function WebShellSidebar({
           id={section.id}
           label={section.label}
           count={section.sessions.length}
-          limitSessions={!searchQuery.trim()}
+          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
           expanded={!collapsedSessionSectionIds.has(section.id)}
           onToggle={() => toggleSessionSection(section.id)}
         >
@@ -3912,7 +3920,7 @@ export function WebShellSidebar({
           label={section.label}
           count={section.sessions.length}
           color={section.color}
-          limitSessions={!searchQuery.trim()}
+          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
@@ -3937,6 +3945,7 @@ export function WebShellSidebar({
     collapsedSessionSectionIds,
     canOrganizeWorkspace,
     channelSessionSections,
+    editingSessionIdentity,
     error,
     filteredSessions,
     groupBusy,
@@ -4655,6 +4664,7 @@ export function WebShellSidebar({
                 channelGroupingEnabled={false}
                 ungroupedLabel={t('sidebar.groupUngrouped')}
                 excludePinned={selectedSessionSource !== 'channel'}
+                limitSessions={editingSessionIdentity === null}
                 autoExpandKey={
                   autoExpandWorkspace?.id === ws.id
                     ? autoExpandWorkspace.key
@@ -4770,6 +4780,7 @@ export function WebShellSidebar({
                           deleteGroupLabel={t('sidebar.groupDelete')}
                           groupActionsDisabled={groupBusy}
                           excludePinned={selectedSessionSource !== 'channel'}
+                          limitSessions={editingSessionIdentity === null}
                           onOpenGitDiff={onOpenGitDiff}
                           onOpenCommit={onOpenCommit}
                           searchQuery={searchQuery}

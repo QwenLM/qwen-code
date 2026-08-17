@@ -23372,6 +23372,7 @@ describe('createServeApp', () => {
         trusted?: boolean;
         sessionRuntimeBaseDir?: string;
         primaryBridge?: FakeBridge;
+        generationGuard?: WorkspaceGenerationGuard;
       } = {},
     ) => {
       const primaryBridge = options.primaryBridge ?? fakeBridge();
@@ -23393,6 +23394,9 @@ describe('createServeApp', () => {
           ...(options.sessionRuntimeBaseDir !== undefined
             ? { sessionRuntimeBaseDir: options.sessionRuntimeBaseDir }
             : {}),
+          ...(options.generationGuard
+            ? { generationGuard: options.generationGuard }
+            : {}),
         }),
       ]);
       return {
@@ -23400,6 +23404,7 @@ describe('createServeApp', () => {
           workspaceRegistry: registry,
         }),
         primaryBridge,
+        registry,
       };
     };
 
@@ -23519,6 +23524,46 @@ describe('createServeApp', () => {
         },
       ]);
       expect(primaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it('fails closed when the live session owner is unavailable', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app, registry } = createWorkspaceMetadataApp(secondaryBridge);
+      vi.spyOn(registry, 'resolveLiveSessionOwner').mockReturnValue({
+        kind: 'unavailable',
+      });
+
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it('fails closed when the selected workspace generation closes', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (_sessionId, metadata) => {
+          generationGuard.close();
+          return metadata;
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        generationGuard,
+      });
+
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
     });
 
     it.each([
