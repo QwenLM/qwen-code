@@ -423,9 +423,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
   });
 
   it('exposes the workspace session live-state surface at the public entry', () => {
-    // The prototype checks are the fence that executes under vitest
-    // (type-only imports are erased); the shape assertions pin the wire
-    // contract for any tsc pass.
+    // The prototype checks execute under vitest (type-only imports are
+    // erased). The type shape assertions pin the wire contract via the
+    // package typecheck, which compiles this file through
+    // tsconfig.test-fence.json — the default tsconfig excludes test/.
     expect(
       typeof Public.DaemonClient.prototype.getWorkspaceSessionLiveState,
     ).toBe('function');

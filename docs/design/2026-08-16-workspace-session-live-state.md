@@ -66,7 +66,9 @@ The protocol needs two independent signals:
 - Detect daemon-observed catalog membership and static metadata changes across
   tabs, controllers, scheduled work, and background session creation.
 - Ensure a newly exposed catalog version cannot be followed by a cache hit for
-  a catalog snapshot that predates that version.
+  a catalog snapshot that predates that version, for reads initiated after that
+  exposure; an invalidated in-flight load may still resolve for waiters that
+  joined before the invalidation, but cannot install a stale cache value.
 - Preserve all existing session-list routes, pagination, filtering, timeouts,
   and compatibility behavior.
 

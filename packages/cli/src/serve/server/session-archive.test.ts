@@ -1124,6 +1124,7 @@ describe('deleteDaemonSessions', () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440084';
     writeSessionFile(workspaceDir, sessionId, 'active');
     const service = new SessionService(workspaceDir);
+    const markSessionCatalogChanged = vi.fn();
 
     await expect(
       deleteDaemonSessionIfOrphan({
@@ -1133,7 +1134,7 @@ describe('deleteDaemonSessions', () => {
           killSession: vi
             .fn()
             .mockRejectedValue(new SessionNotFoundError(sessionId)),
-          markSessionCatalogChanged: vi.fn(),
+          markSessionCatalogChanged,
         },
         coordinator: new SessionArchiveCoordinator(),
       }),
@@ -1141,6 +1142,9 @@ describe('deleteDaemonSessions', () => {
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       false,
     );
+    // Never-live orphan: no lifecycle choke point can fire, so the explicit
+    // mark is the only catalog-version signal for this removal.
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
   });
 
   it('throws when the lease is held by another writer', async () => {

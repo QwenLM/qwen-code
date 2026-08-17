@@ -5795,6 +5795,30 @@ describe('workspace session live-state route', () => {
     ]);
   });
 
+  it('defaults both wait flags to false when the bridge omits them', async () => {
+    // BridgeSessionSummary types both wait flags optional; a bridge that omits
+    // them must not serialize a missing key where the SDK snapshot promises a
+    // boolean.
+    const { app } = makeHarness({
+      primarySummaries: [makeSummary('primary-session', PRIMARY_CWD)],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.sessions).toEqual([
+      {
+        sessionId: 'primary-session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+    ]);
+  });
+
   it('returns an empty complete snapshot for an empty live runtime', async () => {
     const { app } = makeHarness({ primarySummaries: [] });
     const res = await request(app)
@@ -5963,6 +5987,82 @@ describe('workspace session live-state route', () => {
         activeOne,
         activeTwo,
       ]);
+    });
+  });
+
+  it('invalidates both organized cache scopes on the first live-state exposure, revision unchanged', async () => {
+    await withRuntimeDir(async () => {
+      const activeOne = '550e8400-e29b-41d4-a716-446655440211';
+      const archivedOne = '550e8400-e29b-41d4-a716-446655440212';
+      await writeStoredSession({
+        sessionId: activeOne,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'active one',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedOne,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'archived one',
+        mtime: new Date('2026-07-08T01:01:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedOne);
+      const { app, secondaryBridge } = makeHarness({
+        secondarySummaries: [],
+      });
+
+      const organized = (query: string) =>
+        request(app)
+          .get(`/workspaces/secondary-id/sessions?view=organized${query}`)
+          .set('Host', host())
+          .expect(200);
+      const ids = (body: { sessions: Array<{ sessionId: string }> }) =>
+        body.sessions.map((s) => s.sessionId);
+
+      // Deliberately fill both organized scopes BEFORE any live-state request:
+      // the invalidation asserted below can only come from the first-exposure
+      // arm (no lastExposed entry for this bridge yet), not version comparison.
+      expect(ids((await organized('')).body)).toEqual([activeOne]);
+      expect(ids((await organized('&archiveState=archived')).body)).toEqual([
+        archivedOne,
+      ]);
+
+      // A direct write lands WITHOUT advancing the catalog clock.
+      const activeTwo = '550e8400-e29b-41d4-a716-446655440213';
+      const archivedTwo = '550e8400-e29b-41d4-a716-446655440214';
+      await writeStoredSession({
+        sessionId: activeTwo,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:02:00.000Z',
+        prompt: 'active two',
+        mtime: new Date('2026-07-08T00:02:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: archivedTwo,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:03:00.000Z',
+        prompt: 'archived two',
+        mtime: new Date('2026-07-08T01:03:00.000Z'),
+      });
+      await archiveStoredSession(SECONDARY_CWD, archivedTwo);
+
+      // The revision is unchanged, yet the first exposure must still
+      // invalidate both scopes before answering.
+      const live = await request(app)
+        .get(liveStatePath('secondary-id'))
+        .set('Host', host())
+        .expect(200);
+      expect(live.body.catalogVersion.revision).toBe(0);
+      expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(0);
+      expect(ids((await organized('')).body).sort()).toEqual([
+        activeOne,
+        activeTwo,
+      ]);
+      expect(
+        ids((await organized('&archiveState=archived')).body).sort(),
+      ).toEqual([archivedOne, archivedTwo]);
     });
   });
 

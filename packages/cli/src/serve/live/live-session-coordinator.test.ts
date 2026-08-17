@@ -423,6 +423,27 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('rolls back a fresh coordinator session and marks the catalog when the setup aborts before admission', async () => {
+    // The coordinator session is spawned fresh, then the host admission step
+    // rejects. The rollback kills the unattached session, removes its
+    // transcript (mocked removal resolves true), and the removal must advance
+    // the catalog clock. `start()` converts the abort into a call failure
+    // rather than rejecting.
+    const harness = makeHarness();
+    harness.host.setCoordinator.mockReturnValueOnce(false);
+
+    await harness.coordinator.start({ epoch: 1, callId: 'call-1', mode: 'new' });
+
+    expect(harness.host.failCall).toHaveBeenCalledWith(
+      1,
+      expect.stringContaining('Live call ended.'),
+    );
+    expect(harness.bridge.killSession).toHaveBeenCalledWith('live-new', {
+      requireZeroAttaches: true,
+    });
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+  });
+
   it('releases completed input and delegation tracking during a long call', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({

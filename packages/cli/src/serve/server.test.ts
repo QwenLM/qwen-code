@@ -18217,6 +18217,64 @@ describe('createServeApp', () => {
       expect(meta).not.toHaveProperty('availableSkillDetails');
       expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
     });
+
+    it('rolls back a non-attached side task (kill, remove, catalog mark) when the generation closes mid-create', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge();
+      bridge.createSideTaskSession = vi.fn(async () => {
+        // The runtime generation closes between create and the post-create
+        // assertion — the route must roll the fresh side task back.
+        generationGuard.close();
+        return {
+          sessionId: 'side-task-rollback',
+          workspaceCwd: WS_BOUND,
+          attached: false,
+          clientId: 'client-side-task',
+          state: {},
+          liveJournal: [],
+        };
+      });
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'side-task-rollback-ws',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+      const revisionBefore = bridge.getSessionCatalogVersion().revision;
+      const removeSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue(true);
+
+      try {
+        const res = await request(app)
+          .post('/session/source-session/side-task')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'follow-up' });
+
+        expect(res.status).toBe(503);
+        expect(res.body.code).toBe('workspace_runtime_unavailable');
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'side-task-rollback',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
+        expect(removeSpy).toHaveBeenCalledWith('side-task-rollback');
+        // Rolling the fresh side task out of the catalog must advance the
+        // catalog clock for version-watching clients.
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBefore + 1,
+        );
+      } finally {
+        removeSpy.mockRestore();
+      }
+    });
   });
 
   describe('POST /session/:id/fork', () => {
