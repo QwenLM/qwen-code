@@ -16,7 +16,9 @@ import {
   Storage,
   getCronFilePath,
   readCronTasks,
+  updateCronTasks,
 } from '@qwen-code/qwen-code-core';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -49,6 +51,22 @@ interface StubBridge {
     sessionId: string,
     metadata: { displayName?: string },
   ): unknown;
+  getSessionSummary(sessionId: string): {
+    sessionId: string;
+    workspaceCwd: string;
+    hasActivePrompt: boolean;
+    isArchived?: boolean;
+  };
+  /** The sessions the stub reports as live (for getSessionSummary). */
+  liveSessions: Map<
+    string,
+    {
+      sessionId: string;
+      workspaceCwd: string;
+      hasActivePrompt: boolean;
+      isArchived?: boolean;
+    }
+  >;
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
@@ -66,6 +84,7 @@ function makeStubBridge(): StubBridge {
     closed: [],
     named: [],
     failNext: false,
+    liveSessions: new Map(),
     async spawnOrAttach(req) {
       if (bridge.failNext) {
         bridge.failNext = false;
@@ -87,6 +106,11 @@ function makeStubBridge(): StubBridge {
     updateSessionMetadata(sessionId, metadata) {
       bridge.named.push({ sessionId, ...metadata });
       return metadata;
+    },
+    getSessionSummary(sessionId) {
+      const summary = bridge.liveSessions.get(sessionId);
+      if (!summary) throw new SessionNotFoundError(sessionId);
+      return summary;
     },
   };
   return bridge;
@@ -596,6 +620,175 @@ describe('scheduled-tasks routes', () => {
     expect(res.status).toBe(201);
     expect(res.body.sessionId).toBeNull(); // unbound — fires via shared owner
     expect(h.bridge.spawned).toEqual([]); // nothing was spawned
+  });
+
+  // ── Caller-provided sessionId (reuse an existing session) ────────────
+
+  it('reuses a caller-provided session instead of minting one', async () => {
+    h.bridge.liveSessions.set('caller-sess', {
+      sessionId: 'caller-sess',
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    const res = await create({
+      name: 'Digest',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: 'caller-sess',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.sessionId).toBe('caller-sess');
+    // No dedicated session was minted for the task.
+    expect(h.bridge.spawned).toEqual([]);
+    // The reused session is named after the task like a minted one.
+    expect(h.bridge.named).toEqual([
+      { sessionId: 'caller-sess', displayName: '⏰ Digest' },
+    ]);
+    const tasks = await readCronTasks(h.workspace);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.sessionId).toBe('caller-sess');
+  });
+
+  it('rejects an unknown sessionId with 404 and creates nothing', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: 'missing-sess',
+    });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('session_not_found');
+    expect(h.bridge.spawned).toEqual([]);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects a session that belongs to a different workspace', async () => {
+    h.bridge.liveSessions.set('other-sess', {
+      sessionId: 'other-sess',
+      workspaceCwd: path.join(h.scratch, 'some-other-workspace'),
+      hasActivePrompt: false,
+    });
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: 'other-sess',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('session_workspace_mismatch');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects a busy session with 409 session_busy', async () => {
+    h.bridge.liveSessions.set('busy-sess', {
+      sessionId: 'busy-sess',
+      workspaceCwd: h.workspace,
+      hasActivePrompt: true,
+    });
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: 'busy-sess',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_busy');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects an archived session with 409 session_archived', async () => {
+    h.bridge.liveSessions.set('arch-sess', {
+      sessionId: 'arch-sess',
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+      isArchived: true,
+    });
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: 'arch-sess',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_archived');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects a session already bound to another task', async () => {
+    h.bridge.liveSessions.set('caller-sess', {
+      sessionId: 'caller-sess',
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'existing-task',
+        cron: '0 9 * * *',
+        prompt: 'existing',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        enabled: true,
+        sessionId: 'caller-sess',
+      },
+    ]);
+    const res = await create({
+      cron: '0 10 * * *',
+      prompt: 'p',
+      sessionId: 'caller-sess',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_already_bound');
+    expect(await readCronTasks(h.workspace)).toHaveLength(1); // unchanged
+  });
+
+  it('rejects an invalid sessionId field with 400 invalid_session_id', async () => {
+    for (const bad of [123, true, '', '   ']) {
+      const res = await create({
+        cron: '0 9 * * *',
+        prompt: 'p',
+        sessionId: bad,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+    }
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects sessionId when session management is unavailable (no bridge)', async () => {
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      // no bridge — unbound creates stay available, binding fails closed
+    });
+    const res = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'p', sessionId: 'caller-sess' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_binding_unavailable');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('leaves the caller-provided session open when the commit fails', async () => {
+    h.bridge.liveSessions.set('caller-sess', {
+      sessionId: 'caller-sess',
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    // Corrupt the tasks file: the pre-check read fails (skipped), the
+    // authoritative write throws → 500. The caller's session must survive.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, 'CORRUPT {{{', 'utf8');
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: 'caller-sess',
+    });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_write_failed');
+    expect(h.bridge.closed).toEqual([]); // caller session left open
+    expect(h.cleanupSession).not.toHaveBeenCalled();
   });
 
   it('mints the task session with thread scope (never reuses the shared session)', async () => {
@@ -1995,6 +2188,33 @@ describe('workspace-qualified scheduled-tasks routes', () => {
     expect(secList.body.tasks[0].prompt).toBe('secondary work');
     const primaryList = await request(h.app).get('/scheduled-tasks');
     expect(primaryList.body.tasks).toHaveLength(0);
+  });
+
+  it('reuses a caller-provided session on the qualified surface and rejects cross-workspace ones', async () => {
+    h.secondary.bridge.liveSessions.set('sec-sess', {
+      sessionId: 'sec-sess',
+      workspaceCwd: h.secondary.workspaceCwd,
+      hasActivePrompt: false,
+    });
+    const res = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p', sessionId: 'sec-sess' });
+    expect(res.status).toBe(201);
+    expect(res.body.sessionId).toBe('sec-sess');
+    expect(h.secondary.bridge.spawned).toEqual([]);
+
+    // A session living in the PRIMARY workspace can't be bound through the
+    // secondary workspace's endpoint.
+    h.secondary.bridge.liveSessions.set('primary-sess', {
+      sessionId: 'primary-sess',
+      workspaceCwd: h.primary.workspaceCwd,
+      hasActivePrompt: false,
+    });
+    const bad = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'q', sessionId: 'primary-sess' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('session_workspace_mismatch');
   });
 
   it('writes to the targeted workspace’s own cron file on disk', async () => {
