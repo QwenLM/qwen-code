@@ -2692,9 +2692,15 @@ describe('checkout self-heal', () => {
       writeFileSync(join(dir, 'leftover'), 'x');
       mkdirSync(join(dir, '.git'));
       writeFileSync(join(dir, '.git', 'HEAD'), 'x');
-      runWipe({ GITHUB_WORKSPACE: dir });
+      const out = runWipe({ GITHUB_WORKSPACE: dir });
       expect(existsSync(dir)).toBe(true);
       expect(readdirSync(dir)).toEqual([]);
+      // The clean wipe must stay silent about survivors: the warning is the
+      // oncall signal for a poisoned workspace, and a guard-less script
+      // emitting an empty-list survivor warning on EVERY heal dilutes
+      // exactly that signal while shipping green.
+      expect(out).toContain('wiped the workspace');
+      expect(out).not.toContain('workspace wipe left survivors');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2794,6 +2800,29 @@ describe('checkout self-heal', () => {
     expect(() =>
       runWipe({ GITHUB_WORKSPACE: '' }, { stdio: 'pipe' }),
     ).toThrow();
+  });
+
+  it('refuses a redirected workspace instead of silently wiping nothing', () => {
+    // The `:?` guard validates the string, not the filesystem object: find
+    // -P does not descend a symlinked start, so a workspace redirected
+    // through a symlink would make the wipe log success and delete nothing
+    // — then the secret-bearing review step runs through the redirection.
+    // A legitimate workspace is always a runner-created plain directory, so
+    // the refusal costs nothing; the link target must survive it untouched.
+    const parent = mkdtempSync(join(tmpdir(), 'checkout-heal-link-'));
+    const target = join(parent, 'target');
+    mkdirSync(target);
+    writeFileSync(join(target, 'victim'), 'x');
+    const ws = join(parent, 'workspace');
+    symlinkSync(target, ws);
+    try {
+      expect(() =>
+        runWipe({ GITHUB_WORKSPACE: ws }, { stdio: 'pipe' }),
+      ).toThrow();
+      expect(readdirSync(target)).toContain('victim');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 
   it('seals every override channel into the wipe step', () => {
