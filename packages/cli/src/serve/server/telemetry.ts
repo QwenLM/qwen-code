@@ -80,7 +80,7 @@ export const legacySessionTelemetryRoutes = [
   {
     method: 'GET',
     path: '/session/:id/export',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'GET /session/:id/export',
   },
   {
@@ -181,6 +181,24 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/media',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/media',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/media/:mediaId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/media/:mediaId',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/media/:mediaId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/media/:mediaId',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/prompt',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/prompt',
@@ -218,19 +236,19 @@ export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
     path: '/sessions/delete',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'POST /sessions/delete',
   },
   {
     method: 'POST',
     path: '/sessions/archive',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'POST /sessions/archive',
   },
   {
     method: 'POST',
     path: '/sessions/unarchive',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'POST /sessions/unarchive',
   },
   {
@@ -242,7 +260,7 @@ export const legacySessionTelemetryRoutes = [
   {
     method: 'PATCH',
     path: '/session/:id/organization',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'PATCH /session/:id/organization',
   },
   {
@@ -471,6 +489,12 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  if (
+    req.method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state$/.test(path)
+  ) {
+    return { route: 'GET /workspaces/:workspace/sessions/live-state' };
+  }
   if (req.method === 'GET' && /^\/workspace\/[^/]+\/session-info$/.test(path)) {
     return { route: 'GET /workspace/:id/session-info' };
   }
@@ -672,7 +696,7 @@ export function resolveDaemonTelemetryRoute(
 }
 
 export function daemonTelemetryMiddleware(
-  resolveWorkspaceCwd: (req: Request) => string,
+  resolveWorkspaceCwd: (req: Request) => string | undefined,
   // Optional in-process sink for the Daemon Status dashboard's time-series
   // charts. Fed the same (durationMs, statusCode) already computed for OTel,
   // so it adds no extra measurement — just a second consumer. Only known
@@ -700,7 +724,10 @@ export function daemonTelemetryMiddleware(
     let workspaceHash: string | undefined;
     if (route.attribution !== 'handler_resolved') {
       try {
-        workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
+        const workspaceCwd = resolveWorkspaceCwd(req);
+        if (workspaceCwd !== undefined) {
+          workspaceHash = resolveWorkspaceHash(workspaceCwd);
+        }
       } catch {
         // Telemetry must not affect request handling.
       }

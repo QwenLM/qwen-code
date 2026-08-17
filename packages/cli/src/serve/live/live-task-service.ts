@@ -38,6 +38,7 @@ import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../conversations/session-source.js';
+import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;
@@ -504,7 +505,7 @@ export class LiveTaskService {
     const all = (
       await Promise.all(
         this.options.workspaceRegistry
-          .list()
+          .listAll()
           .map((runtime) => this.listRuntimeThreads(runtime, limit)),
       )
     )
@@ -1107,11 +1108,14 @@ export class LiveTaskService {
       removed = false;
     }
     if (removed) {
-      await runWithWorkspaceRuntimeStorage(runtime, () =>
-        createWorkspaceRuntimeSessionService(runtime)
-          .removeSession(session.sessionId)
-          .catch(() => undefined),
+      const persistedRemoved = await runWithWorkspaceRuntimeStorage(
+        runtime,
+        () =>
+          createWorkspaceRuntimeSessionService(runtime)
+            .removeSession(session.sessionId)
+            .catch(() => false),
       );
+      if (persistedRemoved) runtime.bridge.markSessionCatalogChanged();
     }
     if (projectless && removed) {
       await this.options
@@ -1126,12 +1130,18 @@ export class LiveTaskService {
     if (live.kind === 'ambiguous') {
       throw new Error(`Task id is ambiguous: ${threadId}`);
     }
+    if (live.kind === 'unavailable') {
+      throw conversationRuntimeUnavailableError();
+    }
     const runtimes =
       live.kind === 'found'
         ? [live.runtime]
         : (
             await Promise.all(
-              this.options.workspaceRegistry.list().map(async (runtime) => ({
+              (
+                this.options.workspaceRegistry.listAll?.() ??
+                this.options.workspaceRegistry.list()
+              ).map(async (runtime) => ({
                 runtime,
                 exists:
                   await createWorkspaceRuntimeSessionService(

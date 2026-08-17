@@ -232,6 +232,7 @@ function makeHarness() {
     sendPrompt,
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    markSessionCatalogChanged: vi.fn(),
     getSessionEventEpoch: vi.fn(() => 'event-epoch'),
     getSessionLastEventId: vi.fn(() => 7),
     async *subscribeEvents(
@@ -262,7 +263,8 @@ function makeHarness() {
     bridge: projectBridge,
   } as WorkspaceRuntime;
   const registry = {
-    list: () => [runtime, projectRuntime],
+    list: () => [projectRuntime],
+    listAll: () => [runtime, projectRuntime],
     getByWorkspaceId: (workspaceId: string) =>
       workspaceId === projectRuntime.workspaceId ? projectRuntime : undefined,
     resolveLiveSessionOwner: (sessionId: string) =>
@@ -298,6 +300,7 @@ function makeHarness() {
     bridge,
     projectBridge,
     runtime,
+    registry,
     summaries,
     resident,
     sendPrompt,
@@ -321,6 +324,24 @@ beforeEach(() => {
 });
 
 describe('LiveTaskService', () => {
+  it('preserves the structured unavailable error for an inactive internal owner', async () => {
+    const harness = makeHarness();
+    vi.spyOn(harness.registry, 'resolveLiveSessionOwner').mockReturnValue({
+      kind: 'unavailable',
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'inactive-task' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
+  });
+
   it('lists existing tasks in the current Codex wire shape without creating one', async () => {
     const harness = makeHarness();
     listWorkspaceSessionsForResponse
@@ -925,6 +946,33 @@ describe('LiveTaskService', () => {
     expect(removeSessionRuntimeBaseDirs).toEqual([
       path.resolve('/runtime/conversations'),
     ]);
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not mark the catalog when the rollback transcript removal is a no-op', async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.bridge.spawnOrAttach).mockResolvedValueOnce({
+      sessionId: 'new-task',
+      workspaceCwd: '/conversations',
+      attached: false,
+      sourcePersisted: false,
+    });
+    removeSessionMock.mockResolvedValueOnce(false);
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'create_thread',
+        arguments: {
+          prompt: 'build a separate report',
+          target: { type: 'projectless' },
+        },
+      }),
+    ).rejects.toThrow('Projectless task metadata was not persisted.');
+
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(harness.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 });

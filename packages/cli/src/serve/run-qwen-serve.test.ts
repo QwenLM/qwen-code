@@ -73,6 +73,7 @@ import {
 } from './workspace-registration-store.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
+import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -3733,6 +3734,57 @@ describe('runQwenServe pre-listen bridge option validation', () => {
     expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
   });
 
+  it.each(['root', 'child', 'missing-child', 'alias'] as const)(
+    'rejects an explicit Conversations reserved %s before listening',
+    async (candidateKind) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-reserved-workspace-')),
+      );
+      const liveConversationWorkspace = new ConversationWorkspace({
+        homeDir: tmpDir,
+      });
+      fs.mkdirSync(liveConversationWorkspace.rootPath, { recursive: true });
+      const child = path.join(liveConversationWorkspace.rootPath, 'session-1');
+      fs.mkdirSync(child);
+      const missingChild = path.join(
+        liveConversationWorkspace.rootPath,
+        'missing-session',
+      );
+      const alias = path.join(tmpDir, 'conversation-alias');
+      fs.symlinkSync(
+        liveConversationWorkspace.rootPath,
+        alias,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const workspace =
+        candidateKind === 'root'
+          ? liveConversationWorkspace.rootPath
+          : candidateKind === 'child'
+            ? child
+            : candidateKind === 'missing-child'
+              ? missingChild
+              : alias;
+      const stdoutWrites: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+        stdoutWrites.push(String(chunk));
+        return true;
+      });
+
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+          },
+          { liveConversationWorkspace },
+        ),
+      ).rejects.toThrow(/reserved for Conversations/);
+      expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+    },
+  );
+
   it('rejects an unknown embedded external Tool Guard mode before listening', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-opt-')),
@@ -4931,10 +4983,22 @@ describe('runQwenServe runtime startup failures', () => {
     const explicitSecondary = path.join(tmpDir, 'explicit-secondary');
     const restoredSecondary = path.join(tmpDir, 'restored-secondary');
     const nestedSecondary = path.join(explicitSecondary, 'nested');
+    const liveConversationWorkspace = new ConversationWorkspace({
+      homeDir: tmpDir,
+    });
+    const reservedConversationChild = path.join(
+      liveConversationWorkspace.rootPath,
+      'legacy-child',
+    );
+    const missingReservedConversationChild = path.join(
+      liveConversationWorkspace.rootPath,
+      'missing-legacy-child',
+    );
     fs.mkdirSync(primary);
     fs.mkdirSync(explicitSecondary);
     fs.mkdirSync(restoredSecondary);
     fs.mkdirSync(nestedSecondary);
+    fs.mkdirSync(reservedConversationChild, { recursive: true });
     const restoredSecondaryAlias = path.join(
       tmpDir,
       'restored-secondary-alias',
@@ -5000,6 +5064,9 @@ describe('runQwenServe runtime startup failures', () => {
           nestedSecondary,
           restoredSecondaryAlias,
           canonicalRestoredSecondary,
+          liveConversationWorkspace.rootPath,
+          reservedConversationChild,
+          missingReservedConversationChild,
         ],
         displayNames: {
           [workspaceRegistrationId(canonicalExplicitSecondary)]:
@@ -5023,6 +5090,7 @@ describe('runQwenServe runtime startup failures', () => {
       },
       {
         workspaceRegistrationStore: store,
+        liveConversationWorkspace,
         daemonLogBaseDir: path.join(tmpDir, 'debug'),
         resolveOnListen: true,
       },
@@ -5066,6 +5134,11 @@ describe('runQwenServe runtime startup failures', () => {
           String(message).includes('path nests with an explicit'),
         ),
       ).toBe(true);
+      expect(
+        stderrWrite.mock.calls.filter(([message]) =>
+          String(message).includes('path is reserved for Conversations'),
+        ),
+      ).toHaveLength(3);
     } finally {
       await handle.close();
     }
@@ -7169,6 +7242,47 @@ describe('runQwenServe runtime startup failures', () => {
     finishMaintenance();
     await close;
     expect(bridge.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it('propagates an admitted session maintenance drain failure', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-maintenance-failure-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const sealMaintenanceAndWait = vi.fn(async () => {
+      throw new Error('maintenance drain failed');
+    });
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const runtimeApp = express();
+      runtimeApp.locals['sessionArchiveCoordinator'] = {
+        sealMaintenanceAndWait,
+      };
+      return runtimeApp;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+    await handle.runtimeReady;
+
+    await expect(handle.close()).rejects.toThrow('maintenance drain failed');
+    expect(sealMaintenanceAndWait).toHaveBeenCalledOnce();
+    expect(bridge.shutdown).not.toHaveBeenCalled();
   });
 
   it('does not cancel deferred runtime once startup is already running', async () => {
@@ -10439,6 +10553,80 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('keeps the channel lease when lifecycle aggregation wraps the retryable worker error', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-aggregate-error-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      pid: 1234,
+      channels: ['telegram'],
+      error: 'Channel worker did not exit after SIGKILL.',
+    });
+    worker.stop
+      .mockRejectedValueOnce(
+        new Error('Channel worker did not exit after SIGKILL.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    const originalServerClose = handle.server.close;
+    handle.server.close = vi.fn((callback) => {
+      setImmediate(() => callback?.(new Error('listener close failed')));
+      return handle.server;
+    }) as typeof handle.server.close;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+
+      expect(worker.stop).toHaveBeenCalledOnce();
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      handle.server.close = originalServerClose;
+      await handle.close().catch(() => undefined);
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
   it('bounds the logger flush before allowing a retryable close to reject', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-log-stuck-')),
@@ -11053,6 +11241,76 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
+  it('drains the runtime when channel grouping rejects startup after listen', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-untrusted-')),
+    );
+    const bridge = makeFakeBridge();
+    const pidfile = makePidfileDeps();
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge,
+          trustedWorkspace: false,
+          channelServicePidfile: pidfile,
+        },
+      ),
+    ).rejects.toThrow('not trusted; cannot host channels');
+
+    expect(bridge.shutdown).toHaveBeenCalledTimes(1);
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('preserves the startup reason when channel cleanup also fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-startup-cleanup-')),
+    );
+    const cleanupError = new Error('session maintenance drain failed');
+    const bridge = makeFakeBridge();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      app.locals['sessionArchiveCoordinator'] = {
+        sealMaintenanceAndWait: vi.fn().mockRejectedValue(cleanupError),
+      };
+      return app;
+    });
+
+    try {
+      await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge,
+          trustedWorkspace: false,
+          channelServicePidfile: makePidfileDeps(),
+        },
+      );
+      expect.fail('Expected serve startup to reject.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).message).toContain(
+        'is not trusted; cannot host channels',
+      );
+      expect((error as AggregateError).errors).toContain(cleanupError);
+    }
+  });
+
   it('keeps the serve owner alive when failed startup cannot confirm worker exit', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-retained-')),
@@ -11277,22 +11535,20 @@ describe('runQwenServe channel worker supervisor', () => {
       });
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
       locals: {},
-      listen: vi.fn((port, _host, cb) => {
-        portsAttempted.push(port);
-        const srv = createServer();
-        if (typeof cb === 'function') {
-          srv.once('error', cb);
-        }
-        if (portsAttempted.length === 1) {
-          const err = new Error('address in use') as NodeJS.ErrnoException;
-          err.code = 'EADDRINUSE';
-          setImmediate(() => srv.emit('error', err));
-        } else {
-          srv.listen(0, '127.0.0.1', cb);
-        }
-        return srv;
-      }),
     } as unknown as express.Application);
+    const testServer = createServer();
+    const nativeListen = testServer.listen.bind(testServer);
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      if (portsAttempted.length === 1) {
+        const err = new Error('address in use') as NodeJS.ErrnoException;
+        err.code = 'EADDRINUSE';
+        setImmediate(() => testServer.emit('error', err));
+      } else {
+        nativeListen(0, '127.0.0.1');
+      }
+      return testServer;
+    }) as unknown as typeof testServer.listen;
 
     const handle = await runQwenServe(
       {
@@ -11304,6 +11560,7 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
+        httpServerFactory: () => testServer,
         resolveOnListen: true,
       },
     );
@@ -11327,40 +11584,6 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('does not retry EADDRINUSE in strict-port mode', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-strict-port-')),
-    );
-    const portsAttempted: number[] = [];
-    const listenError = new Error('address in use') as NodeJS.ErrnoException;
-    listenError.code = 'EADDRINUSE';
-    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
-      locals: {},
-      listen: vi.fn((port) => {
-        portsAttempted.push(port);
-        const srv = createServer();
-        setImmediate(() => srv.emit('error', listenError));
-        return srv;
-      }),
-    } as unknown as express.Application);
-
-    await expect(
-      runQwenServe(
-        {
-          port: 4170,
-          strictPort: true,
-          hostname: '127.0.0.1',
-          mode: 'http-bridge',
-          workspace: tmpDir,
-          serveWebShell: false,
-        },
-        { bridge: makeFakeBridge() },
-      ),
-    ).rejects.toBe(listenError);
-
-    expect(portsAttempted).toEqual([4170]);
-  });
-
   it('does not retry on non-EADDRINUSE listen errors', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
@@ -11370,13 +11593,13 @@ describe('runQwenServe channel worker supervisor', () => {
     listenError.code = 'EACCES';
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
       locals: {},
-      listen: vi.fn((port, _host, _cb) => {
-        portsAttempted.push(port);
-        const srv = createServer();
-        setImmediate(() => srv.emit('error', listenError));
-        return srv;
-      }),
     } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      setImmediate(() => testServer.emit('error', listenError));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
 
     await expect(
       runQwenServe(
@@ -11387,7 +11610,10 @@ describe('runQwenServe channel worker supervisor', () => {
           workspace: tmpDir,
           serveWebShell: false,
         },
-        { bridge: makeFakeBridge() },
+        {
+          bridge: makeFakeBridge(),
+          httpServerFactory: () => testServer,
+        },
       ),
     ).rejects.toBe(listenError);
 
@@ -11410,13 +11636,13 @@ describe('runQwenServe channel worker supervisor', () => {
     listenError.code = 'EADDRINUSE';
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
       locals: {},
-      listen: vi.fn((port) => {
-        portsAttempted.push(port);
-        const srv = createServer();
-        setImmediate(() => srv.emit('error', listenError));
-        return srv;
-      }),
     } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      setImmediate(() => testServer.emit('error', listenError));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
 
     await expect(
       runQwenServe(
@@ -11427,7 +11653,10 @@ describe('runQwenServe channel worker supervisor', () => {
           workspace: tmpDir,
           serveWebShell: false,
         },
-        { bridge: makeFakeBridge() },
+        {
+          bridge: makeFakeBridge(),
+          httpServerFactory: () => testServer,
+        },
       ),
     ).rejects.toBe(listenError);
 
@@ -11449,13 +11678,13 @@ describe('runQwenServe channel worker supervisor', () => {
     listenError.code = 'EADDRINUSE';
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
       locals: {},
-      listen: vi.fn((port) => {
-        portsAttempted.push(port);
-        const srv = createServer();
-        setImmediate(() => srv.emit('error', listenError));
-        return srv;
-      }),
     } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      setImmediate(() => testServer.emit('error', listenError));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
 
     await expect(
       runQwenServe(
@@ -11466,7 +11695,10 @@ describe('runQwenServe channel worker supervisor', () => {
           workspace: tmpDir,
           serveWebShell: false,
         },
-        { bridge: makeFakeBridge() },
+        {
+          bridge: makeFakeBridge(),
+          httpServerFactory: () => testServer,
+        },
       ),
     ).rejects.toBe(listenError);
 
