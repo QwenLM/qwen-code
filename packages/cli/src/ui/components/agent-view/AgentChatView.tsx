@@ -56,6 +56,9 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
           <Text color={theme.text.secondary} dimColor>
             The session is still running; other tabs are unaffected.
           </Text>
+          <Text color={theme.text.secondary} dimColor>
+            Switch to another tab and back to retry rendering this tab.
+          </Text>
         </Box>
       )}
       onError={(error, info) => {

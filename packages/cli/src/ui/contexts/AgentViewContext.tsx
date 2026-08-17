@@ -145,6 +145,7 @@ export function AgentViewProvider({
   const switchToAgent = useCallback(
     (agentId: string) => {
       if (agents.has(agentId)) {
+        setAgentShellFocused(false);
         setActiveView(agentId);
       }
     },
@@ -155,6 +156,7 @@ export function AgentViewProvider({
     const ids = ['main', ...agents.keys()];
     const currentIndex = ids.indexOf(activeView);
     const nextIndex = (currentIndex + 1) % ids.length;
+    setAgentShellFocused(false);
     setActiveView(ids[nextIndex]!);
   }, [agents, activeView]);
 
@@ -162,6 +164,7 @@ export function AgentViewProvider({
     const ids = ['main', ...agents.keys()];
     const currentIndex = ids.indexOf(activeView);
     const prevIndex = (currentIndex - 1 + ids.length) % ids.length;
+    setAgentShellFocused(false);
     setActiveView(ids[prevIndex]!);
   }, [agents, activeView]);
 

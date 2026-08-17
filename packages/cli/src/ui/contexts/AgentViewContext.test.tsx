@@ -5,9 +5,19 @@
  */
 
 import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { useEffect, useRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { AgentViewProvider } from './AgentViewContext.js';
+import {
+  ApprovalMode,
+  type AgentInteractive,
+  type Config,
+} from '@qwen-code/qwen-code-core';
+import {
+  AgentViewProvider,
+  useAgentViewActions,
+  useAgentViewState,
+} from './AgentViewContext.js';
 
 /**
  * Minimal Config stub exposing only the manager-subscription surface the
@@ -45,5 +55,50 @@ describe('AgentViewProvider in-process bridges', () => {
     render(<AgentViewProvider config={config}>{null}</AgentViewProvider>);
 
     expect(config.onArenaManagerChange).toHaveBeenCalled();
+  });
+
+  it('clears embedded shell focus when switching agent tabs', async () => {
+    const config = makeConfig();
+    const interactiveAgent = {
+      getCore: () => ({
+        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
+      }),
+    } as AgentInteractive;
+
+    function Probe() {
+      const state = useAgentViewState();
+      const actions = useAgentViewActions();
+      const seeded = useRef(false);
+
+      useEffect(() => {
+        if (seeded.current) return;
+        seeded.current = true;
+        actions.registerAgent('mate@team', interactiveAgent, 'model', 'cyan');
+        actions.setAgentShellFocused(true);
+      }, [actions]);
+
+      useEffect(() => {
+        if (state.agentShellFocused) {
+          actions.switchToAgent('mate@team');
+        }
+      }, [actions, state.agentShellFocused]);
+
+      return (
+        <Text>
+          {state.activeView}:{String(state.agentShellFocused)}
+        </Text>
+      );
+    }
+
+    const { lastFrame } = render(
+      <AgentViewProvider config={config}>
+        <Probe />
+      </AgentViewProvider>,
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(lastFrame()).toContain('mate@team:false');
   });
 });
