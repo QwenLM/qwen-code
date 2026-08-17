@@ -1482,6 +1482,32 @@ describe('fileUtils', () => {
       expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
+    it('keeps corrupt GIF bytes inline for the vision bridge', async () => {
+      const filePath = path.join(tempRootDir, 'broken.gif');
+      const bytes = Buffer.from('not a real gif');
+      actualNodeFs.writeFileSync(filePath, bytes);
+      mockMimeGetType.mockReturnValue('image/gif');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        filePath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/gif',
+          displayName: 'broken.gif',
+        },
+      });
+    });
+
     it('omits BMP image bytes the provider cannot safely consume (#9291)', async () => {
       const filePath = path.join(tempRootDir, 'bitmap.bmp');
       const bytes = Buffer.from('unchanged image bytes');
