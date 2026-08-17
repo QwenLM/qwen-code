@@ -8,6 +8,7 @@ import { useState, useCallback } from 'react';
 import {
   SessionService,
   buildSessionRecoveryPlan,
+  replayUiTelemetryEventsFromConversation,
   type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -164,6 +165,10 @@ export function useResumeCommand(
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
+        replayUiTelemetryEventsFromConversation(
+          sessionData.conversation,
+          sessionId,
+        );
         await waitForGoalRuntime(config);
         // Rebuild turn boundary tracking so rewind works within resumed sessions.
         config

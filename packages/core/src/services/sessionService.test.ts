@@ -24,6 +24,7 @@ import {
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
   getResumeTokenCounts,
+  replayUiTelemetryEventsFromConversation,
   type ConversationRecord,
 } from './sessionService.js';
 import {
@@ -38,6 +39,8 @@ import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { EVENT_API_RESPONSE, uiTelemetryService } from '../telemetry/index.js';
+import type { ApiResponseEvent } from '../telemetry/types.js';
 
 vi.mock('./usageHistoryService.js', () => ({
   persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
@@ -2724,6 +2727,45 @@ describe('SessionService', () => {
         sessionService.sessionExistsInAnyState(sessionIdA),
       ).resolves.toBe(true);
     });
+  });
+
+  it('replays historical token metrics for a resumed session', () => {
+    const sessionId = 'resumed-goal-meter';
+    const uiEvent = {
+      'event.name': EVENT_API_RESPONSE,
+      model: 'model-a',
+      duration_ms: 1,
+      input_token_count: 200_000,
+      output_token_count: 0,
+      total_token_count: 200_000,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+    } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+    const telemetryRecord: ChatRecord = {
+      ...recordA1,
+      uuid: 'telemetry-1',
+      sessionId,
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: { uiEvent },
+    };
+
+    replayUiTelemetryEventsFromConversation(
+      {
+        sessionId,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [telemetryRecord],
+      },
+      sessionId,
+    );
+
+    expect(
+      Object.values(uiTelemetryService.getMetricsForSession(sessionId).models)
+        .map((model) => model.tokens.total)
+        .reduce((total, tokens) => total + tokens, 0),
+    ).toBe(200_000);
   });
 
   describe('getResumePromptTokenCount', () => {

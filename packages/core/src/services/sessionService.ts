@@ -2618,12 +2618,11 @@ function collectReferencedFileHistoryBackupNames(
 
 /**
  * Replays stored UI telemetry events to rebuild metrics when resuming a session.
- * Also restores the last prompt token count from the best available source.
  */
-export function replayUiTelemetryFromConversation(
+export function replayUiTelemetryEventsFromConversation(
   conversation: ConversationRecord,
   sessionId?: string,
-): ResumeTokenCounts | undefined {
+): void {
   if (sessionId) {
     uiTelemetryService.resetSession(sessionId);
   } else {
@@ -2642,6 +2641,16 @@ export function replayUiTelemetryFromConversation(
       uiTelemetryService.addEvent(uiEvent, sessionId);
     }
   }
+}
+
+/**
+ * Replays stored UI telemetry and restores the last prompt token count.
+ */
+export function replayUiTelemetryFromConversation(
+  conversation: ConversationRecord,
+  sessionId?: string,
+): ResumeTokenCounts | undefined {
+  replayUiTelemetryEventsFromConversation(conversation, sessionId);
 
   const resumeTokenCounts = getResumeTokenCounts(conversation);
   if (resumeTokenCounts !== undefined) {

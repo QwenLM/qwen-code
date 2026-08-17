@@ -9,6 +9,17 @@ import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
+const replayUiTelemetryEventsMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...original,
+    replayUiTelemetryEventsFromConversation: replayUiTelemetryEventsMock,
+  };
+});
+
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
 } as unknown as LoadedSettings;
@@ -80,6 +91,7 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
+    replayUiTelemetryEventsMock.mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
@@ -283,6 +295,9 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('my-branch');
     });
     expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+    expect(
+      replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
+    ).toBeLessThan(getGoalRuntimeReady.mock.invocationCallOrder[0]!);
   });
 
   it('rolls core back when the fork contains malformed Goal state', async () => {

@@ -12,6 +12,7 @@ import {
   type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
+  replayUiTelemetryEventsFromConversation,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -199,6 +200,10 @@ export function useBranchCommand(
         //    the parent, silently recording user input into an orphan.
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
+        replayUiTelemetryEventsFromConversation(
+          resumed.conversation,
+          newSessionId,
+        );
         await waitForGoalRuntime(config);
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 

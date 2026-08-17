@@ -15,6 +15,8 @@ import { useHistory } from './useHistoryManager.js';
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 
+const replayUiTelemetryEventsMock = vi.hoisted(() => vi.fn());
+
 const mockSettings = {
   merged: {
     ui: {
@@ -105,6 +107,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     SessionService,
+    replayUiTelemetryEventsFromConversation: replayUiTelemetryEventsMock,
   };
 });
 
@@ -231,6 +234,7 @@ describe('useResumeCommand', () => {
   });
 
   it('handleResume closes the dialog immediately and restores session state', async () => {
+    replayUiTelemetryEventsMock.mockClear();
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
 
@@ -244,6 +248,7 @@ describe('useResumeCommand', () => {
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
+    const getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     const resetMonitorRegistry = vi.fn();
 
     const config = {
@@ -251,7 +256,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
-      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getGoalRuntimeReady,
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -332,7 +337,10 @@ describe('useResumeCommand', () => {
       historyManager.loadHistory.mock.invocationCallOrder[0]!,
     );
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
-    expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+    expect(
+      replayUiTelemetryEventsMock.mock.invocationCallOrder[0],
+    ).toBeLessThan(getGoalRuntimeReady.mock.invocationCallOrder[0]!);
   });
 
   it('adds a recovery notice when resuming an interrupted tool turn', async () => {
