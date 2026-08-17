@@ -41,6 +41,7 @@ function installMockStreams(): { stdin: MockStdin; writes: string[] } {
 }
 
 const KITTY_PUSH = '\x1b[>1u';
+const KITTY_POP = '\x1b[<u';
 
 describe('kittyProtocolDetector', () => {
   const realStdin = process.stdin;
@@ -90,6 +91,40 @@ describe('kittyProtocolDetector', () => {
     mod.pushKittyProtocolFlags();
 
     expect(writes).toEqual([KITTY_PUSH]);
+  });
+
+  it('balances alternate-screen and main-screen pushes separately', async () => {
+    const { stdin, writes } = installMockStreams();
+    const mod = await detectWithSupport(stdin);
+
+    writes.length = 0;
+    mod.pushKittyProtocolFlags();
+    mod.popKittyProtocolFlags();
+    mod.disableKittyProtocol();
+
+    expect(writes).toEqual([KITTY_PUSH, KITTY_POP, KITTY_POP]);
+    expect(mod.isKittyProtocolEnabled()).toBe(false);
+  });
+
+  it('leaves signal handling to the coordinated cleanup path', async () => {
+    const { stdin } = installMockStreams();
+    const processOnSpy = vi.spyOn(process, 'on');
+
+    await detectWithSupport(stdin);
+
+    expect(processOnSpy).not.toHaveBeenCalledWith('exit', expect.any(Function));
+    expect(processOnSpy).not.toHaveBeenCalledWith(
+      'SIGINT',
+      expect.any(Function),
+    );
+    expect(processOnSpy).not.toHaveBeenCalledWith(
+      'SIGTERM',
+      expect.any(Function),
+    );
+    expect(processOnSpy).not.toHaveBeenCalledWith(
+      'SIGHUP',
+      expect.any(Function),
+    );
   });
 
   it('is a no-op when the protocol is unsupported', async () => {

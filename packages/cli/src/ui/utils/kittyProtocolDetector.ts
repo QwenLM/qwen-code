@@ -6,7 +6,8 @@
 
 let detectionComplete = false;
 let protocolSupported = false;
-let protocolEnabled = false;
+let mainScreenProtocolEnabled = false;
+let alternateScreenProtocolEnabled = false;
 
 // Progressive-enhancement flag stack control (per screen buffer):
 //   push (enable) / pop (disable). See
@@ -14,9 +15,8 @@ let protocolEnabled = false;
 const KITTY_KEYBOARD_PUSH = '\x1b[>1u';
 const KITTY_KEYBOARD_POP = '\x1b[<u';
 
-function enableProtocol(): void {
+function pushProtocolFlags(): void {
   process.stdout.write(KITTY_KEYBOARD_PUSH);
-  protocolEnabled = true;
 }
 
 /**
@@ -94,16 +94,8 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
         if (progressiveEnhancementReceived) {
           // Enable the protocol
           protocolSupported = true;
-          enableProtocol();
-
-          // Last-resort fallback: if the process exits without running
-          // the async cleanup chain (e.g. direct process.exit() call),
-          // the 'exit' event still fires synchronously and restores the
-          // terminal. Signal-based teardown is handled by the main
-          // installInteractiveSignalHandlers() → runExitCleanup() →
-          // disableKittyProtocol() path, which runs *after* Ink leaves
-          // the alternate screen so the pop lands on the correct buffer.
-          process.on('exit', disableProtocol);
+          pushProtocolFlags();
+          mainScreenProtocolEnabled = true;
         }
 
         detectionComplete = true;
@@ -125,9 +117,16 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
 }
 
 function disableProtocol() {
-  if (protocolEnabled) {
+  if (mainScreenProtocolEnabled) {
     process.stdout.write(KITTY_KEYBOARD_POP);
-    protocolEnabled = false;
+    mainScreenProtocolEnabled = false;
+  }
+}
+
+export function popKittyProtocolFlags(): void {
+  if (alternateScreenProtocolEnabled) {
+    process.stdout.write(KITTY_KEYBOARD_POP);
+    alternateScreenProtocolEnabled = false;
   }
 }
 
@@ -147,21 +146,17 @@ function disableProtocol() {
  */
 export function pushKittyProtocolFlags(): void {
   if (protocolSupported) {
-    enableProtocol();
+    pushProtocolFlags();
+    alternateScreenProtocolEnabled = true;
   }
 }
 
-/**
- * Explicitly disables the Kitty keyboard protocol. Should be called during
- * application cleanup before process.exit() to ensure the terminal is restored
- * even if the 'exit' event handler does not fire in time (e.g. on SIGKILL).
- */
 export function disableKittyProtocol(): void {
   disableProtocol();
 }
 
 export function isKittyProtocolEnabled(): boolean {
-  return protocolEnabled;
+  return mainScreenProtocolEnabled || alternateScreenProtocolEnabled;
 }
 
 export function isKittyProtocolSupported(): boolean {
