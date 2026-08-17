@@ -37,12 +37,17 @@ vi.mock('./AgentChatContent.js', () => ({
   AgentChatMissing: ({ label }: { label: string }) => <Text>{label}</Text>,
 }));
 
+const setAgentShellFocusedSpy = vi.hoisted(() => vi.fn());
+
 vi.mock('../../contexts/AgentViewContext.js', () => ({
   useAgentViewState: () => ({
     agents: new Map<string, unknown>([
       ['crashed@team', { interactiveAgent: { getCore: () => ({}) } }],
       ['healthy@team', { interactiveAgent: { getCore: () => ({}) } }],
     ]),
+  }),
+  useAgentViewActions: () => ({
+    setAgentShellFocused: setAgentShellFocusedSpy,
   }),
 }));
 
@@ -53,6 +58,7 @@ describe('AgentChatView error containment (#9290)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setAgentShellFocusedSpy.mockClear();
   });
   afterEach(() => {
     errorSpy.mockRestore();
@@ -73,6 +79,22 @@ describe('AgentChatView error containment (#9290)', () => {
     expect(output.toLowerCase()).toContain('agent');
     // The panel must read as recoverable state, not a session death.
     expect(output).not.toContain('content:crashed@team');
+  });
+
+  it('clears the embedded-shell focus flag when a tab crashes', () => {
+    // The crashing content is the only production writer of
+    // agentShellFocused and never clears it on unmount (React error
+    // #185); while the flag is stale the tab bar swallows left/right —
+    // the only escape — so the boundary's componentDidCatch is the one
+    // place that can still release the lock. The tab-switch resets cover
+    // normal navigation but are unreachable once locked (#9290 review).
+    render(<AgentChatView agentId="crashed@team" />);
+    expect(setAgentShellFocusedSpy).toHaveBeenCalledWith(false);
+  });
+
+  it('does not touch the focus flag for a healthy tab', () => {
+    render(<AgentChatView agentId="healthy@team" />);
+    expect(setAgentShellFocusedSpy).not.toHaveBeenCalled();
   });
 
   it('recovers when switching from a crashed tab to a healthy one', () => {

@@ -6,7 +6,7 @@
 
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
-import { useEffect, useRef } from 'react';
+import { act, useEffect, useRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import {
   ApprovalMode,
@@ -98,7 +98,75 @@ describe('AgentViewProvider in-process bridges', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     expect(lastFrame()).toContain('mate@team:false');
+  });
+
+  it('clears embedded shell focus when the focused agent unregisters', async () => {
+    // unregisterAgent bounces activeView back to 'main' without going
+    // through switchToAgent/Next/Previous — the switch resets alone never
+    // run, so the view-change effect is the only reset on this path.
+    // Without it a stale true would keyboard-lock the tab bar on main
+    // (#9290 review). Stages are driven imperatively via act() so each
+    // state change lands in its own commit (the production focus seed is
+    // a keypress in a commit well after the tab switch).
+    const config = makeConfig();
+    const interactiveAgent = {
+      getCore: () => ({
+        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
+      }),
+    } as AgentInteractive;
+
+    const probeActions: {
+      registerAgent?: (
+        agentId: string,
+        agent: AgentInteractive,
+        modelId: string,
+        color: string,
+      ) => void;
+      switchToAgent?: (agentId: string) => void;
+      setAgentShellFocused?: (focused: boolean) => void;
+      unregisterAgent?: (agentId: string) => void;
+    } = {};
+
+    function Probe() {
+      const state = useAgentViewState();
+      const actions = useAgentViewActions();
+      probeActions.registerAgent = actions.registerAgent;
+      probeActions.switchToAgent = actions.switchToAgent;
+      probeActions.setAgentShellFocused = actions.setAgentShellFocused;
+      probeActions.unregisterAgent = actions.unregisterAgent;
+      return (
+        <Text>
+          {state.activeView}:{String(state.agentShellFocused)}
+        </Text>
+      );
+    }
+
+    const { lastFrame } = render(
+      <AgentViewProvider config={config}>
+        <Probe />
+      </AgentViewProvider>,
+    );
+
+    await act(async () => {
+      probeActions.registerAgent?.('mate@team', interactiveAgent, 'm', 'c');
+    });
+    await act(async () => {
+      probeActions.switchToAgent?.('mate@team');
+    });
+    expect(lastFrame()).toContain('mate@team:false');
+    await act(async () => {
+      probeActions.setAgentShellFocused?.(true);
+    });
+    expect(lastFrame()).toContain('mate@team:true');
+
+    await act(async () => {
+      probeActions.unregisterAgent?.('mate@team');
+    });
+
+    expect(lastFrame()).toContain('main:false');
   });
 });

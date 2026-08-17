@@ -12,7 +12,10 @@
 
 import { Box, Text } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { useAgentViewState } from '../../contexts/AgentViewContext.js';
+import {
+  useAgentViewState,
+  useAgentViewActions,
+} from '../../contexts/AgentViewContext.js';
 import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { theme } from '../../semantic-colors.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
@@ -26,6 +29,7 @@ interface AgentChatViewProps {
 
 export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
   const { agents } = useAgentViewState();
+  const { setAgentShellFocused } = useAgentViewActions();
   const agent = agents.get(agentId);
 
   const interactiveAgent = agent?.interactiveAgent;
@@ -62,6 +66,15 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
         </Box>
       )}
       onError={(error, info) => {
+        // The crashed content can no longer own the embedded-shell focus:
+        // it is the only production writer of the flag and it deliberately
+        // never clears it on unmount (React error #185). Clear it here —
+        // componentDidCatch runs in the commit phase, so this update is
+        // safe. The tab-switch resets cover normal navigation, but while
+        // the flag is stale the tab bar swallows left/right — the only
+        // escape — so a crash is exactly when only this hook can release
+        // the lock (#9290 review).
+        setAgentShellFocused(false);
         debugLogger.error(
           `[AGENT_TAB_RENDER_ERROR] agentId=${agentId} ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
         );

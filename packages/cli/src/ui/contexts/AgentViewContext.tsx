@@ -19,7 +19,9 @@ import {
   createContext,
   useContext,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
@@ -167,6 +169,22 @@ export function AgentViewProvider({
     setAgentShellFocused(false);
     setActiveView(ids[prevIndex]!);
   }, [agents, activeView]);
+
+  // Belt and braces for the switch resets above: the embedded-shell focus
+  // belongs to the active tab's content, so ANY view change — including
+  // unregisterAgent/unregisterAll bouncing activeView back to 'main'
+  // without going through a switch — must drop a flag the unmounted
+  // content can no longer clear (#9290 review). Skip the mount run: the
+  // flag starts false there, and resetting it in the mount commit would
+  // clobber a same-commit seed from the active tab's content.
+  const initialViewRef = useRef(true);
+  useEffect(() => {
+    if (initialViewRef.current) {
+      initialViewRef.current = false;
+      return;
+    }
+    setAgentShellFocused(false);
+  }, [activeView]);
 
   // ── Registration ──
 
