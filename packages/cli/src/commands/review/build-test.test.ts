@@ -955,6 +955,12 @@ describe('runBuildTest', () => {
     // And the note must not claim tests it did not run.
     expect(buildOnly.note).toContain('build-only');
     expect(buildOnly.note).not.toContain('ran the tests');
+    // The WRITE half of the probe stamp, on the main results-initializer
+    // path: a probe report without it read as a completed zero-suite run on
+    // --resume — the probe/completed misclassification the split exists to
+    // prevent. The non-probe sibling must not carry it.
+    expect(buildOnly.buildOnly).toBe(true);
+    expect(withTests.buildOnly).toBeUndefined();
   });
 
   it('scopes build AND tests to the changed workspace and its dependents', () => {
@@ -3879,12 +3885,49 @@ describe('runBuildTest', () => {
         { toolchain: 'npm', test: [] },
         { toolchain: 'npm', test: [], build: [] },
         { toolchain: 'npm', test: [], timedOut: [] },
-        // The `test` clause needs its own witness: with every fixture above
-        // carrying `test: []`, deleting `!commandsOk(shape.test)` kept all
-        // refusals green (each still failed on build/timedOut) while a
-        // report truncated of its `test` key cleared the gate and died at
-        // `previous.test.filter` — the raw crash the gate exists to replace.
-        { toolchain: 'npm', build: [], timedOut: [] },
+        // The `test` clause needs its own UNMASKED witness: a fixture that
+        // also omitted `affected` and `ok` was refused by their clauses
+        // whatever happened to the `test` clause, so deleting
+        // `!commandsOk(shape.test)` kept every refusal green while a report
+        // truncated of only its `test` key cleared the mutated gate and
+        // died at `previous.test.filter` — the raw crash the gate exists to
+        // replace. Every other walked field is present and valid here, so
+        // the refusal rides on the `test` clause alone.
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: true,
+          build: [],
+          timedOut: [],
+        },
+        // The two newest clauses need their own witnesses too: a corrupted
+        // stamp must refuse here, not steer the nothing-to-resume message
+        // off a non-boolean truthiness ('"buildOnly": "yes"' fails
+        // `=== true` and would read as a completed zero-suite run).
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: true,
+          buildOnly: 'yes',
+          test: [],
+          build: [],
+          timedOut: [],
+        },
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          ok: 'false',
+          test: [],
+          build: [],
+          timedOut: [],
+        },
+        {
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          test: [],
+          build: [],
+          timedOut: [],
+        },
       ]) {
         writeFileSync(outPath, JSON.stringify(partial));
         expect(() =>

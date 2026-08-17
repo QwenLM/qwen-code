@@ -501,16 +501,24 @@ export interface BudgetStop {
 }
 
 /**
- * The phrase that identifies the budget-stop disclosure wherever it is
- * relayed. Exported so `compose-review` dedups the orchestrator's copy
- * against the marker's by the same text the entry itself is spelled with —
- * a reword of the entry moves its key along with it.
+ * The phrase the budget-stop entry is spelled with — interpolated into the
+ * disclosure below, so a reword changes every rendering in one place.
+ *
+ * NOT a dedup key: `compose-review` once spliced relayed copies by this
+ * substring, and the phrase alone also matched genuine free-form
+ * line-coverage disclosures that merely mention the budget — those were
+ * silently dropped from the posted body. The splice now keys on the FULL
+ * canonical entry text (`budgetStopEntry`/`budgetStopEntryZh`), so a
+ * phrase-only relay is no longer deduped: it renders beside the structural
+ * stop line, which is the honest outcome for text the machinery did not
+ * mint.
  */
 export const BUDGET_STOP_PHRASE = 'review time budget';
-/** The Chinese pair — the marker's zh entries carry it, and the body-side
- *  dedup must read BOTH languages: a relayed Chinese stop entry that only the
- *  English phrase was checked against survived the splice and was rendered
- *  under the whiffed-agent cause beside the structural stop line. */
+/** The Chinese pair, spelled into `budgetStopEntryZh`. Same non-dedup-key
+ *  status as the English phrase above: the splice reads the full canonical
+ *  entry in BOTH languages (a relayed Chinese entry checked against only
+ *  the English text once survived and double-rendered), never the bare
+ *  phrase. */
 export const BUDGET_STOP_PHRASE_ZH = '评审时间预算';
 
 /**
@@ -547,12 +555,12 @@ export function budgetStopEntryZh(round: number | undefined): string {
 }
 
 /**
- * The phrase identifying a ROUND-CAP disclosure wherever it is relayed —
- * the cap analogue of `BUDGET_STOP_PHRASE`, so `compose-review` dedups the
- * orchestrator's relayed copy against the marker's by shared text.
+ * The phrase the round-cap entry is spelled with — the cap analogue of
+ * `BUDGET_STOP_PHRASE`, and like it NOT a dedup key: `compose-review`
+ * splices relays by the full canonical entry text, never this substring.
  */
 export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
-/** The Chinese pair, for the same bilingual-dedup reason as the budget one. */
+/** The Chinese pair, spelled into the zh entry — same non-dedup-key status. */
 export const ROUND_CAP_PHRASE_ZH = '反审轮数上限';
 
 /**

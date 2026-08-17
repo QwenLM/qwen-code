@@ -482,6 +482,16 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: 渗透测试未进行',
     ].join('\n');
     expect(budgetGapDisclosures(text)).toEqual(['渗透测试未进行。']);
+
+    // Both CJK full stops — 。(U+3002) and ．(U+FF0E) — are ZH_TAIL
+    // characters, and the fold key must strip both: covering only one left
+    // the double-spend open for the other.
+    const ff0e = [
+      'Budget gap: 渗透测试未进行．',
+      'some other line',
+      'Budget gap: 渗透测试未进行',
+    ].join('\n');
+    expect(budgetGapDisclosures(ff0e)).toEqual(['渗透测试未进行．']);
   });
 
   it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {

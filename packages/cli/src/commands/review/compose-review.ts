@@ -573,12 +573,23 @@ export interface ComposeReviewResult {
  * check`) all reduce to the same core as the brief's `publicLabel`.
  */
 function canonicalDimensionHead(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/&/g, 'and')
-    .replace(/[-\s]+/g, '-')
-    .replace(/^the-/, '')
-    .replace(/-(?:check|verification)$/, '');
+  return (
+    s
+      .toLowerCase()
+      // Spaced, not bare: a tight ampersand (`build&test`) must gain its
+      // separators BEFORE the hyphen collapse, or it canonicalises to
+      // `buildandtest` while the derived set holds `build-and-test` — the
+      // replaced regex accepted the tight form via `[-\s]?`.
+      .replace(/&/g, ' and ')
+      .replace(/[-\s]+/g, '-')
+      .replace(/^the-/, '')
+      .replace(/-(?:check|verification)$/, '')
+  );
+}
+
+/** The fully separator-less spelling — the loosest form the old regex took. */
+function squashedDimensionHead(s: string): string {
+  return canonicalDimensionHead(s).replace(/-/g, '');
 }
 
 /**
@@ -595,6 +606,13 @@ const NON_DIFF_DIMENSION_HEADS: ReadonlySet<string> = new Set(
     .filter((b) => !b.readsDiff)
     .map((b) => canonicalDimensionHead(b.publicLabel)),
 );
+/** Squashed twins of the set above, for the separator-less prose spellings
+ *  (`buildandtest`, `build andtest`) the replaced regex accepted via its
+ *  optional separators — refusing them re-opened the anchor-withholding
+ *  cost on a rare variant, in the safe but expensive direction. */
+const NON_DIFF_DIMENSION_HEADS_SQUASHED: ReadonlySet<string> = new Set(
+  [...NON_DIFF_DIMENSION_HEADS].map((h) => h.replace(/-/g, '')),
+);
 
 /**
  * Does this `unreviewedDimensions` entry name a dimension that reads no diff?
@@ -608,7 +626,10 @@ const NON_DIFF_DIMENSION_HEADS: ReadonlySet<string> = new Set(
  */
 export function isNonDiffDimensionGap(entry: string): boolean {
   const head = entry.split(/[—–-]{1,2}\s/)[0].trim();
-  return NON_DIFF_DIMENSION_HEADS.has(canonicalDimensionHead(head));
+  return (
+    NON_DIFF_DIMENSION_HEADS.has(canonicalDimensionHead(head)) ||
+    NON_DIFF_DIMENSION_HEADS_SQUASHED.has(squashedDimensionHead(head))
+  );
 }
 
 /**

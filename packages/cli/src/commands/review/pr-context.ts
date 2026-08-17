@@ -883,7 +883,12 @@ export function recoverLedger(
   // "re-ruled entry by entry" true for entries a displacement would have
   // removed from view.
   let mergedOverOwn = false;
-  if (best.foreign && bestOwn) {
+  // Non-empty own list only: an ordinary LGTM round posts `"findings":[]`,
+  // and with zero own entries there is nothing to merge OVER — flagging that
+  // shape `merged` made the provenance wording claim own-certified entries
+  // exist when none do (and misattributed the PARTIAL note's sum). The
+  // foreign winner recovers as pure-foreign, which is exactly what it is.
+  if (best.foreign && bestOwn && bestOwn.ledger.findings.length > 0) {
     mergedOverOwn = true;
     const ownIds = new Set(bestOwn.ledger.findings.map((f) => f.id));
     const merged = [
@@ -1168,7 +1173,7 @@ export function renderLedgerSection(
       ? [
           '',
           merged
-            ? `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from the merged rounds did not fit the marker size caps (losses span both source markers and the merge's own re-cap, not round ${ledger.round}'s marker alone) and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`
+            ? `**This list is PARTIAL**: ${ledger.dropped} further finding(s) did not survive into this merged list — lost to a source marker's size cap or to the merge's own re-cap, and not attributable to any single round's marker. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`
             : `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
         ]
       : []),
@@ -1494,14 +1499,15 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     ? (prevRecovered.author ?? null)
     : null;
   const prevLedgerMerged = prevRecovered?.merged ?? false;
-  // The side file's three outcomes live in the helper: recovered → written
+  // The side file's four outcomes live in the helper: recovered → written
   // whole (any account — the round counter is a shared id space, and the
   // anchor was already stripped at the seam for a foreign winner);
   // demonstrably no prior round for THIS account and none recovered from any
   // other → removed (a stale counter would stamp rounds nobody posted);
   // recovered anonymously over an existing file → only the round counter and
-  // tiebreak advance, the persisted list survives; recovery threw → round
-  // counter kept, age-sensitive `commitId`/`reviewId` stripped.
+  // tiebreak advance, the persisted list survives and `sha`/`commitId` are
+  // dropped (an anonymous round cannot be re-vouched); recovery threw →
+  // round counter kept, age-sensitive `commitId`/`reviewId` stripped.
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,

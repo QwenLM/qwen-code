@@ -822,8 +822,11 @@ function stripWrappers(s: string): string {
 // restated with and without a trailing stop discloses once, and a key that
 // stripped only the ASCII set kept `渗透测试未进行。` and `渗透测试未进行` as
 // two gaps — double-spending MAX_GAPS_PER_AGENT slots in exactly the
-// output language the ZH branch exists for.
-const TRAILING_GAP_CHAR_RE = /[.!…,;:\s。，；：！？、]/;
+// output language the ZH branch exists for. The class mirrors ZH_TAIL's
+// full stop set — including the fullwidth full stop ．(U+FF0E) beside 。
+// (U+3002): the classifier treats both as trailing, and a fold key that
+// dropped only one of them kept the double-spend open for the other.
+const TRAILING_GAP_CHAR_RE = /[.!…,;:\s。，；：！？、．]/;
 
 /** Trailing punctuation/whitespace strip for the normalize and fold keys. */
 function stripTrailingGapChars(s: string): string {

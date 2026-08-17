@@ -2712,6 +2712,16 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(firstBlock).toContain(
       `--worktree ${resolve('.qwen/tmp/review-pr-6766')}`,
     );
+
+    // The third-shape sentence, at BOTH prose sites — the role-7 base brief
+    // and the welded resume paragraph each carry it, so a single toContain
+    // is satisfied by either and a one-site deletion ships green. Counted,
+    // not just matched: deleting the sentence anywhere drops the count, and
+    // an agent missing it treats the endedBeforeTests shape as continuable,
+    // spending a MAX_RESUME_CALLS slot on a --resume that can only answer
+    // "ended before its test phase".
+    expect(p.split('"endedBeforeTests": true').length - 1).toBe(2);
+    expect(p.split('do not spend a continuation on it').length - 1).toBe(2);
   });
 
   it('welds the PR into Agent 0 — an unqualified number judges the wrong issue', () => {

@@ -5031,12 +5031,34 @@ describe('the ledger marker reaches the POSTED body', () => {
     // here loudly instead of silently re-opening the full-diff re-review
     // loop (exemption lost) or widening the anchor past a whiffed lens
     // (exemption over-granted).
-    for (const brief of Object.values(BRIEFS)) {
-      expect(
-        isNonDiffDimensionGap(`${brief.publicLabel} — some reason`),
-        `publicLabel ${JSON.stringify(brief.publicLabel)} (readsDiff: ${String(brief.readsDiff)})`,
-      ).toBe(!brief.readsDiff);
-    }
+    expect(
+      Object.fromEntries(
+        Object.values(BRIEFS).map((b) => [
+          b.publicLabel,
+          isNonDiffDimensionGap(`${b.publicLabel} — some reason`),
+        ]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        Object.values(BRIEFS).map((b) => [b.publicLabel, !b.readsDiff]),
+      ),
+    );
+
+    // The prose spellings the replaced regex accepted — tight ampersand and
+    // separator-less — must not silently lose the exemption: refusing them
+    // withholds the anchor and re-opens the full-diff re-review cost on a
+    // spelling variant.
+    const variants = [
+      'build&test — the integration suite never ran',
+      'the build&test check — skipped',
+      'buildandtest — skipped',
+      'build andtest — skipped',
+    ];
+    expect(
+      Object.fromEntries(variants.map((v) => [v, isNonDiffDimensionGap(v)])),
+    ).toEqual(Object.fromEntries(variants.map((v) => [v, true])));
+    // …while a squashed OTHER dimension stays out.
+    expect(isNonDiffDimensionGap('securityaudit — skipped')).toBe(false);
   });
 
   it('sees a lens gap that merely mentions the budget in its reason', () => {

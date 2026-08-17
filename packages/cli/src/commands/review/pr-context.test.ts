@@ -1353,6 +1353,22 @@ describe('latestLedger — the split trust surface', () => {
     const entry = kept?.ledger.findings.find((f) => f.id === 'R7-1');
     expect(entry?.sev).toBe('C');
     expect(entry?.title).toBe('certified critical');
+
+    // An ordinary LGTM round posts `"findings":[]` — with zero own entries
+    // there is nothing to merge OVER, and flagging that shape `merged`
+    // made the provenance wording claim own-certified entries exist when
+    // none do. It recovers as what it is: pure foreign.
+    const emptyOwn =
+      'LGTM <!-- qwen-review-ledger {"v":1,"round":7,"findings":[]} -->';
+    const foreignOnly = recoverLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', emptyOwn),
+        review('stranger', '2026-01-09T00:00:00Z', doctored),
+      ],
+      'maintainer',
+    ).recovered;
+    expect(foreignOnly?.merged).toBe(false);
+    expect(foreignOnly?.ledger.findings.map((f) => f.id)).toEqual(['R7-2']);
   });
 
   it('the merge cap trims FOREIGN entries first — own-first is load-bearing', () => {
@@ -1373,17 +1389,21 @@ describe('latestLedger — the split trust surface', () => {
       (_, i) =>
         `{"id":"R8-${i + 1}","sev":"S","file":"b.ts","title":"theirs ${i + 1}"}`,
     ).join(',');
+    // Both source markers declare their OWN losses: the union's dropped is a
+    // three-term sum (own marker's, foreign marker's, the re-cap), and a
+    // fixture whose markers carried none pinned only the re-cap term — a
+    // refactor zeroing either marker-borne term shipped green.
     const atCap = recoverLedger(
       [
         review(
           'maintainer',
           '2026-01-01T00:00:00Z',
-          `x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[${ownFindings}]} -->`,
+          `x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[${ownFindings}],"dropped":3} -->`,
         ),
         review(
           'stranger',
           '2026-01-09T00:00:00Z',
-          `x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[${foreignFindings}]} -->`,
+          `x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[${foreignFindings}],"dropped":2} -->`,
         ),
       ],
       'maintainer',
@@ -1396,8 +1416,9 @@ describe('latestLedger — the split trust surface', () => {
     // …the trimmed entries are exactly the foreign tail…
     expect(ids).toHaveLength(LEDGER_MAX_FINDINGS);
     expect(ids.some((id) => id.startsWith('R8-'))).toBe(false);
-    // …and `dropped` counts them honestly.
-    expect(atCap?.ledger.dropped).toBe(5);
+    // …and `dropped` is the full three-term sum: own marker's 3, foreign
+    // marker's 2, plus the 5 the re-cap trimmed.
+    expect(atCap?.ledger.dropped).toBe(3 + 2 + 5);
   });
 
   it('does not adopt a foreign round implausibly far past our own', () => {
@@ -1700,9 +1721,12 @@ describe('renderLedgerSection', () => {
       'entries this account certified are its own claims',
     );
     expect(mergedSection).not.toContain('THEIR claims');
-    // The dropped sum is not one round's loss, and the note says so.
-    expect(mergedSection).toContain('from the merged rounds');
-    expect(mergedSection).toContain("not round 8's marker alone");
+    // The dropped sum is a three-term total any subset of which can be
+    // zero, and the note must not pin it on any single round or claim both
+    // sources lost entries — a reader cross-referencing a complete marker
+    // would dismiss the warning as stale.
+    expect(mergedSection).toContain('did not survive into this merged list');
+    expect(mergedSection).toContain('not attributable to any single round');
     expect(mergedSection).not.toContain('from round 8 did not fit');
     // No anchor travels with a foreign winner, merged or not.
     expect(mergedSection).toContain('no incremental anchor');
@@ -2192,6 +2216,42 @@ describe('runPrContext identity failure (handler level)', () => {
       String(c[0]).includes('prev-ledger.json'),
     );
     expect(String(ownSideWrite?.[1])).toContain('"sha"');
+  });
+
+  it('wires the MERGED union through the handler to the rendered context', async () => {
+    // The passthrough is one hardcodable constant: with
+    // `const prevLedgerMerged = false;` at the call site every other test
+    // stayed green — the recovery seam asserts `merged` on the return
+    // value, the renderer test passes `true` directly, and no handler
+    // fixture held BOTH an own marker and a higher-round foreign winner.
+    // A real cross-account recovery would then render the pure-foreign
+    // THEIR-claims wording over a list whose own subset this account
+    // certified.
+    currentUserMock.mockReturnValue('maintainer');
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          id: 21,
+          user: { login: 'maintainer' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-01',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":7,"findings":[{"id":"R7-1","sev":"C","file":"a.ts","title":"own"}]} -->',
+        },
+        {
+          id: 22,
+          user: { login: 'ci-bot' },
+          state: 'COMMENTED',
+          submitted_at: '2026-08-02',
+          body: 'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}]} -->',
+        },
+      ]);
+    await run();
+    const ctx = contextWrite();
+    expect(ctx).toContain("MERGED over this account's own latest findings");
+    expect(ctx).not.toContain('THEIR claims');
   });
 });
 
