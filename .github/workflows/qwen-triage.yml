@@ -2784,40 +2784,69 @@ jobs:
           # entries are imported as shell functions BEFORE this body
           # runs, are invisible to ${!BASH_FUNC_@}/`set`, and shadow
           # every later resolution — including the PATH pin below,
-          # because function lookup precedes PATH. No in-script purge is
-          # safe (an import can shadow the purge builtin itself), so
-          # re-exec ONCE through an absolute-path env -i child: a
-          # slash-bearing word never goes through function lookup, and
-          # -i drops every import. The child marker is a POSITIONAL
-          # argument, never an env entry — the poisoned file-command
-          # channel this block defends against can plant any env
-          # variable, so an env-borne "already re-executed" sentinel
-          # would be forgeable; argv is set by exec, and the runner
-          # wrapper passes no arguments after the script path. Mirrors
-          # the autofix lane's env -i bootstrap; only builtins and
-          # expansions resolve before this guard. The bash operand is
-          # absolute-pathed too: env applies the forwarded environment
-          # FIRST, then resolves the operand via execvp against its PATH —
-          # the inherited one, which may already be attacker-chosen.
-          if [ "${EUID:-1}" -eq 0 ] && { [ -n "${BASH_ENV:-}" ] || [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_AUDIT:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; }; then
+          # because function lookup precedes PATH. An import can even be
+          # NAMED `[` (bash accepts BASH_FUNC_[%%), and function lookup
+          # precedes builtins — so every decision up to and including
+          # the re-exec is a reserved word (`[[`, `case`), recognized
+          # at parse time: through a `[`-shaped guard the poison skips
+          # the re-exec that is the whole defense. No in-script purge
+          # is safe (an import can shadow the purge builtin itself).
+          # The child marker is a POSITIONAL argument, never an env
+          # entry — the poisoned file-command channel this block
+          # defends against can plant any env variable, so an env-borne
+          # "already re-executed" sentinel would be forgeable; argv is
+          # set by exec, and the runner wrapper passes no arguments
+          # after the script path. Mirrors the autofix lane's env -i
+          # bootstrap; only builtins and expansions resolve before this
+          # guard. The bash operand is absolute-pathed too: env applies
+          # the forwarded environment FIRST, then resolves the operand
+          # via execvp against its PATH — the inherited one, which may
+          # already be attacker-chosen. The child runs the body the
+          # PARENT snapshots into a variable — never the path again:
+          # the runner wrote this script node-owned and 644 inside the
+          # uid-1000-writable $RUNNER_TEMP, so a second open by the
+          # child is a deterministic window a kill-race survivor can
+          # rename-plant into.
+          if [[ ${EUID:-1} -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
             echo "::error::flake-gate record: step-env scrub lost — refusing to run in a poisoned environment"
             exit 1
           fi
-          if [ "${1:-}" != '--flake-clean-child' ]; then
-            [ -x /usr/bin/env ] || { echo "::error::flake-gate record: clean re-exec unavailable"; exit 1; }
-            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
-              PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
-              GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
-              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
-              /usr/bin/bash --noprofile --norc -e -o pipefail "${BASH_SOURCE[0]}" --flake-clean-child
+          # Kill BEFORE the snapshot, liveness-verified (the gate
+          # step's shape): a live node writer is all the snapshot race
+          # needs, even at this pre-build point.
+          if [[ ${EUID:-1} -eq 0 ]]; then
+            /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
+              /usr/bin/sleep 1
+              /usr/bin/pkill -KILL -u node 2>/dev/null || true
+            done
+            survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
+            if [[ -n $survivors ]]; then
+              echo "::error::flake-gate record: node-owned processes survived SIGKILL — refusing to record through a contested environment"
+              exit 1
+            fi
           fi
+          case "${1:-}" in
+            --flake-clean-child) ;;
+            *)
+              [[ -x /usr/bin/env ]] || { echo "::error::flake-gate record: clean re-exec unavailable"; exit 1; }
+              _flake_body="$(<"${BASH_SOURCE[0]}")"
+              [[ -n $_flake_body ]] || { echo "::error::flake-gate record: clean re-exec snapshot empty"; exit 1; }
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+                PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+                GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+                GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+                /usr/bin/bash --noprofile --norc -e -o pipefail -c "$_flake_body" flake-record --flake-clean-child
+              ;;
+          esac
           # Runner file-command backing files under $RUNNER_TEMP are
           # uid-1000-owned: a step's PR code can poison the job
           # environment (PATH above all) that LATER steps inherit, and
           # root-side blocks resolve bare binaries through it. Pin a
           # root-only-writable PATH. Production runs this block as root;
           # the test harness does not and keeps its stub PATH.
-          if [ "${EUID:-1}" -eq 0 ]; then
+          if [[ ${EUID:-1} -eq 0 ]]; then
             export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           fi
           # Root-only home for every gate working file. $RUNNER_TEMP itself
@@ -3064,70 +3093,69 @@ jobs:
           # compromised root shell must not keep producing verdicts.
           # EUID-gated so the test harness (which cannot apply this
           # step's env block and runs non-root) stays out of it.
-          if [ "${EUID:-1}" -eq 0 ] && { [ -n "${BASH_ENV:-}" ] || [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_AUDIT:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; }; then
+          if [[ ${EUID:-1} -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
             echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
             echo "flake_summary=the gate refused to sample in a poisoned environment — see the step log" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # The runner wrote THIS script as a node-owned file inside the
-          # uid-1000-writable $RUNNER_TEMP, and the re-exec below RE-READS
-          # it from disk: install/build ran PR lifecycle code as node, so
-          # a detached survivor still alive when the re-exec opens the
-          # file overwrites it in place, and the wrapper executes attacker
-          # content in its full environment — every in-script defence lives
-          # in the overwritten body. Kill BEFORE the re-exec; absolute-
-          # pathed (no PATH pin applies this early, and a BASH_FUNC import
-          # shadows every bare word) and EUID-gated (production runs as
-          # root; the test harness does not and keeps its stubs).
-          if [ "${EUID:-1}" -eq 0 ]; then
+          # Kill BEFORE the re-exec snapshot; absolute-pathed (no PATH
+          # pin applies this early, and a BASH_FUNC import shadows
+          # every bare word), EUID-gated (the harness keeps its
+          # stubs). The liveness refusal mirrors the agent step's
+          # guard: the budget loop alone is out-forked by a plant
+          # repopulating between sweeps, and the snapshot must not
+          # read this node-owned script through a contested
+          # environment (install/build ran PR lifecycle code).
+          if [[ ${EUID:-1} -eq 0 ]]; then
             /usr/bin/pkill -KILL -u node 2>/dev/null || true
             for _ in 1 2 3; do
-              [ -n "$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" ] || break
+              [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
               /usr/bin/sleep 1
               /usr/bin/pkill -KILL -u node 2>/dev/null || true
             done
-          fi
-          # Startup-channel scrub, part two: BASH_FUNC_<name>%% env
-          # entries are imported as shell functions BEFORE this body
-          # runs, are invisible to ${!BASH_FUNC_@}/`set`, and shadow
-          # every later resolution — including the PATH pin below,
-          # because function lookup precedes PATH. No in-script purge is
-          # safe (an import can shadow the purge builtin itself), so
-          # re-exec ONCE through an absolute-path env -i child: a
-          # slash-bearing word never goes through function lookup, and
-          # -i drops every import. The child marker is a POSITIONAL
-          # argument, never an env entry — the poisoned file-command
-          # channel this block defends against can plant any env
-          # variable, so an env-borne "already re-executed" sentinel
-          # would be forgeable; argv is set by exec, and the runner
-          # wrapper passes no arguments after the script path. Mirrors
-          # the autofix lane's env -i bootstrap; only builtins and
-          # expansions resolve before this guard. The bash operand is
-          # absolute-pathed too: env applies the forwarded environment
-          # FIRST, then resolves the operand via execvp against its PATH —
-          # the inherited one, which may already be attacker-chosen. The
-          # gate fails OPEN if the re-exec is unavailable, never into a
-          # compromised shell.
-          if [ "${1:-}" != '--flake-clean-child' ]; then
-            if [ ! -x /usr/bin/env ]; then
+            survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
+            if [[ -n $survivors ]]; then
               echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
-              echo "flake_summary=the gate could not start a clean shell — refusing to sample" >> "$GITHUB_OUTPUT"
+              echo "flake_summary=node-owned processes survived SIGKILL — the gate refused to sample" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
-              PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
-              GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
-              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
-              FLAKE_ROUNDS="${FLAKE_ROUNDS:-}" FLAKE_SEQ_DIR="${FLAKE_SEQ_DIR:-}" \
-              /usr/bin/bash --noprofile --norc -e -o pipefail "${BASH_SOURCE[0]}" --flake-clean-child
           fi
+          # Startup-channel scrub, part two — the record step carries
+          # the full rationale: reserved-word decisions (a BASH_FUNC
+          # import can be named `[`), one-shot env -i re-exec,
+          # positional child marker, and the snapshot body (the child
+          # never re-opens this node-owned script by path). The gate
+          # fails OPEN if the re-exec is unavailable, never into a
+          # compromised shell.
+          case "${1:-}" in
+            --flake-clean-child) ;;
+            *)
+              if [[ ! -x /usr/bin/env ]]; then
+                echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+                echo "flake_summary=the gate could not start a clean shell — refusing to sample" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              _flake_body="$(<"${BASH_SOURCE[0]}")"
+              if [[ -z $_flake_body ]]; then
+                echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+                echo "flake_summary=the gate could not snapshot its own body — refusing to sample" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+                PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+                GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+                GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+                FLAKE_ROUNDS="${FLAKE_ROUNDS:-}" FLAKE_SEQ_DIR="${FLAKE_SEQ_DIR:-}" \
+                /usr/bin/bash --noprofile --norc -e -o pipefail -c "$_flake_body" flake-gate --flake-clean-child
+              ;;
+          esac
           # Same poisoned-env premise as the record step: the file
           # commands a PR step wrote to the uid-1000-owned backing files
           # are applied at step end, so this block's inherited PATH may
           # be attacker-chosen. Pin a root-only-writable one before any
           # bare binary is resolved (production runs as root; the test
           # harness does not and keeps its stub PATH).
-          if [ "${EUID:-1}" -eq 0 ]; then
+          if [[ ${EUID:-1} -eq 0 ]]; then
             export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           fi
           # Abnormal-exit net: `set -u` (or any unforeseen fatal) still
@@ -3185,24 +3213,22 @@ jobs:
           # embeds the FIRST 10,000 chars of the log, so the per-file matrix
           # and verdict must sit ahead of detail that can outgrow the cap.
           DETAIL="$GATE_DIR/detail"
-          : > "$LOG"
-          : > "$DETAIL"
           finish() {
             # Outputs carry FIXED strings and counters only — file paths are
             # PR-controlled text and belong in the log, which the publisher
             # HTML-escapes before embedding.
             echo "flake_verdict=$1" >> "$GITHUB_OUTPUT"
             echo "flake_summary=$2" >> "$GITHUB_OUTPUT"
-            printf '\nverdict: %s\nsummary: %s\n' "$1" "$2" >> "$LOG"
-            # Detail LAST: the publisher embeds the first 10,000 chars, and
-            # the matrix/verdict must never be truncated away behind
-            # failure tails (full copy stays in the artifact).
-            if [ -s "$DETAIL" ]; then
-              if [ -n "${GATE_HOME_ID:-}" ] && ! gate_home_intact; then
-                # A home swapped after the samples ran would feed
-                # attacker-chosen bytes into the published log.
-                printf -- '\n(per-invocation detail dropped: the gate working directory changed mid-run)\n' >> "$LOG"
-              else
+            # Log appends re-resolve the home path, and finish() is
+            # callable from any point: write them only through a home
+            # re-verified at call time — a swapped home must not receive
+            # the verdict bytes through a planted `log` symlink.
+            if gate_home_intact; then
+              printf '\nverdict: %s\nsummary: %s\n' "$1" "$2" >> "$LOG"
+              # Detail LAST: the publisher embeds the first 10,000 chars, and
+              # the matrix/verdict must never be truncated away behind
+              # failure tails (full copy stays in the artifact).
+              if [ -s "$DETAIL" ]; then
                 printf -- '\n--- per-invocation detail (full copy in the artifact) ---\n' >> "$LOG"
                 cat "$DETAIL" >> "$LOG"
               fi
@@ -3223,8 +3249,28 @@ jobs:
           # reintroduce "follow whatever symlink is there".
           gate_home_intact ||
             finish error 'the gate working directory changed since validation — refusing to read files a PR could have planted'
+          # Truncate ONLY through the verified home: `: >` opens with
+          # O_TRUNC through any symlink, so it must never run ahead of
+          # the first identity re-check.
+          : > "$LOG"
+          : > "$DETAIL"
           { [ -f "$LIST" ] && [ ! -L "$LIST" ]; } ||
             finish error 'the recorded changed-test list is missing or not a regular file'
+
+          # vitest's positional filters are lowercase SUBSTRING matches on
+          # root-relative paths: the operand for X.test.ts also collects a
+          # same-stem X.test.tsx sibling, and the one invocation's outcome
+          # would be attributed to the changed file alone — manufacturing
+          # divergence from a deterministic PR, or masking real divergence.
+          # Merge each colliding pair into ONE group and skip the sibling
+          # when the list reaches it. `${f}x` is the live shape: a
+          # collected superstring of a changed test path can only append
+          # the `x` of a .tsx/.jsx twin.
+          declare -A sibling_owner=()
+          while IFS= read -r -d '' f; do
+            [ -n "$f" ] || continue
+            [ -f "${f}x" ] && sibling_owner["${f}x"]="$f"
+          done < "$LIST"
 
           # Partition into per-FILE groups. Every skipped file is logged
           # with its reason — a silently narrowed gate would read as
@@ -3280,6 +3326,10 @@ jobs:
             [ -n "$f" ] || continue
             if [ ! -f "$f" ]; then
               add_skip "$f" 'not present in the merge tree, skipped'
+              continue
+            fi
+            if [ -n "${sibling_owner["$f"]:-}" ]; then
+              add_skip "$f" "substring-colliding sibling — one vitest filter collects it together with ${sibling_owner["$f"]}, whose group it runs in"
               continue
             fi
             case "$f" in
@@ -3340,8 +3390,13 @@ jobs:
                   continue
                 fi
                 # From the owning package CWD (vitest configs assume it);
-                # npx resolves the binary by walking up node_modules.
-                group_labels+=("$f")
+                # npx resolves the binary by walking up node_modules. The
+                # label names a substring-colliding sibling too: one
+                # filter collects both, so the group's outcome belongs to
+                # both (see sibling_owner).
+                label="$f"
+                [ -f "${f}x" ] && label="$f + ${f}x"
+                group_labels+=("$label")
                 group_dirs+=("$pkg")
                 group_cmds+=("npx --no-install vitest run $(printf '%q' "./${f#"$pkg"/}")")
                 ;;
@@ -4255,48 +4310,56 @@ jobs:
           # step's): fail closed if the step-env blanks lost, then
           # re-exec once through an absolute-path env -i child to drop
           # any BASH_FUNC_* imports before a bare binary resolves.
-          if [ "${EUID:-1}" -eq 0 ] && { [ -n "${BASH_ENV:-}" ] || [ -n "${LD_PRELOAD:-}" ] || [ -n "${LD_AUDIT:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; }; then
+          if [[ ${EUID:-1} -eq 0 ]] && [[ -n ${BASH_ENV:-} || -n ${LD_PRELOAD:-} || -n ${LD_AUDIT:-} || -n ${LD_LIBRARY_PATH:-} ]]; then
             echo "::error::flake-gate staging: step-env scrub lost — refusing to stage evidence in a poisoned environment"
             exit 1
           fi
-          # The runner wrote THIS script as a node-owned file inside the
-          # uid-1000-writable $RUNNER_TEMP, and the re-exec below RE-READS
-          # it from disk: the agent era just ran PR-controlled node code,
-          # so a detached survivor still alive when the re-exec opens the
-          # file overwrites it in place, and the wrapper executes attacker
-          # content in its full environment. Kill BEFORE the re-exec —
-          # unconditional, not gated on the log existing: node can unlink
-          # the log, and that must not skip the kill/rebuild for the
-          # report the agent wrote. Absolute-pathed (no PATH pin applies
-          # this early) and EUID-gated (production runs as root; the test
-          # harness does not and keeps its stubs).
-          if [ "${EUID:-1}" -eq 0 ]; then
+          # Kill BEFORE the re-exec snapshot — unconditional, not gated
+          # on the log existing: node can unlink the log, and that must
+          # not skip the kill/rebuild for the report the agent wrote.
+          # Absolute-pathed, EUID-gated (the harness keeps its stubs).
+          # The liveness refusal mirrors the agent step's guard: the
+          # budget loop alone is out-forked by a plant repopulating
+          # between sweeps, and the snapshot must not read this
+          # node-owned script through a contested environment (the
+          # agent era just ran PR-controlled node code).
+          if [[ ${EUID:-1} -eq 0 ]]; then
             /usr/bin/pkill -KILL -u node 2>/dev/null || true
             for _ in 1 2 3; do
-              [ -n "$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" ] || break
+              [[ -n $(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/') ]] || break
               /usr/bin/sleep 1
               /usr/bin/pkill -KILL -u node 2>/dev/null || true
             done
+            survivors="$(/usr/bin/ps -o pid=,stat= -u node 2>/dev/null | /usr/bin/awk '$2 !~ /^Z/')" || true
+            if [[ -n $survivors ]]; then
+              echo "::error::flake-gate staging: node-owned processes survived SIGKILL — refusing to stage evidence through a contested environment"
+              exit 1
+            fi
           fi
-          # The child marker is positional, not an env entry: the
-          # poisoned file-command channel can plant any env variable, so
-          # an env-borne sentinel would be forgeable; the bash operand is
-          # absolute-pathed for the same reason as the PATH pin (see the
-          # record step for the full rationale).
-          if [ "${1:-}" != '--flake-clean-child' ]; then
-            [ -x /usr/bin/env ] || { echo "::error::flake-gate staging: clean re-exec unavailable"; exit 1; }
-            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
-              PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
-              GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
-              GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
-              /usr/bin/bash --noprofile --norc -e -o pipefail "${BASH_SOURCE[0]}" --flake-clean-child
-          fi
+          # The record step carries the full scrub/re-exec rationale:
+          # reserved-word decisions (a BASH_FUNC import can be named
+          # `[`), positional child marker (env markers forgeable),
+          # snapshot body (the child never re-opens this node-owned
+          # script by path), absolute-path bash operand.
+          case "${1:-}" in
+            --flake-clean-child) ;;
+            *)
+              [[ -x /usr/bin/env ]] || { echo "::error::flake-gate staging: clean re-exec unavailable"; exit 1; }
+              _flake_body="$(<"${BASH_SOURCE[0]}")"
+              [[ -n $_flake_body ]] || { echo "::error::flake-gate staging: clean re-exec snapshot empty"; exit 1; }
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= exec /usr/bin/env -i \
+                PATH="$PATH" RUNNER_TEMP="${RUNNER_TEMP:-}" \
+                GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+                GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+                /usr/bin/bash --noprofile --norc -e -o pipefail -c "$_flake_body" flake-stage --flake-clean-child
+              ;;
+          esac
           # Pin a root-only-writable PATH: the job env this step
           # inherits may be poisoned through the uid-1000-owned
           # file-command backing files (see the record step). Production
           # runs as root; the test harness does not and keeps its stub
           # PATH.
-          if [ "${EUID:-1}" -eq 0 ]; then
+          if [[ ${EUID:-1} -eq 0 ]]; then
             export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
           fi
           # BUILD a trusted upload tree; never harden an attacker's.
@@ -4317,9 +4380,10 @@ jobs:
           # staging step runs on exactly the paths where this run's
           # record step (the only creator) was skipped — without it a
           # previous run's evidence would ship under this run's name.
-          if [ ! -L "$GATE_DIR" ] && [ -d "$GATE_DIR" ] && [ -O "$GATE_DIR" ] &&
-             [ "$(stat -c '%a' "$GATE_DIR" 2>/dev/null)" = '700' ] &&
-             [ "$(cat "$GATE_DIR/run-id" 2>/dev/null)" = "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]; then
+          staged_ok=''
+          if [[ ! -L $GATE_DIR ]] && [[ -d $GATE_DIR ]] && [[ -O $GATE_DIR ]] &&
+             [[ $(stat -c '%a' "$GATE_DIR" 2>/dev/null) == '700' ]] &&
+             [[ $(cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]]; then
             # The validated ENTRY still lives in the uid-1000-writable
             # $RUNNER_TEMP top level, and every absolute-path operation
             # re-resolves it through the writable parent: cd in ONCE,
@@ -4329,13 +4393,26 @@ jobs:
             # to the opened inode no matter how the entry above it is
             # swapped. The one exception is the copy target, which must
             # cross trees; a race there can only misdirect OUR bytes,
-            # never inject foreign ones into the anchored tree.
+            # never inject foreign ones into the anchored tree. The
+            # outer conjuncts above are six separate path resolutions a
+            # swap can thread, so the ATTRIBUTE half re-runs inside the
+            # opened directory: a plant the cd resolved into must still
+            # be owned by the effective user, 0700, and carry this
+            # run's marker — and node cannot create the root-owned
+            # directory -O demands.
             home_id="$(stat -c '%d:%i' "$GATE_DIR" 2>/dev/null || true)"
-            (
-              cd "$GATE_DIR"
-              [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$home_id" ]
-              rm -rf -- upload
-              install -d -m 0700 -o root -g root upload
+            # Explicit `|| exit 1` on every check and phase: this
+            # subshell is an `if` condition, and bash suppresses errexit
+            # there — an unguarded failure would fall through into the
+            # copy phases instead of refusing.
+            if (
+              cd "$GATE_DIR" || exit 1
+              [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$home_id" ] || exit 1
+              [ -O . ] || exit 1
+              [ "$(stat -c '%a' . 2>/dev/null)" = '700' ] || exit 1
+              [ "$(cat ./run-id 2>/dev/null)" = "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ] || exit 1
+              rm -rf -- upload || exit 1
+              install -d -m 0700 -o root -g root upload || exit 1
               # Copy only REGULAR files out of the untrusted tree,
               # resolving nothing: -type f excludes symlinks/FIFOs/
               # sockets/devices at selection time, and
@@ -4369,7 +4446,7 @@ jobs:
               # upload-artifact follows links, so any non-regular
               # arrival is a root-readable-content primitive into the
               # public artifact and must not ship.
-              find upload \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete
+              find upload \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete || exit 1
               # The gate's own log is authoritative and root-owned inside
               # the home — it is copied LAST so nothing in the untrusted
               # tree can shadow the name the publisher pins. Reserve the
@@ -4377,26 +4454,76 @@ jobs:
               # planted file would otherwise survive the copy, and a
               # planted DIRECTORY would swallow the authoritative file
               # even when it exists.
-              rm -rf -- upload/flake-gate.log
+              rm -rf -- upload/flake-gate.log || exit 1
               if [ -f log ] && [ ! -L log ]; then
-                cp -f --no-dereference log upload/flake-gate.log
+                cp -f --no-dereference log upload/flake-gate.log || exit 1
               fi
-              chown -R root:root upload
-              chmod -R go-rwx upload
-            )
-          else
-            echo "::warning::flake-gate home missing or not root-owned 0700; skipping the trusted upload rebuild."
-            # Remove the rejected tree anyway: the always() upload step
-            # below enumerates this path unconditionally, so a stale tree
-            # left in place ships a PREVIOUS run's evidence under this
-            # run's artifact name — the exact outcome the run-id conjunct
-            # above exists to prevent. rm -rf removes a symlink operand
-            # itself, never following it.
+              chown -R root:root upload || exit 1
+              chmod -R go-rwx upload || exit 1
+            ); then
+              staged_ok=1
+            fi
+          fi
+          if [ -z "$staged_ok" ]; then
+            # ONE cleanup for BOTH refusals — a home that failed the
+            # outer validation, and one whose opened directory failed
+            # the identity/attribute re-checks mid-staging. Detection
+            # alone is not enough: a set -e abort used to leave the
+            # swapped-in tree for the always() upload to enumerate,
+            # shipping a plant — or a PREVIOUS run's evidence under
+            # this run's artifact name. rm -rf removes a symlink
+            # operand itself, never following it.
+            echo "::warning::flake-gate home missing, invalid, or swapped mid-staging; skipping the trusted upload rebuild."
             rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
           fi
 
-      - name: 'Upload verify results'
+      # The always() upload below re-resolves $RUNNER_TEMP/flake-gate in a
+      # fresh step — staging's anchoring expires at its exit, so a swap
+      # between the two hands the upload a plant. Re-validate the entry's
+      # identity immediately before the upload and remove it on any
+      # mismatch; the upload runs only on an affirmative output. Every
+      # decision is a reserved word and every external absolute-pathed:
+      # this step inherits the same poisoned job environment the
+      # scrub/re-exec blocks defend against, and a hijacked check here
+      # fails CLOSED — never into a shipped plant.
+      - name: 'Re-check flake-gate home before upload'
+        id: 'flake-upload-check'
         if: "always() && steps.pr.outputs.decision == 'run'"
+        # Same posture as the staging step: evidence-copying only.
+        continue-on-error: true
+        env:
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+        run: |-
+          set -uo pipefail
+          if [[ ${EUID:-1} -eq 0 ]]; then
+            export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          fi
+          upload_ok=false
+          GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
+          if [[ ! -L $GATE_DIR ]] && [[ -d $GATE_DIR ]] && [[ -O $GATE_DIR ]] &&
+             [[ $(/usr/bin/stat -c '%a' "$GATE_DIR" 2>/dev/null) == '700' ]] &&
+             [[ $(/usr/bin/cat "$GATE_DIR/run-id" 2>/dev/null) == "${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" ]]; then
+            home_id="$(/usr/bin/stat -c '%d:%i' "$GATE_DIR" 2>/dev/null || true)"
+            if ( cd "$GATE_DIR" &&
+                 [ "$(stat -c '%d:%i' . 2>/dev/null)" = "$home_id" ] &&
+                 [ -O . ] && [ "$(stat -c '%a' . 2>/dev/null)" = '700' ] &&
+                 [ -d upload ] ); then
+              upload_ok=true
+            fi
+          fi
+          if [[ $upload_ok != true ]]; then
+            # Whatever occupies the entry now is not this run's
+            # validated home — remove it so the upload cannot
+            # enumerate a plant.
+            /usr/bin/rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
+          fi
+          echo "upload_ok=$upload_ok" >> "$GITHUB_OUTPUT"
+
+      - name: 'Upload verify results'
+        if: "always() && steps.pr.outputs.decision == 'run' && steps.flake-upload-check.outputs.upload_ok == 'true'"
         # Don't let a missing/empty results dir (qwen crashed before writing
         # any) fail the job and mask the original error.
         continue-on-error: true
