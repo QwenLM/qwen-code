@@ -41,6 +41,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
@@ -56,6 +57,7 @@ import { shellQuotePath } from './lib/shell-quote.js';
 import {
   discardWorktree,
   exposeDependencies,
+  sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
   type DependencyFarm,
@@ -137,10 +139,15 @@ function gitOut(cwd: string, ...args: string[]): string {
   // both pass the default 1 MiB buffer on a large repo, and `spawnSync` answers
   // that by killing the child — which this function reads as a git failure and
   // the reset reads as "rebuild", permanently, for every call.
+  // Sanitized env: an inherited GIT_DIR overrides repository discovery for
+  // the ENTIRE identity gate at once — both sides of every comparison see the
+  // same override, so no check can detect it — and the head sha itself comes
+  // back from the wrong repository.
   const r = spawnSync('git', [...NO_HOOKS, ...args], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: sanitizedGitEnv(),
   });
   if (r.error) throw r.error;
   if (r.status !== 0) {
@@ -216,6 +223,20 @@ function resetScratchTree(
       gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );
     if (gitdir === commonOf(worktree)) return false;
+    // The admin entry must point back at THIS tree. A planted gitfile naming
+    // a SIBLING worktree's admin entry passes every check above — directory,
+    // gitfile, toplevel resolving to itself, common dirs comparing equal,
+    // gitdir distinct from the commondir — while the reset below detaches the
+    // sibling's HEAD onto the PR sha and wipes its staged index. The entry's
+    // `gitdir` file names the `.git` file inside the tree it belongs to; a
+    // borrowed entry names the sibling's, and the mismatch sends this shape
+    // down discard-and-rebuild.
+    const backpointer = readFileSync(join(gitdir, 'gitdir'), 'utf8').trim();
+    if (
+      realpathSync(dirname(resolve(gitdir, backpointer))) !== realpathSync(tree)
+    ) {
+      return false;
+    }
   } catch {
     return false;
   }

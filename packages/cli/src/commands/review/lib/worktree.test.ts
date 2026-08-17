@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
@@ -34,6 +34,12 @@ import {
 
 describe('worktreeResidue', () => {
   let repo: string;
+  // The tree under measurement is a LINKED worktree — the production shape:
+  // fetch-pr creates the review worktree with `git worktree add`, so its
+  // `.git` is a gitfile. The identity gate fails closed for anything else (a
+  // planted repository, a main checkout), so a bare repo fixture could not
+  // measure the healthy path.
+  let tree: string;
   // Ambient host git config makes the fixture commit throw — a global
   // `commit.gpgsign` with no usable key, a `core.hooksPath` that prompts — and
   // the suite then fails for reasons the branch never touched (the incident
@@ -41,19 +47,24 @@ describe('worktreeResidue', () => {
   // isolates; these do too.
   let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
-  const git = (...args: string[]) =>
+  const gitRepo = (...args: string[]) =>
     execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: tree, encoding: 'utf8' }).trim();
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
     repo = mkdtempSync(join(tmpdir(), 'qwen-residue-'));
-    git('init', '-q', '-b', 'main');
-    git('config', 'user.email', 't@t.t');
-    git('config', 'user.name', 't');
+    gitRepo('init', '-q', '-b', 'main');
+    gitRepo('config', 'user.email', 't@t.t');
+    gitRepo('config', 'user.name', 't');
     writeFileSync(join(repo, '.gitignore'), 'node_modules\ndist\n');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-    git('add', '-A');
-    git('commit', '-qm', 'head');
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qm', 'head');
+    tree = join(repo, '.qwen', 'tmp', 'review-wt');
+    mkdirSync(dirname(tree), { recursive: true });
+    gitRepo('worktree', 'add', '--detach', '-q', tree, 'HEAD');
   });
 
   afterEach(() => {
@@ -62,13 +73,13 @@ describe('worktreeResidue', () => {
   });
 
   it('is empty for the tree a review actually reads', () => {
-    expect(worktreeResidue(repo)).toEqual({ paths: [], total: 0 });
+    expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
   });
 
   it('names a modified file and an untracked probe — the live #9207 shape', () => {
-    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
-    writeFileSync(join(repo, '__probe__.test.ts'), 'it("x", () => {});');
-    const got = worktreeResidue(repo);
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
+    const got = worktreeResidue(tree);
     expect(got.paths.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
     expect(got.total).toBe(2);
   });
@@ -77,10 +88,10 @@ describe('worktreeResidue', () => {
     // Agent 7 installs and builds in this tree. If that read as residue, every
     // reader of every review would be told to distrust its own worktree — the
     // warning that fires always is the warning nobody reads.
-    mkdirSync(join(repo, 'node_modules', 'vitest'), { recursive: true });
-    mkdirSync(join(repo, 'dist'), { recursive: true });
-    writeFileSync(join(repo, 'dist', 'out.js'), 'built\n');
-    expect(worktreeResidue(repo)).toEqual({ paths: [], total: 0 });
+    mkdirSync(join(tree, 'node_modules', 'vitest'), { recursive: true });
+    mkdirSync(join(tree, 'dist'), { recursive: true });
+    writeFileSync(join(tree, 'dist', 'out.js'), 'built\n');
+    expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
   });
 
   it('reports BOTH names of a rename — the restore needs the one that is gone', () => {
@@ -89,14 +100,14 @@ describe('worktreeResidue', () => {
     // report never yielded. Reporting only the destination left the reader with
     // a staged `D <orig>` it had never been told about.
     git('mv', 'a.ts', 'b.ts');
-    expect(worktreeResidue(repo).paths.sort()).toEqual(['a.ts', 'b.ts']);
+    expect(worktreeResidue(tree).paths.sort()).toEqual(['a.ts', 'b.ts']);
   });
 
   it('reports STAGED residue, which is the shape a probe leaves with `git add`', () => {
-    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
-    writeFileSync(join(repo, 'staged-new.ts'), 'x\n');
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
+    writeFileSync(join(tree, 'staged-new.ts'), 'x\n');
     git('add', 'a.ts', 'staged-new.ts');
-    expect(worktreeResidue(repo).paths.sort()).toEqual([
+    expect(worktreeResidue(tree).paths.sort()).toEqual([
       'a.ts',
       'staged-new.ts',
     ]);
@@ -105,12 +116,12 @@ describe('worktreeResidue', () => {
   it('hands back names that survive being turned into commands', () => {
     // The paths become `git show HEAD:<path>` and `git checkout HEAD -- <path>`
     // for an agent to run, and porcelain's RENDERED form quotes a non-ASCII
-    // name (`"caf\\303\\251.ts"`), which resolves to nothing on disk.
-    writeFileSync(join(repo, 'café.ts'), 'x\n');
-    const got = worktreeResidue(repo).paths;
+    // name (`"caf\303\251.ts"`), which resolves to nothing on disk.
+    writeFileSync(join(tree, 'café.ts'), 'x\n');
+    const got = worktreeResidue(tree).paths;
     expect(got).toEqual(['café.ts']);
     // The real test of "usable": the name still resolves on disk.
-    for (const p of got) expect(existsSync(join(repo, p))).toBe(true);
+    for (const p of got) expect(existsSync(join(tree, p))).toBe(true);
   });
 
   // `>` is in NTFS's reserved set, so the fixture cannot be created on Windows
@@ -119,10 +130,10 @@ describe('worktreeResidue', () => {
   it.skipIf(process.platform === 'win32')(
     'does not mistake a filename containing ` -> ` for a rename record',
     () => {
-      writeFileSync(join(repo, 'a -> b.ts'), 'x\n');
-      const got = worktreeResidue(repo).paths;
+      writeFileSync(join(tree, 'a -> b.ts'), 'x\n');
+      const got = worktreeResidue(tree).paths;
       expect(got).toEqual(['a -> b.ts']);
-      expect(existsSync(join(repo, got[0]))).toBe(true);
+      expect(existsSync(join(tree, got[0]))).toBe(true);
     },
   );
 
@@ -131,9 +142,9 @@ describe('worktreeResidue', () => {
     // files into a folder of its own. `--untracked-files=normal` collapses it
     // to `probe_dir/`, and every recovery this pipeline prints
     // (`git show HEAD:`, `git checkout HEAD --`) fails on a directory.
-    mkdirSync(join(repo, 'probe_dir'));
-    writeFileSync(join(repo, 'probe_dir', 'probe.test.ts'), 'x\n');
-    expect(worktreeResidue(repo).paths).toEqual(['probe_dir/probe.test.ts']);
+    mkdirSync(join(tree, 'probe_dir'));
+    writeFileSync(join(tree, 'probe_dir', 'probe.test.ts'), 'x\n');
+    expect(worktreeResidue(tree).paths).toEqual(['probe_dir/probe.test.ts']);
   });
 
   it('caps the list but never hides that it capped it', () => {
@@ -141,12 +152,12 @@ describe('worktreeResidue', () => {
     // verifier restoring the twelve it was shown and leaving the thirteenth in
     // the tree the next round reads.
     for (let i = 0; i < 20; i++) {
-      writeFileSync(join(repo, `f${i}.ts`), 'x\n');
+      writeFileSync(join(tree, `f${i}.ts`), 'x\n');
     }
-    expect(worktreeResidue(repo).total).toBe(20);
-    expect(worktreeResidue(repo).paths).toHaveLength(12);
-    expect(worktreeResidue(repo, 3).paths).toHaveLength(3);
-    expect(worktreeResidue(repo, 3).total).toBe(20);
+    expect(worktreeResidue(tree).total).toBe(20);
+    expect(worktreeResidue(tree).paths).toHaveLength(12);
+    expect(worktreeResidue(tree, 3).paths).toHaveLength(3);
+    expect(worktreeResidue(tree, 3).total).toBe(20);
   });
 
   it('says UNMEASURED, not clean, when git cannot answer', () => {
@@ -154,7 +165,7 @@ describe('worktreeResidue', () => {
     // one that returns "clean" for a check that never ran is worse: the
     // overload case (a status too big for the buffer) is the one where the tree
     // is dirtiest, and both renderers used to read the empty list as pristine.
-    const gone = worktreeResidue(join(repo, 'no-such-dir'));
+    const gone = worktreeResidue(join(tree, 'no-such-dir'));
     expect(gone.paths).toEqual([]);
     expect(gone.unmeasured).toBeTruthy();
     const notARepo = mkdtempSync(join(tmpdir(), 'qwen-not-a-repo-'));
@@ -165,7 +176,97 @@ describe('worktreeResidue', () => {
     }
     // A clean tree carries no reason — that is what makes the two states
     // distinguishable at the renderers.
-    expect(worktreeResidue(repo).unmeasured).toBeUndefined();
+    expect(worktreeResidue(tree).unmeasured).toBeUndefined();
+  });
+
+  it('says UNMEASURED, not clean, when a repository is planted at the path', () => {
+    // The concealment: `rm .git && git init && git add -A && git commit` over
+    // the contamination answers a clean `git status` for a dirty tree, and no
+    // local check can tell a planted repo from the tree it replaced — both
+    // sides of every comparison resolve inside the plant. A genuine worktree
+    // carries its `.git` as a gitFILE, so anything else fails closed.
+    writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
+    rmSync(join(tree, '.git'));
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: tree });
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: tree });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: tree });
+    execFileSync('git', ['add', '-A'], { cwd: tree });
+    execFileSync('git', ['commit', '-qm', 'conceal'], { cwd: tree });
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('not a gitfile');
+    expect(existsSync(join(tree, '__probe__.test.ts'))).toBe(true);
+  });
+
+  it('says UNMEASURED for writes inside a committed submodule path', () => {
+    // `git status` never looks inside a gitlink and untracked content there
+    // does not dirty the superproject — the raw oracle the probe trusts is
+    // blind there, so a non-empty gitlink directory is unmeasured, never clean.
+    const sub = join(repo, 'sub-origin');
+    mkdirSync(sub);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: sub });
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: sub });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: sub });
+    writeFileSync(join(sub, 's.txt'), 'x\n');
+    execFileSync('git', ['add', '-A'], { cwd: sub });
+    execFileSync('git', ['commit', '-qm', 'one'], { cwd: sub });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor',
+      ],
+      { cwd: tree },
+    );
+    git('commit', '-qm', 'add submodule');
+
+    writeFileSync(join(tree, 'vendor', 'probe-cache.txt'), 'cache\n');
+
+    const got = worktreeResidue(tree);
+    expect(got.unmeasured).toContain('vendor');
+    expect(got.unmeasured).toContain('cannot see inside');
+  });
+
+  it('still measures clean when the submodule is uninitialized', () => {
+    // `worktree add` leaves submodules uninitialized — here not even a
+    // directory at the gitlink — which is the healthy shape for a review
+    // tree; it hides nothing, so a repo with submodules must not measure
+    // unmeasured forever.
+    const sub = join(repo, 'sub-origin');
+    mkdirSync(sub);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: sub });
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: sub });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: sub });
+    writeFileSync(join(sub, 's.txt'), 'x\n');
+    execFileSync('git', ['add', '-A'], { cwd: sub });
+    execFileSync('git', ['commit', '-qm', 'one'], { cwd: sub });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor',
+      ],
+      { cwd: tree },
+    );
+    git('commit', '-qm', 'add submodule');
+    const fresh = join(repo, 'nested', 'wt-sub');
+    gitRepo('worktree', 'add', '--detach', '-q', fresh, 'HEAD');
+
+    const got = worktreeResidue(fresh);
+    expect(got.unmeasured).toBeUndefined();
+    expect(got).toEqual({ paths: [], total: 0 });
   });
 
   it('fails closed for a degraded dir nested in a checkout — discovery walks up', () => {
@@ -198,14 +299,14 @@ describe('worktreeResidue', () => {
     // own install into residue, and every verifier's first act then pointed
     // at deleting the very tree its farm borrows from. Real residue beside
     // the install stays named.
-    writeFileSync(join(repo, '.gitignore'), 'dist\n');
+    writeFileSync(join(tree, '.gitignore'), 'dist\n');
     git('add', '.gitignore');
     git('commit', '-qm', 'loosen');
-    mkdirSync(join(repo, 'node_modules', 'pkg-0'), { recursive: true });
-    writeFileSync(join(repo, 'node_modules', 'pkg-0', 'index.js'), '1\n');
-    writeFileSync(join(repo, '__probe__.test.ts'), 'x');
+    mkdirSync(join(tree, 'node_modules', 'pkg-0'), { recursive: true });
+    writeFileSync(join(tree, 'node_modules', 'pkg-0', 'index.js'), '1\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'x');
 
-    const got = worktreeResidue(repo);
+    const got = worktreeResidue(tree);
 
     expect(got.paths).toEqual(['__probe__.test.ts']);
     expect(got.total).toBe(1);
@@ -535,6 +636,25 @@ describe('discardWorktree', () => {
     // The path is free: a fresh add succeeds where it used to fatal.
     git(repo, 'worktree', 'add', '--detach', '-q', tree, 'HEAD');
     expect(existsSync(join(tree, 'a.ts'))).toBe(true);
+  });
+
+  it('unlinks a symlink at the tree path instead of deleting what it points at', () => {
+    // `git worktree remove` resolves a symlink standing at the path and
+    // force-removes whichever registered worktree it points at — a victim this
+    // path never owned. The scratch-tree rebuild hands `discardWorktree` paths
+    // its own gate admits can be symlinks; the unlink is the whole job for one.
+    const victim = join(repo, 'victim');
+    git(repo, 'worktree', 'add', '--detach', '-q', victim, 'HEAD');
+    writeFileSync(join(victim, 'keep.txt'), 'must survive\n');
+    const planted = join(repo, 'planted');
+    symlinkSync(victim, planted, 'dir');
+
+    discardWorktree(repo, planted);
+
+    expect(existsSync(planted)).toBe(false);
+    // The victim is still registered AND still on disk.
+    expect(git(repo, 'worktree', 'list')).toContain('victim');
+    expect(existsSync(join(victim, 'keep.txt'))).toBe(true);
   });
 
   it('drops only its OWN registration, never a sibling worktree', () => {

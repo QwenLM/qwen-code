@@ -1177,7 +1177,9 @@ export function buildRoleBrief(
     planPath?: string;
     chunk?: number;
     /**
-     * This launch's record key — unique per role, round and findings digest.
+     * This launch's record key — unique per role, chunk, round and findings
+     * digest: in an --all-chunks round every shard shares one findings file
+     * and therefore one digest, and the chunk id is what separates the keys.
      * The verifier's scratch tree is named after it, which is what keeps the
      * shards of one round out of each other's trees (`scratchWorktreePath`).
      */
@@ -1360,10 +1362,12 @@ export function buildRoleBrief(
   if (role === 'verify') {
     const wt = report.worktreePath;
     if (typeof wt === 'string' && wt) {
-      // The record key is unique per role, round and findings digest, so two
-      // shards of one round get two trees. Falling back to the role name keeps a
-      // direct build working; it is never the roster/CLI path, which always has
-      // a key.
+      // The record key is unique per role, chunk, round and findings digest,
+      // so two shards of one round get two trees — in an --all-chunks round
+      // every shard shares one findings file and therefore one digest, and the
+      // chunk id is what still separates their keys. Falling back to the role
+      // name keeps a direct build working; it is never the roster/CLI path,
+      // which always has a key.
       // Sanitised HERE, not just where the path is built: this string is
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.

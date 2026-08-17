@@ -29,6 +29,8 @@ import {
   findVitestBin,
   MAX_MUTANTS,
   runControlMutant,
+  runOneMutant,
+  runOneHunkProbe,
 } from './test-efficacy.js';
 import {
   mkdtempSync,
@@ -271,6 +273,84 @@ describe('runControlMutant', () => {
       expect(readFileSync(join(dir, 'a.test.ts'), 'utf8')).toBe(original);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null — never injects through — a probe file that is a symlink', () => {
+    // A PR can commit its test as mode 120000 naming anywhere a relative path
+    // reaches — the shared review worktree sits at a predictable sibling path
+    // — and the injection would follow the link out of the probe tree. The
+    // control that never ran is `null`, and the link's target is untouched.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-control-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-control-target-'));
+    try {
+      const original = 'shared file content\n';
+      writeFileSync(join(outside, 'shared.test.ts'), original);
+      symlinkSync(join(outside, 'shared.test.ts'), join(dir, 'a.test.ts'));
+
+      expect(runControlMutant(dir, 'a.test.ts')).toBeNull();
+      expect(readFileSync(join(outside, 'shared.test.ts'), 'utf8')).toBe(
+        original,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('probe write sites refuse a symlinked target', () => {
+  // The mutant and hunk probes write the same way the control does; a leaf
+  // symlink would carry the mutation and its restore into whatever the link
+  // names. Both refuse the shape as inconclusive before anything runs.
+  const setup = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-probetree-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-probetree-target-'));
+    const original = 'line one\nline two\n';
+    writeFileSync(join(outside, 'shared.ts'), original);
+    symlinkSync(join(outside, 'shared.ts'), join(dir, 'target.ts'));
+    return { dir, outside, original };
+  };
+  const teardown = (dir: string, outside: string) => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  };
+
+  it('runOneMutant reports inconclusive and leaves the target untouched', () => {
+    const { dir, outside, original } = setup();
+    try {
+      const r = runOneMutant(
+        dir,
+        { file: 'target.ts', line: 1, statement: 'line one' },
+        [],
+      );
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('symlink');
+      expect(readFileSync(join(outside, 'shared.ts'), 'utf8')).toBe(original);
+    } finally {
+      teardown(dir, outside);
+    }
+  });
+
+  it('runOneHunkProbe reports inconclusive and leaves the target untouched', () => {
+    const { dir, outside, original } = setup();
+    try {
+      const r = runOneHunkProbe(
+        dir,
+        {
+          file: 'target.ts',
+          index: 0,
+          header: '@@ -1,2 +1,2 @@',
+          startLine: 1,
+          patch: 'irrelevant — the guard fires before git apply',
+        },
+        [],
+      );
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('symlink');
+      expect(readFileSync(join(outside, 'shared.ts'), 'utf8')).toBe(original);
+    } finally {
+      teardown(dir, outside);
     }
   });
 });

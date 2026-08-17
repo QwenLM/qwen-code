@@ -1358,16 +1358,20 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
       git('add', '-A');
       git('commit', '-qm', 'head');
+      // The review worktree is a LINKED worktree — the production shape, and
+      // the residue probe's identity gate fails closed for anything else.
+      const wt = join(dir, '.qwen', 'tmp', 'review-pr-9207');
+      git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
       // What the live run's auditor read: a probe's mutant, and a probe file.
-      writeFileSync(join(dir, 'a.ts'), 'export const x = 2;\n');
-      writeFileSync(join(dir, '__probe__.test.ts'), 'it("x", () => {});');
+      writeFileSync(join(wt, 'a.ts'), 'export const x = 2;\n');
+      writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
 
       const plan = join(dir, 'plan.json');
       writeFileSync(
         plan,
         JSON.stringify({
           ...PLAN,
-          worktreePath: dir,
+          worktreePath: wt,
           prNumber: '9207',
           ownerRepo: 'QwenLM/qwen-code',
         }),

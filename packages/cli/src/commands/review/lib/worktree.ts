@@ -38,6 +38,33 @@ import { readWorkspacePackages } from './workspaces.js';
 export type SweepResult = ReturnType<typeof spawnSync>;
 
 /**
+ * The git environment variables that redirect repository discovery, which
+ * this pipeline must never inherit.
+ *
+ * An exported GIT_DIR overrides discovery for EVERY identity check at once —
+ * both sides of every comparison see the same override, so no check can
+ * detect it, and even the head sha is read from the wrong repository. These
+ * variables mean a human deliberately redirected their own shell; this
+ * command's trees are chosen by the paths its callers pass, and a measurement
+ * or reset that lands where the environment points instead is aimed at
+ * someone else's work.
+ */
+const GIT_ENV_REDIRECTS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_COMMON_DIR',
+];
+
+/** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
+export function sanitizedGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of GIT_ENV_REDIRECTS) delete env[key];
+  return env;
+}
+
+/**
  * Free a disposable worktree's path: unregister it, then remove what is left.
  *
  * `git worktree remove --force` only clears a tree git still tracks. A directory
@@ -58,24 +85,46 @@ export type SweepResult = ReturnType<typeof spawnSync>;
  * not throw on a non-zero status. `rmSync` still can (`force` suppresses ENOENT
  * but not EPERM/EBUSY) — callers decide what that means.
  */
-export function discardWorktree(cwd: string, tree: string): SweepResult {
-  let sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
-    cwd,
-    encoding: 'utf8',
-  });
-  if (sweep.status !== 0) {
-    // A LOCKED admin entry is the one leftover neither `remove --force` nor
-    // `prune` can clear, and probe code has a shell inside these trees: one
-    // `touch` in the admin dir the tree's own gitfile names is enough. Every
-    // later `worktree add` at that path then fatals "missing but locked", for
-    // every disposable tree of that review, until a human intervenes. `unlock`
-    // + the second `--force` is what git documents for exactly this.
-    spawnSync('git', ['worktree', 'unlock', tree], { cwd, encoding: 'utf8' });
-    sweep = spawnSync(
-      'git',
-      ['worktree', 'remove', '--force', '--force', tree],
-      { cwd, encoding: 'utf8' },
-    );
+export function discardWorktree(
+  cwd: string,
+  tree: string,
+): SweepResult | undefined {
+  // A symlink at the tree path must never reach `git worktree remove`: git
+  // resolves it and force-removes whichever registered worktree it points at
+  // — a victim this path never owned, measured live. A symlink is never a
+  // worktree; unlinking it — all the `rmSync` below does to it — is the whole
+  // job here.
+  let symlink = false;
+  try {
+    symlink = lstatSync(tree).isSymbolicLink();
+  } catch {
+    // Absent: nothing for the guard, and the rmSync below is a no-op.
+  }
+  let sweep: SweepResult | undefined;
+  if (!symlink) {
+    sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
+      cwd,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (sweep.status !== 0) {
+      // A LOCKED admin entry is the one leftover neither `remove --force` nor
+      // `prune` can clear, and probe code has a shell inside these trees: one
+      // `touch` in the admin dir the tree's own gitfile names is enough. Every
+      // later `worktree add` at that path then fatals "missing but locked", for
+      // every disposable tree of that review, until a human intervenes.
+      // `unlock` + the second `--force` is what git documents for exactly this.
+      spawnSync('git', ['worktree', 'unlock', tree], {
+        cwd,
+        encoding: 'utf8',
+        env: sanitizedGitEnv(),
+      });
+      sweep = spawnSync(
+        'git',
+        ['worktree', 'remove', '--force', '--force', tree],
+        { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
+      );
+    }
   }
   rmSync(tree, { recursive: true, force: true });
   // And clear the ADMIN entry the two steps above can leave behind — but only
@@ -127,7 +176,7 @@ function dropWorktreeRegistration(cwd: string, tree: string): void {
   const common = spawnSync(
     'git',
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    { cwd, encoding: 'utf8' },
+    { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (common.status !== 0 || typeof common.stdout !== 'string') return;
   const dir = join(common.stdout.trim(), 'worktrees');
@@ -242,7 +291,18 @@ function pipelineExcludeArgs(): string[] {
  * walks UP, so a directory whose `.git` file is gone answers `git status`
  * with the enclosing user checkout's dirty state — the wrong tree, measured
  * silently, and the restore recipe this probe triggers aimed at the user's
- * own files. That shape fails closed instead.
+ * own files. That shape fails closed instead. So does a repository PLANTED at
+ * the path — `rm .git && git init && git add -A && git commit` conceals any
+ * contamination under a clean status — because no local check can tell a
+ * planted repo from the tree it replaced: a genuine review worktree holds its
+ * `.git` as a gitFILE naming its admin entry, and anything else is refused as
+ * unmeasured rather than certified clean.
+ *
+ * One blind spot the identity checks cannot close: `git status` never looks
+ * INSIDE a committed gitlink (mode 160000), and untracked content there does
+ * not dirty it — so a tree carrying submodules is measured for everything
+ * except what those paths hold. When a gitlink's directory is non-empty, the
+ * answer is unmeasured naming the path, never clean.
  *
  * Empty on any git failure: this is a diagnostic, and a diagnostic that throws
  * would fail the build it is only commenting on.
@@ -253,6 +313,29 @@ function pipelineExcludeArgs(): string[] {
  * — so the name is disclosed as git rendered it rather than silently dropped.
  */
 export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
+  // A genuine review worktree carries its `.git` as a FILE naming its admin
+  // entry. A `.git` DIRECTORY at this path is a repository planted over the
+  // contamination — `git init` + a commit answers a clean `git status` for a
+  // dirty tree — and no local check can tell it from the tree it replaced, so
+  // it is refused as unmeasured rather than certified clean. (A main checkout
+  // also carries a directory, and is refused the same way: the pipeline only
+  // ever measures linked worktrees, and failing closed costs a warning where
+  // failing open costs a verdict.)
+  try {
+    if (!lstatSync(join(cwd, '.git')).isFile()) {
+      return {
+        paths: [],
+        total: 0,
+        unmeasured:
+          '.git is not a gitfile (a planted repository?) — a repo stood up ' +
+          'at this path answers a clean status for a dirty tree, and the ' +
+          'probe cannot tell the two apart',
+      };
+    }
+  } catch {
+    // No `.git` at all: the walk-up check below fails closed with its own
+    // reason.
+  }
   // git's discovery WALKS UP: with the `.git` file gone — a crash mid-`worktree
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the
   // enclosing user checkout: the wrong tree's dirty state answered as this
@@ -260,6 +343,7 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {
     cwd,
     encoding: 'utf8',
+    env: sanitizedGitEnv(),
   });
   let isWorktree = false;
   try {
@@ -289,7 +373,12 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
       '--untracked-files=all',
       '-z',
     ],
-    { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
     const why = r.error
@@ -315,6 +404,46 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     ) {
       paths.push(records[++i]);
     }
+  }
+  // `git status` never looks INSIDE a committed gitlink (mode 160000), and
+  // untracked content there does not dirty the superproject — the raw oracle
+  // this probe trusts is blind there. `worktree add` leaves submodules
+  // uninitialized — an absent or empty directory at the gitlink — which
+  // measures clean; anything non-empty — a probe's fixtures or caches, an
+  // initialized submodule — is state the status above could not see, and the
+  // answer is unmeasured naming the path rather than clean.
+  const stage = spawnSync('git', ['ls-files', '-s'], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: sanitizedGitEnv(),
+  });
+  if (stage.error || stage.status !== 0 || typeof stage.stdout !== 'string') {
+    const why = stage.error
+      ? ((stage.error as NodeJS.ErrnoException).code ?? stage.error.message)
+      : `git ls-files exited ${stage.status}`;
+    return { paths: [], total: 0, unmeasured: why };
+  }
+  const blind = stage.stdout
+    .split('\n')
+    .filter((line) => line.startsWith('160000 '))
+    .map((line) => line.slice(line.indexOf('\t') + 1))
+    .filter((gitlink) => {
+      try {
+        return readdirSync(join(cwd, gitlink)).length > 0;
+      } catch {
+        // Absent or unreadable: nothing to hide there.
+        return false;
+      }
+    });
+  if (blind.length > 0) {
+    return {
+      paths: paths.slice(0, cap),
+      total: paths.length,
+      unmeasured:
+        'git status cannot see inside the committed submodule path(s) ' +
+        blind.join(', '),
+    };
   }
   return { paths: paths.slice(0, cap), total: paths.length };
 }
@@ -470,18 +599,6 @@ function containedIn(root: string, dir: string): string | null {
 const FARM_MARKER = '.qwen-review-farm';
 
 /**
- * Was this farm built by this code, for this dependency root?
- *
- * Existence alone is not provenance: `node_modules` is gitignored by
- * convention, not by rule, so a pull request can force-add
- * `node_modules/.qwen-review-farm` beside its own module stubs and `git
- * worktree add` will check both out — PR CONTENT reaching the certification
- * path with no execution at all. The marker therefore records the dependency
- * root it was built from, and a marker that does not name this one is not ours.
- * (The callers that reuse a tree across probe runs pass `rebuild` and never
- * consult this at all.)
- */
-/**
  * Does this `node_modules` entry lead back into the dependency root's own
  * source — an npm workspace SELF-link (`@scope/pkg` → `../../packages/pkg`)?
  *
@@ -506,6 +623,18 @@ function resolvesInside(entry: string, root: string): boolean {
   }
 }
 
+/**
+ * Was this farm built by this code, for this dependency root?
+ *
+ * Existence alone is not provenance: `node_modules` is gitignored by
+ * convention, not by rule, so a pull request can force-add
+ * `node_modules/.qwen-review-farm` beside its own module stubs and `git
+ * worktree add` will check both out — PR CONTENT reaching the certification
+ * path with no execution at all. The marker therefore records the dependency
+ * root it was built from, and a marker that does not name this one is not ours.
+ * (The callers that reuse a tree across probe runs pass `rebuild` and never
+ * consult this at all.)
+ */
 function marksOurFarm(target: string, sourceDir: string): boolean {
   try {
     return (

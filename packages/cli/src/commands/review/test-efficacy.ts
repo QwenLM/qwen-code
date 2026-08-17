@@ -1467,7 +1467,9 @@ function runProbeSuite(
  * `join(probeTree, file)` is symlink-safe here the way `safeRmWithin` has to
  * enforce for deletes: the candidate resolved as a blob at the head commit, and
  * one git tree cannot hold both `dir` as a symlink and `dir/file` as a blob, so
- * in a fresh checkout every ancestor is a real directory.)
+ * in a fresh checkout every ancestor is a real directory. The LEAF is a different
+ * story — a PR can commit it as a symlink (mode 120000) — and every write site
+ * below refuses one rather than write through it.)
  *
  * Exported for its tests: the never-delete-a-mismatched-line guard cannot be
  * reached through the command (selection and the probe tree derive from the
@@ -1641,6 +1643,22 @@ function newSideLength(header: string): number {
 }
 
 /**
+ * Whether a probe target stands in the tree as a symlink. A PR can commit a
+ * test or source file as mode 120000 naming anywhere a relative path reaches
+ * — including the shared review worktree, whose sibling path is predictable —
+ * and the probe writes below would follow the link and land there. The leaf
+ * is lstat-checked before any write; a symlink is refused as inconclusive (or
+ * a control that never ran) rather than written through.
+ */
+function probeTargetIsSymlink(probeTree: string, file: string): boolean {
+  try {
+    return lstatSync(join(probeTree, file)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Neutralise ONE hunk in the probe tree, run the affected tests, restore.
  *
  * Reverse-applying the hunk's own patch is what makes this attributable: `git
@@ -1666,6 +1684,14 @@ export function runOneHunkProbe(
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
+  if (probeTargetIsSymlink(probeTree, hunk.file)) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail:
+        'the probe target is a symlink — the reverse patch and the restore would follow it out of the probe tree, so nothing was neutralised',
+    };
+  }
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -1748,6 +1774,10 @@ export function runControlMutant(
   dependencyRoot: string = probeTree,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
+  // A symlinked probe file would take the injection OUT of the probe tree —
+  // into the shared review worktree for a link aimed at the predictable
+  // sibling path. The control never ran, which is `null`, not a verdict.
+  if (probeTargetIsSymlink(probeTree, probeFile)) return null;
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -1785,6 +1815,14 @@ export function runOneMutant(
   dependencyRoot: string = probeTree,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
+  if (probeTargetIsSymlink(probeTree, mutant.file)) {
+    return {
+      ...mutant,
+      verdict: 'inconclusive',
+      detail:
+        'the probe target is a symlink — the mutation and the restore would follow it out of the probe tree, so nothing was mutated',
+    };
+  }
   const original = readFileSync(abs, 'utf8');
   const lines = original.split('\n');
   if ((lines[mutant.line - 1] ?? '').trim() !== mutant.statement) {

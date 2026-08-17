@@ -373,6 +373,78 @@ describe('runScratchTree', () => {
     );
   });
 
+  it('rebuilds when the scratch .git borrows a SIBLING worktree’s admin entry', () => {
+    // A planted gitfile naming another worktree's admin entry passes every
+    // other identity check — directory, gitfile, toplevel resolving to itself,
+    // common dirs comparing equal, gitdir distinct from the commondir — while
+    // the reset detaches the SIBLING's HEAD onto the PR sha and wipes its
+    // staged index. The admin entry's `gitdir` backpointer names the tree it
+    // belongs to; a borrowed entry's names the sibling.
+    const first = run();
+    const sibling = join(repo, 'sibling-wt');
+    git(repo, 'worktree', 'add', '--detach', '-q', sibling, 'HEAD');
+    writeFileSync(join(sibling, 's.txt'), 'sibling work\n');
+    git(sibling, 'add', 's.txt');
+    git(sibling, 'commit', '-qm', 'sibling work');
+    writeFileSync(join(sibling, 'a.ts'), 'SIBLING UNCOMMITTED\n');
+    git(sibling, 'add', 'a.ts');
+    const siblingHead = git(sibling, 'rev-parse', 'HEAD');
+    expect(siblingHead).not.toBe(headSha);
+    const admin = git(
+      sibling,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    writeFileSync(join(first.path!, '.git'), `gitdir: ${admin}\n`);
+
+    const second = run();
+
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false); // rebuilt, not reset
+    expect(readFileSync(join(second.path!, 'a.ts'), 'utf8')).toBe(
+      'export const x = 1;\n',
+    );
+    // The sibling is untouched: HEAD where it was, staged change intact.
+    expect(git(sibling, 'rev-parse', 'HEAD')).toBe(siblingHead);
+    expect(git(sibling, 'diff', '--cached', '--name-only')).toBe('a.ts');
+  });
+
+  it('ignores a GIT_DIR inherited from the environment', () => {
+    // An exported GIT_DIR overrides repository discovery for the ENTIRE
+    // identity gate at once — both sides of every comparison see the same
+    // override, so no check can detect it — and the head sha itself comes back
+    // from the wrong repository. Every git call this command makes must drop
+    // the redirect and resolve the tree it was given.
+    const sibling = join(repo, 'env-sibling');
+    git(repo, 'worktree', 'add', '--detach', '-q', sibling, 'HEAD');
+    writeFileSync(join(sibling, 's.txt'), 'x\n');
+    git(sibling, 'add', 's.txt');
+    git(sibling, 'commit', '-qm', 'sibling');
+    const admin = git(
+      sibling,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    const siblingHead = git(sibling, 'rev-parse', 'HEAD');
+    expect(siblingHead).not.toBe(headSha);
+
+    process.env['GIT_DIR'] = admin;
+    let r: ReturnType<typeof run>;
+    try {
+      r = run();
+    } finally {
+      delete process.env['GIT_DIR'];
+    }
+
+    expect(r.available).toBe(true);
+    // The sha came from the review worktree, not the redirect target.
+    expect(r.headSha).toBe(headSha);
+    expect(git(sibling, 'rev-parse', 'HEAD')).toBe(siblingHead);
+  });
+
   it('is unavailable when the worktree’s .git file is gone — never walked up', () => {
     // With the `.git` file missing — a crash mid-`worktree add`, a cleanup
     // whose rmSync failed — git's discovery walks UP into the user's
