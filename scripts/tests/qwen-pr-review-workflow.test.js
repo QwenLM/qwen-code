@@ -2795,6 +2795,23 @@ describe('checkout self-heal', () => {
       runWipe({ GITHUB_WORKSPACE: '' }, { stdio: 'pipe' }),
     ).toThrow();
   });
+
+  it('keeps GITHUB_WORKSPACE runner-owned before the wipe', () => {
+    // With the allowlist gone, the runner-set GITHUB_WORKSPACE is the
+    // wipe's only path input, so this premise carries the whole safety
+    // story: nothing ordered before the wipe may override it — no
+    // workflow-, job-, or step-level `env:` entry, no `$GITHUB_ENV` or
+    // `export` write in an earlier run block — or the unguarded
+    // `find … -exec rm -rf` deletes the overridden path and nothing left
+    // in the heal chain refuses it.
+    const doc = parse(workflow);
+    expect(doc.env?.GITHUB_WORKSPACE).toBeUndefined();
+    expect(doc.jobs['review-pr'].env?.GITHUB_WORKSPACE).toBeUndefined();
+    for (const step of steps.slice(0, nameIndex(WIPE))) {
+      expect(step.env?.GITHUB_WORKSPACE).toBeUndefined();
+      expect(step.run ?? '').not.toContain('GITHUB_WORKSPACE=');
+    }
+  });
 });
 
 describe('fallback comment resilience (PR #8894 incident class)', () => {
