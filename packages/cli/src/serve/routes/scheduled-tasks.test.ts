@@ -37,6 +37,18 @@ function safeBody(req: Request): Record<string, unknown> {
     : {};
 }
 
+// Caller-supplied session ids must match the UUID grammar enforced by
+// parseCallerSuppliedSessionId (shared with every other caller-id surface),
+// so the stub's live sessions are keyed by valid UUIDs rather than freeform
+// labels.
+const CALLER_SESSION_ID = '10000000-0000-4000-8000-000000000001';
+const MISSING_SESSION_ID = '10000000-0000-4000-8000-000000000002';
+const OTHER_SESSION_ID = '10000000-0000-4000-8000-000000000003';
+const BUSY_SESSION_ID = '10000000-0000-4000-8000-000000000004';
+const ARCHIVED_SESSION_ID = '10000000-0000-4000-8000-000000000005';
+const SECONDARY_SESSION_ID = '10000000-0000-4000-8000-000000000006';
+const PRIMARY_SESSION_ID = '10000000-0000-4000-8000-000000000007';
+
 /** Stub session bridge: mints sequential fake session ids and records spawns /
  * closes so tests can assert binding and rollback without a real child. */
 interface StubBridge {
@@ -627,8 +639,8 @@ describe('scheduled-tasks routes', () => {
   // ── Caller-provided sessionId (reuse an existing session) ────────────
 
   it('reuses a caller-provided session instead of minting one', async () => {
-    h.bridge.liveSessions.set('caller-sess', {
-      sessionId: 'caller-sess',
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
       workspaceCwd: h.workspace,
       hasActivePrompt: false,
     });
@@ -636,26 +648,26 @@ describe('scheduled-tasks routes', () => {
       name: 'Digest',
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: 'caller-sess',
+      sessionId: CALLER_SESSION_ID,
     });
     expect(res.status).toBe(201);
-    expect(res.body.sessionId).toBe('caller-sess');
+    expect(res.body.sessionId).toBe(CALLER_SESSION_ID);
     // No dedicated session was minted for the task.
     expect(h.bridge.spawned).toEqual([]);
     // The reused session is named after the task like a minted one.
     expect(h.bridge.named).toEqual([
-      { sessionId: 'caller-sess', displayName: '⏰ Digest' },
+      { sessionId: CALLER_SESSION_ID, displayName: '⏰ Digest' },
     ]);
     const tasks = await readCronTasks(h.workspace);
     expect(tasks).toHaveLength(1);
-    expect(tasks[0]?.sessionId).toBe('caller-sess');
+    expect(tasks[0]?.sessionId).toBe(CALLER_SESSION_ID);
   });
 
   it('rejects an unknown sessionId with 404 and creates nothing', async () => {
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: 'missing-sess',
+      sessionId: MISSING_SESSION_ID,
     });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('session_not_found');
@@ -664,15 +676,15 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('rejects a session that belongs to a different workspace', async () => {
-    h.bridge.liveSessions.set('other-sess', {
-      sessionId: 'other-sess',
+    h.bridge.liveSessions.set(OTHER_SESSION_ID, {
+      sessionId: OTHER_SESSION_ID,
       workspaceCwd: path.join(h.scratch, 'some-other-workspace'),
       hasActivePrompt: false,
     });
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: 'other-sess',
+      sessionId: OTHER_SESSION_ID,
     });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('session_workspace_mismatch');
@@ -680,15 +692,15 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('rejects a busy session with 409 session_busy', async () => {
-    h.bridge.liveSessions.set('busy-sess', {
-      sessionId: 'busy-sess',
+    h.bridge.liveSessions.set(BUSY_SESSION_ID, {
+      sessionId: BUSY_SESSION_ID,
       workspaceCwd: h.workspace,
       hasActivePrompt: true,
     });
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: 'busy-sess',
+      sessionId: BUSY_SESSION_ID,
     });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('session_busy');
@@ -696,8 +708,8 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('rejects an archived session with 409 session_archived', async () => {
-    h.bridge.liveSessions.set('arch-sess', {
-      sessionId: 'arch-sess',
+    h.bridge.liveSessions.set(ARCHIVED_SESSION_ID, {
+      sessionId: ARCHIVED_SESSION_ID,
       workspaceCwd: h.workspace,
       hasActivePrompt: false,
       isArchived: true,
@@ -705,7 +717,38 @@ describe('scheduled-tasks routes', () => {
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: 'arch-sess',
+      sessionId: ARCHIVED_SESSION_ID,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_archived');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects an archived session the bridge only reports as not-found', async () => {
+    // Production archiving removes the session from the live map first
+    // (toSessionSummary never populates isArchived), so the bridge throws
+    // SessionNotFoundError; the route must still surface the documented 409
+    // by consulting the persisted location on disk. The runtime-enabled
+    // harness gives the target a runtimeBaseDir, which the lookup needs to
+    // find the workspace's persisted sessions.
+    await teardown(h);
+    h = await makeHarness(true);
+    const archivedFile = path.join(
+      new Storage(h.workspace, h.scratch).getProjectDir(),
+      'chats',
+      'archive',
+      `${ARCHIVED_SESSION_ID}.jsonl`,
+    );
+    await fsp.mkdir(path.dirname(archivedFile), { recursive: true });
+    await fsp.writeFile(
+      archivedFile,
+      `${JSON.stringify({ cwd: h.workspace })}\n`,
+      'utf8',
+    );
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: ARCHIVED_SESSION_ID,
     });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('session_archived');
@@ -713,8 +756,8 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('rejects a session already bound to another task', async () => {
-    h.bridge.liveSessions.set('caller-sess', {
-      sessionId: 'caller-sess',
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
       workspaceCwd: h.workspace,
       hasActivePrompt: false,
     });
@@ -728,21 +771,56 @@ describe('scheduled-tasks routes', () => {
         createdAt: 1_700_000_000_000,
         lastFiredAt: 1_700_000_000_000,
         enabled: true,
-        sessionId: 'caller-sess',
+        sessionId: CALLER_SESSION_ID,
       },
     ]);
     const res = await create({
       cron: '0 10 * * *',
       prompt: 'p',
-      sessionId: 'caller-sess',
+      sessionId: CALLER_SESSION_ID,
     });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('session_already_bound');
     expect(await readCronTasks(h.workspace)).toHaveLength(1); // unchanged
   });
 
+  it('binds a session at most once across concurrent creates', async () => {
+    // Both pre-checks can read an empty cron file before either write lands;
+    // the under-write-lock duplicate check is the only guard for that race
+    // (updateCronTasks serializes the writers, so the second mutate re-reads
+    // the first create's committed task). Deleting the in-lock check turns
+    // the second response into a 201.
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    const [a, b] = await Promise.all([
+      create({ cron: '0 9 * * *', prompt: 'p', sessionId: CALLER_SESSION_ID }),
+      create({ cron: '0 10 * * *', prompt: 'q', sessionId: CALLER_SESSION_ID }),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([201, 409]);
+    const rejected = a.status === 409 ? a : b;
+    expect(rejected.body.code).toBe('session_already_bound');
+    // Exactly one task on disk, bound exactly once.
+    const tasks = await readCronTasks(h.workspace);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.sessionId).toBe(CALLER_SESSION_ID);
+    expect(h.bridge.closed).toEqual([]);
+  });
+
   it('rejects an invalid sessionId field with 400 invalid_session_id', async () => {
-    for (const bad of [123, true, '', '   ']) {
+    for (const bad of [
+      123,
+      true,
+      '',
+      '   ',
+      'not-a-uuid',
+      // UUID grammar only — the agent-suffix internal form is not a valid
+      // CALLER-supplied id on any surface.
+      '10000000-0000-4000-8000-000000000001-agent-x',
+    ]) {
       const res = await create({
         cron: '0 9 * * *',
         prompt: 'p',
@@ -752,6 +830,41 @@ describe('scheduled-tasks routes', () => {
       expect(res.body.code).toBe('invalid_session_id');
     }
     expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('mints a dedicated session when sessionId is null', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: null,
+    });
+    expect(res.status).toBe(201);
+    expect(h.bridge.spawned).toHaveLength(1);
+    expect(res.body.sessionId).toBe(h.bridge.spawned[0]);
+  });
+
+  it('normalizes a padded or mixed-case caller sessionId', async () => {
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    const padded = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: `  ${CALLER_SESSION_ID}  `,
+    });
+    expect(padded.status).toBe(201);
+    expect(padded.body.sessionId).toBe(CALLER_SESSION_ID);
+    const upper = await create({
+      cron: '0 10 * * *',
+      prompt: 'q',
+      sessionId: OTHER_SESSION_ID.toUpperCase(),
+    });
+    // A different (uppercase-spelled) session id that is NOT live → 404, and
+    // the lookup happened with the normalized lowercase spelling.
+    expect(upper.status).toBe(404);
+    expect(upper.body.code).toBe('session_not_found');
   });
 
   it('rejects sessionId when session management is unavailable (no bridge)', async () => {
@@ -765,15 +878,15 @@ describe('scheduled-tasks routes', () => {
     });
     const res = await request(app)
       .post('/scheduled-tasks')
-      .send({ cron: '0 9 * * *', prompt: 'p', sessionId: 'caller-sess' });
+      .send({ cron: '0 9 * * *', prompt: 'p', sessionId: CALLER_SESSION_ID });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('session_binding_unavailable');
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   it('leaves the caller-provided session open when the commit fails', async () => {
-    h.bridge.liveSessions.set('caller-sess', {
-      sessionId: 'caller-sess',
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
       workspaceCwd: h.workspace,
       hasActivePrompt: false,
     });
@@ -785,12 +898,89 @@ describe('scheduled-tasks routes', () => {
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'p',
-      sessionId: 'caller-sess',
+      sessionId: CALLER_SESSION_ID,
     });
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('scheduled_tasks_write_failed');
     expect(h.bridge.closed).toEqual([]); // caller session left open
     expect(h.cleanupSession).not.toHaveBeenCalled();
+    // The ⏰ rename happens only after the write commits — a failed create
+    // must not leave the caller's session renamed with no owning task.
+    expect(h.bridge.named).toEqual([]);
+  });
+
+  it('rejects over-cap creates with a caller-provided sessionId too', async () => {
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: h.workspace,
+      hasActivePrompt: false,
+    });
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      ...Array.from({ length: 50 }, (_, i) => ({
+        id: `cap-task-${i}`,
+        cron: '0 9 * * *',
+        prompt: `existing ${i}`,
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        enabled: true,
+        sessionId: `cap-sess-${i}`,
+      })),
+    ]);
+    const res = await create({
+      cron: '0 10 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('max_tasks_reached');
+    expect(await readCronTasks(h.workspace)).toHaveLength(50); // unchanged
+    // The caller's session is untouched by the rejected create.
+    expect(h.bridge.closed).toEqual([]);
+    expect(h.bridge.named).toEqual([]);
+  });
+
+  it('returns 500 scheduled_tasks_session_failed on a generic lookup failure', async () => {
+    h.bridge.getSessionSummary = () => {
+      throw new Error('boom');
+    };
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_session_failed');
+    // No side effects: nothing written, no session spawned or touched.
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+    expect(h.bridge.spawned).toEqual([]);
+    expect(h.bridge.closed).toEqual([]);
+    expect(h.bridge.named).toEqual([]);
+  });
+
+  it('returns 500 (not workspace mismatch) when path canonicalization hits a real I/O error', async () => {
+    // A two-link symlink cycle makes realpathSync.native throw ELOOP — a
+    // transient-I/O shaped failure canonicalizeWorkspace deliberately
+    // re-throws. It must surface as a retryable 500, not a misleading 400
+    // mismatch.
+    const loopDir = path.join(h.scratch, 'loop');
+    await fsp.mkdir(loopDir, { recursive: true });
+    await fsp.symlink(path.join(loopDir, 'b'), path.join(loopDir, 'a'));
+    await fsp.symlink(path.join(loopDir, 'a'), path.join(loopDir, 'b'));
+    h.bridge.liveSessions.set(CALLER_SESSION_ID, {
+      sessionId: CALLER_SESSION_ID,
+      workspaceCwd: path.join(loopDir, 'a'),
+      hasActivePrompt: false,
+    });
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_session_failed');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   it('mints the task session with thread scope (never reuses the shared session)', async () => {
@@ -2216,28 +2406,32 @@ describe('workspace-qualified scheduled-tasks routes', () => {
   });
 
   it('reuses a caller-provided session on the qualified surface and rejects cross-workspace ones', async () => {
-    h.secondary.bridge.liveSessions.set('sec-sess', {
-      sessionId: 'sec-sess',
+    h.secondary.bridge.liveSessions.set(SECONDARY_SESSION_ID, {
+      sessionId: SECONDARY_SESSION_ID,
       workspaceCwd: h.secondary.workspaceCwd,
       hasActivePrompt: false,
     });
     const res = await request(h.app)
       .post(qualified(h.secondary.workspaceId))
-      .send({ cron: '0 9 * * *', prompt: 'p', sessionId: 'sec-sess' });
+      .send({
+        cron: '0 9 * * *',
+        prompt: 'p',
+        sessionId: SECONDARY_SESSION_ID,
+      });
     expect(res.status).toBe(201);
-    expect(res.body.sessionId).toBe('sec-sess');
+    expect(res.body.sessionId).toBe(SECONDARY_SESSION_ID);
     expect(h.secondary.bridge.spawned).toEqual([]);
 
     // A session living in the PRIMARY workspace can't be bound through the
     // secondary workspace's endpoint.
-    h.secondary.bridge.liveSessions.set('primary-sess', {
-      sessionId: 'primary-sess',
+    h.secondary.bridge.liveSessions.set(PRIMARY_SESSION_ID, {
+      sessionId: PRIMARY_SESSION_ID,
       workspaceCwd: h.primary.workspaceCwd,
       hasActivePrompt: false,
     });
     const bad = await request(h.app)
       .post(qualified(h.secondary.workspaceId))
-      .send({ cron: '0 9 * * *', prompt: 'q', sessionId: 'primary-sess' });
+      .send({ cron: '0 9 * * *', prompt: 'q', sessionId: PRIMARY_SESSION_ID });
     expect(bad.status).toBe(400);
     expect(bad.body.code).toBe('session_workspace_mismatch');
   });

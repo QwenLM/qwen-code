@@ -48,9 +48,11 @@ import {
   type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
+  type SessionLocation,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import {
@@ -614,6 +616,28 @@ function registerScheduledTaskCrudRoutes(
             );
           } catch (err) {
             if (err instanceof SessionNotFoundError) {
+              // Archiving removes a session from the live map first, so an
+              // archived id surfaces here instead of in `isArchived`. Consult
+              // the persisted location so the documented 409 still reaches
+              // the caller; anything not on disk either is genuinely gone.
+              let location: SessionLocation;
+              try {
+                location = await runWithScheduledTaskTarget(target, () =>
+                  new SessionService(workspaceCwd, {
+                    runtimeBaseDir: target.runtimeBaseDir,
+                  }).getSessionLocation(providedSessionId),
+                );
+              } catch {
+                location = undefined;
+              }
+              if (location === 'archived') {
+                res.status(409).json({
+                  error:
+                    'The requested session is archived; unarchive it before binding it to a task',
+                  code: 'session_archived',
+                });
+                return;
+              }
               res.status(404).json({
                 error: `Session '${providedSessionId}' was not found`,
                 code: 'session_not_found',
@@ -634,8 +658,19 @@ function registerScheduledTaskCrudRoutes(
             sameWorkspace =
               canonicalizeWorkspace(summary.workspaceCwd) ===
               canonicalizeWorkspace(workspaceCwd);
-          } catch {
-            sameWorkspace = false;
+          } catch (err) {
+            // canonicalizeWorkspace swallows ENOENT itself; anything thrown
+            // here is a real filesystem failure (EACCES/EIO/ELOOP/ESTALE).
+            // Surface it as a retryable 500 instead of a misleading
+            // workspace-mismatch 400.
+            writeStderrLine(
+              `qwen serve: POST ${base} failed to resolve workspace paths for session '${providedSessionId}': ${err instanceof Error ? err.message : String(err)}`,
+            );
+            res.status(500).json({
+              error: 'Failed to look up the requested session',
+              code: 'scheduled_tasks_session_failed',
+            });
+            return;
           }
           if (!sameWorkspace) {
             res.status(400).json({
@@ -696,23 +731,13 @@ function registerScheduledTaskCrudRoutes(
         if (!requireOpenGeneration(target, res)) return;
         if (providedSessionId !== undefined) {
           // Reuse the caller's session — no spawn (sessionMintedHere stays
-          // false, so a failed create leaves it open).
+          // false, so a failed create leaves it open). The ⏰ rename happens
+          // only AFTER the cron write commits (below): a create that fails
+          // after renaming would leave the caller's pre-existing session
+          // permanently named "⏰ …" with no owning task, because
+          // rollbackSession never touches caller sessions and nothing else
+          // restores the prior display name.
           boundSessionId = providedSessionId;
-          // Name it after the task like a minted session — the scheduled-task
-          // session lifecycle (including the keepalive's ⏰ naming) applies
-          // from here on. Best-effort — a rename failure must not fail the
-          // create.
-          try {
-            await runWithScheduledTaskTarget(target, async () =>
-              bridge.updateSessionMetadata(boundSessionId!, {
-                displayName: scheduledTaskSessionName(
-                  nameResult.value ?? prompt,
-                ),
-              }),
-            );
-          } catch {
-            // metadata update is non-critical
-          }
         } else {
           try {
             const session = await runWithScheduledTaskTarget(target, () =>
@@ -864,6 +889,22 @@ function registerScheduledTaskCrudRoutes(
           code: 'session_already_bound',
         });
         return;
+      }
+      if (providedSessionId !== undefined && bridge) {
+        // Name the reused session after the task — like a minted one, but
+        // strictly after the cron write commits, so no failure path leaves
+        // the caller's pre-existing session renamed with no owning task.
+        // Best-effort — a rename failure must not fail the committed create;
+        // the keepalive names bound sessions anyway.
+        try {
+          await runWithScheduledTaskTarget(target, async () =>
+            bridge.updateSessionMetadata(boundSessionId!, {
+              displayName: scheduledTaskSessionName(nameResult.value ?? prompt),
+            }),
+          );
+        } catch {
+          // metadata update is non-critical
+        }
       }
       if (task.delivery && task.sessionId) {
         channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
@@ -1600,7 +1641,12 @@ function parseNameField(raw: unknown): { value?: string; error?: string } {
  * Parses the optional `sessionId` field on POST (reuse an existing session
  * instead of minting a dedicated one). Accepts:
  *  - absent / null → `{ value: undefined }` (mint a dedicated session)
- *  - a non-empty string → `{ value: trimmed }`
+ *  - a valid caller-supplied session id → `{ value }`, canonicalized through
+ *    the same parser every other caller-supplied-session-id surface uses
+ *    (`parseCallerSuppliedSessionId`: UUID grammar, case-normalized,
+ *    length-bounded by the grammar — no unbounded echo in error bodies or
+ *    stderr, and duplicate-binding equality holds per session, not per
+ *    spelling)
  *  - anything else (including empty/whitespace-only strings — a session id
  *    can't be "cleared", so unlike `name` they're an error) → `{ error }`
  */
@@ -1608,13 +1654,12 @@ function parseSessionIdField(raw: unknown): {
   value?: string;
   error?: string;
 } {
-  if (raw === undefined || raw === null) return { value: undefined };
-  if (typeof raw !== 'string') {
-    return { error: '`sessionId` must be a string' };
+  const parsed = parseCallerSuppliedSessionId(
+    typeof raw === 'string' ? raw.trim() : raw,
+  );
+  if (parsed.kind === 'absent') return { value: undefined };
+  if (parsed.kind === 'invalid') {
+    return { error: '`sessionId` must be a valid session id' };
   }
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) {
-    return { error: '`sessionId` must be a non-empty string' };
-  }
-  return { value: trimmed };
+  return { value: parsed.sessionId };
 }
