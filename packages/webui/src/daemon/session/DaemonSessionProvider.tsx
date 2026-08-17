@@ -633,6 +633,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   >(new WeakSet());
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
+  // Aborts the reconnect backoff wait so a caller can force an immediate SSE
+  // rebuild (e.g. a prompt submitted while the stream is down).
+  const reconnectAbortRef = useRef<AbortController | undefined>(undefined);
   const loadWarningsRef = useRef(loadWarnings);
   const historyPageSizeRef = useRef(historyPageSize);
   const subagentTranscriptModeRef = useRef(subagentTranscriptMode);
@@ -741,6 +744,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       tryLiveJournalRepairRef.current = undefined;
     };
   }, []);
+
+  const sessionEffectWorkspaceCwd = restoreWorkspaceCwd ?? workspaceCwd;
 
   useEffect(() => {
     if (!autoConnect) return undefined;
@@ -2696,7 +2701,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           status: 'disconnected',
           error: undefined,
         }));
-        await delay(delayMs, abort.signal);
+        reconnectAbortRef.current?.abort();
+        const reconnectAbort = new AbortController();
+        reconnectAbortRef.current = reconnectAbort;
+        const onEffectAbort = () => reconnectAbort.abort();
+        abort.signal.addEventListener('abort', onEffectAbort, { once: true });
+        await delay(delayMs, reconnectAbort.signal);
+        abort.signal.removeEventListener('abort', onEffectAbort);
       }
     };
 
@@ -2764,7 +2775,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     autoReconnect,
     resolvedBaseUrl,
     resolvedToken,
-    workspaceCwd,
+    sessionEffectWorkspaceCwd,
     modelServiceId,
     sessionScope,
     maxQueued,
@@ -2950,11 +2961,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = () => false;
         },
         restartEventStream: (sessionId: string) => {
-          if (!restartEventStreamOnPrompt) return;
           const eventStream = eventStreamRef.current;
-          if (eventStream?.sessionId !== sessionId) return;
-          eventStream.restartRequested = true;
-          eventStream.controller.abort();
+          if (eventStream?.sessionId === sessionId) {
+            // Live stream: restart it only in the opt-in prompt-restart mode.
+            if (!restartEventStreamOnPrompt) return;
+            eventStream.restartRequested = true;
+            eventStream.controller.abort();
+            return;
+          }
+          // The stream is already down (reconnecting with backoff): a prompt
+          // was submitted, so skip the remaining wait and rebuild the SSE
+          // immediately so the response events land without the backoff delay.
+          if (sessionRef.current?.sessionId === sessionId) {
+            reconnectAbortRef.current?.abort();
+          }
         },
         getCreateSessionRequest: () => ({
           ...createSessionRequestRef.current,
