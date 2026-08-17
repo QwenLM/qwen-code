@@ -29,7 +29,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
@@ -49,7 +49,11 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
-import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
+import {
+  LITERAL_PATHSPECS,
+  PINNED_DIFF_CONFIG,
+  PINNED_DIFF_FLAGS,
+} from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
   reviewBranch,
@@ -75,6 +79,10 @@ import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
 import { roundModelIdFrom } from './lib/round-model.js';
+import {
+  computeIncrementalScope,
+  type IncrementalScope,
+} from './lib/incremental-scope.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -240,6 +248,7 @@ export interface IncrementalDecision {
     | 'behind-merge-base'
     | 'hunks-outside-pr-diff'
     | 'containment-unverified'
+    | 'lineage-unfollowable'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed';
@@ -253,6 +262,22 @@ export interface IncrementalDecision {
    * outside this round's scope.
    */
   diffBase?: string;
+  /**
+   * WHICH files this round reviews and why, present with `diffBase`. The
+   * scoped diff is a slice of the PR's own, so a file can be in scope with no
+   * change of its own: `interaction` names the still-clean importers the
+   * one-hop widening pulled in, with the changed files each of them imports,
+   * and a brief built for one points its agent at that seam instead of a
+   * from-scratch re-review.
+   */
+  scope?: IncrementalScope;
+  /**
+   * Where the superseded FULL-range diff was kept. A later step that needs
+   * the whole PR — Agent 0's issue fidelity, the reverse audit's whole-file
+   * lens — reads it instead of re-running the capture. Absent when it could
+   * not be written; the round is unaffected.
+   */
+  fullDiffPath?: string;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -599,6 +624,39 @@ function cleanStale(prNumber: string): void {
   }
 }
 
+/**
+ * Is `path`'s tree entry identical at both ends of the PR?
+ *
+ * The whole ENTRY — `<mode> <oid>` — not the blob. `rev-parse <ref>:<path>`
+ * yields the oid alone, so a fix round that reverts the content and keeps
+ * `chmod +x`, or swaps a file for a symlink with the same text, compared equal
+ * and was scoped out as "restored". Its mode-only section IS in the PR's diff,
+ * so dropping it put a change nobody reviewed past the next round's anchor.
+ *
+ * Absent on BOTH sides is deliberately NOT a restoration. Two shapes produce
+ * it and this layer cannot tell them apart: a file the PR added and this round
+ * deleted (net-zero — safe), and a file renamed before the anchor and deleted
+ * now, whose unreviewed deletion hunks sit in the PR diff under its pre-rename
+ * name (dropping it loses them). Refusing costs a full review on the first
+ * shape; dropping loses scope on the second, so the refusal wins.
+ */
+function treeEntryUnchanged(
+  baseSha: string,
+  headSha: string,
+  path: string,
+): boolean {
+  const at = (ref: string): string | null => {
+    const line = gitOpt(LITERAL_PATHSPECS, 'ls-tree', ref, '--', path);
+    if (line === null || line === '') return null;
+    const tab = line.indexOf('\t');
+    const meta = (tab < 0 ? line : line.slice(0, tab)).split(' ');
+    return meta.length >= 3 ? `${meta[0]} ${meta[2]}` : null;
+  };
+  const b = at(baseSha);
+  const h = at(headSha);
+  return b !== null && h !== null && b === h;
+}
+
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // Sampled HERE, at the start of the round: see `reviewModelId`.
   const roundModelId = roundModelIdFrom(process.env);
@@ -936,8 +994,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
     /** True when the FINAL published diff is the incremental delta. */
     let scopedDelta = false;
-    let ruling = { ok: true, unverified: false };
     if (anchor?.diffBase) {
+      // The delta is read for ONE fact: which files changed since the anchor.
+      // Their hunks come from the full-range diff — see
+      // `computeIncrementalScope` for why the published bytes are a SLICE of
+      // the PR's own diff and never a re-capture.
+      //
       // An anchor that resolved to the merge base names the range already in
       // hand: re-running the identical `git diff` would spend the capture (and
       // its timeout) twice on the same bytes. Reachable without adversary —
@@ -957,54 +1019,74 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // below for the flows that continue anyway (a model change,
         // --comment).
         anchor.incremental.upToDate = true;
-      } else if (fullText === null && mergeBaseSha !== null) {
-        // The oracle was LOST, not absent: a base was resolved and its capture
-        // threw (the 120s git timeout on the large long-lived PR `--since`
-        // exists for). Scoping now would publish a delta no containment check
-        // ever ran against — the same unchecked scope this guard exists to
-        // refuse, arrived at by an infrastructure failure instead of a bad
-        // anchor.
-        demote('capture-failed');
-      } else if (fullText === null) {
-        // Base-FREE: no merge base resolved, so there is no PR diff to be
-        // contained in. That used to be read as licence to publish the delta
-        // unchecked — the one arm where an uncontained scope shipped by design.
-        // But "no diff to check against" is not proof of containment, it is the
-        // absence of any, and every other arm here fails closed on exactly that
-        // distinction. GitHub still renders SOMETHING for the PR, and a delta
-        // never checked against it can still anchor a comment on a line that
-        // render does not display.
-        demote('containment-unverified');
-      } else if (!(ruling = containmentRuling(delta, fullText)).ok) {
-        // Two different facts, one refusal: the oracle DISPROVED containment,
-        // or it could not rule at all (a path shape it does not model). Only
-        // the first is what `hunks-outside-pr-diff` asserts; the second is an
-        // unavailable oracle, reported as `containment-unverified` so the
-        // reason a reader keys on stays true.
-        //
-        // Ancestry containment is not HUNK containment. An ordinary "undo per
-        // feedback" commit reverts some of the anchor round's lines back to
-        // base content: the delta then carries hunks the PR's own diff does
-        // NOT contain, agents review them, and one comment anchored there
-        // 422s the entire Create Review call — all-or-nothing, taking every
-        // other finding with it. The clamp cannot see this (it compares
-        // history, not content), so the delta is checked against the PR's
-        // diff before it is allowed to be the review's scope.
+      } else if (fullBytes === null || fullText === null) {
+        // No full range to slice: either no merge base resolved (base-free —
+        // there is no PR diff for the round to be a subset OF) or its capture
+        // threw (the 120s git timeout the large long-lived PR `--since` exists
+        // for). Both leave the same hole, and the honest name for it is that
+        // the scope could not be established, not that the anchor was bad.
         demote(
-          ruling.unverified
-            ? 'containment-unverified'
-            : 'hunks-outside-pr-diff',
+          mergeBaseSha === null ? 'containment-unverified' : 'capture-failed',
         );
+      } else if (parseDiff(delta).files.length === 0) {
+        // Non-empty bytes that name no file: the capture returned something
+        // this parser cannot read (an error stream on stdout, a shape it does
+        // not model). The empty file list is the PARSER's, not the tree's —
+        // the `delta.trim() === ''` arm above is what an actually-empty range
+        // takes — so this must not read as "nothing changed since the
+        // anchor", which would stop the round. An oracle that could not rule
+        // is exactly `containment-unverified`.
+        demote('containment-unverified');
       } else {
-        if (publish(deltaBytes)) {
+        const ruling = computeIncrementalScope({
+          anchor: anchor.diffBase,
+          fullDiff: fullBytes,
+          deltaFiles: parseDiff(delta).files.map((f) => f.path),
+          restored: (path) =>
+            treeEntryUnchanged(mergeBaseSha, fetchedSha, path),
+          readWorktree: (rel) => {
+            try {
+              return readFileSync(join(wt, rel), 'utf8');
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (ruling.kind === 'refuse') {
+          writeStderrLine(
+            `Incremental scope refused: ${ruling.detail} Reviewing the full range.`,
+          );
+          demote(ruling.reason);
+        } else if (ruling.kind === 'nothing-new') {
+          // Every changed file was undone and nothing imports them. That is
+          // the same state as an empty delta, and it takes the same exit.
+          writeStderrLine(`Nothing new since the anchor: ${ruling.detail}`);
+          anchor.incremental.upToDate = true;
+        } else if (publish(ruling.diff)) {
           scopedDelta = true;
           // The scoped range's left side, full-sha, for downstream consumers
           // that recompute their own diffs (Agent 7's test-efficacy probe
           // welds --base into its brief) — without it they would probe the
           // full merge-base range on a delta-scoped round.
           anchor.incremental.diffBase = anchor.diffBase;
+          anchor.incremental.scope = ruling.scope;
+          // The superseded full diff stays on disk: a later step that needs
+          // the whole PR (Agent 0's issue fidelity, the reverse audit's
+          // whole-file lens) reads it rather than re-running the capture.
+          try {
+            const fullPath = tmpFile(`pr-${prNumber}`, 'diff-full.txt');
+            writeFileSync(fullPath, fullBytes);
+            anchor.incremental.fullDiffPath = fullPath;
+          } catch (err) {
+            // A convenience artefact must never take the round with it.
+            writeStderrLine(
+              `Could not keep the full-range diff beside the scoped one ` +
+                `(${(err as Error).message}); steps that want the whole PR ` +
+                `will have to re-capture it.`,
+            );
+          }
         } else {
-          // The delta captured but could not be written: degrade like any
+          // The slice captured but could not be written: degrade like any
           // other capture failure rather than scoping to a file nobody has.
           demote('capture-failed');
         }

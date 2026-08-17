@@ -5632,13 +5632,15 @@ describe('incremental-scope briefs', () => {
     diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-7-diff-incremental.txt',
     chunks: [chunk(1, 'src/changed.ts', 1), chunk(2, 'src/caller.ts', 11)],
     incremental: {
-      anchor: 'abc1234def5678900000',
-      deltaFiles: ['src/changed.ts'],
-      interaction: [
-        { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
-      ],
-      contextFileCount: 1,
-      fullDiffPath: '.qwen/tmp/qwen-review-pr-7-diff.txt',
+      scope: {
+        anchor: 'abc1234def5678900000',
+        deltaFiles: ['src/changed.ts'],
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+        contextFileCount: 1,
+        fullDiffPath: '.qwen/tmp/qwen-review-pr-7-diff.txt',
+      },
     },
   };
 
@@ -5669,13 +5671,16 @@ describe('incremental-scope briefs', () => {
     const wide = {
       ...INCREMENTAL_PLAN,
       incremental: {
-        anchor: 'abc1234def567890',
-        deltaFiles: Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`).concat(
-          ['src/changed.ts'],
-        ),
-        interaction: [
-          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
-        ],
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: Array.from(
+            { length: 40 },
+            (_, i) => `src/d${i}.ts`,
+          ).concat(['src/changed.ts']),
+          interaction: [
+            { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+          ],
+        },
       },
     };
     const brief = buildRoleBrief(wide, 'reverse-audit', { chunk: 2 });
@@ -5744,17 +5749,19 @@ describe('incremental-scope briefs', () => {
     const wide = {
       ...INCREMENTAL_PLAN,
       incremental: {
-        anchor: 'abc1234def567890',
-        deltaFiles: Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`),
-        interaction: [
-          {
-            path: 'src/hub.ts',
-            importsChanged: Array.from(
-              { length: 20 },
-              (_, i) => `src/d${i}.ts`,
-            ),
-          },
-        ],
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`),
+          interaction: [
+            {
+              path: 'src/hub.ts',
+              importsChanged: Array.from(
+                { length: 20 },
+                (_, i) => `src/d${i}.ts`,
+              ),
+            },
+          ],
+        },
       },
     };
     const p = buildRoleBrief(wide, '2');
@@ -5766,9 +5773,11 @@ describe('incremental-scope briefs', () => {
     const mangled = {
       ...INCREMENTAL_PLAN,
       incremental: {
-        anchor: 'abc1234def567890',
-        deltaFiles: [],
-        interaction: [{ path: 'src/caller.ts', importsChanged: ['', ''] }],
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: [],
+          interaction: [{ path: 'src/caller.ts', importsChanged: ['', ''] }],
+        },
       },
     };
     expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');

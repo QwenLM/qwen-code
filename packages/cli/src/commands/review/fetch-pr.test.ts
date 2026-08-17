@@ -348,6 +348,25 @@ vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   return { ...actual, buildDiffPlan: producerMocks.buildDiffPlan };
 });
 
+/**
+ * The anchor RULING, without the scope it produced.
+ *
+ * `incremental` answers two questions in one object: MAY this anchor scope the
+ * round (`since`/`effective`/`reason`/`upToDate`/`diffBase`), and — when it
+ * may — WHICH files it scoped to (`scope`, `fullDiffPath`). Nearly every
+ * assertion below is about the first, and folding the second into their exact
+ * shapes would make each of them fail on any change to the widening. The
+ * scope has its own tests.
+ */
+function ruling(report: { incremental?: unknown }): Record<string, unknown> {
+  const {
+    scope: _scope,
+    fullDiffPath: _fullDiffPath,
+    ...rest
+  } = (report.incremental ?? {}) as Record<string, unknown>;
+  return rest;
+}
+
 describe('fetch-pr report assembly', () => {
   const savedEnv: { sessionId?: string; promptId?: string } = {};
 
@@ -836,6 +855,42 @@ describe('fetch-pr report assembly', () => {
     ' tail',
     '',
   ].join('\n');
+  /**
+   * A TWO-file PR whose delta touches only the first — the shape that makes a
+   * slice smaller than the full range, and therefore the only shape in which
+   * "scoped" and "not scoped" are distinguishable at all. `ls-tree` is mocked
+   * per file so the restoration probe can be steered.
+   */
+  const FULL_TWO = [
+    'diff --git a/a.ts b/a.ts',
+    '--- a/a.ts',
+    '+++ b/a.ts',
+    '@@ -1,2 +1,3 @@',
+    ' one',
+    '+two',
+    ' three',
+    'diff --git a/b.ts b/b.ts',
+    '--- a/b.ts',
+    '+++ b/b.ts',
+    '@@ -1,2 +1,3 @@',
+    ' alpha',
+    '+beta',
+    ' gamma',
+    '',
+  ].join('\n');
+  /** Just `a.ts`'s section of FULL_TWO, byte-for-byte. */
+  const SLICE_A = FULL_TWO.split('diff --git a/b.ts')[0];
+  const DELTA_A = [
+    'diff --git a/a.ts b/a.ts',
+    '--- a/a.ts',
+    '+++ b/a.ts',
+    '@@ -1,2 +1,3 @@',
+    ' one',
+    '+two',
+    ' three',
+    '',
+  ].join('\n');
+
   /** Serve the delta for `ANCHOR..head` and the full range for `BASE..head`. */
   function servesBothRanges(full = FULL_DIFF, delta = DELTA_DIFF) {
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
@@ -882,7 +937,7 @@ describe('fetch-pr report assembly', () => {
       }),
     );
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       diffBase: ANCHOR,
@@ -892,11 +947,29 @@ describe('fetch-pr report assembly', () => {
     // the report describes hands every agent a diff whose chunks and
     // diffBase advertise something else — the same mismatch class as the
     // diffPath leak this PR shipped and fixed.
-    expect(writtenDiff()).toBe(DELTA_DIFF);
+    //
+    // And what is published is the PR's OWN section for the scoped file
+    // (`@@ -1,3`), not the delta's re-capture of it (`@@ -1,4`). That is the
+    // property the slice buys: every hunk an agent can anchor a comment on
+    // exists byte-identically in the diff GitHub renders, so an anchored
+    // comment cannot 422 and take the whole Create Review call with it. The
+    // delta is read for WHICH files changed, never for their hunks.
+    expect(writtenDiff()).toBe(FULL_DIFF);
+    expect(writtenDiff()).not.toBe(DELTA_DIFF);
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
-    // …and the PLAN is the delta's, not the full range's: a re-plan over
-    // fullText would pair a 200-line plan with an 8-line published diff.
-    expect(report.diffLines).toBe(DELTA_DIFF.trimEnd().split('\n').length);
+    // The plan is the SLICE's — here the whole full range, because the one
+    // changed file is the PR's only file. `scopes to the delta's files` below
+    // is where a slice smaller than the full range is pinned.
+    expect(report.diffLines).toBe(FULL_DIFF.trimEnd().split('\n').length);
+    // The scope block names what it kept, and the superseded full range stays
+    // on disk for the steps that want the whole PR.
+    expect(
+      (report.incremental as { scope?: { deltaFiles?: string[] } }).scope
+        ?.deltaFiles,
+    ).toEqual(['a.ts']);
+    expect(
+      (report.incremental as { fullDiffPath?: string }).fullDiffPath,
+    ).toMatch(/diff-full\.txt$/);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -923,6 +996,131 @@ describe('fetch-pr report assembly', () => {
     ]);
   });
 
+  it('scopes the slice to the delta files, keeping the PR\u2019s own bytes', async () => {
+    // The core of an incremental round: `b.ts` is in the PR but not in the
+    // delta and nothing imports `a.ts`, so it is out of scope — and what is
+    // published is `a.ts`'s section of the PR's own diff, byte-identical.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges(FULL_TWO, DELTA_A);
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
+    expect(writtenDiff()).toBe(SLICE_A);
+    expect(writtenDiff()).not.toContain('b.ts');
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope).toMatchObject({
+      anchor: ANCHOR,
+      deltaFiles: ['a.ts'],
+      interaction: [],
+      restoredFileCount: 0,
+    });
+    // `b.ts` was CONSIDERED and left out — counted, so a reader can tell
+    // "nothing imports the change" from "there was nothing to consider".
+    expect(scope['contextFileCount']).toBe(1);
+  });
+
+  it('widens one import hop: a still-clean importer re-enters the scope', async () => {
+    // `b.ts` has no change of its own, so no delta capture can show it — and
+    // that is exactly why it needs reviewing. Round 1 cleared it against
+    // `a.ts`'s OLD shape; (b.ts@head \u00d7 a.ts@head) is a pairing no round
+    // has seen. The slice is what makes this expressible: `b.ts` is pulled in
+    // carrying its own full-range hunks.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges(FULL_TWO, DELTA_A);
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(writtenDiff()).toBe(FULL_TWO); // both sections, in PR order
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope['deltaFiles']).toEqual(['a.ts']);
+    expect(scope['interaction']).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    // Pulled in, so no longer merely context.
+    expect(scope['contextFileCount']).toBe(0);
+  });
+
+  it('a file undone since the anchor owes no review but still moves its importers', async () => {
+    // `a.ts` is in the delta and its tree entry is identical at both ends of
+    // the PR: the fix round undid it. It has no hunks left to review, so it
+    // is not in `deltaFiles` — a plan naming a file with zero hunks sends
+    // agents hunting for scope that does not exist — but the undoing IS a
+    // change its importers were cleared against, so `b.ts` still enters.
+    anchorIsValid();
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      // Same tree entry at base and head \u2014 restored.
+      if (args.includes('ls-tree') && args.includes('a.ts')) {
+        return '100644 blob deadbeef\ta.ts';
+      }
+      return null;
+    });
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges(FULL_TWO, DELTA_A);
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const report = await reportFor({ since: ANCHOR });
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope['deltaFiles']).toEqual([]);
+    expect(scope['restoredFileCount']).toBe(1);
+    expect(scope['interaction']).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    // Only the importer's section is published \u2014 the undone file has none
+    // of its own worth reading.
+    expect(writtenDiff()).not.toContain('a/a.ts');
+    expect(writtenDiff()).toContain('a/b.ts');
+  });
+
+  it('stops the round when everything changed since the anchor was undone', async () => {
+    // Every delta file restored and nothing imports them: there is genuinely
+    // nothing to re-review. Same outcome as an empty delta \u2014 `upToDate`,
+    // which the skill turns into "No new changes since last review" \u2014
+    // and the full range is still published for the flows that continue
+    // anyway (a model change, --comment).
+    anchorIsValid();
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-parse') return ANCHOR;
+      if (args.includes('ls-tree')) return '100644 blob deadbeef\tpath';
+      return null;
+    });
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges(FULL_TWO, DELTA_A);
+    const report = await reportFor({ since: ANCHOR });
+    expect(ruling(report)).toEqual({
+      since: ANCHOR,
+      effective: true,
+      upToDate: true,
+    });
+    expect(writtenDiff()).toBe(FULL_TWO);
+  });
+
   it('takes the LAST value of a repeated --since, and expands an abbreviation', async () => {
     // Two findings in one round trip. yargs folds a repeated flag into an
     // array — the recovery flow produces one — and the array stringifies to
@@ -943,7 +1141,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: ['0'.repeat(40), 'abc1234'] });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: 'abc1234',
       effective: true,
       diffBase: ANCHOR,
@@ -959,11 +1157,19 @@ describe('fetch-pr report assembly', () => {
   it('still flags an emptied PR on a delta round — the full range rules it', async () => {
     // The PR collapses between rounds (a revert, or the work landing in the
     // base another way): the full range is empty while `anchor..head` is
-    // not. Both guards fire, and both matter — the delta's hunks are not in
-    // the PR's diff (so the anchor is refused rather than scoped), and the
-    // published full range is empty (so the skill stops and recommends
-    // close-as-superseded instead of reviewing hunks GitHub's empty PR diff
-    // does not contain, where one anchored comment 422s the whole review).
+    // not. Both guards fire, and both matter — there is no section of the
+    // PR's own diff for the changed file to be sliced from (so the anchor is
+    // refused rather than scoped), and the published full range is empty (so
+    // the skill stops and recommends close-as-superseded instead of reviewing
+    // hunks GitHub's empty PR diff does not contain, where one anchored
+    // comment 422s the whole review).
+    //
+    // `lineage-unfollowable` is the name for that under slicing, where the
+    // pre-slice code said `hunks-outside-pr-diff`: the delta is no longer
+    // checked for containment — it cannot fail containment, because it is
+    // never published — so what refuses here is the file having no section
+    // to slice. Same class, same fallback, and the reason still names a
+    // deterministic cause the recovery flow must not retry.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -972,10 +1178,10 @@ describe('fetch-pr report assembly', () => {
     servesBothRanges('');
     const report = await reportFor({ since: ANCHOR });
     expect(report.emptyDiff).toBe(true);
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'hunks-outside-pr-diff',
+      reason: 'lineage-unfollowable',
     });
     // A base resolved from a possibly stale local ref cannot rule it — the
     // same fail-closed conjunct the text path has always had.
@@ -986,12 +1192,20 @@ describe('fetch-pr report assembly', () => {
     expect((await reportFor({ since: ANCHOR })).emptyDiff).toBeUndefined();
   });
 
-  it('refuses a delta carrying hunks the PR diff does not contain', async () => {
-    // An "undo per feedback" commit reverts some of the previous round's
-    // lines back to base content: those lines are changed in `anchor..head`
-    // and unchanged in `base..head`. Ancestry cannot see it — the anchor is
-    // a perfectly good ancestor — so containment is checked on the hunks,
-    // because a comment anchored on such a hunk 422s the entire review.
+  it('reviews an "undo per feedback" file at its FULL-RANGE hunks', async () => {
+    // The case that used to cost the whole round. An "undo per feedback"
+    // commit reverts some of the previous round's lines back to base
+    // content: those lines are changed in `anchor..head` and unchanged in
+    // `base..head`, so a delta capture carries hunks the PR's own diff does
+    // not contain — and a comment anchored on one 422s the entire Create
+    // Review call. Ancestry cannot see it; the anchor is a perfectly good
+    // ancestor. The pre-slice code therefore refused the anchor outright
+    // (`hunks-outside-pr-diff`) and re-reviewed the whole PR.
+    //
+    // Slicing dissolves it. The delta says WHICH file changed; the hunks come
+    // from the PR's own diff, where the reverted lines simply are not. So the
+    // round stays incremental, reviews `a.ts` at the shape GitHub renders,
+    // and every anchor it can produce is one GitHub accepts.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
@@ -1008,18 +1222,18 @@ describe('fetch-pr report assembly', () => {
     ].join('\n');
     servesBothRanges(FULL_DIFF, REVERT_DELTA);
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
-      effective: false,
-      reason: 'hunks-outside-pr-diff',
+      effective: true,
+      diffBase: ANCHOR,
     });
-    // Refused, so the round reviews the PR's own diff instead — and the
-    // FILE agents read must be that diff, not the refused delta: a publish
-    // left at capture time would hand them hunks the oracle just proved
-    // absent from GitHub's PR diff.
+    // The published bytes are the PR's own section for `a.ts`, so the
+    // `-experiment/+original` pair the delta carried — the pair that would
+    // have 422'd — is nowhere in what agents read.
     expect(report.diffPath).not.toBeNull();
     expect(report.diffLines).toBeGreaterThan(0);
     expect(writtenDiff()).toBe(FULL_DIFF);
+    expect(writtenDiff()).not.toContain('-experiment');
     // `read_file` rejects a relative path, so every agent dereferences this
     // one — a relative leak fails the whole fan-out.
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
@@ -1044,7 +1258,7 @@ describe('fetch-pr report assembly', () => {
     // The reason names the CAUSE and keeps naming it: the capture threw.
     // Whether a plan exists is `diffPath`, reported separately — one field
     // meaning both is what used to rename this into the retryable class.
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'capture-failed',
@@ -1068,17 +1282,22 @@ describe('fetch-pr report assembly', () => {
       sha: BASE,
       baseFetchFailed: false,
     });
-    // Not a diff at all — the state where the oracle genuinely cannot rule
-    // (a capture that returned an error stream, say). Path shapes that used
-    // to land here are handled by the shared parser now.
+    // Not a diff at all — a capture that returned an error stream, say. The
+    // delta is read for one fact, the list of changed files, and a stream
+    // that names none leaves that list empty: nothing to scope to, and no
+    // basis to claim the round has nothing new either, because the emptiness
+    // is the parser's not the tree's.
     const UNPARSEABLE = 'fatal: bad revision\nnoise\n';
     servesBothRanges(FULL_DIFF, UNPARSEABLE);
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'containment-unverified',
     });
+    // …and the round reviews the PR's own diff, the fallback every refusal
+    // lands on.
+    expect(writtenDiff()).toBe(FULL_DIFF);
   });
 
   it('refuses the anchor end to end when the base fetch failed', async () => {
@@ -1092,7 +1311,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'base-untrusted',
@@ -1117,7 +1336,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'containment-unverified',
@@ -1148,7 +1367,7 @@ describe('fetch-pr report assembly', () => {
       return producerMocks.actualBuildDiffPlan(text, 400);
     });
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       upToDate: true,
@@ -1177,7 +1396,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: 'f00df00df00d' });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: 'f00df00df00d',
       effective: true,
       upToDate: true,
@@ -1213,7 +1432,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: BASE });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: BASE,
       effective: true,
       diffBase: BASE,
@@ -1252,7 +1471,7 @@ describe('fetch-pr report assembly', () => {
       );
     try {
       const report = await reportFor({ since: ANCHOR });
-      expect(report.incremental).toEqual({
+      expect(ruling(report)).toEqual({
         since: ANCHOR,
         effective: false,
         reason: 'capture-failed',
@@ -1342,7 +1561,7 @@ describe('fetch-pr report assembly', () => {
         );
       try {
         const report = await reportFor({ since: ANCHOR });
-        expect({ what, ...report.incremental }).toEqual({
+        expect({ what, ...ruling(report) }).toEqual({
           what,
           since: ANCHOR,
           effective: false,
@@ -1371,7 +1590,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       diffBase: ANCHOR,
@@ -1417,13 +1636,18 @@ describe('fetch-pr report assembly', () => {
     );
     const report = await reportFor({ since: ANCHOR });
     // Still delta-scoped…
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       diffBase: ANCHOR,
     });
-    expect(writtenDiff()).toBe(DELTA_DIFF);
-    // …and the full-range fact is still reported.
+    // The slice of the PR's own diff, not the delta's re-capture of it.
+    expect(writtenDiff()).toBe(FULL_DIFF);
+    // …and the full-range fact is still reported. It is computed off
+    // `fullText` on every round, so a slice that happens to equal the full
+    // range here does not make the assertion vacuous: the mutant this test
+    // was written for suppresses the flag on delta-scoped rounds outright,
+    // and `effective: true` above is what makes this one of those.
     expect(report.collapsedFromUpstream).toBe(true);
   });
 
@@ -1463,7 +1687,7 @@ describe('fetch-pr report assembly', () => {
       return Buffer.from('');
     });
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       upToDate: true,
@@ -1491,7 +1715,7 @@ describe('fetch-pr report assembly', () => {
       return producerMocks.actualBuildDiffPlan(text, 400);
     });
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'not-an-ancestor',
@@ -1524,7 +1748,7 @@ describe('fetch-pr report assembly', () => {
     // NOT empty: a mutant computing it from the published round state sees
     // an empty published diff here and would recommend closing a live PR.
     expect(report.emptyDiff).toBeUndefined();
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'capture-failed',
@@ -1560,7 +1784,7 @@ describe('fetch-pr report assembly', () => {
     });
     servesBothRanges();
     const report = await reportFor({ since: '0'.repeat(40) });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: '0'.repeat(40),
       effective: false,
       reason: 'unknown-commit',
@@ -1582,7 +1806,7 @@ describe('fetch-pr report assembly', () => {
         : Buffer.from(''),
     );
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'not-an-ancestor',
@@ -1616,7 +1840,7 @@ describe('fetch-pr report assembly', () => {
         : Buffer.from(''),
     );
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'behind-merge-base',
@@ -1633,9 +1857,13 @@ describe('fetch-pr report assembly', () => {
       sha: BASE,
       baseFetchFailed: false,
     });
-    servesBothRanges();
+    // Two files, one in the delta, so the slice is a PROPER part of the full
+    // range and "the partitioner refused the scoped diff" is a state that
+    // exists. With the one-file fixture the two texts are identical and the
+    // rescue could not be told from the first attempt.
+    servesBothRanges(FULL_TWO, DELTA_A);
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
-      if (text === DELTA_DIFF) throw new Error('chunks do not tile the diff');
+      if (text === SLICE_A) throw new Error('chunks do not tile the diff');
       return producerMocks.actualBuildDiffPlan(text, 400);
     });
     const report = await reportFor({ since: ANCHOR });
@@ -1643,11 +1871,11 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffLines).toBeGreaterThan(0);
     // The rescue republished the FULL range — the file agents read must be
     // the range the report now describes.
-    expect(writtenDiff()).toBe(FULL_DIFF);
+    expect(writtenDiff()).toBe(FULL_TWO);
     // The anchor cannot stay effective over a full-range plan — one round,
     // two scopes is what that would mean for Agent 7's welded --base — and
     // the reason names what actually happened, not a capture that worked.
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'partition-failed',
@@ -1667,12 +1895,14 @@ describe('fetch-pr report assembly', () => {
       sha: BASE,
       baseFetchFailed: false,
     });
-    servesBothRanges();
+    // Two files, one in the delta — see the sibling above for why the
+    // one-file fixture cannot express a scoped-then-rescued round.
+    servesBothRanges(FULL_TWO, DELTA_A);
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
-      if (text === DELTA_DIFF) throw new Error('chunks do not tile the diff');
+      if (text === SLICE_A) throw new Error('chunks do not tile the diff');
       return producerMocks.actualBuildDiffPlan(text, 400);
     });
-    // Write 1 is the delta publish and succeeds; write 2 is the rescue.
+    // Write 1 is the scoped publish and succeeds; write 2 is the rescue.
     let diffWrites = 0;
     producerMocks.writeFileSync.mockImplementation((path: unknown) => {
       if (String(path).endsWith('diff.txt') && ++diffWrites === 2) {
@@ -1684,7 +1914,7 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).toBeNull();
     expect(report.diffPathAbsolute).toBeNull();
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'capture-failed',
@@ -1735,7 +1965,7 @@ describe('fetch-pr report assembly', () => {
     // can no longer be true without a base, so it now implies a non-null
     // `fullText`. The guard stays as a guard; what changed is that this shape
     // no longer reaches it.
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'containment-unverified',
@@ -1766,7 +1996,7 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({ since: ANCHOR });
     // The anchor keeps its own cause…
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'not-an-ancestor',
@@ -1815,7 +2045,7 @@ describe('fetch-pr report assembly', () => {
     // identically — SKILL's same-sha retry must keep excluding this reason.
     // Planless-ness is on the report as `diffPath: null`, which is what the
     // degraded flow reads.
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'partition-failed',
@@ -1839,7 +2069,7 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     // The full-range fallback DID produce a plan, so the reason stays the
     // one that names why the delta was abandoned.
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'capture-failed',
@@ -1860,7 +2090,7 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).toBeNull();
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'capture-failed',
@@ -1884,7 +2114,7 @@ describe('fetch-pr report assembly', () => {
         : Buffer.from(''),
     );
     const report = await reportFor({ since: ANCHOR });
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       upToDate: true,
@@ -1913,7 +2143,7 @@ describe('fetch-pr report assembly', () => {
     // anchor, proven by the delta capture, and the flow it serves — "No new
     // changes since last review" → cleanup, stop — consumes no plan. The
     // continuing flows read `diffPath` like any other degraded round.
-    expect(report.incremental).toEqual({
+    expect(ruling(report)).toEqual({
       since: ANCHOR,
       effective: true,
       upToDate: true,
