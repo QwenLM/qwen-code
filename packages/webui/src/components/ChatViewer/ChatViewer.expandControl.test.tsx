@@ -13,6 +13,48 @@ import { ChatViewer, type ChatMessageData } from './ChatViewer.js';
 
 const LONG_OUTPUT = `${'x'.repeat(600)}__SHELL_TAIL__`;
 
+const LONG_READ_OUTPUT = `${'y'.repeat(400)}__READ_TAIL__`;
+
+const USER_MESSAGE_WITH_FILE_REFERENCE = [
+  'please review this file',
+  '--- Content from referenced files ---',
+  'Content from @src/example.ts:',
+  'FILE-REF-BODY-LINE-1',
+  'FILE-REF-BODY-LINE-2',
+  '--- End of content ---',
+].join('\n');
+
+const createFileAndReadMessages = (): ChatMessageData[] => [
+  {
+    uuid: 'user-file-1',
+    timestamp: '2026-03-22T16:48:30.000Z',
+    type: 'user',
+    message: {
+      role: 'user',
+      parts: [{ text: USER_MESSAGE_WITH_FILE_REFERENCE }],
+    },
+  },
+  {
+    uuid: 'read-1',
+    timestamp: '2026-03-22T16:48:35.000Z',
+    type: 'tool_call',
+    toolCall: {
+      toolCallId: 'read-1-call',
+      kind: 'read',
+      title: 'Read src/example.ts',
+      status: 'completed',
+      rawInput: { file_path: 'src/example.ts' },
+      locations: [{ path: 'src/example.ts' }],
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: LONG_READ_OUTPUT },
+        },
+      ],
+    },
+  },
+];
+
 const createMessages = (): ChatMessageData[] => [
   {
     uuid: 'user-1',
@@ -182,5 +224,97 @@ describe('ChatViewer global expand control', () => {
     // A later global command reaches every section again.
     clickButton('Collapse all sections');
     expect(getOutputToggle().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('does not render the toolbar for an empty message list', () => {
+    act(() => {
+      root?.render(
+        <ChatViewer messages={[]} autoScroll={false} showExpandControl />,
+      );
+    });
+
+    expect(container?.querySelector('.chat-viewer-expand-control')).toBeNull();
+  });
+
+  it('expands file references and read outputs via the global buttons', () => {
+    act(() => {
+      root?.render(
+        <ChatViewer
+          messages={createFileAndReadMessages()}
+          autoScroll={false}
+          showExpandControl
+        />,
+      );
+    });
+
+    const getFileRefToggle = () =>
+      container?.querySelector(
+        '.user-message-container button[aria-expanded]',
+      ) as HTMLButtonElement;
+    const getReadToggle = () =>
+      Array.from(
+        container?.querySelectorAll('.read-tool-call-success button') ?? [],
+      ).find((button) => button.textContent?.includes('Show more')) ??
+      Array.from(
+        container?.querySelectorAll('.read-tool-call-success button') ?? [],
+      ).find((button) => button.textContent?.includes('Collapse'));
+
+    // Baseline: both sections start collapsed. The collapsed file-reference
+    // body is not rendered at all.
+    expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(container?.textContent).not.toContain('FILE-REF-BODY-LINE-1');
+    expect(getReadToggle()?.textContent).toContain('Show more');
+
+    clickButton('Expand all sections');
+
+    expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('true');
+    expect(container?.textContent).toContain('FILE-REF-BODY-LINE-1');
+    expect(getReadToggle()?.textContent).toContain('Collapse');
+
+    clickButton('Collapse all sections');
+
+    expect(getFileRefToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(container?.textContent).not.toContain('FILE-REF-BODY-LINE-1');
+    expect(getReadToggle()?.textContent).toContain('Show more');
+  });
+
+  it('mounts sections added after a global command in the target state', () => {
+    act(() => {
+      root?.render(
+        <ChatViewer
+          messages={createMessages()}
+          autoScroll={false}
+          showExpandControl
+        />,
+      );
+    });
+
+    clickButton('Expand all sections');
+    expect(container?.querySelectorAll('.thinking-content').length).toBe(1);
+
+    // A new thinking message arrives after the global command (streaming).
+    const lateThinking: ChatMessageData = {
+      uuid: 'thinking-late',
+      timestamp: '2026-03-22T16:49:00.000Z',
+      type: 'assistant',
+      message: {
+        role: 'thinking',
+        parts: [{ text: 'late body LATE-THINKING-MARKER' }],
+      },
+    };
+    act(() => {
+      root?.render(
+        <ChatViewer
+          messages={[...createMessages(), lateThinking]}
+          autoScroll={false}
+          showExpandControl
+        />,
+      );
+    });
+
+    // The late section inherits the latest global target (expanded)
+    // without another toolbar click.
+    expect(container?.querySelectorAll('.thinking-content').length).toBe(2);
+    expect(container?.textContent).toContain('LATE-THINKING-MARKER');
   });
 });
