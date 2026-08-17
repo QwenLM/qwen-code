@@ -21,6 +21,7 @@ import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import MarkdownIt from 'markdown-it';
+import { JSDOM } from 'jsdom';
 import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
@@ -5252,43 +5253,26 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
   // both of its layers, not a balance count over the raw text. Markdown
   // layer: GFM extends an unclosed fence or raw HTML block to the end of
   // the document, so the notice must parse to its own paragraph token, not
-  // ride as fence/raw-block content. Browser layer: an unclosed comment or
-  // raw-text element in the emitted HTML swallows every tag after it —
-  // including one the markdown layer CLOSED its block around (a comment
-  // opened inside a blockquote still runs, in the page, until the next
-  // `-->`) — so the HTML before the notice must leave no swallow open. A
-  // body whose counts agree with themselves can fail either layer — the
-  // exact shape the parity closers shipped. Where a real renderer puts the
-  // notice is the fact under test.
+  // ride as fence/raw-block content. Browser layer: a real HTML5 parser
+  // decides where the notice lands — four rounds of hand models of the
+  // swallow states each shipped a new blind spot (RCDATA elements, script
+  // escape levels, plaintext, collapsed `<details>`), so the parsed tree
+  // itself is the oracle: the notice's text node must sit outside every
+  // swallowing element and outside every collapsed `<details>`.
   const page = new MarkdownIt({ html: true });
-  /** True when a browser would still be inside a swallow at html's end. */
-  const browserSwallowOpen = (html: string): boolean => {
-    const lower = html.toLowerCase();
-    const swallows = [
-      ['<!--', '-->'],
-      ['<script', '</script'],
-      ['<style', '</style'],
-      ['<textarea', '</textarea'],
-    ] as const;
-    let i = 0;
-    for (;;) {
-      let at = -1;
-      let openerLen = 0;
-      let closer = '';
-      for (const [tag, close] of swallows) {
-        const pos = lower.indexOf(tag, i);
-        if (pos !== -1 && (at === -1 || pos < at)) {
-          at = pos;
-          openerLen = tag.length;
-          closer = close;
-        }
-      }
-      if (at === -1) return false;
-      const end = lower.indexOf(closer, at + openerLen);
-      if (end === -1) return true;
-      i = end + closer.length;
-    }
-  };
+  const SWALLOW_ELEMENTS = new Set([
+    'script',
+    'style',
+    'textarea',
+    'title',
+    'xmp',
+    'iframe',
+    'noembed',
+    'noframes',
+    'noscript',
+    'plaintext',
+    'template',
+  ]);
   const noticeOutsideCode = (body: string): boolean => {
     const tokens = page.parse(body, {});
     // The notice rides in the protected TAIL, so its own occurrence is the
@@ -5300,9 +5284,22 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       if (tok.type === 'fence' || tok.type === 'html_block') return false;
       if (tok.type === 'inline') {
         if (tokens[i - 1]?.type !== 'paragraph_open') return false;
-        const html = page.render(body);
-        const at = html.lastIndexOf('was TRUNCATED to fit');
-        return at !== -1 && !browserSwallowOpen(html.slice(0, at));
+        const doc = new JSDOM(page.render(body)).window.document;
+        const walker = doc.createTreeWalker(
+          doc.body,
+          doc.defaultView!.NodeFilter.SHOW_TEXT,
+        );
+        let notice: Node | null = null;
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          if (n.textContent?.includes('was TRUNCATED to fit')) notice = n;
+        }
+        if (notice === null) return false;
+        for (let el = notice.parentElement; el; el = el.parentElement) {
+          const tag = el.tagName.toLowerCase();
+          if (SWALLOW_ELEMENTS.has(tag)) return false;
+          if (tag === 'details' && !el.hasAttribute('open')) return false;
+        }
+        return true;
       }
     }
     return false;
@@ -5941,8 +5938,206 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
     expect(r.bodyTrim.truncated).toBe(true);
     expect(r.body).toContain('</textarea>');
+    // Content survival and ordering, not just the closer's presence: a
+    // rewind-discard that still emits the stray closer posts a clean page
+    // with the quoted evidence gone — only these two tell the shapes apart.
+    expect(r.body).toContain('x'.repeat(1_000));
+    expect(r.body.lastIndexOf('</textarea>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
     expect(r.body).toContain('was TRUNCATED to fit');
   });
+
+  it('closes a <pre> raw block the cut left open — the one type-1 member the browser renders', () => {
+    // `<pre>` is the only CommonMark type-1 opener the browser does not
+    // swallow: a weaker cut that loses the closer renders the notice
+    // visibly INSIDE the code block — wrong either way, and both shapes
+    // had zero coverage (deleting `pre` from the raw1 alternation shipped
+    // the whole suite green).
+    const preBlock = 'raw:\n<pre>\n' + 'code line\n'.repeat(9_000);
+    const r = composeReview(base({ bodyCriticals: [preBlock] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('</pre>');
+    expect(r.body.lastIndexOf('</pre>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('code line');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a <details> the cut left open, so the notice is not collapsed away', () => {
+    // An unclosed `<details>` is no swallow at the block layer — the tail
+    // parses to a clean paragraph — but the page renders the element
+    // collapsed, hiding every notice inside it from the author. The cut
+    // owes a `</details>` before the tail ships.
+    const detailed =
+      'notes:\n<details>\n<summary>ctx</summary>\n\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [detailed] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body.lastIndexOf('</details>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes every level of a nested <details> the cut left open', () => {
+    // Two unclosed levels: one `</details>` still leaves the notice
+    // collapsed inside the outer one, so the candidate carries one per
+    // open level — longer than the closer reserve, so this shape also
+    // spends the shave branch to make it fit.
+    const nested =
+      'notes:\n<details>\n<summary>o</summary>\n\n' +
+      '<details>\n<summary>i</summary>\n\n' +
+      'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [nested] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(countOf(r.body, '</details>')).toBeGreaterThanOrEqual(2);
+    expect(r.body.lastIndexOf('</details>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('does not spend the appended closer on a script escape level', () => {
+    // Inside `<script>`, `<!--` opens an escape level and a `<script>`
+    // inside it a second; a `</script>` spent inside either level exits
+    // the LEVEL, not the element. The block grammar closed the html_block
+    // on the first `</script>`, and the scan that agreed with it shipped
+    // a tail the page still swallowed.
+    const escaped =
+      'raw:\n<script>\n<!--<script>\n</script>\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [escaped] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body.lastIndexOf('</script>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('fails closed over a mid-line <plaintext> — the swallow with no closer', () => {
+    // `<plaintext>` runs to the end of the page and has no closing tag,
+    // so no closer can be certified: the cut must rewind past the opener
+    // rather than ship a tail the page swallows. Content BEFORE the
+    // opener survives the rewind.
+    const plain =
+      'keep this line\n\nsee <plaintext> tail ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [plain] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('keep this line');
+    expect(r.body).not.toContain('<plaintext>');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('fails closed over a <plaintext> block the same way', () => {
+    const plain = 'raw:\n\n<plaintext>\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [plain] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('raw:');
+    expect(r.body).not.toContain('<plaintext>');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a mid-line <template> the scan never modelled', () => {
+    // An unclosed `<template>` parks everything after its opener in its
+    // inert content — the notice never renders. Unlike plaintext, its
+    // closer is known, so the cut appends it instead of rewinding.
+    const tpl = 'tpl <template> inner ' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [tpl] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body.lastIndexOf('</template>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('closes a <template> block via the raw1 copy', () => {
+    const tpl = 'raw:\n\n<template>\n' + 'x'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [tpl] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('</template>');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('reads a quote in attribute-name position as a name, not a value delimiter', () => {
+    // `<span "x>` is the COMPLETE tag — the quote opens an attribute
+    // NAME, and the `<script>` after it opens for real. The indexOf skip
+    // read the span as one quoted tag, skipped the script opener inside
+    // the "value", and certified the tail the script swallows.
+    const quoted =
+      'quoted:\n<div>\n<span "x><script>" y>\n\n' + 'K'.repeat(70_000);
+    const r = composeReview(base({ bodyCriticals: [quoted] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body.lastIndexOf('</script>')).toBeLessThan(
+      r.body.indexOf('was TRUNCATED to fit'),
+    );
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it('rewinds a block with no known closer instead of spinning on it', () => {
+    // The loop's final fallback — rewind to before the open block — is its
+    // only progress guarantee once no verified closer fits and the shave
+    // does not apply: delete it and this fixture hangs to the test timeout
+    // instead of composing. The type-6 `<div` block owes the page no
+    // closer, so the cut loses the block and keeps everything before it.
+    // (A `<!DOCTYPE review` shape does NOT force this arm — it resolves
+    // via `open === null`.)
+    const lost = 'evidence line\n<div class="x\n' + 'y'.repeat(80_000);
+    const r = composeReview(base({ bodyCriticals: [lost] }));
+    expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(r.bodyTrim.truncated).toBe(true);
+    expect(noticeOutsideCode(r.body)).toBe(true);
+    expect(r.body).toContain('evidence line');
+    expect(r.body).toContain('was TRUNCATED to fit');
+  });
+
+  it.each(['style', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript'])(
+    'closes a mid-line <%s> opener the block grammar never tokenized',
+    (tag) => {
+      // The RAW_TEXT_ELEMENTS members with no fixture of their own: the
+      // set and the raw1 closer regex are SEPARATE copies, so each member
+      // needs its own cut fixture or the two can drift apart green.
+      const inline = `trace: <${tag}> fragment ` + 'K'.repeat(70_000);
+      const r = composeReview(base({ bodyCriticals: [inline] }));
+      expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+      expect(r.bodyTrim.truncated).toBe(true);
+      expect(noticeOutsideCode(r.body)).toBe(true);
+      expect(r.body.lastIndexOf(`</${tag}>`)).toBeLessThan(
+        r.body.indexOf('was TRUNCATED to fit'),
+      );
+      expect(r.body).toContain('was TRUNCATED to fit');
+    },
+  );
+
+  it.each(['noscript', 'noframes'])(
+    'closes a line-start <%s> block whose closer comes from the raw1 copy',
+    (tag) => {
+      const block = `raw:\n\n<${tag}>\n` + 'x'.repeat(70_000);
+      const r = composeReview(base({ bodyCriticals: [block] }));
+      expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+      expect(r.bodyTrim.truncated).toBe(true);
+      expect(noticeOutsideCode(r.body)).toBe(true);
+      expect(r.body).toContain(`</${tag}>`);
+      expect(r.body).toContain('was TRUNCATED to fit');
+    },
+  );
 
   it('closes a 12-backtick fence by shaving the cut, not by spending the block', () => {
     // The closer of a ≥12-tick fence overruns the 12-char reserve by
@@ -6257,12 +6452,16 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     expect(parseLedger(r.body)).not.toBeNull();
   });
 
-  it('reserves the marker on the rung-2 exit too, not only on the cut', () => {
+  it('measures the rung-2 exit against the RESERVED budget, not the raw limit', () => {
     // Every other rank-dropping fixture uses a PR-less plan, where the
-    // reserve is 0. A PR-named body that fits AFTER a rank drop must be
-    // measured against the reserved budget: unreserved, it exits rung 2 at
-    // up to 65,024 chars, the marker rides on top, and the POST 422s —
-    // losing the review this whole file exists to deliver.
+    // reserve is 0. A PR-named body whose post-rank-drop size lands in the
+    // reserve window (reserved budget < body ≤ unreserved budget) must
+    // fall through to the rung-3 CUT: measured against the UNRESERVED
+    // budget it would exit rung 2 whole at up to 65,024 chars, the marker
+    // would ride on top, and the POST 422s — losing the review this whole
+    // file exists to deliver. (The original sizing here sat BELOW the
+    // reserved budget after its rank drop and exited rung 2 identically
+    // under that mutation — it caught nothing.)
     const planPath = coveredPlan(['verify', 'reverse-audit'], {
       prNumber: 8255,
       fetchedSha: 'deadbeef00112233',
@@ -6274,11 +6473,17 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       criticalsInline: 0,
       suggestionsInline: 0,
       severityFloor: 'critical',
-      bodyCriticals: ['B'.repeat(56_000)],
-      deferredSuggestions: [nit(1), nit(2), nit(3)],
+      bodyCriticals: ['B'.repeat(59_600)],
+      unreviewedDimensions: [
+        `security — ${'D'.repeat(3_000)}`,
+        `perf — ${'D'.repeat(3_000)}`,
+        `a11y — ${'D'.repeat(3_000)}`,
+        `i18n — ${'D'.repeat(3_000)}`,
+      ],
     });
-    expect(r.bodyTrim.deferralList).toBe(true);
-    expect(r.bodyTrim.truncated).toBe(false);
+    expect(r.bodyTrim.sections).toBe(4);
+    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.bodyTrim.truncated).toBe(true);
     expect(r.body).toContain('<!-- qwen-review-ledger ');
     expect(parseLedger(r.body)).not.toBeNull();
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
