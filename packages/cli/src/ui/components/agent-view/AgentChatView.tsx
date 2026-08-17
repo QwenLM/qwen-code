@@ -63,6 +63,9 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
           <Text color={theme.text.secondary} dimColor>
             Switch to another tab and back to retry rendering this tab.
           </Text>
+          <Text color={theme.text.secondary} dimColor>
+            Set QWEN_DEBUG_LOG_FILE=1 and reproduce for a full log.
+          </Text>
         </Box>
       )}
       onError={(error, info) => {
