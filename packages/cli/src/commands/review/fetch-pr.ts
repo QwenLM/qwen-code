@@ -560,6 +560,21 @@ function sectionsContained(
   return true;
 }
 
+/**
+ * Allowlist shape for a server-controlled branch name reaching git's argv:
+ * a plain branch name and nothing else (twin of aone.ts's guard — see that
+ * comment for each admitted channel's wrong outcome). Fail closed: an
+ * unusual-but-legal name is refused with a clear metadata-stage error
+ * rather than guessed at inside a git invocation.
+ */
+function isPlainBranchName(name: string): boolean {
+  return (
+    name !== 'HEAD' &&
+    !name.includes('..') &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
+  );
+}
+
 /** The real git surface `resolveMergeBase` runs against. */
 const gitProbe: GitProbe = {
   // `--` ends option parsing: the base ref is server-controlled platform
@@ -671,20 +686,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     };
     // The base ref is server-controlled metadata reaching git's argv through
     // the base fetch below. The fetch probe passes `--`, but that only ends
-    // OPTION parsing — refuse anything that can read as more than a plain
-    // branch name (the fetchDiff target guard's comment names each channel:
-    // dash-leading option, `+` force refspec, `src:dst` colon refspec), so
-    // a hostile platform value dies here with the metadata rolled back, not
-    // inside a git invocation.
-    if (
-      meta.baseRefName.startsWith('-') ||
-      meta.baseRefName.startsWith('+') ||
-      meta.baseRefName.includes(':')
-    ) {
+    // OPTION parsing — validate ALLOWLIST-style, accepting only a plain
+    // branch name (the twin of aone.fetchDiff's target guard, whose comment
+    // names each admitted channel's wrong outcome: option spellings, `+`
+    // force refspec, `src:dst` colon refspec, `HEAD`'s silent fetch + stale
+    // clone-time symref merge-base, rev-parse metasyntax, the empty
+    // string). A hostile platform value dies here with the metadata rolled
+    // back, not inside a git invocation.
+    if (!isPlainBranchName(meta.baseRefName)) {
       throw new Error(
         `refusing base ref ${JSON.stringify(meta.baseRefName)} from the ` +
-          `platform metadata — a branch name must not start with '-' or ` +
-          `'+', or contain ':'`,
+          `platform metadata — not a plain branch name`,
       );
     }
   } catch (err) {
@@ -997,17 +1009,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // branch on every same-sha retry, whose only possible answer was
     // "up to date".
   }
-  // Aone does not advertise diff stats — fill them from the captured
-  // diff so the report's diffStat and the stderr summary carry real
-  // numbers. Runs AFTER the publish decision above, so the numbers
-  // describe the SAME diff the report points at — a scoped-delta round
-  // must not advertise the full range's stats.
-  if (needsLocalStats) {
-    const stats = computeDiffStats(diffText);
-    meta.additions = stats.additions;
-    meta.deletions = stats.deletions;
-    meta.changedFiles = stats.changedFiles;
-  }
   // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
   // hole. That must be loud, but it must not take the whole review with it: the
   // throw would fire after the worktree exists and before any report is
@@ -1118,6 +1119,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
                   : 'no diff could be captured — coverage will be partial.'
             }`,
     );
+  }
+
+  // Aone does not advertise diff stats — fill them from the captured diff
+  // so the report's diffStat and the stderr summary carry real numbers.
+  // Runs AFTER the plan/rescue above, where `diffText` is FINAL: the
+  // partition-rescue can republish the full range over a delta-scoped
+  // capture, and a backfill run before it would advertise the delta's
+  // numbers beside a diffPath pointing at the full merge-base diff. The
+  // numbers must describe the SAME diff the report points at.
+  if (needsLocalStats) {
+    const stats = computeDiffStats(diffText);
+    meta.additions = stats.additions;
+    meta.deletions = stats.deletions;
+    meta.changedFiles = stats.changedFiles;
   }
 
   // 6. Emit the report. The window opening survives drift restarts: this
@@ -1238,14 +1253,24 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // advertised stat, so the collapse ratio would fire on every incremental
     // review — both flags are full-range facts, so both read `fullText` on
     // EVERY round, delta-scoped or not.
-    ...(isCollapsedFromUpstream({
-      diffText: fullText ?? '',
-      baseFetchFailed,
-      additions: meta.additions,
-      deletions: meta.deletions,
-    })
-      ? { collapsedFromUpstream: true }
-      : {}),
+    // The collapse disclosure needs TWO independent quantities: the
+    // platform-advertised full-PR stat and the recomputed full-range count.
+    // Off GitHub the advertised half is locally derived FROM THE SAME
+    // captured text — one source, not two — and on a delta-scoped round it
+    // is delta-scoped beside a full-range count (a churned delta passing
+    // containment would fire a false "overlapping merged PRs collapsed
+    // this PR"). Skip it when the stats are locally derived; a genuine
+    // upstream collapse cannot be disclosed without an independent fact.
+    ...(needsLocalStats
+      ? {}
+      : isCollapsedFromUpstream({
+            diffText: fullText ?? '',
+            baseFetchFailed,
+            additions: meta.additions,
+            deletions: meta.deletions,
+          })
+        ? { collapsedFromUpstream: true }
+        : {}),
     diffStat: {
       files: meta.changedFiles,
       additions: meta.additions,

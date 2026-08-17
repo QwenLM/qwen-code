@@ -88,6 +88,8 @@ The parser already classified the target, so there is nothing to disambiguate by
      --owner <the verdict's owner> --repo <the verdict's repo> --host <the verdict's host>
    ```
 
+   For an **Aone nested-group target** (`…/<group>/<subgroup…>/<project>/codereview/<id>`), also pass `--group-path <group>/<subgroup…>/<project>` (the URL's full path before `/codereview/`) — owner/repo collapse to the last two segments, and without the full path the matcher could pick a different group's same-named repo.
+
    Exit 0 prints the matching remote's name — forks included: a clone whose `upstream` points to the target repository matches that repository's PRs exactly. Exit 6 means no remote matches — go to item 3. Exit 7 means several match; tell the user and stop rather than picking one. Any other exit is fail-closed like the other gates: report it and stop.
 
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.

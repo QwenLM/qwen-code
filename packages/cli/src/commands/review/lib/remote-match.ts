@@ -16,6 +16,13 @@ export interface RemoteIdentity {
   host: string;
   owner: string;
   repo: string;
+  /**
+   * The FULL normalized path (`group/subgroup/project`) when the remote URL
+   * carries three or more segments — the collapse to owner/repo is
+   * non-injective, and matchRemotes compares every segment when both sides
+   * carry a path. Two-segment remotes repeat `owner/repo` here.
+   */
+  groupPath: string;
 }
 
 /** Lowercase and strip one trailing `.git`, the normal form comparison runs in. */
@@ -87,13 +94,17 @@ export function parseRemoteUrl(raw: string): RemoteIdentity | null {
   if (host === '') return null;
 
   // Nested-group repos (e.g. Aone `group/subgroup/project`) collapse to the
-  // last two segments, mirroring aone.parseRemoteUrl — otherwise every
+  // last two segments for the owner/repo fields — otherwise every
   // nested-group clone fails to match and the worktree flow is unreachable.
-  // GitHub remotes are always exactly two segments, so this is a no-op there.
+  // GitHub remotes are always exactly two segments, so this is a no-op
+  // there. The FULL path rides `groupPath`: the collapse is non-injective
+  // (two different nested groups can share their last two segments), and
+  // matchRemotes compares every segment when both sides carry a path.
   return {
     host: host.toLowerCase(),
     owner: normalizeSegment(segments[segments.length - 2]),
     repo: normalizeSegment(segments[segments.length - 1]),
+    groupPath: segments.map(normalizeSegment).join('/'),
   };
 }
 
@@ -102,6 +113,13 @@ export interface RemoteMatchInput {
   repo: string;
   /** Defaults to `github.com` — a PR URL's host, or github.com for bare numbers. */
   host?: string;
+  /**
+   * The target's FULL group path when its URL grammar carries one (Aone
+   * nested groups). When BOTH sides have three or more segments the match
+   * compares every segment — the owner/repo collapse alone is non-injective
+   * and would match a different group's same-named repo.
+   */
+  groupPath?: string;
 }
 
 export interface RemoteMatchOutcome {
@@ -119,10 +137,16 @@ export interface RemoteMatchOutcome {
  */
 export function matchRemotes(
   remoteVOutput: string,
-  { owner, repo, host = 'github.com' }: RemoteMatchInput,
+  { owner, repo, host = 'github.com', groupPath }: RemoteMatchInput,
 ): RemoteMatchOutcome {
   const wantOwner = normalizeSegment(owner);
   const wantRepo = normalizeSegment(repo);
+  // The full-path comparison's want side: only a three-or-more-segment
+  // target path carries identity the collapse loses — a two-segment want
+  // (GitHub URLs, bare numbers) keeps the last-two-segment rule.
+  const wantPath = groupPath
+    ? groupPath.split('/').filter(Boolean).map(normalizeSegment)
+    : undefined;
   // A PR URL's host can carry an explicit port (parse-args' PR_URL_RE keeps
   // it, lib/gh.ts' HOSTNAME_RE accepts it), but a parsed remote host never
   // does — compare the hostname part only, or a port-bearing GHE review
@@ -148,11 +172,20 @@ export function matchRemotes(
     if (!nameMatch) continue;
     const identity = parseRemoteUrl(nameMatch[2]);
     if (identity === null) continue;
-    if (
-      hostsEquivalent(identity.host, wantHost) &&
-      identity.owner === wantOwner &&
-      identity.repo === wantRepo
-    ) {
+    if (!hostsEquivalent(identity.host, wantHost)) continue;
+    // Repository identity: compare EVERY path segment when both sides carry
+    // three or more — the last-two collapse is non-injective, and matching a
+    // different nested group's same-named repo is exactly the review-one-
+    // repo-post-to-another hazard this module exists to prevent. When
+    // either side has exactly two segments (GitHub remotes, targets without
+    // a nested path) the last-two rule stands.
+    const remotePath = identity.groupPath.split('/');
+    const sameRepo =
+      wantPath !== undefined && wantPath.length >= 3 && remotePath.length >= 3
+        ? wantPath.length === remotePath.length &&
+          wantPath.every((seg, i) => seg === remotePath[i])
+        : identity.owner === wantOwner && identity.repo === wantRepo;
+    if (sameRepo) {
       matched.push(nameMatch[1]);
     }
   }

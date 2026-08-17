@@ -448,9 +448,28 @@ describe('fetch-pr report assembly', () => {
           body: '',
         }),
       );
-      await expect(reportFor({})).rejects.toThrow(
-        /must not start with '-' or '\+', or contain ':'/,
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('refuses HEAD, rev-parse metasyntax, and the empty baseRefName', async () => {
+    // `HEAD` fetches silently and merge-bases through the stale clone-time
+    // symref; `main^` rev-parses to the WRONG base under a misdescribing
+    // warning; the empty string degrades to a garbled diff-less fallback.
+    for (const baseRefName of ['HEAD', 'main^', 'main~1', '']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
       );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
     }
   });
 

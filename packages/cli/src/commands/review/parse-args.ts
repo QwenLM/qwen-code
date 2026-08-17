@@ -47,6 +47,16 @@ export type ReviewTarget =
       host: string;
       owner: string;
       repo: string;
+      /**
+       * The FULL group path (`group/subgroup/project`) when the URL grammar
+       * carries one — Aone nested-group repos. owner/repo collapse to the
+       * last two segments, which is non-injective: identity gates
+       * (match-remote, fetchDiff's origin guard) compare every segment when
+       * both sides carry a path, so a same-named repo in a different group
+       * can never pass as the target. Absent when the grammar holds exactly
+       * two segments (GitHub).
+       */
+      groupPath?: string;
       number: number;
     }
   | { type: 'file'; path: string }
@@ -269,6 +279,11 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
       host: lowerHost,
       owner,
       repo,
+      // Nested-group targets carry the FULL path: owner/repo collapse is
+      // non-injective, and the remote-match gate compares every segment
+      // when both sides have one (a same-named repo in a different group
+      // must not match).
+      ...(segs.length >= 3 ? { groupPath: segs.join('/') } : {}),
       number: Number(num),
     };
   }

@@ -107,7 +107,18 @@ export function runMeta(args: MetaArgs): MetaResult {
     // environmental condition, not a --host typo, so name the actual source
     // and fail in the runtime class (exit 1), never as a usage error that
     // blames a flag the caller never passed.
-    const routed = resolveGhHost(args.host) ?? id.host;
+    //
+    // Off GitHub the env half of that precedence is DROPPED: the Aone
+    // reader never routes a gh call, so an operator's ambient GH_HOST
+    // export (the standard GHE pattern) beside an Aone-origin clone must
+    // not override the discovered host — it would veto a valid Aone
+    // invocation at the HOSTNAME_RE gate below (the explicit-`--repo`
+    // branch's no-default-host guard names the same interference class).
+    // Only an explicit --host flag overrides discovery there.
+    const routed =
+      (platform.kind === 'github'
+        ? resolveGhHost(args.host)
+        : (args.host ?? '').trim() || undefined) ?? id.host;
     if (!HOSTNAME_RE.test(routed)) {
       throw new Error(
         `cannot route at the ${

@@ -13,6 +13,7 @@
 import { git, gitRaw } from '../git.js';
 import { isOwnerRepo } from '../gh.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
+import { hostsEquivalent } from '../remote-match.js';
 import { a1Json, ensureAoneAuthenticated } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -81,26 +82,48 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
   // Clean (order matters): strip any userinfo FIRST — it may itself contain
   // `?` or `#` (`https://user:pa?ss@host/…`), and a query-first strip would
   // truncate it mid-credential, making a parseable origin unparseable (and
-  // leaking the prefix through the refusal message). Then the query string
-  // / fragment: query-string credentials (`?private_token=…`, a real CI
-  // pattern) would otherwise become part of the repo coordinate and echo
-  // unredacted into meta's stdout and the refusal messages. `[\s\S]*` (not
-  // `.`) eats newlines too: git stores and re-emits newline-bearing remote
-  // URLs, and a plain `.*$` stops at the first `\n`, letting
-  // `?private_token=SECRET\n` survive the strip and leak through the
-  // refusal message. Finally trailing slashes before `.git`, so two or more
-  // trailing slashes after `.git` (`…/p.git//`) cannot defeat the suffix
-  // strip. Git accepts all of these shapes.
+  // leaking the prefix through the refusal message). The userinfo
+  // consumption is GREEDY — up to the LAST `@` of the authority: token-
+  // bearing CI origins arrive with several `@` (`user:S1@S2@host`) or with
+  // `:` AND `/` inside the secret, and a single-chunk match would leave the
+  // residue to fold into the parsed host or echo unredacted into the
+  // refusal message. The URL form bounds the authority at the first `/`
+  // (userinfo cannot contain one); the scp form admits only a strip that
+  // leaves a `host:` shape behind (see the chain below). An `@` that
+  // survives into the host or a path segment fails closed in `take` rather
+  // than guessing. Then the query string / fragment: query-string
+  // credentials (`?private_token=…`, a real CI pattern) would otherwise
+  // become part of the repo coordinate and echo unredacted into meta's
+  // stdout and the refusal messages. `[\s\S]*` (not `.`) eats newlines too:
+  // git stores and re-emits newline-bearing remote URLs, and a plain `.*$`
+  // stops at the first `\n`, letting `?private_token=SECRET\n` survive the
+  // strip and leak through the refusal message. Finally trailing slashes
+  // before `.git`, so two or more trailing slashes after `.git`
+  // (`…/p.git//`) cannot defeat the suffix strip. Git accepts all of these
+  // shapes.
   const cleaned = url
     .trim()
-    .replace(/\/\/[^@/]+@/, '//')
-    .replace(/^[^@/]+@/, '')
+    .replace(/\/\/[^/]*@/, '//')
+    // scp form: consume up to the LAST `@` of the authority — the token may
+    // itself contain `:` and `/`, so neither `[^@/]+` nor `[^/]+` can bound
+    // it. The lookahead admits only a stripping that leaves a `host:` shape
+    // behind (`[^:@/]+:`); when the only `@` sits in the PATH of a
+    // userinfo-less origin (`host:path@x`), nothing is stripped and the
+    // `@` residue fails closed in `take` instead of guessing.
+    .replace(/^(?:.*@)(?=[^:@/]+:)/, '')
     .replace(/[?#][\s\S]*$/, '')
     .replace(/\/+$/, '')
     .replace(/\.git$/, '');
   const take = (host: string, path: string): RepoIdentity | null => {
+    // Defense in depth: if any `@` survived the userinfo consumption into
+    // the host or a path segment, fail closed — a credential residue must
+    // never become part of a parsed coordinate (it would echo through
+    // meta's stdout and the HOSTNAME_RE refusal).
     const parts = path.split('/').filter(Boolean);
     if (parts.length < 2) return null;
+    if (host.includes('@') || parts.some((p) => p.includes('@'))) {
+      return null;
+    }
     return {
       host: host.toLowerCase(),
       owner: parts[parts.length - 2],
@@ -126,15 +149,18 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
  *  itself contains `?` or `#` (`https://user:pa?ss@host/…`, which git
  *  stores and re-emits fine) would otherwise be truncated mid-credential,
  *  leaving no `@` for either regex, and the username + secret prefix would
- *  reach the message. Covers the userinfo prefix in both the URL form
+ *  reach the message. The userinfo consumption is GREEDY — up to the last
+ *  `@` of the authority (parseRemoteUrl's cleaning comment names why:
+ *  multi-`@` and `:`/`/`-bearing token userinfo must be consumed whole, or
+ *  the residue reaches the message in cleartext). Covers both the URL form
  *  (`//user:token@`) and the scp form (`user:token@host:…`, common for
  *  `insteadOf`/token-bearing origins), AND the query/fragment channel:
  *  `?private_token=…` origins carry no `@`, so a userinfo-only redaction
  *  would echo them. */
 function redactUrl(url: string): string {
   return url
-    .replace(/\/\/[^@/]+@/, '//<redacted>@')
-    .replace(/^[^@/]+@/, '<redacted>@')
+    .replace(/\/\/[^/]*@/, '//<redacted>@')
+    .replace(/^(?:.*@)(?=[^:@/]+:)/, '<redacted>@')
     .replace(/[?#][\s\S]*$/, '');
 }
 
@@ -164,6 +190,24 @@ function mrView(
  *  ref namespace ever changed. */
 function mrHeadRefSpec(prNumber: number): string {
   return `refs/merge-requests/${prNumber}/head`;
+}
+
+/**
+ * Allowlist shape for a server-controlled branch name reaching git's argv:
+ * a plain branch name and nothing else — no option spellings, no refspec
+ * shapes (`+`, `:`), no rev-parse metasyntax (`^`, `~`, `@{`), no ranges
+ * (`..`), and never the reserved word `HEAD` (fetch serves it silently and
+ * merge-base resolves it through the stale clone-time symref). Fail closed:
+ * an unusual-but-legal name is refused with a clear metadata-stage error
+ * rather than guessed at inside a git invocation. fetch-pr's baseRefName
+ * guard carries the twin of this check.
+ */
+function isPlainBranchName(name: string): boolean {
+  return (
+    name !== 'HEAD' &&
+    !name.includes('..') &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
+  );
 }
 
 export const aoneReader: ReviewPlatformReader = {
@@ -275,8 +319,13 @@ export const aoneReader: ReviewPlatformReader = {
       originUrl = undefined;
     }
     const originIdentity = originUrl ? parseRemoteUrl(originUrl) : null;
+    // The comparison carries the origin's HOST too — owner/repo equality
+    // alone lets a same-named repo on a DIFFERENT platform pass the guard
+    // and serve the ref-fetch; an Aone target's clone must sit on the Aone
+    // host family (the web/git alias pair counts as one, per remote-match).
     if (
       originIdentity === null ||
+      !hostsEquivalent(originIdentity.host, 'gitlab.alibaba-inc.com') ||
       `${originIdentity.owner}/${originIdentity.repo}` !== ownerRepo
     ) {
       throw new Error(
@@ -292,28 +341,31 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     const target = view.targetBranch ?? 'master';
     // The target branch is SERVER-controlled metadata reaching git's argv.
-    // Refuse it outright unless it can only be read as a plain branch name;
-    // the `--` below also ends option parsing for whatever reaches the
-    // fetch, but the guard must close EVERY argv channel, not just options:
-    //  - dash-leading: parses as an option — `git fetch origin
+    // Validate ALLOWLIST-style — accept only a plain branch name — because
+    // a denylist of hostile spellings cannot enumerate the channels, and
+    // each admitted one has a distinct wrong outcome:
+    //  - dash-leading parses as an option: `git fetch origin
     //    --upload-pack=<payload>` executes the attacker-named program on
     //    the remote host with the reviewer's credentials (creatable by
     //    full-refname push);
-    //  - leading `+`: parses as a FORCE refspec after `--` — `+master`
+    //  - leading `+` parses as a FORCE refspec after `--` — `+master`
     //    silently fetches the wrong head (stale evidence, no WARNING);
-    //  - colon: `src:dst` refspec shape — `+master:__qwen-review-diff-…`
-    //    force-moves the just-fetched throwaway ref (the served diff
-    //    carries master's change, not the MR's), and `+b:<local-branch>`
-    //    force-overwrites a reviewer-local branch.
-    if (
-      target.startsWith('-') ||
-      target.startsWith('+') ||
-      target.includes(':')
-    ) {
+    //  - a colon parses as `src:dst` refspec — force-moving the
+    //    just-fetched throwaway ref or a reviewer-local branch;
+    //  - `HEAD` makes `git fetch origin -- HEAD` exit 0 SILENTLY and
+    //    merge-base resolves through the stale clone-time symref
+    //    (wrong-base diff, zero disclosure);
+    //  - rev-parse metasyntax (`master^`, `~1`, `@{…}`) rev-parses to a
+    //    WRONG base under a WARNING that misdescribes the state;
+    //  - the empty string degrades the run to a garbled diff-less
+    //    fallback instead of this clean metadata-stage refusal.
+    // The character class is git's branch-name shape (no `..`, no leading
+    // dot); `HEAD` is reserved. The `--` below also ends option parsing
+    // for whatever reaches the fetch.
+    if (!isPlainBranchName(target)) {
       throw new Error(
         `refusing target branch ${JSON.stringify(target)} from the MR ` +
-          `metadata — a branch name must not start with '-' or '+', or ` +
-          `contain ':'`,
+          `metadata — not a plain branch name`,
       );
     }
     // The throwaway ref is suffixed with the pid: two concurrent fetchDiff

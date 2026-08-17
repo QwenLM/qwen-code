@@ -59,6 +59,36 @@ describe('parseRemoteUrl hardening', () => {
       repo: 'p',
     });
   });
+
+  it('consumes multi-@ userinfo whole (no cleartext residue)', () => {
+    // Token-bearing CI origins arrive with several `@`; a single-chunk
+    // match left the residue to fold into the parsed host or echo
+    // unredacted into the refusal message.
+    expect(
+      parseRemoteUrl(
+        'https://ci-user:SECRET1@SECRET2@code.alibaba-inc.com/g/p',
+      ),
+    ).toEqual({ host: 'code.alibaba-inc.com', owner: 'g', repo: 'p' });
+    expect(
+      parseRemoteUrl('https://ci-user:S1@S2@S3@code.alibaba-inc.com/g/p'),
+    ).toEqual({ host: 'code.alibaba-inc.com', owner: 'g', repo: 'p' });
+  });
+
+  it('consumes a `/`-bearing scp userinfo whole', () => {
+    expect(
+      parseRemoteUrl('ci-user:/token-with-slash@code.alibaba-inc.com:g/p.git'),
+    ).toEqual({ host: 'code.alibaba-inc.com', owner: 'g', repo: 'p' });
+  });
+
+  it('fails closed on a single-segment multi-@ origin without leaking', () => {
+    // The refusal message must not carry the residue — resolveRepo routes
+    // the raw URL through redactUrl, which consumes the same greedy shape.
+    expect(
+      parseRemoteUrl(
+        'https://ci-user:SECRET1@SECRET2@code.alibaba-inc.com/solo',
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('aoneReader.resolveRepo', () => {
@@ -168,6 +198,23 @@ describe('aoneReader.resolveRepo', () => {
     expect(message).toContain('cannot parse the origin remote');
     expect(message).not.toContain('user');
     expect(message).not.toContain('pa?ss');
+  });
+
+  it('redacts a `/`-bearing scp userinfo on the refusal path too', () => {
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote')
+        return 'ci-user:/token-with-slash@code.alibaba-inc.com:solo';
+      return '';
+    });
+    let message = '';
+    try {
+      aoneReader.resolveRepo();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('cannot parse the origin remote');
+    expect(message).not.toContain('token-with-slash');
+    expect(message).not.toContain('ci-user');
   });
 });
 
@@ -309,20 +356,31 @@ describe('aoneReader.fetchDiff', () => {
     expect(gitRawMock).not.toHaveBeenCalled();
   });
 
-  it('refuses the refspec channel too — `+` force and `src:dst` colon shapes', () => {
-    // `--` ends OPTION parsing, but git still reads a refspec after it: a
-    // leading `+` force-fetches the wrong head (stale evidence), and a
-    // colon shape force-moves the throwaway ref or a reviewer-local branch.
+  it('refuses anything that is not a plain branch name (allowlist)', () => {
+    // The guard validates allowlist-style: option spellings, refspec
+    // shapes (`+` force, `src:dst` colon), rev-parse metasyntax, `HEAD`
+    // (silent fetch + stale clone-time symref merge-base), ranges, and the
+    // empty string all die at the metadata stage — each has a distinct
+    // wrong outcome inside git.
     gitMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
       return '';
     });
-    for (const target of ['+master', '+master:__qwen-review-diff-7', 'a:b']) {
+    for (const target of [
+      '+master',
+      '+master:__qwen-review-diff-7',
+      'a:b',
+      'HEAD',
+      'master^',
+      'master~1',
+      'master..other',
+      '',
+    ]) {
       a1JsonMock.mockReturnValue({
         mergeRequest: { sourceBranch: 'sha', targetBranch: target },
       });
       expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
-        /must not start with '-' or '\+', or contain ':'/,
+        /not a plain branch name/,
       );
     }
     expect(gitRawMock).not.toHaveBeenCalled();
@@ -386,5 +444,35 @@ describe('aoneReader.fetchDiff', () => {
       /not g\/p — run from inside a clone of the target repo/,
     );
     expect(gitRawMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a same-named repo on a DIFFERENT platform (host in the guard)', () => {
+    // owner/repo equality alone would let a github.com clone of the same
+    // coordinate serve the ref-fetch; the guard carries the origin's host
+    // (Aone host family only).
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') return 'git@github.com:g/p.git';
+      return '';
+    });
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+      /not g\/p — run from inside a clone of the target repo/,
+    );
+    expect(gitRawMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts the web/git host alias as the origin', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'merge-base') return 'base-sha';
+      if (args[0] === 'remote') return 'https://code.alibaba-inc.com/g/p.git';
+      return '';
+    });
+    gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).not.toThrow();
   });
 });
