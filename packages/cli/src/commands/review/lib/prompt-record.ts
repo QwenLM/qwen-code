@@ -34,6 +34,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, basename, resolve } from 'node:path';
 import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
@@ -159,6 +160,20 @@ export function writeFindingsFile(
   try {
     mkdirSync(promptRecordDir(planPath), { recursive: true });
     writeFileSync(p, content);
+    // The content digest, recorded beside the list at WRITE time. The
+    // recovery path refuses a findings file whose bytes no longer hash to
+    // it: the round-7 corroboration bound only the NAME a certified agent
+    // was pointed at, and an overwrite landing after the certified read
+    // relayed forged cumulative state under a genuinely corroborated path.
+    // The sidecar lives in the same attempt-1-writable dir — a planter who
+    // rewrites both still forges the pair — so this binds CONTENT to the
+    // builder's write against the demonstrated post-read overwrite, and the
+    // residual (a two-file forgery) is disclosed in the design doc rather
+    // than pretended away.
+    writeFileSync(
+      `${p}.sha256`,
+      createHash('sha256').update(content).digest('hex'),
+    );
   } catch (err) {
     // A read-only tmp dir must not stop a review being BUILT — and it must
     // not send a whole round pointing at a file that does not exist either:

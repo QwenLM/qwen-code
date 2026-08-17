@@ -27,6 +27,7 @@ import {
   readdirSync,
   statSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
@@ -349,6 +350,24 @@ export function recoverFindings(
     // a foreign attempt's state as this one's.
     if (st.mtimeMs < sinceMs) continue;
     if (!corroboratedFindings.has(resolve(path))) continue;
+    // CONTENT bound, not only the name: the corroborated pointer proves a
+    // certified agent was POINTED at this path, and the digest the builder
+    // recorded at write time proves the bytes are still the ones it wrote —
+    // the demonstrated plant overwrote the file after the certified read,
+    // with the pointer still corroborating the name. No sidecar or a
+    // mismatch reads as absent, the direction every unverifiable artifact
+    // here reads.
+    let bytes: Buffer;
+    let recordedDigest: string;
+    try {
+      bytes = readFileSync(path);
+      recordedDigest = readFileSync(`${path}.sha256`, 'utf8').trim();
+    } catch {
+      continue;
+    }
+    if (createHash('sha256').update(bytes).digest('hex') !== recordedDigest) {
+      continue;
+    }
     const m = ROUND_IN_KEY_RE.exec(key);
     findingsFiles.push({
       key,

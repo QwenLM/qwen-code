@@ -64,7 +64,11 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   diffStat: { files: 2, additions: 7, deletions: 3 },
   collapsedRederived: false,
   nowMs: Date.now(),
+  reportMtimeMs: Date.parse('2026-01-01T00:00:00.000Z'),
   graftsAbsent: true,
+  shallowAbsent: true,
+  repoConfigClean: true,
+  ledgerEntryCount: 1,
   resumeCount: 0,
   requestedEffort: null,
   ...over,
@@ -391,6 +395,52 @@ describe('assessResume — every report field the pipeline consumes is compared'
         probes({ worktreeIdentityMatches: false, worktreeHeadSha: 'other' }),
       ),
     ).toEqual({ ok: false, reason: 'worktree-identity-mismatch' });
+  });
+
+  it('refuses a shallow boundary — severed ancestry bends the merge base', () => {
+    expect(assessResume(prev(), probes({ shallowAbsent: false }))).toEqual({
+      ok: false,
+      reason: 'shallow-present',
+    });
+  });
+
+  it('refuses command-executing repo-local config — the probes run under it', () => {
+    expect(assessResume(prev(), probes({ repoConfigClean: false }))).toEqual({
+      ok: false,
+      reason: 'repo-config-untrusted',
+    });
+  });
+
+  it('refuses a valid report beside an EMPTY session ledger', () => {
+    // The deleted-bookkeeping pair: both cap counters read zero through it
+    // and the resume chain uncaps. fetch-pr appends the original session's
+    // entry in the same breath that writes the report, so absence is a
+    // tampered pair, not a fresh run.
+    expect(assessResume(prev(), probes({ ledgerEntryCount: 0 }))).toEqual({
+      ok: false,
+      reason: 'ledger-absent',
+    });
+  });
+
+  it('refuses a fetchedAt far after the report file existed — the forward shift', () => {
+    // Two-field self-consistency is the forger's to arrange; the file's own
+    // mtime is the writer's. A recorded time an hour past it is a shift
+    // that would blind the bypass-write audit to every earlier write.
+    expect(
+      assessResume(
+        prev(),
+        probes({
+          reportMtimeMs: Date.parse('2026-01-01T00:00:00.000Z') - 3_600_000,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: 'window-corrupt' });
+  });
+
+  it('refuses when the report cannot be statted — nothing corroborates the window', () => {
+    expect(assessResume(prev(), probes({ reportMtimeMs: null }))).toEqual({
+      ok: false,
+      reason: 'window-corrupt',
+    });
   });
 
   it('refuses when grafts could redirect the re-derivation', () => {

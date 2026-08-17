@@ -28,7 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -46,8 +46,11 @@ import {
   gitOpt,
   gitProbe as gitExit,
   gitRaw,
+  gitWithInput,
+  plantedHooks,
   refExists,
   releaseWorktree,
+  untrustedLocalConfig,
 } from './lib/git.js';
 import {
   PINNED_DIFF_CONFIG,
@@ -82,6 +85,7 @@ import { SHA_RE } from './lib/ledger.js';
 import {
   appendRunSession,
   ledgerResumeCount,
+  sessionEntryCount,
   readResumeMarker,
   recordResume,
   recordRestart,
@@ -653,10 +657,79 @@ function plantedFileActive(path: string | null): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code !== 'ENOENT';
   }
-  return text.split('\n').some((line) => {
-    const t = line.trim();
-    return t !== '' && !t.startsWith('#');
-  });
+  return text.split('\n').some(
+    // Git's comment rule is BYTE 0: a ` #rule` line (leading space) is a
+    // live pattern, and trimming before the test classified it as a
+    // comment while git applied it — a probe reading the planted file as
+    // inactive is worse than no probe.
+    (line) => line.trim() !== '' && !line.startsWith('#'),
+  );
+}
+
+/**
+ * A `shallow` file with ANY content marks a shallow boundary — its lines are
+ * commit SHAs, with no comment syntax, so unlike the exclude probes there is
+ * nothing to parse: presence with bytes is the fact. Unreadable (short of
+ * absent) is present — a boundary this run cannot rule out.
+ */
+function shallowFilePresent(path: string): boolean {
+  try {
+    return readFileSync(path, 'utf8').trim() !== '';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+/** The report file's own mtime, or null when it cannot be statted. */
+function reportMtime(out: string): number | null {
+  try {
+    return statSync(out).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does every tracked BLOB in the worktree hash to the object recorded at
+ * HEAD? `git status` answers through the index, and a forged per-worktree
+ * index with patched stat fields hides tracked-file tamper from it —
+ * `hash-object` reads the bytes and the object store is content-addressed,
+ * so this comparison cannot be answered from forged metadata. Symlinks
+ * (mode 120000) and gitlinks (160000) are skipped: `hash-object` follows a
+ * link to its target, which legitimately differs from the link text the
+ * tree records. False on any read/parse failure — an unverifiable tree is
+ * not a verified one.
+ */
+function worktreeMatchesHead(wt: string): boolean {
+  const listing = gitOpt('-C', wt, 'ls-tree', '-r', '-z', 'HEAD');
+  if (listing === null) return false;
+  const expected: Array<{ oid: string; path: string }> = [];
+  for (const entry of listing.split('\0')) {
+    if (entry === '') continue;
+    // `<mode> <type> <oid>\t<path>` — paths are raw under -z.
+    const tab = entry.indexOf('\t');
+    if (tab < 0) return false;
+    const [mode, type, oid] = entry.slice(0, tab).split(' ');
+    if (mode === undefined || type === undefined || oid === undefined) {
+      return false;
+    }
+    if (mode === '120000' || mode === '160000') continue;
+    if (type !== 'blob') return false;
+    expected.push({ oid, path: entry.slice(tab + 1) });
+  }
+  if (expected.length === 0) return true;
+  let hashed: string;
+  try {
+    hashed = gitWithInput(
+      Buffer.from(expected.map((e) => e.path).join('\0'), 'utf8'),
+      ['-C', wt, 'hash-object', '--stdin-paths', '-z'],
+    );
+  } catch {
+    return false;
+  }
+  const got = hashed === '' ? [] : hashed.split('\n');
+  if (got.length !== expected.length) return false;
+  return expected.every((e, i) => got[i] === e.oid);
 }
 
 /**
@@ -756,6 +829,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   let liveHeadSha: string | null = null;
   let liveBaseRefName: string | null = null;
   let liveHeadRefName: string | null = null;
+  let liveBaseRefOid: string | null = null;
   let liveIsCrossRepository: boolean | null = null;
   let livePrDescriptionHasHan: boolean | null = null;
   let liveDiffStat: {
@@ -775,12 +849,13 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         '--repo',
         ownerRepo,
         '--json',
-        'headRefOid,headRefName,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
+        'headRefOid,headRefName,baseRefName,baseRefOid,additions,deletions,changedFiles,isCrossRepository,body',
       ),
     ) as {
       headRefOid?: unknown;
       headRefName?: unknown;
       baseRefName?: unknown;
+      baseRefOid?: unknown;
       additions?: unknown;
       deletions?: unknown;
       changedFiles?: unknown;
@@ -798,6 +873,10 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     liveHeadRefName =
       typeof view.headRefName === 'string' && view.headRefName !== ''
         ? view.headRefName
+        : null;
+    liveBaseRefOid =
+      typeof view.baseRefOid === 'string' && SHA_RE.test(view.baseRefOid)
+        ? view.baseRefOid
         : null;
     // The head OID is the one field every genuine view carries; its absence
     // names an unreachable or malformed forge, which leaves every derived
@@ -829,6 +908,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     liveHeadSha = null;
     liveBaseRefName = null;
     liveHeadRefName = null;
+    liveBaseRefOid = null;
     liveIsCrossRepository = null;
     livePrDescriptionHasHan = null;
     liveDiffStat = null;
@@ -852,6 +932,22 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     worktreeIdentityMatches && wtGitDirRaw !== null
       ? resolve(wt, wtGitDirRaw)
       : null;
+  // The command-executing and fetch-redirecting config surface, screened
+  // BEFORE any further git probe runs: the demonstrated entrances execute
+  // DURING probe gathering — `reference-transaction` hooks fire on the base
+  // fetch's ref update, `filter.*.clean` runs inside the status refresh —
+  // so a dirty screen must not merely refuse at ruling time, it must stop
+  // the probes from executing at all. Screened at the scopes the reviewed
+  // PR's code can write (local + worktree); global and system config are
+  // the operator's, and that residual is disclosed rather than screened.
+  const localConfig = untrustedLocalConfig(wt);
+  const hooks =
+    commonDir !== null ? plantedHooks(join(commonDir, 'hooks')) : null;
+  const repoConfigClean =
+    localConfig !== null &&
+    localConfig.length === 0 &&
+    hooks !== null &&
+    hooks.length === 0;
   // A planted `info/grafts` redirects the merge-base the re-derivation diffs
   // against (to the head itself: an empty diff matching a forged empty
   // pair). Replace refs are pinned out of every git wrapper; grafts have no
@@ -863,13 +959,34 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // collapses hunks to `Binary files differ`) and no pinned flag covers
   // attribute lookup, so a present file makes the re-derivation untrusted —
   // it stays null and the ruling refuses `diff-underivable`.
+  const hostAttributesStatus = repoConfigClean
+    ? gitOpt(
+        '-c',
+        'core.fsmonitor=false',
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--',
+        '.gitattributes',
+        ':(glob)**/.gitattributes',
+      )
+    : null;
   const attributesPlanted =
     plantedFileActive(
       commonDir !== null ? join(commonDir, 'info', 'attributes') : null,
     ) ||
     plantedFileActive(
       wtGitDir !== null ? join(wtGitDir, 'info', 'attributes') : null,
-    );
+    ) ||
+    // The HOST repo's own `.gitattributes` chain: the re-derivation runs at
+    // host cwd, so an UNTRACKED or MODIFIED attributes file anywhere in the
+    // main checkout (part of no diff, checked by no other probe) shapes the
+    // bytes git derives — `target -diff` collapses the malicious hunks to
+    // `Binary files differ` under the exact pinned command. Committed
+    // attributes are symmetric (the capture ran under them too); dirty ones
+    // are a plant. Unanswerable reads as planted.
+    hostAttributesStatus === null ||
+    hostAttributesStatus.trim() !== '';
   // Re-derive the diff from git objects, keyed on the RECORDED head and the
   // recomputed merge-base against the FORGE's base ref — never the report's
   // own mergeBaseSha, which sits on the same attacker-writable disk as the
@@ -889,21 +1006,37 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   let rederivedDiffEmpty: boolean | null = null;
   let rederivedText: string | null = null;
   let rederivedMergeBase: string | null = null;
-  if (!attributesPlanted && recordedSha !== null && liveBaseRefName !== null) {
-    const mb = resolveMergeBase(
-      args.remote,
-      liveBaseRefName,
-      recordedSha,
-      gitProbe,
-    );
-    if (!mb.baseFetchFailed && mb.sha !== null) {
-      rederivedMergeBase = mb.sha;
+  // The merge base is computed between two forge-verified OIDs — the
+  // recorded head (corroborated against `headRefOid`) and the base branch's
+  // `baseRefOid` — never through a ref NAME. Every name is resolved through
+  // attempt-1-writable state: `remote.<n>.url`/`insteadOf` redirect the
+  // fetch, a refspec-sabotaged fetch leaves a planted remote-tracking ref in
+  // place, and a planted `refs/heads/<remote>/<base>` shadows it — while an
+  // OBJECT is content-addressed, so whichever remote supplied it, an object
+  // with the base's OID is the base. The fetch is still issued (best-effort)
+  // to make the objects present; its success is not trusted for anything.
+  if (
+    repoConfigClean &&
+    !attributesPlanted &&
+    recordedSha !== null &&
+    liveBaseRefOid !== null
+  ) {
+    if (liveBaseRefName !== null) {
+      gitProbe.fetch(args.remote, liveBaseRefName);
+    }
+    const baseObjPresent =
+      gitOpt('cat-file', '-e', `${liveBaseRefOid}^{commit}`) !== null;
+    const mbSha = baseObjPresent
+      ? gitOpt('merge-base', liveBaseRefOid, recordedSha)
+      : null;
+    if (mbSha !== null && mbSha !== '') {
+      rederivedMergeBase = mbSha;
       try {
         const buf = gitRaw(
           ...PINNED_DIFF_CONFIG,
           'diff',
           ...PINNED_DIFF_FLAGS,
-          `${mb.sha}..${recordedSha}`,
+          `${mbSha}..${recordedSha}`,
         );
         diffSha256Rederived = createHash('sha256').update(buf).digest('hex');
         rederivedDiffEmpty = buf.length === 0;
@@ -1013,31 +1146,31 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // on the index refresh this probe triggers, and `core.excludesFile` is
   // pointed at the null device because an exclude pattern hides untracked
   // residue from this very listing.
-  const status = gitOpt(
-    '-c',
-    'core.fsmonitor=false',
-    '-c',
-    `core.excludesFile=${NULL_DEVICE}`,
-    '-C',
-    wt,
-    'status',
-    '--porcelain',
-    '--untracked-files=normal',
-    '--ignore-submodules=none',
-  );
+  // Null (probe-not-run) when the config screen is dirty: `filter.*.clean`
+  // executes inside the status refresh itself, so a screened-dirty repo
+  // must not have this probe RUN, not merely have its answer distrusted.
+  const status = repoConfigClean
+    ? gitOpt(
+        '-c',
+        'core.fsmonitor=false',
+        '-c',
+        `core.excludesFile=${NULL_DEVICE}`,
+        '-C',
+        wt,
+        'status',
+        '--porcelain',
+        '--untracked-files=normal',
+        '--ignore-submodules=none',
+      )
+    : null;
   // Two more hiders of the same state, invisible to `--porcelain`:
   // skip-worktree and assume-unchanged index bits mask a tampered tracked
   // file (`ls-files -v` tags them `S` and lowercase), and a planted exclude
   // rule masks untracked residue. Either reads as dirty — resuming there
   // reviews content that is not in the PR.
-  const lsFiles = gitOpt(
-    '-c',
-    'core.fsmonitor=false',
-    '-C',
-    wt,
-    'ls-files',
-    '-v',
-  );
+  const lsFiles = repoConfigClean
+    ? gitOpt('-c', 'core.fsmonitor=false', '-C', wt, 'ls-files', '-v')
+    : null;
   const indexHidesFiles =
     lsFiles === null ||
     lsFiles.split('\n').some((line) => {
@@ -1051,6 +1184,32 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     plantedFileActive(
       wtGitDir !== null ? join(wtGitDir, 'info', 'exclude') : null,
     );
+  // A shallow boundary severs the recorded head's ancestry: the merge-base
+  // degrades to null or bends to a planted commit and the re-derived range
+  // omits what the boundary cuts off. Any content refuses — a legitimate
+  // review clone is never shallow (the fresh path full-fetches).
+  const shallowAbsent =
+    commonDir !== null && !shallowFilePresent(join(commonDir, 'shallow'));
+  // The authoritative untracked listing: `ls-files --others` WITHOUT
+  // `--exclude-standard` lists every untracked path regardless of any
+  // `.gitignore`/exclude/attribute game — a planted per-directory
+  // `.gitignore` containing `*` blanks the status probe, but nothing can
+  // hide a path from the unexcluded listing. A fresh checkout has zero
+  // untracked files, so ANY entry is residue.
+  const untrackedListing = repoConfigClean
+    ? gitOpt('-c', 'core.fsmonitor=false', '-C', wt, 'ls-files', '--others')
+    : null;
+  // Tracked content anchored to the OBJECT STORE: hash every blob in the
+  // worktree and compare against `ls-tree -r HEAD`. The status probe trusts
+  // the index, and a forged per-worktree index with patched stat fields
+  // hides arbitrary tracked-file tamper from it — `hash-object` does not
+  // consult the index at all, and HEAD here is the forge-corroborated
+  // recorded head. Symlink and gitlink entries are skipped (their tamper
+  // surfaces through status/submodule probes); a read failure fails closed.
+  const worktreeContentMatches =
+    repoConfigClean && worktreeIdentityMatches && recordedSha !== null
+      ? worktreeMatchesHead(wt)
+      : false;
   const ruling = assessResume(prev, {
     prNumber,
     ownerRepo,
@@ -1060,7 +1219,12 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     worktreeClean:
       status === null
         ? null
-        : status.trim() === '' && !indexHidesFiles && !excludesPlanted,
+        : status.trim() === '' &&
+          !indexHidesFiles &&
+          !excludesPlanted &&
+          untrackedListing !== null &&
+          untrackedListing.trim() === '' &&
+          worktreeContentMatches === true,
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     diffSha256Rederived,
     rederivedDiffEmpty,
@@ -1081,7 +1245,11 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     diffStat: liveDiffStat,
     collapsedRederived,
     nowMs: Date.now(),
+    reportMtimeMs: reportMtime(out),
     graftsAbsent,
+    shallowAbsent,
+    repoConfigClean,
+    ledgerEntryCount: sessionEntryCount(out),
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
   });
@@ -1757,8 +1925,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // attempt, never forward. A corrupted far-future `auditSince`
           // (`"2099-…"`) is therefore rejected here — it would push the window
           // ahead of every real comment and silently report a clean audit.
-          // (ISO-8601 strings from `toISOString()` compare chronologically.)
-          prevSince < auditSince
+          // Compared NUMERICALLY: `toISOString()` output happens to sort
+          // chronologically, but a forged extended-year form
+          // (`"+275760-…"`) parses to the far future while sorting
+          // lexicographically BEFORE any `"2026-…"` string — a string
+          // comparison inherits exactly the forgery this bound rejects.
+          Date.parse(prevSince) < Date.parse(auditSince)
         ) {
           auditSince = prevSince;
         }

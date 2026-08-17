@@ -39,6 +39,9 @@ export type ResumeRefusal =
   | 'diff-unreadable' // the captured diff is gone or cannot be read
   | 'diff-hash-mismatch' // the diff file changed since it was captured
   | 'grafts-present' // info/grafts could redirect the re-derivation's base
+  | 'shallow-present' // a shallow boundary could sever the merge-base's ancestry
+  | 'repo-config-untrusted' // repo-local config carries command-executing keys
+  | 'ledger-absent' // a valid report with an empty session ledger is a tampered pair
   | 'diff-underivable' // the diff could not be re-derived, or not trusted
   | 'diff-rederive-mismatch' // git derives a different diff than was recorded
   | 'base-fetch-mismatch' // the report claims a base fetch failure this run disproved
@@ -295,6 +298,43 @@ export interface ResumeProbes {
    */
   graftsAbsent: boolean;
   /**
+   * No shallow boundary sits in the git common dir. A planted `shallow`
+   * file severs the recorded head's ancestry, the merge-base degrades to
+   * null or a planted commit, and the re-derived range omits exactly the
+   * hunks the boundary cuts off. Like grafts, no flag pins it out.
+   */
+  shallowAbsent: boolean;
+  /**
+   * The repo-local (and worktree-scope) git config carries none of the
+   * command-executing keys — `core.fsmonitor`, `core.sshCommand`,
+   * `credential.*.helper`, `filter.*`, hooks-path and remote-transport
+   * overrides — and the hooks directory holds no live hook. Every probe
+   * this ruling trusts runs git UNDER that config; a planted key executes
+   * the reviewed PR's code inside the ruling process, and a redirect key
+   * bends the base fetch to an attacker remote. Screened at local and
+   * worktree scope only: global and system config are the operator's.
+   */
+  repoConfigClean: boolean;
+  /**
+   * Session-ledger entries recorded for this plan, current session
+   * included — a COUNT, not evidence. A parsable report whose ledger is
+   * EMPTY is a tampered pair, not a fresh run: `fetch-pr` appends the
+   * original session's entry in the same breath that writes the report, so
+   * the legitimate report-written-but-ledger-empty window is microseconds.
+   * Deleting both bookkeeping files was the demonstrated reset of the
+   * resume cap; an absent ledger now fails closed instead of counting zero.
+   */
+  ledgerEntryCount: number;
+  /**
+   * The report file's own mtime — the run epoch every fence keys on, and
+   * the corroborating fact for `fetchedAt`: the writer stamps `fetchedAt`
+   * moments before writing the file, so a recorded time far AFTER the
+   * file's mtime is a forward-shifted forgery blinding the bypass-write
+   * audit window (the mtime itself is restorable by `utimesSync`, but
+   * backdating it only WIDENS the audited window — the safe direction).
+   */
+  reportMtimeMs: number | null;
+  /**
    * How many times this review has already resumed. The caller computes the
    * MAX of the resume marker's count and the session ledger's entry count
    * minus one (the original run's own session is not a resume): the marker
@@ -323,7 +363,11 @@ export interface ResumeProbes {
  * the <=now checks while blinding cleanup's bypass-write audit to every
  * write made before the forgery.
  */
-function windowSound(prev: PreviousReport, nowMs: number): boolean {
+function windowSound(
+  prev: PreviousReport,
+  nowMs: number,
+  reportMtimeMs: number | null,
+): boolean {
   if (typeof prev.auditSince !== 'string' || prev.auditSince === '') {
     return false;
   }
@@ -333,6 +377,15 @@ function windowSound(prev: PreviousReport, nowMs: number): boolean {
   const auditSince = Date.parse(prev.auditSince);
   const fetchedAt = Date.parse(prev.fetchedAt);
   if (Number.isNaN(auditSince) || Number.isNaN(fetchedAt)) return false;
+  // `fetchedAt` corroborated against the report file's own mtime — the one
+  // clock the writers maintain by construction (the enrichment restores it
+  // to the microsecond). Self-consistency of two recorded strings proves
+  // only that the forger wrote both; a recorded time meaningfully AFTER the
+  // file existed is a forward shift that would blind the bypass-write audit
+  // to every write made before it. One minute of slack covers the stamp-
+  // then-write gap; an unstatable report corroborates nothing and fails.
+  if (reportMtimeMs === null) return false;
+  if (fetchedAt > reportMtimeMs + 60_000) return false;
   return auditSince <= fetchedAt && auditSince <= nowMs && fetchedAt <= nowMs;
 }
 
@@ -401,6 +454,15 @@ export function assessResume(
   if (!probes.worktreeIdentityMatches) {
     return { ok: false, reason: 'worktree-identity-mismatch' };
   }
+  // BEFORE any probe answer is believed: the gatherer SKIPS the fetch and
+  // the worktree probes under a dirty screen (their execution is itself the
+  // attack — hooks on the fetch's ref update, filter.clean inside the
+  // status refresh), so every later probe reads null/false here. Naming the
+  // screen first keeps the reason actionable: the operator fixes the config
+  // plant, not a phantom dirty worktree.
+  if (!probes.repoConfigClean) {
+    return { ok: false, reason: 'repo-config-untrusted' };
+  }
   if (probes.worktreeHeadSha !== prev.fetchedSha) {
     return { ok: false, reason: 'worktree-sha-mismatch' };
   }
@@ -418,6 +480,16 @@ export function assessResume(
   }
   if (!probes.graftsAbsent) {
     return { ok: false, reason: 'grafts-present' };
+  }
+  if (!probes.shallowAbsent) {
+    return { ok: false, reason: 'shallow-present' };
+  }
+  // A parsable report beside an EMPTY session ledger is the deleted-
+  // bookkeeping shape: both cap counters read zero through it, and the
+  // resume chain uncaps. fetch-pr appends the original session's entry in
+  // the same breath that writes the report, so absence is not a fresh run.
+  if (probes.ledgerEntryCount === 0) {
+    return { ok: false, reason: 'ledger-absent' };
   }
   // The recorded hash and the disk file agree — but both live on a disk the
   // reviewed PR's own code could write during attempt 1, so their agreement
@@ -559,7 +631,7 @@ export function assessResume(
   ) {
     return { ok: false, reason: 'head-ref-mismatch' };
   }
-  if (!windowSound(prev, probes.nowMs)) {
+  if (!windowSound(prev, probes.nowMs, probes.reportMtimeMs)) {
     return { ok: false, reason: 'window-corrupt' };
   }
   if ((prev.emptyDiff === true) !== (probes.rederivedDiffEmpty === true)) {

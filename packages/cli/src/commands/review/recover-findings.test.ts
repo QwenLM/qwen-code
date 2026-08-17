@@ -24,6 +24,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { recoverFindings, recoverFindingsCommand } from './recover-findings.js';
@@ -278,6 +279,12 @@ describe('recover-findings', () => {
     const key = 'reverse-audit--round-2--abc123def456';
     const list = join(recordDir, `${encodeURIComponent(key)}.findings.md`);
     writeFileSync(list, '- R1-1 …');
+    // The builder records a content digest beside every list it writes;
+    // recovery refuses a list without one (fail closed on authorship).
+    writeFileSync(
+      `${list}.sha256`,
+      createHash('sha256').update('- R1-1 …').digest('hex'),
+    );
     // Enumeration is corroborated: the file is listed because a CERTIFIED
     // transcript's recorded prompt points at it (the brief and the list
     // both read, so the bar clears).
@@ -294,6 +301,41 @@ describe('recover-findings', () => {
     });
     const r = recoverFindings({ plan, out: out() }, ENV);
     expect(r.findingsFiles).toEqual([{ key, path: list, round: 2 }]);
+  });
+
+  it('refuses a corroborated list whose CONTENT was overwritten after the read', () => {
+    // The R8-34 shape: certification stays genuine (the agent read the
+    // genuine list), the pointer still corroborates the PATH — and the
+    // overwrite lands after the read, before the resume. The digest the
+    // builder recorded at write time no longer matches, so the forged
+    // snapshot reads as absent.
+    const recordDir = promptRecordDir(plan);
+    const key = 'reverse-audit--round-2--abc123def456';
+    const list = join(recordDir, `${encodeURIComponent(key)}.findings.md`);
+    writeFileSync(list, '- the genuine cumulative list');
+    writeFileSync(
+      `${list}.sha256`,
+      createHash('sha256')
+        .update('- the genuine cumulative list')
+        .digest('hex'),
+    );
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${list}")\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('S0', 'ra2', prompt, {
+      opens: [brief, list],
+      finalText: 'Round 2: no new issues after a full walk.',
+    });
+    // The overwrite: content replaced, sidecar left behind (rewriting it
+    // too is the disclosed two-file residual, not this probe's shape).
+    writeFileSync(list, '- FORGED: real Criticals erased');
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([key]);
+    expect(r.findingsFiles).toEqual([]);
   });
 
   it('reports the latest certified reverse-audit round', () => {
@@ -789,6 +831,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     const key = 'invariant-a--packages/cli/src/x.ts';
     const list = join(recordDir, `${encodeURIComponent(key)}.findings.md`);
     writeFileSync(list, '- entry');
+    writeFileSync(
+      `${list}.sha256`,
+      createHash('sha256').update('- entry').digest('hex'),
+    );
     const brief = briefPath(plan, key);
     writeFileSync(brief, `The ${key} brief.`);
     const prompt =

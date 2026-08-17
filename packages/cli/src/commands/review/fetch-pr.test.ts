@@ -243,6 +243,12 @@ const producerMocks = vi.hoisted(() => ({
   refExists: vi.fn(() => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   gitOpt: vi.fn((..._args: string[]): string | null => null),
+  statSync: vi.fn((path?: unknown): { mtimeMs: number } | undefined =>
+    String(path).endsWith('-fetch.json') ||
+    String(path).endsWith('fetch-report.json')
+      ? { mtimeMs: Date.parse('2026-08-13T00:00:00.000Z') }
+      : undefined,
+  ),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
     (): { sha: string | null; baseFetchFailed: boolean } => ({
@@ -266,11 +272,18 @@ vi.mock('node:fs', async (importOriginal) => {
       mkdirSync: producerMocks.mkdirSync,
       readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
+      statSync: statSyncThroughMock,
     },
     mkdirSync: producerMocks.mkdirSync,
     readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
+    statSync: statSyncThroughMock,
   };
+  function statSyncThroughMock(path?: unknown, ...rest: unknown[]) {
+    const mocked = producerMocks.statSync(path);
+    if (mocked !== undefined) return mocked;
+    return (actual.statSync as (...a: unknown[]) => unknown)(path, ...rest);
+  }
 });
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -318,8 +331,11 @@ vi.mock('./lib/git.js', () => ({
     return { out, status: out === null ? 1 : 0 };
   },
   gitRaw: producerMocks.gitRaw,
+  gitWithInput: vi.fn((): string => ''),
   refExists: producerMocks.refExists,
   releaseWorktree: producerMocks.releaseWorktree,
+  untrustedLocalConfig: vi.fn((): string[] => []),
+  plantedHooks: vi.fn((): string[] => []),
 }));
 
 vi.mock('./lib/merge-base.js', () => ({
@@ -337,7 +353,7 @@ vi.mock('./lib/run-ledger.js', async (importOriginal) => {
     ...actual,
     appendRunSession: vi.fn(),
     priorSessionIds: vi.fn(() => []),
-    sessionEntryCount: vi.fn(() => 0),
+    sessionEntryCount: vi.fn(() => 1),
     ledgerResumeCount: vi.fn(() => 0),
     readResumeMarker: vi.fn(() => ({
       schemaVersion: 1,
@@ -401,6 +417,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -786,6 +803,23 @@ describe('fetch-pr report assembly', () => {
     expect(report.auditSince).toBe('2020-01-01T00:00:00.000Z');
   });
 
+  it('does not inherit an extended-year forgery that sorts before today', async () => {
+    // `'+275760-09-13…'` parses to the maximum Date yet sorts
+    // lexicographically BEFORE any `'2026-…'` string — a string-compared
+    // bound inherited exactly the far-future forgery it exists to reject,
+    // and cleanup's `comments?since=<far future>` audit then returned
+    // nothing. The bound compares numerically.
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '42',
+        auditSince: '+275760-09-13T00:00:00.000Z',
+        fetchedAt: '+275760-09-13T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe(report.fetchedAt);
+  });
+
   it('does not inherit a window from a DIFFERENT PR left at the same path', async () => {
     producerMocks.readFileSync.mockReturnValue(
       JSON.stringify({
@@ -893,6 +927,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 400,
         deletions: 100,
         changedFiles: 9,
@@ -1427,6 +1462,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 800,
         deletions: 100,
         changedFiles: 9,
@@ -1814,6 +1850,7 @@ describe('fetch-pr report assembly', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 400,
         deletions: 100,
         changedFiles: 9,
@@ -3302,6 +3339,7 @@ describe('fetch-pr diff identity (diffSha256)', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -3447,6 +3485,7 @@ describe('fetch-pr run-session ledger wiring', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -3531,6 +3570,7 @@ describe('fetch-pr --resume', () => {
       diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
       mergeBaseSha: 'baseb45eb45e',
       baseRefName: 'main',
+      baseRefOid: 'ba5e0f0ba5e0',
       headRefName: 'feat/x',
       baseFetchFailed: false,
       auditSince: '2026-08-12T00:00:00.000Z',
@@ -3562,6 +3602,7 @@ describe('fetch-pr --resume', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -3574,6 +3615,10 @@ describe('fetch-pr --resume', () => {
     // `status --porcelain` → clean; `ls-files -v` → ordinary tags; the
     // identity probes agree on ONE repository; rev-parse → the fetched SHA.
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
       if (args.includes('status')) return '';
       if (args.includes('ls-files')) return 'H f.txt';
       if (args.includes('--git-common-dir')) return '/repo/.git';
@@ -3593,10 +3638,21 @@ describe('fetch-pr --resume', () => {
     // clearAllMocks resets call history but NOT implementations; re-assert
     // the ledger defaults so a mockReturnValue set by one test cannot leak
     // into the next — the same discipline the fs mock above follows.
-    const { priorSessionIds, readResumeMarker, ledgerResumeCount } =
-      await import('./lib/run-ledger.js');
+    const {
+      priorSessionIds,
+      readResumeMarker,
+      ledgerResumeCount,
+      sessionEntryCount,
+    } = await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
     vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
+    vi.mocked(sessionEntryCount).mockImplementation(() => 1);
+    const { untrustedLocalConfig, plantedHooks, gitWithInput } = await import(
+      './lib/git.js'
+    );
+    vi.mocked(untrustedLocalConfig).mockImplementation(() => []);
+    vi.mocked(plantedHooks).mockImplementation(() => []);
+    vi.mocked(gitWithInput).mockImplementation(() => '');
     vi.mocked(readResumeMarker).mockImplementation(() => ({
       schemaVersion: 1,
       resumes: [],
@@ -3677,6 +3733,7 @@ describe('fetch-pr --resume', () => {
         headRefName: 'feat/x',
         headRefOid: 'aaaa1111bbbb',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -3994,7 +4051,7 @@ describe('fetch-pr --resume', () => {
     const { gitOpt } = await import('./lib/git.js');
     const statusCall = vi
       .mocked(gitOpt)
-      .mock.calls.find((c) => c.includes('status'));
+      .mock.calls.find((c) => c.includes('status') && c.includes('-C'));
     expect(statusCall).toContain('--untracked-files=normal');
   });
 
@@ -4034,6 +4091,10 @@ describe('fetch-pr --resume', () => {
     // and its revert leaves exactly this.
     const { gitOpt } = await import('./lib/git.js');
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
       if (args.includes('status')) return ' M packages/cli/src/x.ts';
       if (args.includes('ls-files')) return 'H f.txt';
       if (args.includes('--git-common-dir')) return '/repo/.git';
@@ -4065,6 +4126,10 @@ describe('fetch-pr --resume', () => {
   it('falls through when the worktree is not at the fetched SHA', async () => {
     const { gitOpt } = await import('./lib/git.js');
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
       if (args.includes('status')) return '';
       if (args.includes('ls-files')) return 'H f.txt';
       if (args.includes('--git-common-dir')) return '/repo/.git';
@@ -4314,16 +4379,176 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
-  it('refuses when the base fetch failed — the left side is attempt-1-writable', async () => {
-    const { resolveMergeBase } = await import('./lib/merge-base.js');
-    vi.mocked(resolveMergeBase).mockImplementation(() => ({
-      sha: 'baseb45eb45e',
-      baseFetchFailed: true,
-    }));
+  it('refuses when the base OBJECT is absent — a fetch failure cannot fall back to refs', async () => {
+    // The left side of the re-derivation is the forge's `baseRefOid`, never
+    // a ref name — a failed or redirected fetch therefore cannot bend it to
+    // attempt-1-writable local refs. What a failed fetch CAN do is leave the
+    // base object absent, and `cat-file -e` then refuses the derivation.
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('cat-file')) return null;
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
     await run();
     expect(reportWritten()).toBe(true);
     expect(await stdoutJsonLines()).toEqual([
       { resumed: false, resumeRefused: 'diff-underivable' },
+    ]);
+  });
+
+  it('refuses untracked residue the exclude games cannot hide — the unexcluded listing', async () => {
+    // A planted per-directory `.gitignore` containing `*` blanks the status
+    // probe; `ls-files --others` without exclude flags lists it anyway.
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return 'payload.sh';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'worktree-dirty' },
+    ]);
+  });
+
+  it('refuses tracked content that does not hash to HEAD — the forged-index shape', async () => {
+    // A forged per-worktree index with patched stat fields blanks status
+    // and ls-files -v; hash-object reads the bytes and the object store is
+    // content-addressed, so the comparison cannot be answered from forged
+    // metadata.
+    const { gitOpt, gitWithInput } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) {
+        return '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tf.txt';
+      }
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    vi.mocked(gitWithInput).mockImplementation(
+      () => 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    );
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'worktree-dirty' },
+    ]);
+  });
+
+  it('refuses command-executing repo-local config', async () => {
+    const { untrustedLocalConfig } = await import('./lib/git.js');
+    vi.mocked(untrustedLocalConfig).mockImplementation(() => [
+      'core.fsmonitor',
+    ]);
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'repo-config-untrusted' },
+    ]);
+  });
+
+  it('refuses a live hook in the common hooks dir', async () => {
+    const { plantedHooks } = await import('./lib/git.js');
+    vi.mocked(plantedHooks).mockImplementation(() => ['reference-transaction']);
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'repo-config-untrusted' },
+    ]);
+  });
+
+  it('refuses a dirty host .gitattributes chain — the re-derivation runs at host cwd', async () => {
+    // An UNTRACKED root `.gitattributes` with `* -diff` collapses the
+    // re-derived hunks to `Binary files differ` under the exact pinned
+    // command; it is part of no diff and no other probe checks it.
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes(':(glob)**/.gitattributes')) {
+        return '?? .gitattributes';
+      }
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'diff-underivable' },
+    ]);
+  });
+
+  it('does not EXECUTE the base fetch or the status refresh under a dirty screen', async () => {
+    // The demonstrated entrances run during probe gathering — hooks fire on
+    // the fetch's ref update, filter.clean inside the status refresh — so a
+    // dirty screen must suppress the probes' execution, not merely distrust
+    // their answers.
+    const { untrustedLocalConfig, gitOpt } = await import('./lib/git.js');
+    vi.mocked(untrustedLocalConfig).mockImplementation(() => [
+      'filter.evil.clean',
+    ]);
+    await run();
+    const calls = vi.mocked(gitOpt).mock.calls;
+    expect(calls.some((c) => c.includes('fetch'))).toBe(false);
+    expect(calls.some((c) => c.includes('status') && c.includes('-C'))).toBe(
+      false,
+    );
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'repo-config-untrusted' },
+    ]);
+  });
+
+  it('refuses a shallow boundary in the common dir', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      if (String(path) === '/repo/.git/shallow') {
+        return 'ba5e0f0ba5e0ba5e0f0ba5e0ba5e0f0ba5e0ba5e\n';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'shallow-present' },
+    ]);
+  });
+
+  it('refuses a valid report beside an empty ledger — deleted bookkeeping', async () => {
+    const { sessionEntryCount } = await import('./lib/run-ledger.js');
+    vi.mocked(sessionEntryCount).mockImplementation(() => 0);
+    await run();
+    expect(await stdoutJsonLines()).toEqual([
+      { resumed: false, resumeRefused: 'ledger-absent' },
     ]);
   });
 
@@ -4366,6 +4591,10 @@ describe('fetch-pr --resume', () => {
   it('refuses a relinked worktree — its answers address another repository', async () => {
     const { gitOpt } = await import('./lib/git.js');
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
       if (args.includes('status')) return '';
       if (args.includes('ls-files')) return 'H f.txt';
       if (args.includes('--git-common-dir')) {
@@ -4387,6 +4616,10 @@ describe('fetch-pr --resume', () => {
   it('treats skip-worktree bits as dirty — status cannot see a tampered file', async () => {
     const { gitOpt } = await import('./lib/git.js');
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
       if (args.includes('status')) return '';
       if (args.includes('ls-files')) return 'S src/tampered.ts';
       if (args.includes('--git-common-dir')) return '/repo/.git';
@@ -4425,7 +4658,7 @@ describe('fetch-pr --resume', () => {
     const { gitOpt } = await import('./lib/git.js');
     const statusCall = vi
       .mocked(gitOpt)
-      .mock.calls.find((c) => c.includes('status'));
+      .mock.calls.find((c) => c.includes('status') && c.includes('-C'));
     expect(statusCall).toContain('core.fsmonitor=false');
     expect(statusCall).toContain(`core.excludesFile=${NULL_DEVICE}`);
     expect(statusCall).toContain('--ignore-submodules=none');
@@ -4485,6 +4718,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       diffPathAbsolute: resolve(tmpFile('pr-42', 'diff.txt')),
       mergeBaseSha: 'baseb45eb45e',
       baseRefName: 'main',
+      baseRefOid: 'ba5e0f0ba5e0',
       headRefName: 'feat/x',
       baseFetchFailed: false,
       auditSince: '2026-08-12T00:00:00.000Z',
@@ -4514,6 +4748,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
         headRefName: 'feat/x',
         headRefOid: 'f00df00df00d',
         baseRefName: 'main',
+        baseRefOid: 'ba5e0f0ba5e0',
         additions: 1,
         deletions: 0,
         changedFiles: 1,
@@ -4525,6 +4760,10 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     // `status --porcelain` → clean; `ls-files -v` → ordinary tags; the
     // identity probes agree on ONE repository; rev-parse → the fetched SHA.
     vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
       if (args.includes('status')) return '';
       if (args.includes('ls-files')) return 'H f.txt';
       if (args.includes('--git-common-dir')) return '/repo/.git';
@@ -4533,10 +4772,21 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       }
       return 'f00df00df00d';
     });
-    const { priorSessionIds, readResumeMarker, ledgerResumeCount } =
-      await import('./lib/run-ledger.js');
+    const {
+      priorSessionIds,
+      readResumeMarker,
+      ledgerResumeCount,
+      sessionEntryCount,
+    } = await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
     vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
+    vi.mocked(sessionEntryCount).mockImplementation(() => 1);
+    const { untrustedLocalConfig, plantedHooks, gitWithInput } = await import(
+      './lib/git.js'
+    );
+    vi.mocked(untrustedLocalConfig).mockImplementation(() => []);
+    vi.mocked(plantedHooks).mockImplementation(() => []);
+    vi.mocked(gitWithInput).mockImplementation(() => '');
     vi.mocked(readResumeMarker).mockImplementation(() => ({
       schemaVersion: 1,
       resumes: [],

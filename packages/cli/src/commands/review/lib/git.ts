@@ -9,7 +9,8 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
 const GIT_TIMEOUT_MS = 120_000;
@@ -266,4 +267,95 @@ export function gitRawTolerateDiff(...args: string[]): Buffer {
     if (e.status === 1 && e.stdout && e.stdout.length > 0) return e.stdout;
     throw err;
   }
+}
+
+/**
+ * Git config keys whose VALUES git executes (directly or through a shell)
+ * during the read-only commands the resume ruling runs — status, diff,
+ * fetch, merge-base, ls-files, ls-tree, rev-parse — plus the two include
+ * keys that pull in config this screen cannot read (undecidable, so they
+ * fail it), and the redirect keys that re-route a fetch to another remote.
+ * The pattern family mirrors `daemon-git-worktree-guard`'s blocklist, cut
+ * to the commands this module actually issues. Matched against lowercased
+ * keys: git folds config key case.
+ */
+const RESUME_UNTRUSTED_CONFIG_PATTERNS: RegExp[] = [
+  /^core\.(askpass|editor|fsmonitor|pager|sshcommand|gitproxy|hookspath)$/,
+  /^credential\./,
+  /^diff\..+\.(command|textconv)$/,
+  /^diff\.external$/,
+  /^difftool\./,
+  /^filter\./,
+  /^gpg\.(.+\.)?program$/,
+  /^merge\..+\.driver$/,
+  /^mergetool\./,
+  /^pager\./,
+  /^sequence\.editor$/,
+  /^uploadpack\.packobjectshook$/,
+  /^gc\.recentobjectshook$/,
+  /^interactive\.difffilter$/,
+  /^remote\..+\.(proxy|receivepack|uploadpack|vcs)$/,
+  /^url\..+\.insteadof$/,
+  /^protocol\.ext\.allow$/,
+  /^ssh\.variant$/,
+  /^include\.path$/,
+  /^includeif\..+\.path$/,
+];
+
+/**
+ * The repo-local (and worktree-scope) config keys the resume ruling must not
+ * run git under — the scopes the reviewed PR's own code can write. Returns
+ * the matching keys, `[]` for a clean config, and `null` when the config
+ * could not be read at all (the caller fails closed: an unreadable screen
+ * clears nothing). System and global scopes are deliberately NOT screened:
+ * they are the operator's (a global `credential.helper` is near-universal),
+ * and refusing on them would refuse every resume on an ordinary machine —
+ * while the demonstrated plants all wrote the repository's own config.
+ */
+export function untrustedLocalConfig(worktree: string): string[] | null {
+  const found = new Set<string>();
+  let sawAnyScope = false;
+  for (const scope of ['--local', '--worktree'] as const) {
+    const listing = gitOpt('-C', worktree, 'config', scope, '--list');
+    if (listing === null) continue;
+    sawAnyScope = true;
+    for (const line of listing.split('\n')) {
+      if (line === '') continue;
+      const key = line.slice(0, line.indexOf('=') >>> 0).toLowerCase();
+      if (RESUME_UNTRUSTED_CONFIG_PATTERNS.some((re) => re.test(key))) {
+        found.add(key);
+      }
+    }
+  }
+  // `--worktree` may refuse (no worktree, old git); `--local` refusing too
+  // means the repository config itself could not be read — fail closed.
+  if (!sawAnyScope) return null;
+  return [...found].sort();
+}
+
+/**
+ * Executable non-sample entries in the repository's hooks directory. A hook
+ * fires on the very commands the ruling runs (`reference-transaction` on the
+ * base fetch's ref update, `post-index-change` on the status refresh), so a
+ * planted one is code execution mid-ruling. `null` when the directory could
+ * not be read for a reason other than absence — unreadable fails closed.
+ */
+export function plantedHooks(hooksDir: string): string[] | null {
+  let names: string[];
+  try {
+    names = readdirSync(hooksDir);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null;
+  }
+  const planted: string[] = [];
+  for (const name of names) {
+    if (name.endsWith('.sample')) continue;
+    try {
+      const st = statSync(join(hooksDir, name));
+      if (st.isFile() && (st.mode & 0o111) !== 0) planted.push(name);
+    } catch {
+      planted.push(name); // unreadable entry: cannot be ruled benign
+    }
+  }
+  return planted.sort();
 }
