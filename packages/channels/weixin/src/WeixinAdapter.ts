@@ -37,6 +37,14 @@ const typingTickets = new Map<string, string>();
  */
 const TYPING_KEEPALIVE_INTERVAL_MS = 4000;
 
+/**
+ * Backstop for a turn that never emits a terminal event (ChannelBase
+ * documents turns whose finally "may settle long after — or never"). After
+ * this long, the keepalive reaps itself and sends CANCEL, so a wedged chat
+ * cannot be refreshed indefinitely.
+ */
+export const TYPING_KEEPALIVE_MAX_MS = 10 * 60 * 1000;
+
 /** Escape special regex characters in a string. */
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -50,6 +58,9 @@ export class WeixinChannel extends ChannelBase {
     ReturnType<typeof setInterval>
   >();
   private typingKeepaliveInFlight = new Set<string>();
+  private typingKeepaliveArmedAt = new Map<string, number>();
+  /** Per-chat generation token; stale setTyping continuations bail out. */
+  private typingGenerations = new Map<string, number>();
   private baseUrl: string;
   private token: string = '';
 
@@ -310,6 +321,8 @@ export class WeixinChannel extends ChannelBase {
     }
     this.typingKeepaliveIntervals.clear();
     this.typingKeepaliveInFlight.clear();
+    this.typingKeepaliveArmedAt.clear();
+    this.typingGenerations.clear();
     this.activeTypingChats.clear();
   }
 
@@ -317,10 +330,22 @@ export class WeixinChannel extends ChannelBase {
     if (this.activeTypingChats.has(chatId)) return;
     this.activeTypingChats.add(chatId);
     const controller = this.abortController;
+    const generation = (this.typingGenerations.get(chatId) ?? 0) + 1;
+    this.typingGenerations.set(chatId, generation);
     void this.setTyping(chatId, true).then((started) => {
       // Disconnect (or reconnect) raced the request — don't fire a
       // post-disconnect setTyping(false).
       if (controller !== this.abortController || controller?.signal.aborted) {
+        return;
+      }
+      // A successor turn (or stopTyping) already moved on — a stale result
+      // must not touch the live turn's typing state. A late success still
+      // re-set the server-side indicator after our CANCEL, so compensate;
+      // a late failure is harmless and must not delete live state.
+      if (generation !== this.typingGenerations.get(chatId)) {
+        if (started) {
+          void this.setTyping(chatId, false);
+        }
         return;
       }
       if (!started) {
@@ -336,6 +361,11 @@ export class WeixinChannel extends ChannelBase {
   }
 
   private stopTyping(chatId: string): void {
+    // Invalidate any in-flight initial TYPING of a previous turn.
+    this.typingGenerations.set(
+      chatId,
+      (this.typingGenerations.get(chatId) ?? 0) + 1,
+    );
     this.stopTypingKeepalive(chatId);
     if (!this.activeTypingChats.delete(chatId)) return;
     void this.setTyping(chatId, false);
@@ -344,17 +374,28 @@ export class WeixinChannel extends ChannelBase {
   /**
    * Refreshes TYPING periodically while the chat stays in
    * `activeTypingChats`, so the indicator survives long turns. The interval
-   * is only armed after the initial TYPING is confirmed, and each tick skips
-   * (and reaps itself) once the chat is no longer typing, so a missed
-   * terminal event cannot keep it alive indefinitely.
+   * is only armed after the initial TYPING is confirmed, and each tick
+   * self-reaps once the chat is no longer typing or the backstop
+   * (`TYPING_KEEPALIVE_MAX_MS`) elapses, so a missed terminal event cannot
+   * keep it alive indefinitely.
    */
   private startTypingKeepalive(chatId: string): void {
     if (this.typingKeepaliveIntervals.has(chatId)) return;
+    this.typingKeepaliveArmedAt.set(chatId, Date.now());
     this.typingKeepaliveIntervals.set(
       chatId,
       setInterval(() => {
         if (!this.activeTypingChats.has(chatId)) {
           this.stopTypingKeepalive(chatId);
+          return;
+        }
+        const armedAt = this.typingKeepaliveArmedAt.get(chatId);
+        if (
+          armedAt !== undefined &&
+          Date.now() - armedAt >= TYPING_KEEPALIVE_MAX_MS
+        ) {
+          // Wedged turn — bound the leak and clear the indicator.
+          this.stopTyping(chatId);
           return;
         }
         // Don't overlap keepalive requests for the same chat.
@@ -372,6 +413,7 @@ export class WeixinChannel extends ChannelBase {
     if (interval === undefined) return;
     clearInterval(interval);
     this.typingKeepaliveIntervals.delete(chatId);
+    this.typingKeepaliveArmedAt.delete(chatId);
   }
 
   private async setTyping(userId: string, typing: boolean): Promise<boolean> {

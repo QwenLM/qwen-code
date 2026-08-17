@@ -14,7 +14,7 @@ vi.mock('./api.js', async () => {
   };
 });
 
-import { WeixinChannel } from './WeixinAdapter.js';
+import { TYPING_KEEPALIVE_MAX_MS, WeixinChannel } from './WeixinAdapter.js';
 import { TypingStatus } from './types.js';
 import type {
   ChannelAgentBridge,
@@ -364,6 +364,124 @@ describe('WeixinChannel', () => {
 
       await vi.advanceTimersByTimeAsync(16000);
       expect(apiMocks.sendTyping).toHaveBeenCalledTimes(3);
+    });
+
+    it('re-arms the keepalive on a second turn of the same chat', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-rearm', 'session-rearm');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(4000);
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      // Initial TYPING, one refresh, terminal CANCEL.
+      expect(setTyping).toHaveBeenCalledTimes(3);
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(4);
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(5);
+      expect(setTyping).toHaveBeenLastCalledWith('user-rearm', true);
+    });
+
+    it('keeps other chats refreshing when one chat terminates', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const baseA = keepaliveEvent('user-iso-a', 'session-iso-a');
+      const baseB = keepaliveEvent('user-iso-b', 'session-iso-b');
+
+      channel.emitLifecycle({ ...baseA, type: 'started' });
+      channel.emitLifecycle({ ...baseB, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(4);
+
+      channel.emitLifecycle({ ...baseA, type: 'completed' });
+      expect(setTyping).toHaveBeenCalledTimes(5);
+      expect(setTyping).toHaveBeenLastCalledWith('user-iso-a', false);
+
+      await vi.advanceTimersByTimeAsync(8000);
+      // Only chat B keeps refreshing.
+      expect(setTyping).toHaveBeenCalledTimes(7);
+      expect(setTyping).toHaveBeenLastCalledWith('user-iso-b', true);
+    });
+
+    it('keeps the keepalive armed when a refresh fails', async () => {
+      const channel = createChannel();
+      const setTyping = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-retry', 'session-retry');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(1);
+
+      // The first refresh fails transiently; the next tick still retries.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(3);
+      expect(setTyping).toHaveBeenLastCalledWith('user-retry', true);
+    });
+
+    it('stops refreshing a wedged turn after the backstop elapses', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-wedged', 'session-wedged');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(1);
+
+      // No terminal event ever arrives.
+      await vi.advanceTimersByTimeAsync(TYPING_KEEPALIVE_MAX_MS + 4000);
+      const callsAtBackstop = setTyping.mock.calls.length;
+      expect(setTyping).toHaveBeenLastCalledWith('user-wedged', false);
+
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(setTyping).toHaveBeenCalledTimes(callsAtBackstop);
+    });
+
+    it('ignores a stale failed initial TYPING from a previous turn', async () => {
+      const channel = createChannel();
+      const stale = deferredPromise<boolean>();
+      const setTyping = vi
+        .fn()
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-stale', 'session-stale');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      channel.emitLifecycle({ ...base, type: 'cancelled' });
+      // Turn 2 starts before turn 1's stalled request settles.
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      // Stalled initial, terminal CANCEL, turn-2 initial.
+      expect(setTyping).toHaveBeenCalledTimes(3);
+
+      // Turn 1's request finally fails — must not delete turn 2's state.
+      stale.resolve(false);
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(8000);
+      // Turn-2 initial plus two keepalive refreshes.
+      expect(setTyping).toHaveBeenCalledTimes(5);
+      expect(setTyping).toHaveBeenLastCalledWith('user-stale', true);
+
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      expect(setTyping).toHaveBeenLastCalledWith('user-stale', false);
     });
   });
 });
