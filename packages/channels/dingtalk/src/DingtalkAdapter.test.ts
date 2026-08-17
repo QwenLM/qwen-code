@@ -39,6 +39,16 @@ function createTempPng(): { dir: string; path: string } {
   return { dir, path };
 }
 
+function createTempFile(
+  fileName = 'report.txt',
+  contents = 'report',
+): { dir: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-file-'));
+  const path = join(dir, fileName);
+  writeFileSync(path, contents);
+  return { dir, path };
+}
+
 vi.mock('dingtalk-stream-sdk-nodejs', () => ({
   DWClient: class {
     debug = true;
@@ -253,6 +263,17 @@ it('adds outbound image instructions without replacing custom instructions', () 
 
   expect(instructions).toContain('Keep the answer concise.');
   expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
+  expect(instructions).toContain('[FILE: /absolute/path/to/file]');
+});
+
+it('does not advertise outbound files in block-streaming mode', () => {
+  const channel = createChannel({ blockStreaming: 'on' });
+  const instructions = (
+    channel as unknown as { config: { instructions: string } }
+  ).config.instructions;
+
+  expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
+  expect(instructions).not.toContain('[FILE: /absolute/path/to/file]');
 });
 
 it('validates interactive card config in the adapter', () => {
@@ -3876,6 +3897,500 @@ describe('DingtalkChannel outbound image delivery', () => {
   });
 });
 
+describe('DingtalkChannel outbound file delivery', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubFileReplyFetch(options?: {
+    uploadTokenHandler?: (tokenCall: number) => Response;
+    uploadHandler?: (uploadCall: number) => Response;
+    fileHandler?: (fileCall: number) => Response;
+    markdownHandler?: (markdownCall: number) => Response;
+  }) {
+    let uploadCall = 0;
+    let uploadTokenCall = 0;
+    let robotTokenCall = 0;
+    let fileCall = 0;
+    let markdownCall = 0;
+    const events: string[] = [];
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          events.push('upload-token');
+          return Promise.resolve(
+            options?.uploadTokenHandler?.(uploadTokenCall++) ??
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: 'upload-token',
+                  expires_in: 7200,
+                }),
+                { status: 200 },
+              ),
+          );
+        }
+        if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+          events.push('upload');
+          const call = uploadCall++;
+          return Promise.resolve(
+            options?.uploadHandler?.(call) ??
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  media_id: `@lAL-file-media-${call + 1}`,
+                }),
+                { status: 200 },
+              ),
+          );
+        }
+        if (url === 'https://api.dingtalk.com/v1.0/oauth2/accessToken') {
+          events.push('robot-token');
+          robotTokenCall++;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                accessToken: `robot-token-${robotTokenCall}`,
+                expireIn: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as { msgtype?: string };
+        events.push(body.msgtype ?? 'unknown');
+        if (body.msgtype === 'file') {
+          return Promise.resolve(
+            options?.fileHandler?.(fileCall++) ??
+              new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+          );
+        }
+        if (body.msgtype === 'markdown') {
+          return Promise.resolve(
+            options?.markdownHandler?.(markdownCall++) ??
+              new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+        );
+      });
+    const webhookCalls = () =>
+      spy.mock.calls.filter((call) =>
+        String(call[0]).startsWith(
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        ),
+      );
+    return {
+      events,
+      fileCalls: () =>
+        webhookCalls().filter((call) => {
+          const body = JSON.parse(String((call[1] as RequestInit).body)) as {
+            msgtype?: string;
+          };
+          return body.msgtype === 'file';
+        }),
+      markdownCalls: () =>
+        webhookCalls().filter((call) => {
+          const body = JSON.parse(String((call[1] as RequestInit).body)) as {
+            msgtype?: string;
+          };
+          return body.msgtype === 'markdown';
+        }),
+      robotTokenCalls: () =>
+        spy.mock.calls.filter(
+          (call) =>
+            String(call[0]) ===
+            'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+        ),
+      uploadTokenCalls: () =>
+        spy.mock.calls.filter((call) =>
+          String(call[0]).startsWith('https://oapi.dingtalk.com/gettoken'),
+        ),
+      uploadCalls: () =>
+        spy.mock.calls.filter((call) =>
+          String(call[0]).startsWith('https://oapi.dingtalk.com/media/upload'),
+        ),
+    };
+  }
+
+  it('uploads and sends a native file after path-free Markdown', async () => {
+    const file = createTempFile('周报 final.PDF');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { events, fileCalls, markdownCalls, robotTokenCalls, uploadCalls } =
+        stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `before\n[FILE: ${file.path}]\nafter`,
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      const uploadUrl = String(uploadCalls()[0]![0]);
+      expect(uploadUrl).toContain('type=file');
+      expect(robotTokenCalls()).toHaveLength(0);
+      const markdownBody = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdownBody.markdown.text).toContain(
+        '[File sent: 周报 final.PDF]',
+      );
+      expect(markdownBody.markdown.text).not.toContain(file.path);
+      expect(markdownBody.markdown.text).not.toContain('[FILE:');
+      const fileCall = fileCalls()[0]!;
+      expect(
+        (fileCall[1] as RequestInit).headers as Record<string, string>,
+      ).not.toHaveProperty('x-acs-dingtalk-access-token');
+      expect(JSON.parse(String((fileCall[1] as RequestInit).body))).toEqual({
+        msgtype: 'file',
+        file: {
+          mediaId: '@lAL-file-media-1',
+          fileName: '周报 final.PDF',
+          fileType: 'pdf',
+        },
+      });
+      expect(events).toEqual(['upload-token', 'upload', 'markdown', 'file']);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not upload a file when the reply webhook is unavailable', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      await channel.sendMessage('missing-chat', `[FILE: ${file.path}]`);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('prepares a status-card file once and sends it after finalization', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { events, fileCalls, uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockImplementation(() => {
+        events.push('card');
+        return Promise.resolve(true);
+      });
+      (
+        channel as unknown as {
+          interactionPresenter: { closeOutput: typeof closeOutput };
+        }
+      ).interactionPresenter = { closeOutput };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getCompleteHook(channel)(
+        'cid-1',
+        `[FILE: ${file.path}]`,
+        'session-1',
+        segment,
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '[File sent: report.txt]',
+        'completed',
+        segment,
+      );
+      expect(events.indexOf('card')).toBeLessThan(events.indexOf('file'));
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reuses the prepared file when status-card finalization falls back', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+      const closeOutput = vi.fn().mockResolvedValue(false);
+      (
+        channel as unknown as {
+          interactionPresenter: { closeOutput: typeof closeOutput };
+        }
+      ).interactionPresenter = { closeOutput };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getCompleteHook(channel)(
+        'cid-1',
+        `[FILE: ${file.path}]`,
+        'session-1',
+        segment,
+      );
+
+      expect(closeOutput).toHaveBeenCalledOnce();
+      expect(uploadCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes the upload token once on an explicit auth failure', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, uploadCalls, uploadTokenCalls } = stubFileReplyFetch({
+        uploadTokenHandler: (tokenCall) =>
+          new Response(
+            JSON.stringify({
+              errcode: 0,
+              access_token: `upload-token-${tokenCall + 1}`,
+              expires_in: 7200,
+            }),
+            { status: 200 },
+          ),
+        uploadHandler: (uploadCall) =>
+          uploadCall === 0
+            ? new Response(
+                JSON.stringify({ errcode: 42001, errmsg: 'token expired' }),
+                { status: 200 },
+              )
+            : new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  media_id: '@lAL-file-media-refreshed',
+                }),
+                { status: 200 },
+              ),
+      });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(uploadTokenCalls()).toHaveLength(2);
+      expect(uploadCalls()).toHaveLength(2);
+      expect(String(uploadCalls()[0]![0])).toContain('upload-token-1');
+      expect(String(uploadCalls()[1]![0])).toContain('upload-token-2');
+      const fileBody = JSON.parse(
+        String((fileCalls()[0]![1] as RequestInit).body),
+      );
+      expect(fileBody.file.mediaId).toBe('@lAL-file-media-refreshed');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes the robot token once on an explicit file-delivery 401', async () => {
+    const channel = createChannel();
+    let tokenCall = 0;
+    let deliveryCall = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        if (
+          String(input) === 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
+        ) {
+          tokenCall++;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                accessToken: `robot-token-${tokenCall}`,
+                expireIn: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        deliveryCall++;
+        return Promise.resolve(
+          deliveryCall === 1
+            ? new Response('expired', { status: 401 })
+            : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+        );
+      });
+
+    await (
+      channel as unknown as {
+        postRobotFileMessage(
+          url: string,
+          body: Record<string, unknown>,
+        ): Promise<Record<string, unknown>>;
+      }
+    ).postRobotFileMessage(
+      'https://api.dingtalk.com/v1.0/robot/groupMessages/send',
+      { msgKey: 'sampleFile' },
+    );
+
+    expect(tokenCall).toBe(2);
+    expect(deliveryCall).toBe(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not forward a robot token to an untrusted file endpoint', async () => {
+    const channel = createChannel();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(
+      (
+        channel as unknown as {
+          postRobotFileMessage(
+            url: string,
+            body: Record<string, unknown>,
+          ): Promise<Record<string, unknown>>;
+        }
+      ).postRobotFileMessage('https://example.com/collect', {
+        msgtype: 'file',
+      }),
+    ).rejects.toThrow('untrusted endpoint');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not retry an ambiguous file failure and sends a safe notice', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () => {
+          throw new Error(`connection reset for ${file.path}`);
+        },
+      });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(2);
+      const failure = JSON.parse(
+        String((markdownCalls()[1]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(failure.markdown.text).toContain(
+        '[File delivery failed: report.txt]',
+      );
+      expect(failure.markdown.text).not.toContain(file.path);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a nonzero DingTalk code in a successful HTTP response', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(2);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('continues with later files when a failure notice cannot be sent', async () => {
+    const first = createTempFile('first.txt');
+    const secondPath = join(first.dir, 'second.txt');
+    writeFileSync(secondPath, 'second');
+    try {
+      const channel = createChannel({ cwd: first.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { fileCalls } = stubFileReplyFetch({
+        fileHandler: (fileCall) =>
+          fileCall === 0
+            ? new Response('rejected', { status: 500 })
+            : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+        markdownHandler: (markdownCall) => {
+          if (markdownCall === 1) throw new Error('notice unavailable');
+          return new Response(JSON.stringify({ errcode: 0 }), { status: 200 });
+        },
+      });
+
+      await channel.sendMessage(
+        'cid123',
+        `[FILE: ${first.path}]\n[FILE: ${secondPath}]`,
+      );
+
+      expect(fileCalls()).toHaveLength(2);
+    } finally {
+      rmSync(first.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('opens and uploads at most five files from one response', async () => {
+    const file = createTempFile('file-1.txt');
+    try {
+      const paths = [file.path];
+      for (let i = 2; i <= 5; i++) {
+        const path = join(file.dir, `file-${i}.txt`);
+        writeFileSync(path, String(i));
+        paths.push(path);
+      }
+      paths.push(join(file.dir, 'file-6-does-not-exist.txt'));
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        paths.map((path) => `[FILE: ${path}]`).join('\n'),
+      );
+
+      expect(uploadCalls()).toHaveLength(5);
+      expect(fileCalls()).toHaveLength(5);
+      const markdown = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdown.markdown.text).toContain(
+        '[File delivery failed: response file limit exceeded]',
+      );
+      expect(markdown.markdown.text).not.toContain(
+        '[File delivery failed: file-6-does-not-exist.txt]',
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('DingtalkChannel proactive send', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -3921,9 +4436,15 @@ describe('DingtalkChannel proactive send', () => {
         JSON.stringify({ errcode: 0, media_id: '@lAL-proactive-media-id' }),
         { status: 200 },
       ),
+    robotTokenHandler: (tokenCall: number) => Response = () =>
+      new Response(
+        JSON.stringify({ accessToken: 'robot-api-token', expireIn: 7200 }),
+        { status: 200 },
+      ),
   ) {
     let sendCall = 0;
     let uploadCall = 0;
+    let robotTokenCall = 0;
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockImplementation((input: RequestInfo | URL) => {
@@ -3933,6 +4454,9 @@ describe('DingtalkChannel proactive send', () => {
         }
         if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
           return Promise.resolve(mediaHandler(uploadCall++));
+        }
+        if (url === 'https://api.dingtalk.com/v1.0/oauth2/accessToken') {
+          return Promise.resolve(robotTokenHandler(robotTokenCall++));
         }
         return Promise.resolve(sendHandler(sendCall++));
       });
@@ -3946,6 +4470,8 @@ describe('DingtalkChannel proactive send', () => {
         calls('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'),
       mediaCalls: () => calls('https://oapi.dingtalk.com/media/upload'),
       tokenCalls: () => calls('https://oapi.dingtalk.com/gettoken'),
+      robotTokenCalls: () =>
+        calls('https://api.dingtalk.com/v1.0/oauth2/accessToken'),
     };
   }
 
@@ -4074,6 +4600,153 @@ describe('DingtalkChannel proactive send', () => {
       );
     } finally {
       rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads and sends a native file to a proactive group target', async () => {
+    const file = createTempFile('group report.pdf');
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      const { mediaCalls, robotTokenCalls, sendCalls } = stubProactiveFetch(
+        (sendCall) =>
+          new Response(
+            JSON.stringify(
+              sendCall === 0 ? {} : { processQueryKey: 'file-key' },
+            ),
+            { status: 200 },
+          ),
+      );
+
+      await channel.pushProactive(groupTarget, `[FILE: ${file.path}]`);
+
+      expect(mediaCalls()).toHaveLength(1);
+      expect(String(mediaCalls()[0]![0])).toContain('type=file');
+      expect(robotTokenCalls()).toHaveLength(1);
+      const sends = sendCalls();
+      expect(sends).toHaveLength(2);
+      const fileInit = sends[1]![1] as RequestInit;
+      expect(
+        (fileInit.headers as Record<string, string>)[
+          'x-acs-dingtalk-access-token'
+        ],
+      ).toBe('robot-api-token');
+      const body = JSON.parse(String(fileInit.body));
+      expect(body).toMatchObject({
+        robotCode: 'client-id',
+        openConversationId: groupTarget.chatId,
+        msgKey: 'sampleFile',
+      });
+      expect(JSON.parse(body.msgParam)).toEqual({
+        mediaId: '@lAL-proactive-media-id',
+        fileName: 'group report.pdf',
+        fileType: 'pdf',
+      });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sends a native file to a proactive direct target', async () => {
+    const file = createTempFile();
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      const { directSendCalls, mediaCalls, robotTokenCalls } =
+        stubProactiveFetch(
+          (sendCall) =>
+            new Response(
+              JSON.stringify(
+                sendCall === 0 ? {} : { processQueryKey: 'direct-file-key' },
+              ),
+              { status: 200 },
+            ),
+        );
+
+      await channel.pushProactive(directTarget, `[FILE: ${file.path}]`);
+
+      const sends = directSendCalls();
+      expect(mediaCalls()).toHaveLength(1);
+      expect(robotTokenCalls()).toHaveLength(1);
+      expect(sends).toHaveLength(2);
+      const fileInit = sends[1]![1] as RequestInit;
+      expect(
+        (fileInit.headers as Record<string, string>)[
+          'x-acs-dingtalk-access-token'
+        ],
+      ).toBe('robot-api-token');
+      const body = JSON.parse(String(fileInit.body));
+      expect(body.userIds).toEqual([directTarget.chatId]);
+      expect(body.openConversationId).toBeUndefined();
+      expect(body.msgKey).toBe('sampleFile');
+      expect(JSON.parse(body.msgParam)).toEqual({
+        mediaId: '@lAL-proactive-media-id',
+        fileName: 'report.txt',
+        fileType: 'txt',
+      });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not accept a proactive file response without processQueryKey', async () => {
+    const file = createTempFile();
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { sendCalls } = stubProactiveFetch(
+        () => new Response('{}', { status: 200 }),
+      );
+
+      await expect(
+        channel.pushProactive(groupTarget, `[FILE: ${file.path}]`),
+      ).rejects.toThrow('missing processQueryKey');
+
+      expect(sendCalls()).toHaveLength(3);
+      const bodies = sendCalls().map((call) =>
+        JSON.parse(String((call[1] as RequestInit).body)),
+      );
+      expect(
+        bodies.filter((body) => body.msgKey === 'sampleFile'),
+      ).toHaveLength(1);
+      expect(
+        bodies.filter((body) => body.msgKey === 'sampleMarkdown'),
+      ).toHaveLength(2);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('continues with later proactive files after one delivery fails', async () => {
+    const first = createTempFile('first.txt');
+    const secondPath = join(first.dir, 'second.txt');
+    writeFileSync(secondPath, 'second');
+    try {
+      const channel = proactive(createChannel({ cwd: first.dir }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { sendCalls } = stubProactiveFetch(
+        (sendCall) =>
+          new Response(
+            JSON.stringify(
+              sendCall === 3 ? { processQueryKey: 'second-file-key' } : {},
+            ),
+            { status: 200 },
+          ),
+      );
+
+      await expect(
+        channel.pushProactive(
+          groupTarget,
+          `[FILE: ${first.path}]\n[FILE: ${secondPath}]`,
+        ),
+      ).rejects.toThrow('missing processQueryKey');
+
+      const bodies = sendCalls().map((call) =>
+        JSON.parse(String((call[1] as RequestInit).body)),
+      );
+      const fileBodies = bodies.filter((body) => body.msgKey === 'sampleFile');
+      expect(fileBodies).toHaveLength(2);
+      expect(JSON.parse(fileBodies[1]!.msgParam).fileName).toBe('second.txt');
+    } finally {
+      rmSync(first.dir, { recursive: true, force: true });
     }
   });
 

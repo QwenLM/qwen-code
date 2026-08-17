@@ -26,6 +26,14 @@ import {
   uploadDingTalkImage,
 } from './outbound-image.js';
 import {
+  MAX_FILES_PER_RESPONSE,
+  findFileMarkers,
+  readValidatedFile,
+  replaceFileMarkers,
+  safeFileName,
+  uploadDingTalkFile,
+} from './outbound-file.js';
+import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
@@ -127,9 +135,12 @@ const EMOTION_RETRY_BASE_DELAY_MS = 250;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
+const ROBOT_TOKEN_API = 'https://api.dingtalk.com/v1.0/oauth2/accessToken';
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
+const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
 const mentionTarget = Symbol('mentionTarget');
 const IMAGE_INSTRUCTIONS = [
   '',
@@ -139,6 +150,15 @@ const IMAGE_INSTRUCTIONS = [
   'The marker is stripped from text and the image is uploaded automatically.',
   '',
   'Only use a real image file inside the workspace or system temporary directory.',
+].join('\n');
+const FILE_INSTRUCTIONS = [
+  '',
+  'If the user explicitly asks you to send a file that exists inside the workspace or system temporary directory, include this in the final answer:',
+  '`[FILE: /absolute/path/to/file]` (without the backticks)',
+  '',
+  'Use the marker only after the file is complete. Do not use it in progress text, inside code, or before asking the user for input.',
+  'The whole marker must sit on one line, and the path must not contain `]`. If it does, copy the file to a path without brackets first.',
+  'Do not claim that delivery succeeded; DingTalk will show the file as a separate attachment.',
 ].join('\n');
 
 type MentionTargetEnvelope = Envelope & {
@@ -182,6 +202,23 @@ interface DingTalkTokenResponse {
 interface DingTalkDirectMessageResponse {
   flowControlledStaffIdList?: string[];
   invalidStaffIdList?: string[];
+  processQueryKey?: string;
+}
+
+interface DingTalkRobotTokenResponse {
+  accessToken?: string;
+  expireIn?: number;
+}
+
+interface PreparedDingTalkFile {
+  mediaId: string;
+  fileName: string;
+  fileType: string;
+}
+
+interface PreparedDingTalkOutput {
+  text: string;
+  files: PreparedDingTalkFile[];
 }
 
 type DingTalkClientInternals = DWClient & {
@@ -226,6 +263,7 @@ export class DingtalkChannel extends ChannelBase {
    * on (re)connect, so a long-lived socket serves a stale one after ~2h.
    */
   private proactiveToken?: { token: string; expiresAt: number };
+  private robotApiToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
@@ -245,15 +283,23 @@ export class DingtalkChannel extends ChannelBase {
 
     this.atSender =
       (config as unknown as Record<string, unknown>)['atSender'] === true;
+    const fileInstructions =
+      config.blockStreaming === 'on' ? '' : FILE_INSTRUCTIONS;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## DingTalk Channel',
         '',
         'You are responding through DingTalk.',
         IMAGE_INSTRUCTIONS,
+        fileInstructions,
       ].join('\n');
-    } else if (!this.config.instructions.includes('[IMAGE:')) {
-      this.config.instructions += IMAGE_INSTRUCTIONS;
+    } else {
+      if (!this.config.instructions.includes('[IMAGE:')) {
+        this.config.instructions += IMAGE_INSTRUCTIONS;
+      }
+      if (fileInstructions && !this.config.instructions.includes('[FILE:')) {
+        this.config.instructions += fileInstructions;
+      }
     }
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
       (config as DingtalkChannelConfig).interactiveCards,
@@ -578,7 +624,7 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  private async prepareOutgoingText(text: string): Promise<string> {
+  private async prepareOutgoingImages(text: string): Promise<string> {
     const markers = findImageMarkers(text);
     if (markers.length === 0) return text;
 
@@ -631,24 +677,95 @@ export class DingtalkChannel extends ChannelBase {
     return replaceImageMarkers(text, markers, replacements);
   }
 
-  private async sendReply(
+  private async prepareOutgoingContent(
+    text: string,
+  ): Promise<PreparedDingTalkOutput> {
+    const imageText = await this.prepareOutgoingImages(text);
+    const markers = findFileMarkers(imageText);
+    if (markers.length === 0) return { text: imageText, files: [] };
+
+    const files: PreparedDingTalkFile[] = [];
+    const replacements: string[] = [];
+    for (const [index, marker] of markers.entries()) {
+      if (index >= MAX_FILES_PER_RESPONSE) {
+        replacements.push(
+          '[File delivery failed: response file limit exceeded]',
+        );
+        continue;
+      }
+
+      const fileName = safeFileName(marker.path);
+      try {
+        const file = readValidatedFile(marker.path, {
+          workspaceDir: this.config.cwd,
+        });
+        let mediaId: string | undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const token = await this.getProactiveToken();
+          try {
+            mediaId = await uploadDingTalkFile(file, token);
+            break;
+          } catch (error) {
+            if (
+              error instanceof DingTalkMediaUploadError &&
+              error.authFailure &&
+              attempt === 0
+            ) {
+              this.proactiveToken = undefined;
+              continue;
+            }
+            throw error;
+          }
+        }
+        if (!mediaId) {
+          throw new Error('DingTalk media upload returned no MediaID');
+        }
+        files.push({
+          mediaId,
+          fileName: file.fileName,
+          fileType: file.fileType,
+        });
+        // "File sent:", not "File:" — the latter self-matches the FILE marker
+        // pattern, so every display-side sanitizer deleted the receipt again on
+        // its way out and a file-only response rendered an empty final card.
+        replacements.push(`[File sent: ${file.fileName}]`);
+      } catch (error) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] outbound file upload failed (${sanitizeLogText(
+            fileName,
+            255,
+          )}): ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        replacements.push(`[File delivery failed: ${fileName}]`);
+      }
+    }
+
+    return {
+      text: replaceFileMarkers(imageText, markers, replacements),
+      files,
+    };
+  }
+
+  private async sendPreparedReply(
     chatId: string,
     text: string,
     atUserId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
       process.stderr.write(
         `[DingTalk:${this.name}] No webhook for chatId ${chatId}, cannot send.\n`,
       );
-      return;
+      return false;
     }
 
-    const outgoingText = await this.prepareOutgoingText(text);
     const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
-    const chunks = normalizeDingTalkMarkdown(mentionPrefix + outgoingText);
-    const title = extractTitle(outgoingText);
+    const chunks = normalizeDingTalkMarkdown(mentionPrefix + text);
+    const title = extractTitle(text);
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
@@ -694,6 +811,22 @@ export class DingtalkChannel extends ChannelBase {
         );
       }
     }
+    return true;
+  }
+
+  private async sendReply(
+    chatId: string,
+    text: string,
+    atUserId?: string,
+  ): Promise<void> {
+    if (!this.webhooks.has(chatId)) {
+      await this.sendPreparedReply(chatId, text, atUserId);
+      return;
+    }
+    const prepared = await this.prepareOutgoingContent(text);
+    if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId)))
+      return;
+    await this.sendReplyFiles(chatId, prepared.files);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -744,9 +877,9 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (!text.trim()) return;
 
-    const outgoingText = await this.prepareOutgoingText(text);
-    const chunks = normalizeDingTalkMarkdown(outgoingText);
-    const title = extractTitle(outgoingText);
+    const prepared = await this.prepareOutgoingContent(text);
+    const chunks = normalizeDingTalkMarkdown(prepared.text);
+    const title = extractTitle(prepared.text);
 
     for (let i = 0; i < chunks.length; i++) {
       await this.sendProactiveChunk(
@@ -756,6 +889,44 @@ export class DingtalkChannel extends ChannelBase {
         `chunk ${i + 1}/${chunks.length}`,
       );
     }
+
+    let firstError: Error | undefined;
+    for (const file of prepared.files) {
+      try {
+        await this.sendProactiveFile(target, file);
+      } catch (error) {
+        const deliveryError =
+          error instanceof Error ? error : new Error(String(error));
+        firstError ??= deliveryError;
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive file delivery failed (${sanitizeLogText(
+            file.fileName,
+            255,
+          )}): ${sanitizeLogText(deliveryError.message, 300)}\n`,
+        );
+        try {
+          await this.sendProactiveChunk(
+            target,
+            'File delivery failed',
+            `[File delivery failed: ${file.fileName}]`,
+            'file delivery failure notice',
+          );
+        } catch (noticeError) {
+          // `firstError` is always set by the enclosing catch, so this can only
+          // ever be logged — assigning it would be dead code. Losing the notice
+          // matters though: the user is left with neither the file nor a reason.
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive file failure notice not delivered: ${sanitizeLogText(
+              noticeError instanceof Error
+                ? noticeError.message
+                : String(noticeError),
+              300,
+            )}\n`,
+          );
+        }
+      }
+    }
+    if (firstError) throw firstError;
   }
 
   private async getProactiveToken(): Promise<string> {
@@ -793,6 +964,226 @@ export class DingtalkChannel extends ChannelBase {
         Date.now() + Math.max(60, (data.expires_in ?? 7200) - 60) * 1000,
     };
     return data.access_token;
+  }
+
+  private async getRobotApiToken(): Promise<string> {
+    const cached = this.robotApiToken;
+    if (cached && Date.now() < cached.expiresAt) return cached.token;
+
+    let response: Response;
+    try {
+      response = await fetch(ROBOT_TOKEN_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appKey: this.config.clientId!,
+          appSecret: this.config.clientSecret!,
+        }),
+        signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error('DingTalk robot access token fetch failed');
+    }
+
+    let data: DingTalkRobotTokenResponse;
+    try {
+      data = (await response.json()) as DingTalkRobotTokenResponse;
+    } catch {
+      throw new Error(
+        `DingTalk robot access token request failed: HTTP ${response.status} invalid JSON response`,
+      );
+    }
+    if (!response.ok || !data.accessToken) {
+      throw new Error(
+        `DingTalk robot access token request failed: HTTP ${response.status}`,
+      );
+    }
+
+    this.robotApiToken = {
+      token: data.accessToken,
+      expiresAt: Date.now() + Math.max(60, (data.expireIn ?? 7200) - 60) * 1000,
+    };
+    return data.accessToken;
+  }
+
+  private async postRobotFileMessage(
+    url: string,
+    body: Record<string, unknown>,
+    authentication: 'robot-api' | 'session-webhook' = 'robot-api',
+  ): Promise<Record<string, unknown>> {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(url);
+    } catch {
+      throw new Error('DingTalk file delivery failed: invalid endpoint');
+    }
+    if (
+      endpoint.protocol !== 'https:' ||
+      endpoint.port !== '' ||
+      !ROBOT_MESSAGE_HOSTS.has(endpoint.hostname)
+    ) {
+      throw new Error('DingTalk file delivery failed: untrusted endpoint');
+    }
+
+    const usesRobotApiToken = authentication === 'robot-api';
+    const attempts = usesRobotApiToken ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const token = usesRobotApiToken
+        ? await this.getRobotApiToken()
+        : undefined;
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            ...(token ? { 'x-acs-dingtalk-access-token': token } : undefined),
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
+        });
+      } catch {
+        throw new Error(
+          'DingTalk file delivery failed: network request failed',
+        );
+      }
+
+      if (usesRobotApiToken && response.status === 401 && attempt === 0) {
+        this.robotApiToken = undefined;
+        await response.body?.cancel();
+        continue;
+      }
+
+      const responseText = await response.text().catch(() => '');
+      if (!response.ok) {
+        throw new Error(
+          `DingTalk file delivery failed: HTTP ${response.status}`,
+        );
+      }
+
+      let data: Record<string, unknown> = {};
+      if (responseText.trim()) {
+        try {
+          const parsed = JSON.parse(responseText) as unknown;
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('invalid response');
+          }
+          data = parsed as Record<string, unknown>;
+        } catch {
+          throw new Error(
+            'DingTalk file delivery failed: invalid JSON response',
+          );
+        }
+      }
+
+      for (const value of [data['errcode'], data['code']]) {
+        if (value !== undefined && String(value) !== '0') {
+          throw new Error(
+            `DingTalk file delivery failed: API code ${sanitizeLogText(
+              String(value),
+              80,
+            )}`,
+          );
+        }
+      }
+      return data;
+    }
+    throw new Error('DingTalk file delivery failed: unauthorized');
+  }
+
+  private async sendReplyFiles(
+    chatId: string,
+    files: readonly PreparedDingTalkFile[],
+  ): Promise<void> {
+    if (files.length === 0) return;
+    const webhook = this.webhooks.get(chatId);
+    if (!webhook) return;
+
+    for (const file of files) {
+      try {
+        await this.postRobotFileMessage(
+          webhook,
+          {
+            msgtype: 'file',
+            file: {
+              mediaId: file.mediaId,
+              fileName: file.fileName,
+              fileType: file.fileType,
+            },
+          },
+          'session-webhook',
+        );
+      } catch (error) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] outbound file delivery failed (${sanitizeLogText(
+            file.fileName,
+            255,
+          )}): ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        try {
+          await this.sendPreparedReply(
+            chatId,
+            `[File delivery failed: ${file.fileName}]`,
+          );
+        } catch (noticeError) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] file failure notice failed: ${sanitizeLogText(
+              noticeError instanceof Error
+                ? noticeError.message
+                : String(noticeError),
+              300,
+            )}\n`,
+          );
+        }
+      }
+    }
+  }
+
+  private async sendProactiveFile(
+    target: SessionTarget,
+    file: PreparedDingTalkFile,
+  ): Promise<void> {
+    const targetBody =
+      target.isGroup === true
+        ? { openConversationId: target.chatId }
+        : { userIds: [target.chatId] };
+    const data = await this.postRobotFileMessage(
+      target.isGroup === true ? GROUP_MSG_API : DIRECT_MSG_API,
+      {
+        robotCode: this.config.clientId!,
+        ...targetBody,
+        msgKey: PROACTIVE_FILE_MSG_KEY,
+        msgParam: JSON.stringify(file),
+      },
+    );
+
+    if (
+      target.isGroup === false &&
+      Array.isArray(data['invalidStaffIdList']) &&
+      data['invalidStaffIdList'].includes(target.chatId)
+    ) {
+      throw new Error(
+        'DingTalk file delivery failed: invalid direct recipient',
+      );
+    }
+    if (
+      target.isGroup === false &&
+      Array.isArray(data['flowControlledStaffIdList']) &&
+      data['flowControlledStaffIdList'].includes(target.chatId)
+    ) {
+      throw new Error(
+        'DingTalk file delivery failed: direct recipient rate limited',
+      );
+    }
+    if (
+      typeof data['processQueryKey'] !== 'string' ||
+      !data['processQueryKey'].trim()
+    ) {
+      throw new Error('DingTalk file delivery failed: missing processQueryKey');
+    }
   }
 
   private sendCardInteractionFeedback(
@@ -1293,11 +1684,26 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     sessionId: string,
   ): Promise<void> {
+    if (!this.webhooks.has(chatId)) {
+      await this.sendPreparedResponse(chatId, { text, files: [] }, sessionId);
+      return;
+    }
+    const prepared = await this.prepareOutgoingContent(text);
+    await this.sendPreparedResponse(chatId, prepared, sessionId);
+  }
+
+  private async sendPreparedResponse(
+    chatId: string,
+    prepared: PreparedDingTalkOutput,
+    sessionId: string,
+  ): Promise<void> {
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendReply(chatId, text, atUserId);
+    if (!(await this.sendPreparedReply(chatId, prepared.text, atUserId)))
+      return;
+    await this.sendReplyFiles(chatId, prepared.files);
   }
 
   private async sendFallbackReply(
@@ -1310,7 +1716,12 @@ export class DingtalkChannel extends ChannelBase {
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
-    await this.sendReply(chatId, text, atUserId);
+    if (!this.webhooks.has(chatId)) {
+      await this.sendPreparedReply(chatId, text, atUserId);
+      return;
+    }
+    const outgoingText = await this.prepareOutgoingImages(text);
+    await this.sendPreparedReply(chatId, outgoingText, atUserId);
   }
 
   protected override async onResponseComplete(
@@ -1320,17 +1731,20 @@ export class DingtalkChannel extends ChannelBase {
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     if (segment && this.interactionPresenter) {
-      const outgoingText = await this.prepareOutgoingText(text);
+      const prepared = await this.prepareOutgoingContent(text);
       if (
         await this.interactionPresenter.closeOutput(
           segment.segmentId,
-          outgoingText,
+          prepared.text,
           'completed',
           segment,
         )
       ) {
+        await this.sendReplyFiles(chatId, prepared.files);
         return;
       }
+      await this.sendPreparedResponse(chatId, prepared, sessionId);
+      return;
     }
     await this.sendResponseMessage(chatId, text, sessionId);
   }

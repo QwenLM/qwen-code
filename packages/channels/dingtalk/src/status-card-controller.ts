@@ -9,6 +9,8 @@ import {
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
+import { sanitizeFileMarkersToFixedPoint } from './outbound-file.js';
+import { truncateOutboundMediaText } from './outbound-markers.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
@@ -51,10 +53,23 @@ export interface StatusCardControllerOptions {
 }
 
 function boundContent(content: string): string {
-  if (content.length <= CONTENT_LIMIT) return content;
-  return `${TRUNCATION_MARKER}${content.slice(
-    content.length - (CONTENT_LIMIT - TRUNCATION_MARKER.length),
-  )}`;
+  return truncateOutboundMediaText(content, CONTENT_LIMIT, TRUNCATION_MARKER);
+}
+
+/**
+ * FILE before IMAGE, then repeat to a fixed point.
+ *
+ * The image pass substitutes a bracketed `[Image pending]` placeholder while
+ * the file pass substitutes nothing, so running images first hands the file
+ * pass a `]` that was never in the model's output: an unclosed `[FILE:` then
+ * "closes" on the placeholder and swallows it. Sanitising files first means
+ * every pass only ever sees brackets the model actually emitted. The repeat
+ * covers a removal splicing its surroundings into a fresh marker.
+ */
+function sanitizeStreamingMediaMarkers(content: string): string {
+  return sanitizeStreamingImageMarkers(
+    sanitizeFileMarkersToFixedPoint(content),
+  );
 }
 
 export class StatusCardController {
@@ -89,7 +104,7 @@ export class StatusCardController {
     if (record.terminal) return;
     record.content = boundContent(content);
     if (record.streamFailed) return;
-    record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
+    record.pendingSnapshot = sanitizeStreamingMediaMarkers(record.content);
     this.scheduleFlush(record);
   }
 
@@ -189,7 +204,7 @@ export class StatusCardController {
       if (!record) continue;
       void this.finalize(
         segmentId,
-        sanitizeStreamingImageMarkers(record.content),
+        sanitizeStreamingMediaMarkers(record.content),
         reason === 'cancel_command' ? 'Stopped' : 'Cancelled',
         false,
       );
@@ -236,7 +251,7 @@ export class StatusCardController {
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
     try {
-      const initialContent = sanitizeStreamingImageMarkers(record.content);
+      const initialContent = sanitizeStreamingMediaMarkers(record.content);
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
         outTrackId: record.outTrackId,
@@ -354,7 +369,7 @@ export class StatusCardController {
         content ||
         (retainedContent ? retainedContent(record.content) : record.content);
       const finalContent = boundContent(
-        sanitizeStreamingImageMarkers(retained),
+        sanitizeStreamingMediaMarkers(retained),
       );
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,

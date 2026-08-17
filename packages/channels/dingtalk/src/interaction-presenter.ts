@@ -8,6 +8,8 @@ import type {
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 import { stripPartialImageMarker } from './outbound-image.js';
+import { sanitizeFileMarkersToFixedPoint } from './outbound-file.js';
+import { truncateOutboundMediaText } from './outbound-markers.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
   CONTENT_LIMIT,
@@ -39,6 +41,21 @@ export interface DingtalkInteractionPresenterOptions {
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
   sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
+}
+
+/**
+ * Files first, images last.
+ *
+ * The original order stripped partial image markers before removing file
+ * markers, which left an unclosed `[IMAGE:` untouched whenever its candidate
+ * happened to contain the `]` of a following FILE marker — the file removal
+ * then deleted that closing context and delivered the orphaned image marker,
+ * absolute path and all, as literal text. Sanitising files to a fixed point
+ * first means the image pass sees the real bracket structure, and running it
+ * last keeps its `[Image pending]` placeholder out of the file pass.
+ */
+function sanitizeFallbackOutput(text: string): string {
+  return stripPartialImageMarker(sanitizeFileMarkersToFixedPoint(text));
 }
 
 export interface DingtalkCardSender {
@@ -185,13 +202,13 @@ export class DingtalkInteractionPresenter {
           (await statusCards.flushPending(statusContext.segmentId));
         if (deliveredViaCard) {
           run.cardDelivered = {
-            text: stripPartialImageMarker(text || presentation.content),
+            text: sanitizeFallbackOutput(text || presentation.content),
             chatId: presentation.context.target.chatId,
             sessionId: presentation.context.sessionId,
           };
           return true;
         }
-        const fallbackText = stripPartialImageMarker(
+        const fallbackText = sanitizeFallbackOutput(
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
@@ -211,7 +228,7 @@ export class DingtalkInteractionPresenter {
           ));
         run.statusContext = undefined;
         if (completed) return true;
-        const fallbackText = stripPartialImageMarker(
+        const fallbackText = sanitizeFallbackOutput(
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
@@ -230,9 +247,7 @@ export class DingtalkInteractionPresenter {
           this.withSenderPrefix(run, text || presentation.content),
         ));
       if (completed) return true;
-      const fallbackText = stripPartialImageMarker(
-        text || presentation.content,
-      );
+      const fallbackText = sanitizeFallbackOutput(text || presentation.content);
       if (!fallbackText || !this.options.sendFallback) return false;
       await this.options.sendFallback(
         presentation.context.target.chatId,
@@ -389,12 +404,7 @@ export class DingtalkInteractionPresenter {
   }
 
   private boundContent(content: string, limit = CONTENT_LIMIT): string {
-    if (content.length <= limit) return content;
-    if (limit === 0) return '';
-    if (limit <= TRUNCATION_MARKER.length) return content.slice(-limit);
-    return `${TRUNCATION_MARKER}${content.slice(
-      content.length - (limit - TRUNCATION_MARKER.length),
-    )}`;
+    return truncateOutboundMediaText(content, limit, TRUNCATION_MARKER);
   }
 
   private withSenderPrefix(run: RunPresentation, content: string): string {
