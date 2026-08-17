@@ -560,6 +560,14 @@ describe('TeamCoordinationHarness', () => {
         subject: 'Blocker',
         description: 'Finish first',
       });
+      // Reserve the blocker as owned BEFORE alice exists so the idle
+      // auto-claim scan cannot consume it (it is the only unblocked,
+      // claimable task here) and race a prompt into her inbox — the
+      // received-messages assertion below must measure only the blocked
+      // assignment path. The blocked task itself stays unowned so the
+      // owner assertion still holds, and stays blocked so auto-claim
+      // skips it via blockedBy.
+      await updateTask(h.teamName, blocker.id, { owner: 'leader' });
       const task = await createTask(h.teamName, {
         subject: 'Blocked',
         description: 'Wait for blocker',
