@@ -16,12 +16,14 @@ export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
 
 // Matches the FULL placeholder shape this module emits
 // (`${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${mime}]`; the mime is sanitized
-// to contain no `]`), not just the prefix. Derived from the constant above
-// so producer and consumer cannot drift. A genuine user prompt that merely
-// *begins* with the prefix is NOT a placeholder and must keep counting as
-// user text wherever this predicate is used.
+// to contain no `]` and may be EMPTY — sanitizeMimeForPlaceholder returns
+// '' for empty/whitespace-only/bracket-only mimeTypes, and the producer's
+// `??` fallback only covers null/undefined), not just the prefix. Derived
+// from the constant above so producer and consumer cannot drift. A genuine
+// user prompt that merely *begins* with the prefix is NOT a placeholder and
+// must keep counting as user text wherever this predicate is used.
 const CLEARED_MEDIA_PLACEHOLDER_RE = new RegExp(
-  `^${MICROCOMPACT_CLEARED_IMAGE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} [^\\]]+\\]$`,
+  `^${MICROCOMPACT_CLEARED_IMAGE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} [^\\]]*\\]$`,
 );
 
 export function isClearedMediaPlaceholder(text: string): boolean {

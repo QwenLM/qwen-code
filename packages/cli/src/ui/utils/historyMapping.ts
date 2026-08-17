@@ -70,11 +70,13 @@ function isUserTextContent(content: Content): boolean {
   // mixes placeholders with real prompt text still counts (it IS a real
   // turn).
   //
-  // The ACP session's private `#isUserTextContent` deliberately keeps the
-  // old prefix check: ACP rewind maps against per-prompt file-history
-  // snapshots, which ARE created for media-only prompts, so cleared
-  // placeholders must stay counted there. Do not mirror this exclusion
-  // into that twin.
+  // The ACP session's private `#isUserTextContent`
+  // (packages/cli/src/acp-integration/session/Session.ts) deliberately
+  // keeps the bare text-presence check (`'text' in part && part.text`),
+  // which counts these placeholders: ACP rewind maps against per-prompt
+  // file-history snapshots, which ARE created for media-only prompts, so
+  // cleared placeholders must stay counted there. Do not mirror this
+  // exclusion into that twin.
   return content.parts.some(
     (part) =>
       'text' in part && !!part.text && !isClearedMediaPlaceholder(part.text),
