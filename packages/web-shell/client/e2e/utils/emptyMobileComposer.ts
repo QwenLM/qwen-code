@@ -155,7 +155,7 @@ export function expectEmptyMobileComposerAnchored(
   ).toBeLessThanOrEqual(1);
   expect(layout.chatViewPosition).toBe('static');
   expect(layout.chatViewIsPaneFlexItem).toBe(true);
-  expect(layout.chatViewZIndex).toBe('1');
+  expect(layout.chatViewZIndex).toBe('auto');
   expect(layout.footerAnchoredToChatPane).toBe(true);
 
   if (options.requireWelcomeFooter !== false) {
