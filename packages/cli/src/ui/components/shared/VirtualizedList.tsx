@@ -543,6 +543,17 @@ function VirtualizedList<T>(
     maxScroll,
   );
 
+  // Bottom-align short content while stuck to the bottom (#9300): when the
+  // whole conversation fits in the viewport, push it down so the latest
+  // message sits directly above the composer and any blank space is at the
+  // TOP (standard chat-TUI behavior), instead of top-aligning and leaving a
+  // gap between the last message and the composer. Zero whenever content
+  // overflows (maxScroll > 0) or the user has scrolled away from the bottom.
+  const bottomAlignGap =
+    isStickingToBottom && maxScroll === 0
+      ? Math.max(0, scrollableContainerHeight - totalHeight)
+      : 0;
+
   // The render window must cover what the viewport actually paints, so
   // it is computed from clampedScrollTop, not the anchor-based
   // actualScrollTop. While bottom-stuck the viewport pins to maxScroll,
@@ -953,7 +964,7 @@ function VirtualizedList<T>(
   // `containerHeight`, so scrolling is unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? fullHeightMeasurementPending
+      ? fullHeightMeasurementPending || bottomAlignGap > 0
         ? props.containerHeight
         : Math.min(props.containerHeight, totalHeight)
       : '100%';
@@ -973,6 +984,7 @@ function VirtualizedList<T>(
           flexDirection="column"
           marginTop={-clampedScrollTop}
         >
+          <Box height={bottomAlignGap} flexShrink={0} />
           <Box height={topSpacerHeight} flexShrink={0} />
           {renderedItems}
           <Box height={bottomSpacerHeight} flexShrink={0} />

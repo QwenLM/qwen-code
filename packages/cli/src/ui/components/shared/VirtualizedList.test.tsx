@@ -174,7 +174,12 @@ describe('<VirtualizedList />', () => {
     await act(async () => {});
 
     const frame = lastFrame() ?? '';
-    expect(frame.split('\n')).toEqual([
+    // Short bottom-stuck content is bottom-aligned (#9300): blank rows at the
+    // top, the five items pinned to the bottom of the 20-row container.
+    const lines = frame.split('\n');
+    expect(lines.length).toBe(20);
+    expect(lines.slice(0, 15).every((l) => l.trim() === '')).toBe(true);
+    expect(lines.slice(15)).toEqual([
       'item-0',
       'item-1',
       'item-2',
@@ -301,7 +306,9 @@ describe('<VirtualizedList />', () => {
       />,
     );
     await act(async () => {});
-    expect(lastFrame()?.split('\n')).toEqual(['confirm']);
+    // Bottom-aligned (#9300): the single confirmation sits at the container
+    // bottom with blank rows above.
+    expect(lastFrame()?.split('\n')).toEqual(['', '', '', '', 'confirm']);
 
     const longConfirmationItems = [
       { id: -1, label: ['confirm', 'line 2', 'line 3'].join('\n') },
@@ -326,7 +333,14 @@ describe('<VirtualizedList />', () => {
     expect(
       frames.slice(frameCountBeforeLongContent).map((frame) => frame.trimEnd()),
     ).not.toContain('confirm');
-    expect(lastFrame()?.split('\n')).toEqual(['confirm', 'line 2', 'line 3']);
+    // Bottom-aligned (#9300): 3-line content pinned to the 5-row bottom.
+    expect(lastFrame()?.split('\n')).toEqual([
+      '',
+      '',
+      'confirm',
+      'line 2',
+      'line 3',
+    ]);
   });
 
   it('targetScrollIndex anchors to that index on first usable render', () => {
@@ -1132,10 +1146,13 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     const lines = (harness.lastFrame() ?? '').split('\n');
     expect(lines.some((l) => l.includes('c1 thought line 0'))).toBe(false);
     expect(lines.filter((l) => l.trim() !== '').length).toBeLessThanOrEqual(6);
-    expect(lines.length).toBeLessThanOrEqual(8);
     // Collapsed state must still render the head summary, not an empty
     // window (the assertions above also hold for a blank frame).
     expect(lines.some((l) => l.includes('Thought for 1m 41s'))).toBe(true);
+    // Bottom-aligned (#9300): the released height becomes blank space at the
+    // TOP, and the collapsed summary sits at the bottom (last row is content,
+    // not a gap between content and the composer).
+    expect(lines[lines.length - 1]!.trim()).not.toBe('');
   });
 
   it('does not lock the render window when a tall thought collapses off-screen', async () => {
