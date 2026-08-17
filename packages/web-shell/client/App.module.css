@@ -719,14 +719,8 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
-  position: relative;
-  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
-}
-
-.appChatEmpty .chatPane {
-  position: relative;
 }
 
 .footer {
