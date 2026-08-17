@@ -96,6 +96,13 @@ interface MockSession {
   updateMetadata: (metadata: {
     displayName?: string;
   }) => Promise<{ displayName?: string }>;
+  getTranscriptPage: (opts: unknown) => Promise<{
+    events: DaemonEvent[];
+    hasMore: boolean;
+    nextCursor?: string;
+    partial?: true;
+    replayError?: string;
+  }>;
   replaySnapshot: {
     compactedReplay: DaemonEvent[];
     liveJournal: DaemonEvent[];
@@ -1554,7 +1561,7 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       {
         kind: 'status',
-        text: 'Inserted message: also check the tests',
+        text: 'also check the tests',
         source: 'mid_turn_message_injected',
         data: {
           sessionId: 'mt-session',
@@ -12523,7 +12530,7 @@ function createTextReplaySnapshot(text: string): MockSession['replaySnapshot'] {
 }
 
 function createMockSession(opts: Partial<MockSession> = {}): MockSession {
-  const session = {
+  const session: MockSession = {
     sessionId: opts.sessionId ?? 'session-1',
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
@@ -12588,6 +12595,21 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     updateMetadata:
       opts.updateMetadata ??
       vi.fn(async (metadata: { displayName?: string }) => metadata),
+    getTranscriptPage:
+      opts.getTranscriptPage ??
+      vi.fn(async (pageOpts: unknown) => {
+        if (!session.client) throw new Error('Session client is unavailable');
+        return (await session.client.getSessionTranscriptPage(
+          session.sessionId,
+          pageOpts,
+        )) as {
+          events: DaemonEvent[];
+          hasMore: boolean;
+          nextCursor?: string;
+          partial?: true;
+          replayError?: string;
+        };
+      }),
     replaySnapshot: opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],

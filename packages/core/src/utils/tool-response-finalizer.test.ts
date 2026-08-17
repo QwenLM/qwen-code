@@ -23,9 +23,17 @@ const debugLogger = vi.hoisted(() => ({
   warn: vi.fn(),
   error: vi.fn(),
 }));
+const boundaryObserveMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./debugLogger.js', () => ({
   createDebugLogger: () => debugLogger,
+}));
+
+vi.mock('./tool-result-boundary-diagnostics.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('./tool-result-boundary-diagnostics.js')
+  >()),
+  observeToolResultBoundary: boundaryObserveMock,
 }));
 
 vi.mock('./truncation.js', async (importOriginal) => {
@@ -60,6 +68,7 @@ function config(budget: number): Config {
 describe('tool response finalization', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    boundaryObserveMock.mockReset();
     persist.mockImplementation(async (callId, _toolName, content) => ({
       content,
       outputFile: `/tmp/${callId}.txt`,
@@ -80,11 +89,175 @@ describe('tool response finalization', () => {
       ]),
     ];
 
-    await expect(finalizeToolResponses(config(100), entries)).resolves.toBe(
-      entries,
-    );
+    await expect(
+      finalizeToolResponses(
+        config(100),
+        entries,
+        new Map([['small', 'prompt-small']]),
+      ),
+    ).resolves.toBe(entries);
     expect(persist).not.toHaveBeenCalled();
     expect(debugLogger.info).not.toHaveBeenCalled();
+    expect(boundaryObserveMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        stage: 'finalizer_input',
+        promptId: 'prompt-small',
+        mutated: false,
+      }),
+    );
+    expect(boundaryObserveMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        stage: 'finalizer_output',
+        promptId: 'prompt-small',
+        mutated: false,
+      }),
+    );
+  });
+
+  it('marks only persisted over-budget entries as mutated', async () => {
+    const entries = [
+      entry('large', [
+        {
+          functionResponse: {
+            id: 'large',
+            name: 'shell',
+            response: { output: 'x'.repeat(1000) },
+          },
+        },
+      ]),
+      entry('small', [
+        {
+          functionResponse: {
+            id: 'small',
+            name: 'shell',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+    ];
+
+    await finalizeToolResponses(config(100), entries);
+
+    const observations = boundaryObserveMock.mock.calls.map(
+      ([observation]) => observation,
+    );
+    expect(
+      observations
+        .filter((observation) => observation.toolCallId === 'large')
+        .map((observation) => observation.mutated),
+    ).toEqual([true, true]);
+    expect(
+      observations
+        .filter((observation) => observation.toolCallId === 'small')
+        .map((observation) => observation.mutated),
+    ).toEqual([false, false]);
+  });
+
+  it('can suppress intermediate boundary observations', async () => {
+    const entries = [
+      entry('small', [
+        {
+          functionResponse: {
+            id: 'small',
+            name: 'shell',
+            response: { output: 'small output' },
+          },
+        },
+      ]),
+    ];
+
+    await finalizeToolResponses(config(100), entries, undefined, false);
+
+    expect(boundaryObserveMock).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates an unchanged scheduler-owned entry in an outer batch', async () => {
+    boundaryObserveMock.mockReturnValue(true);
+    const owned = entry('owned', [
+      {
+        functionResponse: {
+          id: 'owned',
+          name: 'shell',
+          response: { output: 'a'.repeat(70_000) },
+        },
+      },
+    ]);
+    const promptIds = new Map([
+      ['owned', 'prompt-owned'],
+      ['synthetic', 'prompt-synthetic'],
+    ]);
+    const schedulerFinalized = await finalizeToolResponses(
+      config(200_000),
+      [owned],
+      promptIds,
+      true,
+      true,
+    );
+    boundaryObserveMock.mockClear();
+
+    await finalizeToolResponses(
+      config(200_000),
+      [
+        ...schedulerFinalized,
+        entry('synthetic', [
+          {
+            functionResponse: {
+              id: 'synthetic',
+              name: 'shell',
+              response: { output: 'synthetic error' },
+            },
+          },
+        ]),
+      ],
+      promptIds,
+    );
+
+    expect(
+      boundaryObserveMock.mock.calls.map(([observation]) => [
+        observation.toolCallId,
+        observation.stage,
+      ]),
+    ).toEqual([
+      ['synthetic', 'finalizer_input'],
+      ['synthetic', 'finalizer_output'],
+    ]);
+  });
+
+  it('observes an outer mutation of a scheduler-owned entry', async () => {
+    boundaryObserveMock.mockReturnValue(true);
+    const promptIds = new Map([['owned', 'prompt-owned']]);
+    const schedulerFinalized = await finalizeToolResponses(
+      config(200_000),
+      [
+        entry('owned', [
+          {
+            functionResponse: {
+              id: 'owned',
+              name: 'shell',
+              response: { output: 'a'.repeat(70_000) },
+            },
+          },
+        ]),
+      ],
+      promptIds,
+      true,
+      true,
+    );
+    boundaryObserveMock.mockClear();
+
+    await finalizeToolResponses(config(10_000), schedulerFinalized, promptIds);
+
+    expect(
+      boundaryObserveMock.mock.calls.map(([observation]) => [
+        observation.stage,
+        observation.mutated,
+      ]),
+    ).toEqual([
+      ['finalizer_input', true],
+      ['finalizer_output', true],
+    ]);
   });
 
   it.each([false, true])(

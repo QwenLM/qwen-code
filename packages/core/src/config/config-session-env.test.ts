@@ -390,6 +390,42 @@ describe('Config provider-qualified model identity', () => {
     expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe(first);
   });
 
+  it('registers the identity PER SESSION, which is what daemon spawns read', async () => {
+    // The process-global slot is first-writer-wins, so in daemon mode it
+    // belongs to whichever session booted first. Handing that to a later
+    // session's subprocess is worse than handing it nothing — a confidently
+    // wrong qualification passes a gate the bare id would have failed — so
+    // the registry is what `getShellContextEnvVars` resolves, and this is
+    // where each session's entry is written.
+    const { Config } = await import('./config.js');
+    const { getSessionModelIdentity } = await import(
+      '../utils/sessionIdContext.js'
+    );
+    const first = new Config({ ...baseParams });
+    const later = new Config({ ...baseParams, model: 'other-model' });
+
+    expect(getSessionModelIdentity(first.getSessionId())).toBe('test-model');
+    expect(getSessionModelIdentity(later.getSessionId())).toBe('other-model');
+    // …and it is the OWNER's that reached the global slot.
+    expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe('test-model');
+  });
+
+  it('re-keys the identity on a mid-session model switch', async () => {
+    // `setModel` republishes; an identity left keyed on the previous model
+    // would qualify one this session no longer runs.
+    const { Config } = await import('./config.js');
+    const { getSessionModelIdentity } = await import(
+      '../utils/sessionIdContext.js'
+    );
+    const config = new Config({ ...baseParams });
+    expect(getSessionModelIdentity(config.getSessionId())).toBe('test-model');
+
+    await config.setModel('switched-model');
+    expect(getSessionModelIdentity(config.getSessionId())).toBe(
+      'switched-model',
+    );
+  });
+
   it('a later Config cannot overwrite the claimed identity slot', async () => {
     const { Config } = await import('./config.js');
     new Config({ ...baseParams });

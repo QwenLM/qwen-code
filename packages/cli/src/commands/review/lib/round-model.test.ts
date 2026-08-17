@@ -26,7 +26,28 @@ describe('roundModelIdFrom', () => {
     );
   });
 
-  it('is empty when neither slot is published, and when one is blank', () => {
+  it('falls back to the bare id when the identity slot is BLANK, not just absent', () => {
+    // The blank is not hypothetical: `getShellContextEnvVars` writes `''`
+    // rather than omitting the key, because an omitted key is not a withheld
+    // value — the spawn-site `{...process.env, ...}` spread would leak the
+    // parent's stale one. `??` falls back on absent and not on empty, so it
+    // turned every such round into "no identity at all": nobody certified,
+    // and the next round re-reviewed the full diff, permanently.
+    expect(
+      roundModelIdFrom({
+        QWEN_CODE_MODEL: 'qwen3-coder-plus',
+        QWEN_CODE_MODEL_IDENTITY: '',
+      }),
+    ).toBe('qwen3-coder-plus');
+    expect(
+      roundModelIdFrom({
+        QWEN_CODE_MODEL: 'qwen3-coder-plus',
+        QWEN_CODE_MODEL_IDENTITY: '   ',
+      }),
+    ).toBe('qwen3-coder-plus');
+  });
+
+  it('is empty only when NEITHER slot names anything', () => {
     // Empty means "unknown", which the composer reads as a MISMATCH rather
     // than as agreement — the anchor is withheld and the next round reviews
     // in full. A whitespace-only slot must reach that same state, not stamp a
@@ -34,10 +55,7 @@ describe('roundModelIdFrom', () => {
     expect(roundModelIdFrom({})).toBe('');
     expect(roundModelIdFrom({ QWEN_CODE_MODEL: '   ' })).toBe('');
     expect(
-      roundModelIdFrom({
-        QWEN_CODE_MODEL: 'qwen3-coder-plus',
-        QWEN_CODE_MODEL_IDENTITY: '  ',
-      }),
+      roundModelIdFrom({ QWEN_CODE_MODEL: '  ', QWEN_CODE_MODEL_IDENTITY: '' }),
     ).toBe('');
   });
 });
@@ -63,6 +81,17 @@ describe('certifierMatchesRound', () => {
     expect(certifierMatchesRound(undefined, '')).toBe(false);
     expect(certifierMatchesRound('   ', 'm@1a2b3c4d')).toBe(false);
     expect(certifierMatchesRound('   ', '   ')).toBe(false);
+  });
+
+  it('ENGAGES on two bare ids — the qualifier is optional, not required', () => {
+    // Every other case here is a refusal, so a `return false` mutant would
+    // survive them all. A runtime that publishes no identity certifies with
+    // its bare model id, and the next round under the same one must be able
+    // to use that anchor — otherwise the gate does not narrow the feature, it
+    // deletes it for anyone whose provider config resolves to nothing.
+    expect(certifierMatchesRound('qwen3-coder-plus', 'qwen3-coder-plus')).toBe(
+      true,
+    );
   });
 
   it('ignores surrounding whitespace on the certifier', () => {
