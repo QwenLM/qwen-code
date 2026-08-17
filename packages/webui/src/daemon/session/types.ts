@@ -148,7 +148,11 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Restart the SSE event stream after each accepted prompt. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. A stream that
+   * is already down is always rebuilt immediately on prompt admission,
+   * regardless of this flag.
+   */
   restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;

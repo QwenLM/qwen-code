@@ -641,6 +641,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_metadata',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -700,6 +701,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
+      f !== 'workspace_session_metadata' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
   ),
@@ -755,6 +757,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_metadata',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -23379,6 +23382,47 @@ describe('createServeApp', () => {
       req
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
+    const createWorkspaceMetadataApp = (
+      secondaryBridge: FakeBridge,
+      options: {
+        trusted?: boolean;
+        sessionRuntimeBaseDir?: string;
+        primaryBridge?: FakeBridge;
+        generationGuard?: WorkspaceGenerationGuard;
+      } = {},
+    ) => {
+      const primaryBridge = options.primaryBridge ?? fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+          ...(options.trusted !== undefined
+            ? { trusted: options.trusted }
+            : {}),
+          ...(options.sessionRuntimeBaseDir !== undefined
+            ? { sessionRuntimeBaseDir: options.sessionRuntimeBaseDir }
+            : {}),
+          ...(options.generationGuard
+            ? { generationGuard: options.generationGuard }
+            : {}),
+        }),
+      ]);
+      return {
+        app: createServeApp(tokenOpts, undefined, {
+          workspaceRegistry: registry,
+        }),
+        primaryBridge,
+        registry,
+      };
+    };
 
     it('200 on successful metadata update', async () => {
       const bridge = fakeBridge();
@@ -23473,6 +23517,311 @@ describe('createServeApp', () => {
       ).send({ displayName: 'x'.repeat(300) });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
+    });
+
+    it('updates the selected workspace runtime with client identity', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app, primaryBridge } =
+        createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ displayName: 'Secondary session' });
+
+      expect(res.status).toBe(200);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          metadata: { displayName: 'Secondary session' },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+      expect(primaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it('fails closed when the live session owner is unavailable', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app, registry } = createWorkspaceMetadataApp(secondaryBridge);
+      vi.spyOn(registry, 'resolveLiveSessionOwner').mockReturnValue({
+        kind: 'unavailable',
+      });
+
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it('fails closed when the selected workspace generation closes', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (_sessionId, metadata) => {
+          generationGuard.close();
+          return metadata;
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        generationGuard,
+      });
+
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+    });
+
+    it.each([
+      [{}, 'displayName'],
+      [{ displayName: 123 }, 'displayName'],
+      [{ displayName: '' }, 'displayName'],
+      [{ displayName: '   ' }, 'displayName'],
+      [{ displayName: 'bad\nname' }, 'displayName'],
+    ] as const)(
+      'rejects invalid workspace metadata %#',
+      async (body, field) => {
+        const secondaryBridge = fakeBridge();
+        const { app } = createWorkspaceMetadataApp(secondaryBridge);
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/session-A/metadata',
+          ),
+        ).send(body);
+
+        expect(res.status).toBe(400);
+        expect(res.body).toMatchObject({ code: 'invalid_metadata', field });
+        expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+      },
+    );
+
+    it('clamps workspace metadata displayName to 256 characters', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'x'.repeat(300) });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        displayName: 'x'.repeat(256),
+      });
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          metadata: { displayName: 'x'.repeat(256) },
+        },
+      ]);
+    });
+
+    it('rejects metadata updates for an untrusted workspace', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        trusted: false,
+      });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'Blocked' });
+
+      expect(res.status).toBe(403);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+    });
+
+    it.each(['active', 'archived'] as const)(
+      'renames a persisted %s session in the selected workspace',
+      async (state) => {
+        const runtimeBaseDir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-workspace-metadata-'),
+        );
+        const sessionId = `550e8400-e29b-41d4-a716-4466554400${
+          state === 'active' ? '31' : '32'
+        }`;
+        const chatsDir = path.join(
+          new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+          'chats',
+          ...(state === 'archived' ? ['archive'] : []),
+        );
+        const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          filePath,
+          `${JSON.stringify({
+            uuid: 'record-1',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-05-17T12:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'original' }] },
+            cwd: WS_DIFFERENT,
+          })}\n`,
+          'utf8',
+        );
+        const secondaryBridge = fakeBridge({
+          updateMetadataImpl: () => {
+            throw new SessionNotFoundError(sessionId);
+          },
+        });
+        const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+          sessionRuntimeBaseDir: runtimeBaseDir,
+        });
+
+        try {
+          const res = await auth(
+            request(app).patch(
+              `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+            ),
+          ).send({ displayName: 'Persisted rename' });
+          expect(res.status).toBe(200);
+          expect(res.body).toEqual({
+            sessionId,
+            displayName: 'Persisted rename',
+          });
+          expect(await fsp.readFile(filePath, 'utf8')).toContain(
+            'Persisted rename',
+          );
+        } finally {
+          await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('returns 404 for a missing persisted session and 409 for a store conflict', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-conflict-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440033';
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+      });
+      const patchMetadata = () =>
+        auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({ displayName: 'Rename' });
+
+      try {
+        expect((await patchMetadata()).status).toBe(404);
+
+        const chatsDir = path.join(
+          new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+          'chats',
+        );
+        const record = `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`;
+        await fsp.mkdir(path.join(chatsDir, 'archive'), { recursive: true });
+        await Promise.all([
+          fsp.writeFile(path.join(chatsDir, `${sessionId}.jsonl`), record),
+          fsp.writeFile(
+            path.join(chatsDir, 'archive', `${sessionId}.jsonl`),
+            record,
+          ),
+        ]);
+
+        const conflict = await patchMetadata();
+        expect(conflict.status).toBe(409);
+        expect(conflict.body).toMatchObject({
+          code: 'session_conflict',
+          sessionId,
+        });
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects a rename when the session is live in another workspace runtime', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-live-owner-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440034';
+      const chatsDir = path.join(
+        new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`,
+        'utf8',
+      );
+      const primaryBridge = fakeBridge({
+        summaryImpl: (id: string) => ({
+          sessionId: id,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+        primaryBridge,
+      });
+
+      try {
+        const res = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({ displayName: 'Live elsewhere' });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({
+          code: 'session_workspace_conflict',
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          liveWorkspaceCwd: WS_BOUND,
+          liveWorkspaceId: 'ws-primary',
+        });
+        expect(secondaryBridge.updateMetadataCalls).toEqual([]);
+        expect(primaryBridge.updateMetadataCalls).toEqual([]);
+        expect(await fsp.readFile(filePath, 'utf8')).not.toContain(
+          'Live elsewhere',
+        );
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
     });
   });
 

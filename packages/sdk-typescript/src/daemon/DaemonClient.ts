@@ -5933,6 +5933,19 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return this.client.workspaceJsonRequest<SessionMetadataResult>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/metadata`,
+      'PATCH /workspaces/:workspace/session/:id/metadata',
+      { method: 'PATCH', body: metadata, clientId, mode: 'rest' },
+    );
+  }
+
   listSessionGroups(): Promise<DaemonSessionGroupCatalog> {
     return this.get(
       '/session-groups',
