@@ -623,7 +623,11 @@ function cleanStale(prNumber: string): void {
  * publishes neither.
  */
 export function roundModelIdFrom(env: NodeJS.ProcessEnv): string {
-  return (env['QWEN_CODE_MODEL_IDENTITY'] ?? env['QWEN_CODE_MODEL'] ?? '').trim();
+  return (
+    env['QWEN_CODE_MODEL_IDENTITY'] ??
+    env['QWEN_CODE_MODEL'] ??
+    ''
+  ).trim();
 }
 
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
