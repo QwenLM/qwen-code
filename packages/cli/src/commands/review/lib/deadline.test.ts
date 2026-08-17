@@ -29,6 +29,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -337,6 +338,29 @@ describe('the round-cost estimate — measured when it can be', () => {
     } finally {
       fsFault.failClaimWrite = false;
     }
+  });
+
+  it('claimRetirementDegradeNote reads no claim from a DIRECTORY at the claim path (#9272)', () => {
+    // A directory (or any non-file) occupying the claim path holds no
+    // claim: the `wx` create's EEXIST must not read as "claimed", or the
+    // NOTE silences forever — a non-file occupant never self-heals into
+    // one. Fresh occupants fail open; a stale one is cleared by the
+    // fence and the claim then lands normally.
+    const p = plan();
+    const dir = promptRecordDir(p);
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(dir, 'retirement-degrade-note-round-3.json'));
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    // A stale occupant is cleared by the fence and the claim then lands
+    // normally: the plan re-captures NOW, the occupant dates an hour back.
+    const stalePath = join(dir, 'retirement-degrade-note-round-4.json');
+    mkdirSync(stalePath);
+    const stale = new Date(Date.now() - 3_600_000);
+    utimesSync(stalePath, stale, stale);
+    const now = new Date();
+    utimesSync(p, now, now);
+    expect(claimRetirementDegradeNote(p, 4)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 4)).toBe(false);
   });
 
   it('ignores stamps older than the plan — a previous run of the same PR', () => {

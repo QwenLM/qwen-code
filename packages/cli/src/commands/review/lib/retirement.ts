@@ -80,6 +80,7 @@ export type CertificationFailure =
   | 'receipt not matched'
   | 'receipt not alone'
   | 'receipt lead contradicts the phrase'
+  | 'receipt clause restates the all-clear'
   | 'receipt clause contradicts the phrase'
   | 'receipt clause names no walk'
   | 'receipt clause too thin'
@@ -346,103 +347,48 @@ const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
  * `ignored`, `without checking`, 忽略, 略过, 遗漏 …). The test's misses
  * fail toward AUDIT — a clause whose walk verb the vocabulary does not
  * name reads `unknown` and the chunk stays hot — the opposite direction
- * of a marker miss, and the only one the module header declares. One
- * definition, shared by the walk gate and the marker strip below, so a
- * change to it cannot apply to one reader and not the other (#9272).
+ * of a marker miss, and the only one the module header declares.
  */
 const WALK_VERB_SRC =
   '\\bwalk|\\bverif|\\btrace|\\bexamin|走查|核对|复核|核查|复查|重走';
 const WALK_VERB_RE = new RegExp(WALK_VERB_SRC, 'i');
 
 /**
- * The marker test over the clause. Echoed phrases are stripped with the
- * CORE first — never the filler tail: a greedy tail swallowed a marker
- * riding right after an echo (`no issues found but I skipped …` lost
- * `skipped` to the strip and retired the chunk) (#9213). No quoted span
- * is exempted: a quoted `could not open` contradicts the phrase exactly
- * as a bare one — the exemption blanked a self-admission and retired the
- * chunk on it (#9213) — and an honest clause quoting a marker-carrying
- * label now reads `unknown`, the direction every failure here fails.
+ * The polarity guard, closed by FORM rather than enumeration (#9272,
+ * rounds 4–6 — three shipped guard shapes were each falsified by
+ * execution the round they landed: walk-verb lookaheads, passive-head
+ * lookaheads, a `found` exemption; every one left an executed entrance
+ * retiring a chunk on a receipt that admitted the walk was not done).
+ * The bars:
  *
- * The en strip also refuses a `no <noun>` whose word-run after the noun
- * reaches a walk-family verb OR a passive head — the CLOSED class of
- * English passive auxiliaries (`was/were/is/are/been/being/got/…`),
- * never the open class of participles: `no issues were checked`, `no
- * issues got confirmed` are admissions whatever participle closes them,
- * and round 4's probe retired chunks on five such families because the
- * guard named walk verbs one by one (non-walk participles, hyphenated
- * and prefixed ones, NBSP-split runs and parentheticals all passed it).
- * The run is read across inline whitespace — NBSP and ideographic space
- * included; `[ \t]` alone split the guard's transit — and across commas
- * and brackets, which carry a parenthetical between the noun and its
- * verb (`no issues, however, were verified`); a sentence stop still
- * ends it. That shape is the admission that the walk was not done, not
- * a restatement of the all-clear, and stripping it blanked the bare
- * `\bno\b` marker's whole domain over these three nouns (#9272 — round
- * 3's bare marker closed the passive and compound entrances yet these
- * still retired, because the strip had eaten the `no` before the marker
- * could see it). One exemption: a run carrying the phrase's OWN filler
- * `found` keeps stripping — `no issues were found verifying the
- * callers` is the all-clear the walk produced, and a lead's `No issues
- * found after verification` names the walk after the filler; refusing
- * those fired the guard on the honest receipts it exists to spare
- * (#9272 round 4). The stated residue is the reduced passive without a
- * head (`no issues checked`) and an honest `no <noun> <be-form>` with
- * no filler (`no issues were present`): both read `unknown` and stay
- * under audit, the direction every failure here fails. The EN
- * alternative is grouped before the guard binds, so a future
- * restructure of DRY_RECEIPT_EN into several top-level alternations
- * cannot leave the guard riding the last one alone (#9272 round 4).
- * The `\b` after the noun pins the alternation: without it a refused
- * strip backtracked the noun (`issues` → `issue`) and stripped THAT,
- * leaving `s were verified` marker-less. The zh branch needs no guard:
- * 没/未 stay marked whatever follows.
+ * 1. THE LEAD (the phrase's own side of the separator) is stripped of
+ *    its phrase cores and the residue is marker-tested: a hedge riding
+ *    the filler (`…found but only skimmed.`) contradicts the claim
+ *    exactly as one in the clause.
+ * 2. THE CLAUSE must not contain the receipt's core AT ALL — a clause
+ *    restating the all-clear (`no issues …`, 未发现问题 …) proves no
+ *    walk, whatever follows the restatement, and no regex tells the
+ *    honest `no issues were found verifying X` from the admission `no
+ *    issues were found because nothing was verified`: both refuse as
+ *    `receipt clause restates the all-clear`. This one bar retires the
+ *    entire executed entrance family — passive voice, reduced passives,
+ *    dash- or comma-spliced runs — with no lookahead and no list.
+ * 3. What survives restatement is marker-tested bare: a clause carrying
+ *    ANY negation, incapacity, or omission marker contradicts the
+ *    phrase however long and object-named it is.
+ *
+ * The stated residue, declared rather than papered over: an admission
+ * phrased with no restatement, no listed marker, and a walk verb
+ * (`nothing was verified`, `overlooked the files`, 忽略/略过/遗漏)
+ * still reads dry; what closes that class is the form itself — the
+ * brief tells an auditor that did not walk its scope to return prose,
+ * not the receipt, and prose is not the form — and a wrongly granted
+ * retirement self-corrects at the next even-round cold check.
  */
-/**
- * The passive head the guard reads after the noun — a closed class,
- * where the walk verbs and the participles they once tried to name are
- * open ones: a passive admission carries one of these whatever
- * participle follows it.
- */
-const PASSIVE_HEAD_SRC =
-  '\\b(?:am|is|are|was|were|be|been|being|get|gets|got|gotten|getting)\\b';
-
-/**
- * The guard's transit between the noun and what reaches it: inline
- * whitespace in every width a receipt can carry (NBSP and ideographic
- * space split `[ \t]` runs) plus the parenthetical punctuation that
- * sits between a subject and its verb. Sentence stops (`. ; :` and the
- * dashes) still end the run — a clause's own structure, not the guard,
- * decides what sits after them.
- */
-const GUARD_TRANSIT_SRC =
-  '[ \\t\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF,，()（）]';
-
-const PHRASE_CORE_RE = new RegExp(
-  '(?:' +
-    '(?:' +
-    DRY_RECEIPT_EN +
-    ')' +
-    '\\b(?!(?!' +
-    GUARD_TRANSIT_SRC +
-    '+(?:\\w+' +
-    GUARD_TRANSIT_SRC +
-    '+)*found\\b)' +
-    GUARD_TRANSIT_SRC +
-    '+(?:\\w+' +
-    GUARD_TRANSIT_SRC +
-    '+)*(?:' +
-    WALK_VERB_SRC +
-    '|' +
-    PASSIVE_HEAD_SRC +
-    '))' +
-    DRY_RECEIPT_ZH +
-    ')',
-  'gi',
-);
-function contradictsThePhrase(clause: string): boolean {
-  return NEGATION_MARKER_RE.test(clause.replace(PHRASE_CORE_RE, ' '));
-}
+const DRY_RECEIPT_PHRASE_CORE = '(?:' + DRY_RECEIPT_EN + DRY_RECEIPT_ZH + ')';
+const PHRASE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'gi');
+/** The restatement bar's own copy — non-global, so `.test` carries no lastIndex state. */
+const CLAUSE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'i');
 
 /**
  * An ENCLOSED code span or a real path is a named object at any length —
@@ -687,20 +633,23 @@ function classifyReturn(
   // identical prose on either side of the line, identical `unknown`.
   if (judged.slice(receipt[0].length).trim() !== '')
     return unknown('receipt not alone');
-  // The marker domain is the match's own prefix — phrase, filler and
-  // separator — plus the clause: a hedge riding the filler
+  // The polarity bars, each naming itself (#9259) and each single-domain
+  // (#9272 — no bar reads across the lead/clause boundary, so the split
+  // cannot hide a cross-boundary run from a guard that needs it):
+  //
+  // The LEAD: its own phrase core is expected there — strip it and
+  // marker-test the residue, so a hedge riding the filler
   // (`…found but only skimmed.`) contradicts the claim exactly as one
-  // inside the clause, and the phrase itself is core-stripped out of it.
+  // inside the clause.
   const receiptLead = receipt[0].slice(0, receipt[0].length - clause.length);
-  // Each bar names ITSELF (#9259 — the #9206 diagnostic exists so a
-  // silent never-retire can be told apart; one collapsed name hid which
-  // bar a return fell at). No token spans the lead/clause boundary (the
-  // separator's trailing `[ \t]*` sits between them), so testing the lead
-  // and the clause separately classifies identically to the combined
-  // domain this replaces.
-  if (contradictsThePhrase(receiptLead))
+  if (NEGATION_MARKER_RE.test(receiptLead.replace(PHRASE_CORE_RE, ' ')))
     return unknown('receipt lead contradicts the phrase');
-  if (contradictsThePhrase(judgedClause))
+  // The CLAUSE must not restate the all-clear at all — the form's close
+  // over the executed passive/reduced-passive/spliced entrance family,
+  // no enumeration (#9272).
+  if (CLAUSE_CORE_RE.test(judgedClause))
+    return unknown('receipt clause restates the all-clear');
+  if (NEGATION_MARKER_RE.test(judgedClause))
     return unknown('receipt clause contradicts the phrase');
   if (!namesTheWalk(judgedClause))
     return unknown('receipt clause names no walk');

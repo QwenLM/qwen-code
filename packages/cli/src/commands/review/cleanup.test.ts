@@ -122,6 +122,10 @@ describe('runCleanup', () => {
     mocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
+    // Same leak class for the listing (#9272): the retention tests install
+    // path-dependent implementations, and a later test reading the declared
+    // `[]` default would otherwise inherit them.
+    mocks.readdirSync.mockImplementation((_path: string): string[] => []);
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,

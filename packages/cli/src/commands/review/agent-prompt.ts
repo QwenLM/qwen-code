@@ -2148,6 +2148,22 @@ function reverseAuditScheduleOrNote(
 }
 
 /**
+ * Print the round's deferred degrade NOTE exactly once per round per run
+ * — the claim-plus-write glued at both build sites (#9272: a lockstep
+ * duplicate of the claim condition or the writer channel would diverge
+ * the two modes' diagnostics silently).
+ */
+function printRetirementDegradeNoteOnce(
+  planPath: string,
+  round: number | undefined,
+  scheduleNote: string | null,
+): void {
+  if (scheduleNote !== null && claimRetirementDegradeNote(planPath, round)) {
+    writeStderrLineSafe(scheduleNote);
+  }
+}
+
+/**
  * Topology anomaly note (#9242): the plan's own size fields decide the
  * topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
  * reverse-audit round-cap tier is priced against that decision — but the
@@ -2266,9 +2282,7 @@ function runAllChunks(
   // deferred catch NOTE tells the truth (#9259), claimed cross-process
   // so a dead-schedule round's per-chunk builds print it exactly once
   // (#9272).
-  if (scheduleNote !== null && claimRetirementDegradeNote(planPath, round)) {
-    writeStderrLineSafe(scheduleNote);
-  }
+  printRetirementDegradeNoteOnce(planPath, round, scheduleNote);
 
   const dueSet = schedule === null ? null : new Set(schedule.due);
   const dueChunks =
@@ -2797,12 +2811,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // deferred NOTE tells the truth now (#9259) — once per round per
     // RUN, across the per-chunk processes, via the sidecar claim
     // (#9272).
-    if (
-      scheduleNote !== null &&
-      claimRetirementDegradeNote(args.plan, args.round)
-    ) {
-      writeStderrLineSafe(scheduleNote);
-    }
+    printRetirementDegradeNoteOnce(args.plan, args.round, scheduleNote);
     // The note belongs to the round's ADMISSION — a stamped rebuild
     // was ruled on when the round was admitted, so it stays silent.
     if (!roundAdmitted) {

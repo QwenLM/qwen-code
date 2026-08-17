@@ -650,113 +650,147 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       'a passive no+noun admission (no regressions were verified)',
       'No issues found — re-walked the reconnect path; no regressions ' +
         'were verified.',
+      'receipt clause contradicts the phrase',
     ],
     [
       'the incapacity compound 未来得及',
       '未发现问题——走查了解析器，未来得及检查生成的文件。',
+      'receipt clause contradicts the phrase',
     ],
     [
       'a limiter before the walk verb (没有回归，只走查了X)',
       '未发现问题——没有回归，只走查了解析器与调用点。',
+      'receipt clause contradicts the phrase',
     ],
     [
       'an un-examined admission (unexamined)',
       'No issues found — re-walked the scheduler; the fallback path ' +
         'went unexamined.',
+      'receipt clause contradicts the phrase',
     ],
     [
       'a no+verb admission (no verification)',
       'No issues found — I did no verification of the parser or its callers.',
+      'receipt clause contradicts the phrase',
     ],
     [
       'a strip-dead noun in the passive seat (no issues were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a strip-dead noun with an adverb between (no issues at all were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues at all were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a strip-dead noun, findings (no findings were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no findings were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a strip-dead noun, gaps (no gaps are verified outstanding)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no gaps are verified outstanding.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a strip-dead noun in a filler-seat clause (there were no issues verified)',
       'No issues found — there were no issues verified this round across ' +
         'the reconnect state machine and its call sites.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a passive head with a non-walk participle (no issues were checked)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues were checked.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a get-passive head with a non-walk participle (no issues got checked)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues got checked.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a passive head with a non-walk participle (no issues were confirmed)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues were confirmed.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a hyphenated walk verb in the passive seat (no issues were re-verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues were re-verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a passive seat across a no-break space (no issues NBSP were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues\u00A0were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a passive seat across an ideographic space (no issues U+3000 were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues\u3000were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a passive seat across a parenthetical (no issues, however, were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues, however, were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a passive seat across parens (no issues (all 12) were verified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues (all 12) were verified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a prefixed one-token participle in the passive seat (no issues were reverified)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues were reverified.',
+      'receipt clause restates the all-clear',
     ],
     [
       'a prefixed one-token participle in the passive seat (no issues were retraced)',
       'No issues found — re-walked the reconnect state machine and its ' +
         'call sites; no issues were retraced.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a blanket-found pardon with an admission spliced after (nothing was verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues were found because nothing was verified.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a headless reduced passive (no issues checked)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues checked.',
+      'receipt clause restates the all-clear',
+    ],
+    [
+      'a dash-split passive (no issues — were verified)',
+      'No issues found — re-walked the reconnect state machine and its ' +
+        'call sites; no issues — were verified across every call site.',
+      'receipt clause restates the all-clear',
     ],
   ])(
     'an admission stays marked, however the absence-of-problems phrasing tempts an exception: %s (#9272)',
-    (_label, leaked) => {
-      // The exception class these shapes probed was tried and REMOVED:
-      // two review rounds of executed entrances (passive voice,
-      // lexicalized compounds, limiter compounds) showed an exception
-      // list over natural language has no last corner — the same lesson
-      // as #9213's polarity guard. Each of these names a walk, so
-      // polarity is the only text gate — and it stays armed. The
-      // strip-dead nouns pin the marker strip's own guard: an echoed
-      // `no <noun>` strips, but the same noun as the SUBJECT of a walk
-      // verb keeps its `no`, so the bare marker sees it. The honest
-      // mirror reads `unknown` and keeps auditing: the module's declared
-      // direction.
+    (_label, leaked, failure) => {
+      // The fleet-family fixtures restate the receipt's core in the
+      // clause — the passive/reduced/spliced family three shipped guard
+      // shapes failed to close — and fall to the restatement bar by FORM
+      // (`receipt clause restates the all-clear`), no lookahead, no
+      // enumeration. The marker fixtures carry no core, so the bare
+      // marker list itself contradicts them (`…contradicts the phrase`).
+      // The expected bar rides with each tuple.
       transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
       transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
 
@@ -764,7 +798,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       expect(r3.due).toEqual([13]);
       expect(r3.skipped).toEqual([]);
       expect(r3.diagnostics).toEqual([
-        'chunk 13 — round 1: receipt clause contradicts the phrase; round 2: receipt clause contradicts the phrase',
+        `chunk 13 — round 1: ${failure}; round 2: ${failure}`,
       ]);
     },
   );
@@ -790,10 +824,14 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     ]);
   });
 
-  it('an echo in a walk verb\u2019s object seat still retires — the guard spares it (#9272)', () => {
-    // The marker strip refuses to blank a `no <noun>` the clause makes
-    // the subject of a walk verb; the same nouns as the verb's OBJECT —
-    // the all-clear the walk produced — keep stripping and retiring.
+  it('an echo in a walk verb\u2019s object seat restates the all-clear — the form refuses it (#9272)', () => {
+    // The object-seat restatement reads as the all-clear the walk
+    // produced — and it is refused anyway: no regex tells `verified no
+    // issues in X` from an admission wearing the same words, so the form
+    // forbids the restatement outright (the brief now mandates the
+    // clause never restates the all-clear). Fails toward audit — the
+    // declared direction — and stays out of the enumeration trap the
+    // last three guard shapes fell into (#9272 rounds 4-6).
     for (const r of [1, 2]) {
       transcript(
         record(r, 13, `chunk 13 round ${r} territory walk`),
@@ -803,34 +841,26 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     }
 
     const r3 = schedule(3, [13]);
-    expect(r3.due).toEqual([]);
-    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt clause restates the all-clear; round 2: receipt clause restates the all-clear',
+    ]);
   });
 
-  it('an honest echo keeps stripping when the filler rides the word-run (#9272)', () => {
-    // The guard refuses a strip whose word-run after the noun reaches a
-    // walk verb or a passive head — but the phrase's OWN filler exempts
-    // the run: `no issues were found verifying the callers` is the
-    // all-clear the walk produced, not a passive admission, whatever walk
-    // vocabulary rides after `found`. Both honest shapes pin the
-    // exemption: the filler in the receipt's lead with a walk noun after
-    // it (`found after verification`), and the filler inside the clause
-    // with a walk verb after it. Without the exemption the guard fired on
-    // `verification` / `verifying` and refused receipts whose auditors
-    // phrase the all-clear this way.
-    for (const receipt of [
+  it('a lead filler carrying walk vocabulary still retires — the lead never restates (#9272)', () => {
+    // `No issues found after verification — …` puts the walk in the
+    // receipt's own filler: the lead strip removes the phrase core, the
+    // residue carries no marker, and the clause narrates without
+    // restating — the honest shape the form keeps retiring.
+    const receipt =
       'No issues found after verification — re-walked the parser and both ' +
-        'of its call sites.',
-      'No issues found — re-walked the parser; no issues were found ' +
-        'verifying the callers.',
-    ]) {
-      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
-      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+      'of its call sites.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
 
-      const r3 = schedule(3, [13]);
-      expect(r3.due).toEqual([]);
-      expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
-    }
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
   });
 
   it('a Chinese receipt separated by a full-width colon is dry', () => {
@@ -1336,9 +1366,9 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     // exactly the receipts it was added to admit. The anchored matcher
     // must take the lead.
     for (const receipt of [
-      'No new issues were found. All six layers walked; no gaps: none.',
-      'No new issues were found. Re-walked the scheduler: no issues — all ' +
-        'cold.',
+      'No new issues were found. All six layers walked; every gap already ' +
+        'on the list.',
+      'No new issues were found. Re-walked the scheduler: all of it cold.',
     ]) {
       transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
       transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
@@ -1701,11 +1731,10 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
   });
 
   it("a doubled stock sentence is not dry — the parrot bar refuses the brief's own example (#9213)", () => {
-    // The stock sentence pasted twice: the doubled clause contains the
-    // brief's example clause verbatim twice over, so the case-insensitive
-    // parrot bar is the bar that falls (#9259 — the title used to credit
-    // the substance floor, which this fixture never reaches). The floor's
-    // own phrase-stripped measurement is pinned by the next test.
+    // The stock sentence pasted twice: the doubled clause RESTATES the
+    // all-clear core twice over, so the restatement bar is the bar that
+    // falls (#9272 — an earlier form credited the parrot bar, and before
+    // that the substance floor; the form's refusal lands earlier now).
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
     transcript(
       record(2, 13, 'chunk 13 round 2 territory walk'),
@@ -1719,11 +1748,12 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(3, [13]).due).toEqual([13]);
   });
 
-  it('an echo cannot lend the floor its substance — the floor measures the stripped clause (#9259)', () => {
-    // The clause carries a walk verb, so it clears the walk gate — but
-    // every flat character past the verb is an echoed phrase. Measured on
-    // the phrase-STRIPPED clause the floor sees `re-walked, , .` (under
-    // 20, no object) and refuses; measured unstripped it would pass.
+  it('an echo cannot lend the floor its substance — the restatement bar refuses it first (#9272)', () => {
+    // The clause carries a walk verb, but every flat character past it is
+    // an echoed all-clear — a restatement, which the form refuses before
+    // any floor measurement runs (the strip-measure ordering this test
+    // once pinned is unreachable now: no clause with a core in it
+    // survives the restatement bar to be measured).
     for (const r of [1, 2]) {
       transcript(
         record(r, 13, `chunk 13 round ${r} territory walk`),
@@ -1734,7 +1764,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([13]);
     expect(r3.diagnostics).toEqual([
-      'chunk 13 — round 1: receipt clause too thin; round 2: receipt clause too thin',
+      'chunk 13 — round 1: receipt clause restates the all-clear; round 2: receipt clause restates the all-clear',
     ]);
   });
 

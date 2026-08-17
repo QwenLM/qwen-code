@@ -195,9 +195,11 @@ export function claimRetirementDegradeNote(
       // fenced by it would re-admit a dead run's claim written in the two
       // seconds before a re-capture — silently suppressing the retried
       // run's NOTE. The sibling fence in retirement.ts reads the strict
-      // mtime for the same reason.
+      // mtime for the same reason. `recursive` so a stale DIRECTORY at
+      // the claim path clears too — an occupant that is not a plain file
+      // can never be a claim (#9272).
       if (statSync(file).mtimeMs < statSync(planPath).mtimeMs) {
-        rmSync(file, { force: true });
+        rmSync(file, { force: true, recursive: true });
       }
     } catch {
       // No prior claim — the create below is the claimant.
@@ -209,9 +211,16 @@ export function claimRetirementDegradeNote(
     );
     return true;
   } catch (err) {
-    // EEXIST: claimed already this run — stay silent. Anything else (an
-    // unwritable record dir, a faulting stat) must not silence the note.
-    return (err as NodeJS.ErrnoException).code !== 'EEXIST';
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return true;
+    // EEXIST: claimed already this run — but only when the occupant is
+    // the claim FILE. A directory or other non-file at the claim path
+    // holds no claim, and treating it as one silences the NOTE forever —
+    // the only wrong answer here (#9272).
+    try {
+      return !statSync(file).isFile();
+    } catch {
+      return true;
+    }
   }
 }
 
