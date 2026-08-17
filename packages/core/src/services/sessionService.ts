@@ -638,13 +638,59 @@ export class SessionService {
     sourceType?: string;
     sourceId?: string;
   }> {
-    for (const state of ['active', 'archived'] as const) {
+    return (
+      (await this.readCreationMetadataInternal(
+        sessionId,
+        ['active', 'archived'],
+        false,
+      )) ?? {}
+    );
+  }
+
+  /** Reads one location, returning undefined unless its head is fully readable. */
+  async readCreationMetadataIfReadable(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): Promise<
+    | {
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }
+    | undefined
+  > {
+    return this.readCreationMetadataInternal(sessionId, [state], true);
+  }
+
+  private async readCreationMetadataInternal(
+    sessionId: string,
+    states: readonly SessionArchiveState[],
+    requireCompleteLines: boolean,
+  ): Promise<
+    | {
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }
+    | undefined
+  > {
+    for (const state of states) {
       const filePath = this.getSessionFilePath(sessionId, state);
       try {
-        const records = await jsonl.readLines<ChatRecord>(
-          filePath,
-          MAX_PROMPT_SCAN_LINES,
-        );
+        let records: ChatRecord[];
+        if (requireCompleteLines) {
+          const result = await jsonl.readLinesWithIntegrity<ChatRecord>(
+            filePath,
+            MAX_PROMPT_SCAN_LINES,
+          );
+          if (!result.complete) continue;
+          records = result.records;
+        } else {
+          records = await jsonl.readLines<ChatRecord>(
+            filePath,
+            MAX_PROMPT_SCAN_LINES,
+          );
+        }
         if (records.length === 0) continue;
         if (
           !(await this.sessionBelongsToCurrentProject(
@@ -662,7 +708,7 @@ export class SessionService {
         );
       }
     }
-    return {};
+    return undefined;
   }
 
   async getSessionLocation(sessionId: string): Promise<SessionLocation> {

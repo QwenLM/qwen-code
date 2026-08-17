@@ -22,7 +22,10 @@ export interface ConversationSessionMetadataStore {
   getSessionLocation(
     sessionId: string,
   ): Promise<'active' | 'archived' | 'conflict' | undefined>;
-  readCreationMetadata(sessionId: string): Promise<LiveSessionCreationMetadata>;
+  readCreationMetadataIfReadable(
+    sessionId: string,
+    state: 'active' | 'archived',
+  ): Promise<LiveSessionCreationMetadata | undefined>;
 }
 
 export type ConversationSessionKind = 'live' | 'standalone';
@@ -96,7 +99,11 @@ async function readExistingMetadata(
 ): Promise<LiveSessionCreationMetadata | undefined> {
   const location = await store.getSessionLocation(sessionId);
   if (location !== 'active' && location !== 'archived') return undefined;
-  const metadata = await store.readCreationMetadata(sessionId);
+  const metadata = await store.readCreationMetadataIfReadable(
+    sessionId,
+    location,
+  );
+  if (!metadata) return undefined;
   const confirmedLocation = await store.getSessionLocation(sessionId);
   return confirmedLocation === location ? metadata : undefined;
 }

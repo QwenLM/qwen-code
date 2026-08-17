@@ -38,7 +38,7 @@ function createStore(
     async getSessionLocation(sessionId) {
       return records.has(sessionId) ? 'active' : undefined;
     },
-    async readCreationMetadata(sessionId) {
+    async readCreationMetadataIfReadable(sessionId) {
       return records.get(sessionId) ?? {};
     },
   };
@@ -157,7 +157,7 @@ describe('conversation session source classification', () => {
       async getSessionLocation(sessionId) {
         return sessionId === LEGACY_ID ? 'conflict' : undefined;
       },
-      async readCreationMetadata() {
+      async readCreationMetadataIfReadable() {
         reads++;
         return {};
       },
@@ -179,7 +179,7 @@ describe('conversation session source classification', () => {
         locationReads++;
         return locationReads === 1 ? 'active' : undefined;
       },
-      async readCreationMetadata() {
+      async readCreationMetadataIfReadable() {
         return {};
       },
     };
@@ -187,5 +187,26 @@ describe('conversation session source classification', () => {
     await expect(
       readLoadableConversationSession(LEGACY_ID, disappearingStore),
     ).resolves.toBeUndefined();
+  });
+
+  it('rejects a transcript whose creation metadata is unreadable', async () => {
+    const states: Array<'active' | 'archived'> = [];
+    const unreadableStore: ConversationSessionMetadataStore = {
+      async getSessionLocation() {
+        return 'active';
+      },
+      async readCreationMetadataIfReadable(_sessionId, state) {
+        states.push(state);
+        return undefined;
+      },
+    };
+
+    await expect(
+      readLoadableConversationSession(LEGACY_ID, unreadableStore),
+    ).resolves.toBeUndefined();
+    await expect(
+      readLoadableLiveConversationMetadata(LEGACY_ID, unreadableStore),
+    ).resolves.toBeUndefined();
+    expect(states).toEqual(['active', 'active']);
   });
 });
