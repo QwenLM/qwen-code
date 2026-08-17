@@ -105,7 +105,10 @@ interface ConversationSessionMetadataStore {
   getSessionLocation(
     sessionId: string,
   ): Promise<'active' | 'archived' | 'conflict' | undefined>;
-  readCreationMetadata(sessionId: string): Promise<LiveSessionCreationMetadata>;
+  readCreationMetadataIfReadable(
+    sessionId: string,
+    state: 'active' | 'archived',
+  ): Promise<LiveSessionCreationMetadata | undefined>;
 }
 ```
 
@@ -432,7 +435,7 @@ ACP child guard再次检查所有真正开始的turn，覆盖HTTP route之外的
 
 `create-sub-session` launcher增加一个窄 conversation hook，由 server assembly注入：
 
-- caller是explicit或legacy standalone时，调用service的`createChildWithInitialPrompt()`；该方法预生成child UUID、做global reservation、directory pin、spawn/relocation/durable reread/prompt admission与统一rollback。Launcher不得保留第二套standalone spawn/cleanup状态机。Live caller保持现有auto-ID、无child source与materialize流程。
+- caller是explicit或legacy standalone时，调用service的`createChildWithInitialPrompt()`；child UUID由launcher预生成canonical UUID v4并经request传入，service先在任何lock/reservation前拒绝parent/child相同，再做global reservation、directory pin、spawn/relocation/durable reread/prompt admission与统一rollback。Launcher不得保留第二套standalone spawn/cleanup状态机。Live caller保持现有auto-ID、无child source与materialize流程。
 - standalone parent的sent-completion/background follow-up也通过 admission；Live路径保持现有逻辑。
 - standalone child只有在`sourcePersisted === true`且`parentSessionPersisted === true`时才可dispatch首个prompt；任一false/absent都按fresh child rollback。只验证source不足以证明重启后仍能恢复lineage。失败关闭不确定时复用service quarantine policy。
 
@@ -448,9 +451,11 @@ ACP child guard再次检查所有真正开始的turn，覆盖HTTP route之外的
 - Modify: `packages/cli/src/acp-integration/acpAgent.ts`及load/resume tests，移除exact-lowercase `sessionExists()` fast path；ACP child必须直接调用唯一case-insensitive resolver，才能在exact与case-only twin并存时于Config/filesystem初始化前fail closed。
 - Modify: `packages/cli/src/serve/live/live-task-service.ts`及现有caller tests，只把旧source adapter调用改为传入existence-aware SessionService store；不在PR2A迁移Live task的创建或restore语义。
 - Modify: `packages/cli/src/serve/session-id-admission.ts`及test，让case-only duplicate resolver结果按persisted UUID conflict处理，而不是被外层catch误映射为临时`session_id_admission_unavailable`；该适配只改变重复持久化ID的fail-closed分类，不改变I/O失败的retryable unavailable语义。
-- Modify: `packages/core/src/services/sessionService.ts`及test，让case-insensitive persisted-ID resolver无论exact lowercase文件是否存在都扫描active/archived候选；单一candidate返回authoritative spelling，仅大小写不同的多个candidate抛typed conflict。
+- Modify: `packages/core/src/services/sessionService.ts`及test，让case-insensitive persisted-ID resolver无论exact lowercase文件是否存在都扫描active/archived候选；单一candidate返回authoritative spelling，仅大小写不同的多个candidate抛typed conflict。同一文件新增`readCreationMetadataIfReadable()`，把creation metadata读取与existence state绑定，corrupt metadata fail closed。
+- Create: `packages/core/src/utils/jsonl-utils.ts`及test，新增`readLinesWithIntegrity()` fail-closed reader，供`readCreationMetadataIfReadable()`区分missing与corrupt transcript；不新增其他core util。
+- Modify: `packages/cli/src/serve/server/error-response.ts`及test，把core `SessionIdCaseConflictError`映射为与`SessionConflictError`相同的无path 409 `session_conflict`形状，作为routes/dispatch翻译之后的defense-in-depth。
 
-PR2A跨到`packages/core`的生产改动只允许`SessionService`既有case-insensitive resolver的唯一性收紧。不增加core field、setter或新service。若实现需要第二个core文件，先停下重新审计是否应留给PR2B containment或由CLI admission完成。
+PR2A跨到`packages/core`的生产改动只允许`SessionService`既有case-insensitive resolver的唯一性收紧及`readCreationMetadataIfReadable()`，外加`jsonl-utils.ts`的`readLinesWithIntegrity()`。第二个core文件的重审计结论：creation metadata的integrity判定属于core fail-closed边界，CLI routes/dispatch在classify前无法用空读区分missing与corrupt，因此与resolver同属PR2A而不是留给PR2B containment。除此之外不增加core field、setter或新service；PR2A的core生产改动止于这两个文件。
 
 ### PR2B
 
@@ -503,7 +508,7 @@ ACP relocation warning与filesystem error message也不能原样进入standalone
 - Source矩阵：explicit standalone、legacy none/default、exact Live、empty Live id、standalone with sourceId、other source、top-level/child/grandchild/self/cycle；explicit child在parent active/archived/deleted时仍独立分类，legacy orphan不猜测；新reader标记explicit/legacy，旧adapter允许Live与legacy但拒绝explicit standalone。
 - Generic REST与ACP create/restore在任何bridge/admission调用前拒绝explicit standalone；legacy restore仍保持PR2前metadata shape和行为，Live reserved gate回归不变。
 - Mixed-case restore：单一legacy storage ID在REST、ACP HTTP和ACP child load/resume中保留storage spelling用于metadata、ACP child持久化与directory hash，同时daemon bridge live key保持canonical；lowercase exact与uppercase twin并存时四个入口都在materialize/bridge前返回conflict；global admission仍视为persisted占用。
-- Root/child：new、valid empty reuse、non-empty conflict、missing recreate、symlink/junction、wrong owner/mode、file、nested、root replacement、child inode replacement、TOCTOU revalidation、Windows case/canonical behavior；standalone失败路径不调用目录删除，保留empty child可由同UUID重试复用，Live现有empty cleanup行为不变。
+- Root/child：new、valid empty reuse、non-empty conflict、missing recreate、symlink、wrong owner/mode、file、nested、root replacement、child inode replacement、TOCTOU revalidation（含child捕获后root swap窗口的fs-interception pin）与并发create EEXIST raced re-inspection；junction与Windows case/canonical行为在PR2A的可运行平台矩阵下无法验证，该项作为已知未覆盖项推迟，不在本PR宣称覆盖（libuv在lstat下把junction报告为symlink，风险主要剩win32 case-fold比较分支）；standalone失败路径不调用目录删除，保留empty child可由同UUID重试复用，Live现有empty cleanup行为不变。
 
 ### PR2B service tests
 
@@ -563,10 +568,17 @@ npx vitest run \
   src/serve/session-id-admission.test.ts \
   src/serve/acp-http/transport.test.ts \
   src/serve/multi-workspace-sessions.test.ts \
+  src/serve/server/error-response.test.ts \
+  src/serve/live/live-task-service.test.ts \
+  src/acp-integration/acpAgent.test.ts \
+  src/acp-integration/acpAgent.worktree.test.ts \
   src/serve/server.test.ts
 
 cd ../core
-npx vitest run src/services/sessionService.test.ts
+npx vitest run \
+  src/services/sessionService.test.ts \
+  src/services/sessionService.corruption.test.ts \
+  src/utils/jsonl-utils.test.ts
 ```
 
 PR2B：
@@ -601,7 +613,7 @@ npx vitest run src/tools/cron-create.test.ts src/config/config.test.ts
 每个实施 PR 的最终验证：
 
 ```bash
-npx prettier --check packages/acp-bridge/src packages/cli/src/serve packages/cli/src/acp-integration packages/cli/src/config/config.ts packages/core/src/config/config.ts packages/core/src/tools/cron-create.ts packages/core/src/services/sessionService.ts docs/design/standalone-daemon-sessions.md docs/plans/2026-08-14-standalone-pr2-core.md
+npx prettier --check packages/acp-bridge/src packages/cli/src packages/core/src docs/design/standalone-daemon-sessions.md docs/plans/2026-08-14-standalone-pr2-core.md
 npm run lint --workspace @qwen-code/acp-bridge
 npm run lint --workspace @qwen-code/qwen-code
 npm run lint --workspace @qwen-code/qwen-code-core

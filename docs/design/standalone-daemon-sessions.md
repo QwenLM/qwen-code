@@ -680,8 +680,14 @@ logical transaction:
    release. Only a confirmed release promotes the record to reusable
    `agentBound` and permits prompts or automatic work.
 9. Commit process-local creation state and invalidate the catalog cache before
-   attempting to write the HTTP response; no further fallible durable or
-   workspace operation occurs after an initial prompt is admitted.
+   attempting to write the HTTP response. The wire create itself carries no
+   prompt: the strict `CreateStandaloneSessionRequest` schema admits only
+   `sessionId`, `modelServiceId?`, and `approvalMode?`. When a launcher
+   supplies an initial prompt, `createWithInitialPrompt(request, prompt)`
+   admits it as a separate step only after the transaction above commits —
+   inside the same still-held exclusive, via an "exclusive already held"
+   internal dispatch helper — and no further fallible durable or workspace
+   operation occurs after an initial prompt is admitted.
 
 Before source persistence, failure closes any owned ACP session and releases the
 UUID after closure succeeds. The deterministic empty child is retained and may
@@ -691,8 +697,8 @@ atomically bind deletion to the inode validated earlier, so a same-path
 replacement race would make an “exact identity” cleanup claim false. If
 ACP-session closure fails before a durable standalone marker exists, the UUID
 remains reserved as `creating`, the Conversations runtime is quarantined, and
-its shared ACP child is torn down to eliminate the unpersisted orphan before the
-UUID can be released. Quarantine is
+its shared ACP child is torn down to eliminate the unpersisted orphan; the UUID
+reservation is held, not released, until daemon shutdown. Quarantine is
 terminal for the current daemon: the triggering transaction performs no further
 private-directory or transcript cleanup after quarantine begins, every creation
 already in flight remains frozen, and exact lookup for those UUIDs returns
@@ -1352,9 +1358,11 @@ the daemon contract.
 - Primary project settings, memory, Git state, trust, and cwd do not leak; shared
   user and Conversations configuration follows the documented boundary.
 - Standalone ACP command projection and dispatch use one canonical deny predicate:
-  workspace/session-reset, Git diff, project-skill management, and cwd-derived
-  transcript commands are absent and fail before their actions; supported
-  child-local and user-global commands retain their documented behavior.
+  workspace directory management, session/workspace-reset, Git diff,
+  project-skill management, project-scoped language or config import, explicit
+  model persistence, and cwd-derived transcript commands are absent and fail
+  before their actions; supported child-local and user-global commands retain
+  their documented behavior.
 - Standalone permission prompts, including nested sub-agents, cannot persist a
   project rule into the Conversations root; user-global permission persistence
   remains available and does not mutate another session's in-memory rule set.
