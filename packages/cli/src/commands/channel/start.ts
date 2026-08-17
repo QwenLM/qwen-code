@@ -368,14 +368,29 @@ function recordChannelActive(name: string, workspaceCwd: string): void {
   ).trySet(name, 'active');
   // Mirror the stop side's dual-write (recordStoppedChannels): a stop
   // records `stopped` in BOTH the workspace-scoped store and the legacy
-  // global file, and adoption seeds every other workspace from the legacy
-  // file on its next start. Without the mirrored active write the restart
-  // stays scoped to this workspace — after the service dies, a bare start
-  // from ANOTHER workspace adopts the legacy `stopped` record and skips
-  // the channel the user explicitly restarted (R16-30).
-  const legacyPersisted = workspaceCwd
-    ? new ChannelStateStore(channelRuntimeStatePath()).trySet(name, 'active')
-    : true;
+  // global file, and adoption seeds every other workspace from the
+  // legacy file on its next start. Without the mirrored active write the
+  // restart stays scoped to this workspace — after the service dies, a
+  // bare start from ANOTHER workspace adopts the legacy `stopped` record
+  // and skips the channel the user explicitly restarted (R16-30).
+  //
+  // The legacy write is GATED on a differing record (doudouOUC C2): it
+  // only matters while the legacy file still says `stopped` for this
+  // name — the restart must flip that. An absent record (absence already
+  // means active to adoption) or an already-`active` one needs no write,
+  // so a restart-by-name loop pays one scoped write instead of two
+  // fsync'd atomic writes per restart. readAll is the store's tolerant
+  // contract read: an unreadable legacy file yields no record and the
+  // write is skipped — the mirror is then lost under the same disk
+  // condition the write itself would fail under, and the store already
+  // warned about the unreadable file.
+  let legacyPersisted = true;
+  if (workspaceCwd) {
+    const legacyStore = new ChannelStateStore(channelRuntimeStatePath());
+    if (legacyStore.readAll()[name] === 'stopped') {
+      legacyPersisted = legacyStore.trySet(name, 'active');
+    }
+  }
   // The channel IS running, so a failed write is a warning, not an exit —
   // but the stale `stopped` record survives and the next `--channel all`
   // would skip the channel the user explicitly restarted. Surface the loss

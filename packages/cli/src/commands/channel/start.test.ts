@@ -2361,30 +2361,26 @@ describe('startCommand.handler', () => {
     }
 
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
-    // Dual-write (R16-30): the scoped write AND the legacy global write.
-    // The stop direction records `stopped` in BOTH files, so an explicit
-    // restart must flip BOTH — with only the scoped write, a bare start
-    // from ANOTHER workspace adopts the surviving legacy `stopped` record
-    // and skips the channel the user just restarted.
-    expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(2);
-    expect(mockChannelStateStoreSet).toHaveBeenNthCalledWith(
-      2,
-      'telegram',
-      'active',
-    );
-    // The legacy write derives the global path with NO argument (the
-    // zero-argument call form stop.ts's legacy writer uses when the
-    // pidfile carries no workspace).
+    // Scoped write only (doudouOUC C2): the legacy global write is GATED
+    // on a differing record, and this test's legacy file carries none
+    // (default readAll `{}`). Absence already means active to adoption,
+    // so the fsync'd legacy write is skipped for a first-ever named
+    // start. The R16-30 flip direction — legacy record `stopped` →
+    // legacy write — is pinned by the `overwrites a prior stopped
+    // record` test below.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(1);
+    // The gate still constructs a legacy store to READ the record: the
+    // path helper and store counts stay two each (scoped write + legacy
+    // gate read), the write count drops to one.
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith();
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       '/tmp/qwen-home/channels/channel-state.json',
     );
+    expect(mockChannelStateStoreReadAll).toHaveBeenCalled();
     // Cardinality pin (the startAll twins pin it; the named path did not):
     // a refactor generalizing recordChannelActive to write every configured
     // name would flip other channels' `stopped` records to `active` while
-    // the any-call assertion above still matches (#8975). The expected
-    // count is two per name since the dual-write (scoped + legacy,
-    // R16-30).
+    // the any-call assertion above still matches (#8975).
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
     // One-sided warning pin: the persistence-failure warning is pinned on
     // the failure twin below; a successful named start must NOT fire it —
@@ -2451,11 +2447,53 @@ describe('startCommand.handler', () => {
       exitSpy.mockRestore();
     }
 
-    // Two writes since the dual-write (scoped + legacy, R16-30): both
-    // flip the explicitly restarted name to `active`.
+    // Two writes (R16-30 flip, doudouOUC C2 gate FIRES): the legacy file
+    // records `stopped` for the name (readAll seed above), so the gated
+    // legacy write runs and BOTH files flip the explicitly restarted
+    // name to `active`.
     expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(2);
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+  });
+
+  it('skips the legacy active write when the legacy record is already active (doudouOUC C2)', async () => {
+    // The C2 gate's third arm: a legacy record that already matches the
+    // restart (`active`) needs no fsync'd rewrite — only a differing
+    // `stopped` record does (pinned by the test above). A restart-by-name
+    // loop on a warm legacy file pays one scoped write per restart.
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'active' });
+    mockChannelConnect.mockResolvedValue(undefined);
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    // Scoped write only; the legacy gate read happens (readAll) but the
+    // legacy write is skipped.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    expect(mockChannelStateStoreReadAll).toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // No loss warning: nothing was lost — the legacy record already
+    // matches.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
   });
 
   it('still finishes a named start when state persistence fails (#8975)', async () => {

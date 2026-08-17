@@ -163,6 +163,45 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
 }
 
 /**
+ * chmod one already-created directory level to 0o700, tolerating
+ * filesystems without POSIX modes but NOT a concurrent deletion: an
+ * ENOENT here means the level vanished between its mkdir (or the
+ * existsSync walk) and this chmod. Recreate the level and retry the
+ * chmod ONCE; a second ENOENT is a real racing deletion and rethrows,
+ * so the writer fails closed with the true cause instead of the bare
+ * catch silently swallowing it and proceeding to a guaranteed ENOENT
+ * state-file write (doudouOUC C3).
+ */
+function chmodStateLevel(level: string): void {
+  try {
+    chmodSync(level, 0o700);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Windows and some filesystems do not implement POSIX modes.
+      return;
+    }
+    try {
+      mkdirSync(level, { mode: 0o700 });
+    } catch (mkdirError) {
+      // Concurrent recreation is fine; anything else (including the
+      // parent-vanished ENOENT) surfaces to the writer's fail-closed
+      // boundary.
+      if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw mkdirError;
+      }
+    }
+    try {
+      chmodSync(level, 0o700);
+    } catch (retryError) {
+      if ((retryError as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw retryError;
+      }
+      // Non-POSIX filesystem again — tolerate.
+    }
+  }
+}
+
+/**
  * Create a state file's directory tree defeating a restrictive umask at
  * EVERY level (R14-24). A recursive `mkdirSync(..., { mode: 0o700 })`
  * masks each created level with the process umask; under a umask that
@@ -191,17 +230,9 @@ function prepareStateDirectory(dir: string): void {
       // Concurrent creation between existsSync and mkdirSync is fine.
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
-    try {
-      chmodSync(level, 0o700);
-    } catch {
-      // Windows and some filesystems do not implement POSIX modes.
-    }
+    chmodStateLevel(level);
   }
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // Windows and some filesystems do not implement POSIX modes.
-  }
+  chmodStateLevel(dir);
 }
 
 /**

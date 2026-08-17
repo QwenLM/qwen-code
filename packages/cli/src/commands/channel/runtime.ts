@@ -62,6 +62,17 @@ export function daemonChannelLoopPath(workspaceCwd: string): string {
   return daemonChannelStatePath(workspaceCwd, 'cron.json');
 }
 
+/**
+ * Daemon-managed counterpart of the standalone `channelRuntimeStatePath`
+ * (channel-state-store.ts): `qwen serve` persists per-workspace channel
+ * runtime state under `channels/daemon/<hash>/channel-state.json`, the
+ * standalone `qwen channel` commands under `channels/standalone/<hash>`.
+ * Each service owns its own file exclusively — a stop in one mode never
+ * writes the other's file, so the two state trees never cross-contaminate
+ * (#8975). The workspace arrives already canonicalized by the daemon
+ * (canonicalizeWorkspace); unlike the standalone path helper this one
+ * requires a workspace — daemon channel state is always workspace-scoped.
+ */
 export function daemonChannelRuntimeStatePath(workspaceCwd: string): string {
   return daemonChannelStatePath(workspaceCwd, 'channel-state.json');
 }

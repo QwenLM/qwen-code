@@ -47,6 +47,16 @@ function recordStoppedChannels(
     channels,
     'stopped',
   );
+  if (!scoped && legacy) {
+    // Partial loss (doudouOUC S3): the workspace-scoped write failed but
+    // the legacy global write succeeded. Adoption re-merges the legacy
+    // record into this workspace on the next start, so the stop survives
+    // — but the silent heal would mask a failing scoped write path from
+    // operators; leave a trace (best-effort sink, R11-13).
+    writeStdoutLineBestEffort(
+      'Warning: could not persist the workspace channel state; the stop was recorded in the legacy global file and will be re-adopted on the next start.',
+    );
+  }
   return scoped && legacy;
 }
 

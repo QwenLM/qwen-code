@@ -1028,6 +1028,13 @@ describe('stopCommand', () => {
     // ANOTHER workspace sees via adoption — and ships green without this
     // count pin (the message/exit pins above pass either way).
     expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
+    // Partial-heal trace (doudouOUC S3): the scoped write failed but the
+    // legacy write succeeded — adoption re-seeds the stop on the next
+    // start, so the stop survives, but the silent heal must leave an
+    // operator-visible trace of the failing scoped write path.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      expect.stringContaining('recorded in the legacy global file'),
+    );
     // Message-before-exit ordering, twin of the success-path pin: the
     // loss warning is the only trace that `--channel all` may resurrect
     // the channels (R10-19).

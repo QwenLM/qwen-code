@@ -617,6 +617,82 @@ describe('writeServiceInfo + readServiceInfo', () => {
   });
 });
 
+describe('writeServiceInfo stale-pidfile recovery (doudouOUC C1)', () => {
+  // SIGKILL/OOM and any process.exit() past the SIGINT/SIGTERM handlers
+  // leave the pidfile dangling; the exclusive-create refusal must not
+  // block the next start on a DEAD owner's leftover (mirrors the
+  // serve-side reservation flow's liveness check).
+
+  function seedStalePidfile(pid: number): void {
+    fsStore[getPidFilePath()] = JSON.stringify({
+      owner: 'channel',
+      pid,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+  }
+
+  it('replaces a stale pidfile left by a confirmed-dead process', () => {
+    seedStalePidfile(999999);
+    process.kill = vi.fn((pid: number, signal?: number | string) => {
+      if (pid === 999999 && (signal === 0 || signal === undefined)) {
+        throw errnoError('ESRCH');
+      }
+      return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    expect(() => writeServiceInfo(['feishu'], '/ws')).not.toThrow();
+
+    const written = JSON.parse(fsStore[getPidFilePath()] ?? '') as {
+      owner: string;
+      pid: number;
+      channels: string[];
+      workspaceCwd?: string;
+    };
+    expect(written.owner).toBe('channel');
+    expect(written.pid).toBe(process.pid);
+    expect(written.channels).toEqual(['feishu']);
+    expect(written.workspaceCwd).toBe('/ws');
+  });
+
+  it('replaces a corrupt pidfile blocking the exclusive create', () => {
+    fsStore[getPidFilePath()] = 'not-json!!!';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(() => writeServiceInfo(['feishu'])).not.toThrow();
+
+    const written = JSON.parse(fsStore[getPidFilePath()] ?? '') as {
+      pid: number;
+      channels: string[];
+    };
+    expect(written.pid).toBe(process.pid);
+    expect(written.channels).toEqual(['feishu']);
+  });
+
+  it('still refuses when the existing pidfile belongs to a live process', () => {
+    seedStalePidfile(4321);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(() => writeServiceInfo(['feishu'])).toThrow('EEXIST');
+    // The live owner's reservation is untouched.
+    expect(JSON.parse(fsStore[getPidFilePath()] ?? '').pid).toBe(4321);
+  });
+
+  it('still refuses when the existing pid is alive under another user (EPERM)', () => {
+    seedStalePidfile(4321);
+    process.kill = vi.fn(() => {
+      throw errnoError('EPERM');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    expect(() => writeServiceInfo(['feishu'])).toThrow('EEXIST');
+    expect(JSON.parse(fsStore[getPidFilePath()] ?? '').pid).toBe(4321);
+  });
+});
+
 describe('removeServiceInfo', () => {
   it('removes existing PID file', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -72,6 +72,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 // beforeAll via vi.importActual. The race test's `armedAfterSut`
 // assertion fails red if the injection ever stops reaching the SUT.
 const mkdirEexistOnce = vi.hoisted(() => ({ armed: false, target: '' }));
+// doudouOUC C3 race injection: one chmodSync on the target throws ENOENT
+// after actually deleting the level — the concurrent-deletion shape
+// prepareStateDirectory's chmod handling must recover from (recreate the
+// level, retry the chmod once).
+const chmodEnoentOnce = vi.hoisted(() => ({ armed: false, target: '' }));
 const realNodeFs = vi.hoisted(() => ({
   current: undefined as unknown as typeof import('node:fs'),
 }));
@@ -97,6 +102,28 @@ vi.mock('node:fs', () => {
         throw error;
       }
       return realNodeFs.current.mkdirSync(p as string, opts as never);
+    },
+    chmodSync: (
+      p: Parameters<typeof import('node:fs').chmodSync>[0],
+      mode: Parameters<typeof import('node:fs').chmodSync>[1],
+    ) => {
+      if (chmodEnoentOnce.armed && String(p) === chmodEnoentOnce.target) {
+        chmodEnoentOnce.armed = false;
+        // Simulate the concurrent deletion faithfully: the level really
+        // vanishes, so the SUT's recovery (recreate + retry) must do real
+        // filesystem work — a swallow-and-continue mutation would leave
+        // the directory missing and fail the post-race write (C3).
+        realNodeFs.current.rmSync(p as string, {
+          recursive: true,
+          force: true,
+        });
+        const error = new Error(
+          `ENOENT: no such file or directory, chmod '${p}'`,
+        ) as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      }
+      return realNodeFs.current.chmodSync(p as string, mode);
     },
   };
   // CJS/ESM interop: vitest requires the default export on the mock.
@@ -901,6 +928,52 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(armedAfterSut).toBe(false);
 
     // The target is still seeded from the legacy map.
+    expect(existsSync(workspacePath)).toBe(true);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
+  });
+
+  it('recovers a concurrently deleted state dir level during chmod and still adopts (doudouOUC C3)', () => {
+    // prepareStateDirectory chmods each created level; a concurrent
+    // deletion between the mkdir and the chmod used to be swallowed by
+    // the bare catch meant for non-POSIX filesystems — hiding a real
+    // ENOENT and proceeding to a guaranteed ENOENT state-file write.
+    // The recovery must recreate the level and retry the chmod once so
+    // the adoption (and any store write) still lands (#8975).
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+    });
+    writeFileSync(legacyPath, legacyBody, 'utf-8');
+    // Arm ONE ENOENT at the leaf hash level; the injection deletes the
+    // level for real before throwing (see the node:fs mock).
+    chmodEnoentOnce.armed = true;
+    chmodEnoentOnce.target = dirname(workspacePath);
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    let armedAfterSut = false;
+    try {
+      expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+      armedAfterSut = chmodEnoentOnce.armed;
+      // The race must not surface as a failed adoption.
+      expect(writeSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('could not adopt legacy channel state'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+      chmodEnoentOnce.armed = false;
+      chmodEnoentOnce.target = '';
+    }
+    // The armed ENOENT must have been CONSUMED by the store-under-test:
+    // with the injection never reaching the SUT the test exercises only
+    // the uncontended path and pins the recovery vacuously (R16-3 shape).
+    expect(armedAfterSut).toBe(false);
+
+    // The target is still seeded from the legacy map, and its directory
+    // survived the race at the restrictive mode.
     expect(existsSync(workspacePath)).toBe(true);
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
@@ -2582,5 +2655,74 @@ describe('selectActiveChannels (#8975)', () => {
     expect(message).toContain('x'.repeat(128));
     expect(message).not.toContain('x'.repeat(129));
     expect(message).toContain('skipped (stopped before restart)');
+  });
+
+  // Edge-case block (doudouOUC S1): dedicated coverage for the shapes the
+  // start paths reach with, beyond the sanitization pins above.
+
+  it('returns an empty selection for empty configured names, even with recorded states', () => {
+    const onSkipped = vi.fn();
+
+    expect(selectActiveChannels([], {}, onSkipped)).toEqual([]);
+    expect(
+      selectActiveChannels([], { telegram: 'stopped' }, onSkipped),
+    ).toEqual([]);
+    // Nothing configured, nothing selected — no skip notices either: a
+    // state entry without a configured name is not a skip event.
+    expect(onSkipped).not.toHaveBeenCalled();
+  });
+
+  it('does not require an onSkipped callback when skipping stopped channels', () => {
+    expect(() =>
+      selectActiveChannels(['telegram'], { telegram: 'stopped' }),
+    ).not.toThrow();
+    expect(selectActiveChannels(['telegram'], { telegram: 'stopped' })).toEqual(
+      [],
+    );
+  });
+
+  it('ignores recorded states for channels that are not configured', () => {
+    const onSkipped = vi.fn();
+
+    const selected = selectActiveChannels(
+      ['telegram'],
+      { telegram: 'active', removed: 'stopped', other: 'active' },
+      onSkipped,
+    );
+
+    expect(selected).toEqual(['telegram']);
+    expect(onSkipped).not.toHaveBeenCalled();
+  });
+
+  it('treats channels without recorded state as active alongside explicit entries', () => {
+    const onSkipped = vi.fn();
+
+    const selected = selectActiveChannels(
+      ['telegram', 'feishu', 'slack'],
+      { feishu: 'active' },
+      onSkipped,
+    );
+
+    expect(selected).toEqual(['telegram', 'feishu', 'slack']);
+    expect(onSkipped).not.toHaveBeenCalled();
+  });
+
+  it('accepts a null-prototype state map like the store read paths return', () => {
+    // ChannelStateStore.readAll / parseStateFile build null-prototype
+    // maps (a channel literally named `__proto__` must round-trip); the
+    // filter must read them the same way as plain objects.
+    const states = Object.create(null) as Record<string, 'active' | 'stopped'>;
+    states['__proto__'] = 'stopped';
+    states['telegram'] = 'active';
+    const onSkipped = vi.fn();
+
+    const selected = selectActiveChannels(
+      ['__proto__', 'telegram'],
+      states,
+      onSkipped,
+    );
+
+    expect(selected).toEqual(['telegram']);
+    expect(onSkipped).toHaveBeenCalledTimes(1);
   });
 });

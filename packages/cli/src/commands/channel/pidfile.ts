@@ -294,7 +294,28 @@ export function writeServiceInfo(
     ...(workspaceCwd !== undefined ? { workspaceCwd } : {}),
   };
 
-  writeInfo(info, 'wx');
+  try {
+    writeInfo(info, 'wx');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    // An existing pidfile may be STALE: SIGKILL/OOM and any
+    // `process.exit()` past the SIGINT/SIGTERM handlers (a crash path,
+    // a concurrent fatal error) bypass the shutdown that removes it,
+    // leaving a dangling reservation behind. `readServiceInfo` carries
+    // the liveness-aware cleanup, but it runs at the TOP of the start
+    // flow — a service that dies during this start's connect window
+    // recreates the shape here, and the exclusive-create failure alone
+    // cannot tell a live concurrent service from a dead one's leftover.
+    // Verify the recorded pid before refusing; clean up and retry once
+    // when it is dead, mirroring the serve-side reservation flow
+    // (run-qwen-serve's reserveChannelServicePidfile) (doudouOUC C1).
+    const existing = peekServiceInfo();
+    if (existing !== null && isProcessAlive(existing.pid)) throw error;
+    unlinkPidFile(pidFilePath());
+    // A live start racing the cleanup legitimately re-creates the file
+    // in between — this retry then throws EEXIST like the first attempt.
+    writeInfo(info, 'wx');
+  }
 }
 
 export function writeServeServiceInfo({
