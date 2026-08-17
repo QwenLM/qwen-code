@@ -6774,7 +6774,7 @@ exit 1
         gate.indexOf('echo "${VERIFY_RUNNER_SHA256}'),
       );
       expect(gate).toContain(
-        'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -',
+        'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | timeout 30 sha256sum -c -',
       );
       // Presence is not enough: the digest checks are only a wall if they run
       // BEFORE the wrapper and actually abort. Moving the invocation above
@@ -6782,9 +6782,9 @@ exit 1
       // appending `|| true` (verification that cannot fail) both leave every
       // other assertion here green.
       for (const verifyLine of [
-        'echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -',
-        'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -',
-        'GATE_HELPERS_NOW="$(sha256sum ',
+        'echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | timeout 30 sha256sum -c -',
+        'echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | timeout 30 sha256sum -c -',
+        'GATE_HELPERS_NOW="$(timeout 30 sha256sum ',
       ]) {
         expect(gate.indexOf(verifyLine)).toBeGreaterThan(-1);
         expect(gate.indexOf(verifyLine)).toBeLessThan(
@@ -6824,6 +6824,29 @@ exit 1
       expect(gate).not.toMatch(
         /^ {10}unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH\s*$/m,
       );
+      // DOCKER_HOST/DOCKER_CONTEXT reroute the wrapper's `docker run` to a
+      // rogue daemon (the entrance demonstrated in the round-7 probe), and
+      // NODE_OPTIONS injects into every node process at startup — pinned
+      // empty at env: level like the preload channels (#9214 review).
+      expect(gate).toContain("DOCKER_HOST: ''");
+      expect(gate).toContain("DOCKER_CONTEXT: ''");
+      // BASH_FUNC_* carriers cannot be pinned by name: an imported shell
+      // function shadows sha256sum/stat/bash ahead of the PATH pin, so the
+      // run body unloads every imported function BEFORE the digest checks,
+      // and re-sweeps this run's agent-tree marker — a step-timeout kill of
+      // the agent step skips that step's own sweep and channel unlink
+      // (#9214 review). Both run before anything trusts this host.
+      expect(gate).toContain('for _fn in $(compgen -A function); do');
+      expect(gate).toMatch(/unset -f -- "\$\{_fn\}"/);
+      expect(gate).toContain(
+        'grep -qs "^AUTOFIX_AGENT_TREE=${GITHUB_RUN_ID:-0}-"',
+      );
+      expect(
+        gate.indexOf('for _fn in $(compgen -A function); do'),
+      ).toBeLessThan(gate.indexOf('echo "${VERIFY_RUNNER_SHA256}'));
+      expect(
+        gate.indexOf('grep -qs "^AUTOFIX_AGENT_TREE=${GITHUB_RUN_ID:-0}-"'),
+      ).toBeLessThan(gate.indexOf('echo "${VERIFY_RUNNER_SHA256}'));
       // The image reference is shape-validated at the consumer: a forged
       // `image=` line appended during the sandbox step's own window (the
       // runner parses the step output file last-wins at step END) must not
@@ -6972,6 +6995,40 @@ exit 1
           'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"',
         ),
       );
+      // A process-group kill misses setsid'd descendants, and a detached
+      // survivor re-creates GITHUB_ENV/GITHUB_PATH between the rm and the
+      // runner's step-END parse, injecting every later step (#9214 review).
+      // The agent tree is marked via env (which survives setsid and
+      // re-parenting) and every carrier is killed BEFORE the channel files
+      // are unlinked.
+      expect(agentStep).toContain(
+        'export AUTOFIX_AGENT_TREE="${GITHUB_RUN_ID:-0}-$$"',
+      );
+      expect(agentStep.indexOf('export AUTOFIX_AGENT_TREE=')).toBeLessThan(
+        agentStep.indexOf(
+          'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"',
+        ),
+      );
+      expect(agentStep).toContain(
+        'grep -qs "^AUTOFIX_AGENT_TREE=${AUTOFIX_AGENT_TREE}$"',
+      );
+      expect(agentStep).toContain('for _pass in 1 2; do');
+      expect(
+        agentStep.indexOf(
+          'grep -qs "^AUTOFIX_AGENT_TREE=${AUTOFIX_AGENT_TREE}$"',
+        ),
+      ).toBeGreaterThan(
+        agentStep.indexOf(
+          'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"',
+        ),
+      );
+      expect(
+        agentStep.indexOf(
+          'grep -qs "^AUTOFIX_AGENT_TREE=${AUTOFIX_AGENT_TREE}$"',
+        ),
+      ).toBeLessThan(
+        agentStep.indexOf('rm -f "${SEVERED_ENV_FILE}" "${SEVERED_PATH_FILE}"'),
+      );
     }
     // The three helpers the gate EXECUTES are staged in the same writable
     // RUNNER_TEMP, so they are digested at staging and verified before the
@@ -6988,11 +7045,11 @@ exit 1
     expect(helperBlob).toBeTruthy();
     for (const gate of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(gate).toContain(
-        `GATE_HELPERS_NOW="$(sha256sum ${helperBlob} | sha256sum`,
+        `GATE_HELPERS_NOW="$(timeout 30 sha256sum ${helperBlob} | sha256sum`,
       );
     }
     expect(
-      workflow.match(/GATE_HELPERS_NOW="\$\(sha256sum /g) ?? [],
+      workflow.match(/GATE_HELPERS_NOW="\$\(timeout 30 sha256sum /g) ?? [],
     ).toHaveLength(2);
     // The digest must cover the three files INDIVIDUALLY: `cat a b c |
     // sha256sum` is invariant under file-boundary shifts, so a writer with
@@ -7025,9 +7082,11 @@ exit 1
         "VERDICT_INPUTS_SHA256: '${{ steps.prepare.outputs.verdict_inputs_sha256 }}'",
       );
       expect(gate).toContain(
-        `VERDICT_INPUTS_NOW="$(sha256sum ${verdictInputsBlob} | sha256sum`,
+        `VERDICT_INPUTS_NOW="$(timeout 30 sha256sum ${verdictInputsBlob} | sha256sum`,
       );
-      expect(gate.indexOf('VERDICT_INPUTS_NOW="$(sha256sum ')).toBeLessThan(
+      expect(
+        gate.indexOf('VERDICT_INPUTS_NOW="$(timeout 30 sha256sum '),
+      ).toBeLessThan(
         gate.indexOf('bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"'),
       );
     }
@@ -7075,6 +7134,31 @@ exit 1
     expect(stagedList.slice().sort()).toEqual(
       ['run-autofix-review-verification.sh', ...digestedHelpers].sort(),
     );
+    // The gate step's digest checks cover the RUNNER_TEMP bytes at CHECK
+    // time, but the wrapper cp's the scripts into CBIN AFTERWARDS — a
+    // watcher overwriting a staged script in that seam would otherwise be
+    // copied in and execute AS the gate. The wrapper therefore re-digests
+    // the COPIES against the staging-time digests (which ride step env from
+    // GITHUB_OUTPUT, unreachable from a disk write) before docker run, and
+    // refuses on a mismatch or an empty digest (#9214 review).
+    expect(wrapper).toContain(
+      'copy_digest() { timeout 10 sha256sum "${CBIN}/${1}" 2> /dev/null | cut -d\' \' -f1; }',
+    );
+    expect(wrapper).toMatch(
+      /if \[\[ -z "\$\{VERIFY_RUNNER_SHA256:-\}" \]\] \|\|[\s\S]{0,160}?copy_digest run-autofix-review-verification\.sh[\s\S]{0,300}?exit 125/,
+    );
+    expect(wrapper).toMatch(
+      /if \[\[ -z "\$\{GATE_CONTAINER_SHA256:-\}" \]\] \|\|[\s\S]{0,160}?copy_digest run-autofix-gate-container\.sh[\s\S]{0,300}?exit 125/,
+    );
+    expect(wrapper).toContain(
+      'HELPERS_COPY_NOW="$(timeout 30 sha256sum "${CBIN}/check-settings-schema.sh"',
+    );
+    expect(wrapper).toMatch(
+      /if \[\[ -z "\$\{GATE_HELPERS_SHA256:-\}" \]\] \|\| \[\[ "\$\{HELPERS_COPY_NOW\}" != "\$\{GATE_HELPERS_SHA256\}" \]\]; then[\s\S]{0,240}?exit 125/,
+    );
+    expect(wrapper.indexOf('copy_digest() {')).toBeLessThan(
+      wrapper.indexOf('docker run --rm'),
+    );
     const passedEnv = [...dockerRun.matchAll(/--env ([A-Z_]+)=/g)].map(
       (m) => m[1],
     );
@@ -7082,6 +7166,7 @@ exit 1
       'BRANCH',
       'CI',
       'FOOTPRINT_ENFORCE',
+      'GATE_INPUTS',
       'GATE_TMPDIR',
       'GITHUB_OUTPUT',
       'HOME',
@@ -7103,14 +7188,16 @@ exit 1
     expect(dockerRun).toContain('--env CI=true');
     expect(dockerRun).not.toContain('CI_DEV_BOT_PAT');
     expect(dockerRun).not.toContain('GITHUB_ENV');
-    // Only three paths are mounted: the workspace, the round's workdir, and
-    // the container's own staging copy. The real RUNNER_TEMP (staged agent
-    // runner, the PAT steps' throwaway configs) is never mounted.
+    // Only four paths are mounted: the workspace, the round's workdir, the
+    // container's own staging copy, and the digest-verified inputs snapshot.
+    // The real RUNNER_TEMP (staged agent runner, the PAT steps' throwaway
+    // configs) is never mounted.
     const mounts = [...dockerRun.matchAll(/--volume "([^:]+):/g)].map(
       (m) => m[1],
     );
     expect(mounts.sort()).toEqual([
       '${CBIN}',
+      '${CINPUTS}',
       '${CRW}',
       '${GITHUB_WORKSPACE}',
       '${WORKDIR}',
@@ -7121,6 +7208,8 @@ exit 1
     // code would stop being the unforgeable half. Everything the gate
     // legitimately writes goes to the separate rw scratch mount.
     expect(dockerRun).toContain('--volume "${CBIN}:${CBIN}:ro"');
+    expect(dockerRun).toContain('--volume "${CINPUTS}:${CINPUTS}:ro"');
+    expect(dockerRun).toContain('--env GATE_INPUTS="${CINPUTS}"');
     expect(dockerRun).toContain('--volume "${CRW}:${CRW}"');
     // Mount TARGETS must equal their sources (a retargeting mutant would slip
     // past a sources-only comparison), and the workdir must be the workspace —
@@ -7164,6 +7253,27 @@ exit 1
         'if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]',
       ),
     ).toBeLessThan(wrapper.indexOf('OUTCOME="$(verdict_value'));
+    // The host-authored bite inputs are re-verified against the
+    // prepare-time digest and snapshotted into the read-only mount BEFORE
+    // the run: a surviving host process truncating rc.json after the gate
+    // step's check would otherwise become BOTH the wrapper baseline and the
+    // gate's capture, flipping BITE_ENFORCE off so the bogus-fix round the
+    // bite check exists to reject exits 0 as `fixed`. The copies are
+    // re-digested after the cp, so a swap in the verify->copy seam is
+    // refused too (#9214 review).
+    expect(wrapper).toMatch(
+      /if \[\[ -z "\$\{VERDICT_INPUTS_SHA256:-\}" \]\] \|\| \[\[ "\$\{VERDICT_INPUTS_NOW\}" != "\$\{VERDICT_INPUTS_SHA256\}" \]\]; then[\s\S]{0,280}?exit 125/,
+    );
+    expect(wrapper).toContain(
+      'VERDICT_INPUTS_DETAIL="$(timeout 30 sha256sum "${WORKDIR}/rc.json"',
+    );
+    expect(wrapper).toMatch(
+      /timeout 10 cp "\$\{WORKDIR\}\/\$\{_vi\}" "\$\{CINPUTS\}\/\$\{_vi\}"/,
+    );
+    expect(wrapper).toContain('grep -F " ${WORKDIR}/${_vi}"');
+    expect(
+      wrapper.indexOf('VERDICT_INPUTS_DETAIL="$(timeout 30 sha256sum'),
+    ).toBeLessThan(wrapper.indexOf('docker run --rm'));
     // The host-side HEAD pin: the container mounts the workspace rw at the
     // runner uid, so a detached in-container process can move the branch
     // ref to an attacker commit AND append verified_head=<it> after the
@@ -7232,27 +7342,35 @@ exit 1
     ]);
     // The fingerprint only catches modifications that PERSIST until the
     // post-run compare: a truncate-during-run-then-restore flips the bite
-    // check's BITE_ENFORCE off mid-run (its -s guard reads the truncated
-    // file) while the restored bytes pass the compare — the bogus-fix round
-    // the bite check exists to reject sails to outcome=fixed. The gate
-    // therefore reads its bite inputs ONCE, before any branch code runs,
-    // and freezes the enforcement decision there: a check-then-use re-read
-    // after the build legs let a watcher truncate in the digest→read gap or
-    // substitute a FIFO that feeds the digest original bytes while `[[ -s ]]`
-    // sees st_size 0 — both probe-confirmed (#9214 review). The late site
-    // keeps only a type-safe tamper alarm.
+    // check's BITE_ENFORCE off mid-run while the restored bytes pass the
+    // compare — the bogus-fix round the bite check exists to reject sails
+    // to outcome=fixed. The gate therefore captures each input ONCE,
+    // bounded, before any branch code runs, and computes the digest AND
+    // both jq decisions from that single capture: the old shape digested
+    // the live files and let the jq decisions RE-READ them — check-then-
+    // use, so a watcher swapping rc.json in the digest→read gap steered
+    // BITE_ENFORCE (probe-confirmed), and a FIFO swapped into the
+    // stat→open window hung the read out to the step timeout. One capture
+    // closes both: the bytes cannot move between uses of them, and the
+    // timeout converts a racing swap into a crash (#9214 review). The
+    // container reads the wrapper's digest-verified snapshot mount
+    // (GATE_INPUTS); host runs read WORKDIR directly.
     expect(reviewVerificationRunner).toContain(
-      'BITE_INPUTS_BEFORE="$(bite_input_digest)"',
+      'GATE_INPUTS="${GATE_INPUTS:-${WORKDIR}}"',
     );
-    // Type discipline BEFORE any hash or read of the inputs: a FIFO planted
-    // in the container-startup window must crash the gate loudly, never hang
-    // sha256sum's open() until the step timeout.
+    expect(reviewVerificationRunner).toContain(
+      'BITE_INPUTS_BEFORE="$(bite_input_digest "${BITE_RC_CAPTURE}" "${BITE_RESOLVED_CAPTURE}" "${BITE_RV_CAPTURE}")',
+    );
     expect(reviewVerificationRunner).toMatch(
-      /for _bi in rc\.json resolved-comments\.txt rv\.json; do[\s\S]{0,420}?BITE_INPUTS_BEFORE="\$\(bite_input_digest\)"/,
+      /bite_capture\(\) \{[\s\S]{0,420}?timeout 10 cat/,
     );
-    // Every read that feeds the decision — the digest, the -s guards and
-    // both jq computations — sits BEFORE the first build leg: the frozen
-    // decision is what makes a mid-run truncate or FIFO substitution inert.
+    // Type discipline BEFORE any capture, and every read that feeds the
+    // decision — the captures, the -n guards and both jq computations —
+    // sits BEFORE the first build leg: the frozen decision is what makes a
+    // mid-run truncate or FIFO substitution inert.
+    expect(reviewVerificationRunner).toMatch(
+      /for _bi in rc\.json resolved-comments\.txt rv\.json; do[\s\S]{0,1800}?BITE_INPUTS_BEFORE="\$\(bite_input_digest "\$\{BITE_RC_CAPTURE\}"/,
+    );
     expect(
       reviewVerificationRunner.indexOf("BITE_ENFORCE='false'"),
     ).toBeLessThan(
@@ -7262,7 +7380,7 @@ exit 1
     );
     expect(
       reviewVerificationRunner.lastIndexOf(
-        '--slurpfile reviews "${WORKDIR}/rv.json"',
+        '--slurpfile reviews <(printf \'%s\\n\' "${BITE_RV_CAPTURE}")',
       ),
     ).toBeLessThan(
       reviewVerificationRunner.indexOf(
@@ -7271,9 +7389,15 @@ exit 1
     );
     // The alarm survives at the bite section: refuse a moved (or swapped
     // non-regular) input loudly instead of letting a tampered round carry a
-    // verdict built on inputs of unknown integrity.
+    // verdict built on inputs of unknown integrity. Its re-capture is
+    // BOUNDED: a watcher swap landing in the stat→open window hits the
+    // timeout and becomes the same rejection instead of hanging the gate
+    // out to the step timeout (#9214 review).
     expect(reviewVerificationRunner).toMatch(
-      /if \[\[ "\$\(bite_input_digest\)" != "\$\{BITE_INPUTS_BEFORE\}" \]\]; then\n\s+reject_fix 'bite check inputs changed during the gate run'/,
+      /if ! \{ BITE_RC_NOW="\$\(bite_capture rc\.json "\$\{WORKDIR\}"\)" &&[\s\S]{0,400}?reject_fix 'bite check inputs changed during the gate run'/,
+    );
+    expect(reviewVerificationRunner).toMatch(
+      /if \[\[ "\$\(bite_input_digest "\$\{BITE_RC_NOW\}" "\$\{BITE_RESOLVED_NOW\}" "\$\{BITE_RV_NOW\}"\)" != "\$\{BITE_INPUTS_BEFORE\}" \]\]; then\n\s+reject_fix 'bite check inputs changed during the gate run'/,
     );
     expect(
       reviewVerificationRunner.indexOf(
@@ -7322,25 +7446,26 @@ exit 1
     expect(wrapper).toMatch(
       /if \[\[ "\$\{VERDICT_INODE_NOW\}" != "\$\{VERDICT_INODE\}" \]\]; then[\s\S]{0,300}?exit 125/,
     );
-    // BOTH arms count outcome lines: the gate writes `outcome=` exactly
-    // once on every genuine path, so a watcher appending a bare `outcome=`
-    // after the gate's write would empty OUTCOME through last-wins and
-    // silently turn an EVALUATED rejection into a no-diagnostic crash-retry
-    // loop — and on the rc=0 arm an appended `outcome=noop` silently
-    // discards a verified fix as no-action. The exit-0 arm additionally
+    // The exit-0 arm counts outcome lines: the gate writes `outcome=`
+    // exactly once on every genuine path, so a watcher appending a bare
+    // `outcome=` after the gate's write would empty OUTCOME through
+    // last-wins and silently turn an EVALUATED rejection into a
+    // no-diagnostic crash-retry loop — and an appended `outcome=noop`
+    // silently discards a verified fix as no-action. The arm additionally
     // counts verified_head= (an appended line is the push-guard identity
-    // forgery) and bounds committed= (#9214 review).
+    // forgery) and bounds committed= (#9214 review). The rejection arms
+    // read no flags from the file at all — routing rides the exit code.
     expect(
       wrapper.match(
-        /OUTCOME_LINES="\$\(grep -c '\^outcome=' "\$\{VERDICT\}"/g,
+        /OUTCOME_LINES="\$\(timeout 10 grep -c '\^outcome=' "\$\{VERDICT\}"/g,
       ) ?? [],
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(wrapper).toMatch(/if \[\[ "\$\{OUTCOME_LINES:-0\}" -ne 1 \]\]/);
     expect(wrapper).toContain(
-      'VERIFIED_HEAD_LINES="$(grep -c \'^verified_head=\' "${VERDICT}"',
+      'VERIFIED_HEAD_LINES="$(timeout 10 grep -c \'^verified_head=\' "${VERDICT}"',
     );
     expect(wrapper).toContain(
-      'COMMITTED_LINES="$(grep -c \'^committed=\' "${VERDICT}"',
+      'COMMITTED_LINES="$(timeout 10 grep -c \'^committed=\' "${VERDICT}"',
     );
     expect(wrapper.indexOf('VERDICT_INODE_NOW="$(stat')).toBeGreaterThan(
       wrapper.indexOf('GATE_RC=$?'),
@@ -7422,6 +7547,62 @@ exit 1
     expect(wrapper).toContain('set -uo pipefail');
     expect(wrapper).not.toMatch(/^set -e/m);
     expect(wrapper.trimEnd().endsWith('exit "${GATE_RC}"')).toBe(true);
+    // Imported shell functions are unloaded FIRST: bash re-imports
+    // BASH_FUNC_* carriers at every startup — the caller's strip does not
+    // cover the child — and an imported function shadows sha256sum/stat
+    // ahead of any PATH pin (#9214 review).
+    expect(wrapper).toContain('for _fn in $(compgen -A function); do');
+    expect(
+      wrapper.indexOf('for _fn in $(compgen -A function); do'),
+    ).toBeLessThan(wrapper.indexOf('VERDICT="${WORKDIR}/gate-verdict"'));
+    // Every read of an attacker-writable path is BOUNDED: a watcher swap
+    // landing in the stat→open window must surface as a refusal (fingerprint
+    // NONREGULAR marker, verdict-grep empty → crash/refusal), never a hang
+    // until the step's 60-minute timeout (#9214 review).
+    expect(wrapper).toContain(
+      'hash="$(timeout 10 sha256sum "${WORKDIR}/${f}" 2> /dev/null | cut -d\' \' -f1)" ||',
+    );
+    expect(wrapper).toContain("hash='NONREGULAR:read-blocked'");
+    expect(wrapper).toMatch(/verdict_value\(\) \{\n\s+timeout 10 grep -E/);
+    // The workspace git config is snapshotted pre-run and restored
+    // immediately after the container exits: the rw mount lets the
+    // container plant exec vectors ([diff] external=<payload>) for the
+    // host's post-run git steps, and 'Show run artifacts' runs `git diff`
+    // before the PAT steps' resanitize (#9214 review).
+    expect(wrapper).toContain(
+      'GIT_CONFIG_SNAPSHOT="${CTEMP}/git-config.snapshot"',
+    );
+    expect(
+      wrapper.indexOf('GIT_CONFIG_SNAPSHOT="${CTEMP}/git-config.snapshot"'),
+    ).toBeLessThan(wrapper.indexOf('docker run --rm'));
+    expect(wrapper).toContain(
+      'timeout 10 cp "${GIT_CONFIG_SNAPSHOT}" "${GITHUB_WORKSPACE}/.git/config"',
+    );
+    expect(
+      wrapper.indexOf('timeout 10 cp "${GIT_CONFIG_SNAPSHOT}"'),
+    ).toBeGreaterThan(wrapper.indexOf('GATE_RC=$?'));
+    expect(
+      wrapper.indexOf('timeout 10 cp "${GIT_CONFIG_SNAPSHOT}"'),
+    ).toBeLessThan(wrapper.indexOf('OUTCOME="$(verdict_value'));
+    // Rejection routing rides the gate's exit code end-to-end: reject_fix
+    // exits 10/11/12 by class and fail_handoff the terminal 12; the
+    // wrapper's case arms translate exactly those codes, and the crash
+    // paths keep exit 1 (#9214 review).
+    expect(reviewVerificationRunner).toMatch(
+      /if \[\[ "\$\{preexisting\}" == 'true' \]\]; then\n\s+exit 11\n\s+fi\n\s+if \[\[ "\$\{retryable\}" == 'true' \]\]; then\n\s+exit 10\n\s+fi\n\s+exit 12\n\}/,
+    );
+    expect(reviewVerificationRunner).toMatch(
+      /retryable=false" >> "\$\{GITHUB_OUTPUT\}"[\s\S]{0,340}?exit 12\n\}/,
+    );
+    expect(wrapper).toContain('10 | 11 | 12)');
+    expect(wrapper).toMatch(
+      /\[\[ "\$\{GATE_RC\}" == '10' \]\] && echo "retryable=true"/,
+    );
+    expect(wrapper).toMatch(
+      /\[\[ "\$\{GATE_RC\}" == '11' \]\] && echo "preexisting=true"/,
+    );
+    expect(wrapper).not.toContain('RETRYABLE="$(verdict_value retryable)"');
+    expect(wrapper).not.toContain('PREEXISTING="$(verdict_value preexisting)"');
     const dir = mkdtempSync(join(tmpdir(), 'autofix-gate-verdict-'));
     const runTranslate = (rc, verdictLines) => {
       const verdict = join(dir, 'verdict');
@@ -7447,28 +7628,73 @@ exit 1
     expect(
       runTranslate(0, ['committed=true', 'outcome=fixed', 'verified_head=abc']),
     ).toBe('committed=true\noutcome=fixed\nverified_head=abc');
-    // A real rejection (the gate wrote failed, then exited 1) carries through
-    // with its routing flags, which only pick repair vs handoff, never a
-    // push. reject_fix writes BOTH flags on every rejection, so the genuine
-    // shape carries the explicit baseline. The gate writes `outcome=` exactly
-    // once on every genuine path — a two-outcome fixture corresponds to no
-    // real gate shape and is refused by the count check (cases below).
+    // Rejection routing rides the EXIT CODE — the unforgeable half. The
+    // gate exits 10 (retryable), 11 (pre-existing handoff), 12 (terminal);
+    // the file's routing flags are human-facing detail the translation
+    // never reads, so an IN-PLACE rewrite of the mounted verdict file
+    // (open(O_WRONLY|O_TRUNC) preserves the inode and the type pinned
+    // above, and a well-formed rewrite satisfies any line count) can no
+    // longer flip a deliberately non-retryable rejection into a PAT-backed
+    // repair round or misclassify a fixable one as pre-existing (#9214).
     expect(
-      runTranslate(1, [
+      runTranslate(10, [
         'outcome=failed',
         'preexisting=false',
         'retryable=true',
       ]),
     ).toBe('outcome=failed\nretryable=true');
-    // A FORGED pass cannot survive exit 1 — `fixed` is accepted only on exit
-    // 0 — and with no genuine `failed` in the file the outcome stays UNSET so
-    // the round retries rather than being handed off as evaluated.
-    expect(runTranslate(1, ['outcome=fixed'])).toBe('');
-    // The gate's deliberate exit-1-WITHOUT-verdict crash paths (the baseline
-    // A/B and bite tree-restore failures) must keep reaching the gate-crashed
-    // retry: synthesizing `failed` there would advance the watermark and hand
-    // the item off for good.
+    expect(
+      runTranslate(11, [
+        'outcome=failed',
+        'preexisting=true',
+        'retryable=false',
+      ]),
+    ).toBe('outcome=failed\npreexisting=true');
+    expect(
+      runTranslate(12, [
+        'outcome=failed',
+        'preexisting=false',
+        'retryable=false',
+      ]),
+    ).toBe('outcome=failed');
+    // The rewrite-immunity proof: the same exit codes with FORGED file
+    // content — flipped flags, extra keys — forward exactly the same
+    // routing. The file has no authority on the rejection arms.
+    expect(runTranslate(12, ['outcome=failed', 'retryable=true'])).toBe(
+      'outcome=failed',
+    );
+    expect(
+      runTranslate(10, [
+        'outcome=failed',
+        'preexisting=true',
+        'retryable=false',
+      ]),
+    ).toBe('outcome=failed\nretryable=true');
+    expect(
+      runTranslate(11, [
+        'outcome=failed',
+        'preexisting=false',
+        'retryable=true',
+      ]),
+    ).toBe('outcome=failed\npreexisting=true');
+    // committed= is a ref-only fact the gate records before any check runs;
+    // it is forwarded on rejection paths too so the handoff wording stays
+    // right (a forged value only changes report wording, never a push).
+    expect(runTranslate(12, ['committed=true', 'outcome=failed'])).toBe(
+      'committed=true\noutcome=failed',
+    );
+    // A FORGED pass cannot survive a rejection exit: `fixed` is accepted
+    // only on exit 0, and the rejection arms read no outcome from the file.
+    expect(runTranslate(10, ['outcome=fixed'])).toBe(
+      'outcome=failed\nretryable=true',
+    );
+    // The gate's verdict-less crash paths (the baseline-A/B and bite
+    // tree-restore failures) keep exit 1 — now distinct from the
+    // 10/11/12 rejection classes — and translate to no outcome at all: an
+    // EVALUATED rejection would advance the watermark and hand the item off
+    // for good, while the empty outcome takes the gate-crashed retry.
     expect(runTranslate(1, [])).toBe('');
+    expect(runTranslate(1, ['outcome=failed', 'retryable=true'])).toBe('');
     // A legitimate no-op round carries through as well. The gate's noop
     // exit writes verified_head too, so the count check rides along.
     expect(runTranslate(0, ['verified_head=abc', 'outcome=noop'])).toBe(
@@ -7495,101 +7721,29 @@ exit 1
         'verified_head=attacker',
       ]),
     ).toBe('');
-    // preexisting routes to the base-update handoff (never a push) and rides
-    // along with a genuine failure.
-    expect(
-      runTranslate(1, [
-        'outcome=failed',
-        'preexisting=true',
-        'retryable=false',
-      ]),
-    ).toBe('outcome=failed\npreexisting=true');
-    // committed= is a ref-only fact the gate records before any check runs; it
-    // is forwarded on non-zero paths too so the handoff wording stays right.
-    expect(
-      runTranslate(1, [
-        'committed=true',
-        'outcome=failed',
-        'preexisting=false',
-        'retryable=false',
-      ]),
-    ).toBe('committed=true\noutcome=failed');
     // Exit 0 with no verdict is a crash, not a silent success: outcome stays
     // unset so 'Finalize verification' retries on the next scan.
     expect(runTranslate(0, [])).toBe('');
-    // A docker/infra failure (125) leaves outcome unset too.
+    // A docker/infra failure (125) or a killed container (137) leaves
+    // outcome unset too — even against a planted verdict file.
     expect(runTranslate(125, ['outcome=fixed'])).toBe('');
-    // The `^` anchor in verdict_value's grep is load-bearing and every case
-    // above is blind to it (they all feed exact key names): without it,
-    // `tail -n 1` picks up an attacker-appended `xoutcome=fixed`, OUTCOME
-    // reads `fixed` at exit 1 and a genuine evaluated rejection is rerouted
-    // into the crash-retry loop.
+    expect(runTranslate(137, ['outcome=failed', 'retryable=true'])).toBe('');
+    // The `^` anchor in verdict_value's grep is load-bearing on the pass
+    // arm — the only arm still reading outcome= from the file: without it,
+    // `tail -n 1` picks up an attacker-appended `xoutcome=noop` and
+    // silently discards a verified fix as no-action.
     expect(
-      runTranslate(1, [
-        'outcome=failed',
-        'preexisting=false',
-        'retryable=false',
-        'xoutcome=fixed',
-      ]),
-    ).toBe('outcome=failed');
-    // reject_fix writes BOTH routing flags on every deterministic rejection
-    // (mutually exclusive at the source), so any other shape — a flag line
-    // missing, repeated, or both true — is proof of an append the gate never
-    // made. The translation refuses the verdict as tampered — nothing
-    // forwarded, crash-retry path — instead of guessing which flag is
-    // genuine: a lone forged `retryable=true` used to flip a deliberately
-    // non-retryable rejection (the bite check wrote neither flag) into a
-    // PAT-backed repair round, and a planted
-    // `preexisting=true` overriding a genuine `retryable=true` would skip
-    // the repair the round is entitled to and permanently misclassify a
-    // fixable rejection as a terminal pre-existing failure.
-    expect(
-      runTranslate(1, ['retryable=true', 'outcome=failed', 'preexisting=true']),
-    ).toBe('');
-    // The bite check's non-retryable rejection carries the false baseline,
-    // and a forged `retryable=true` append repeats the key.
-    expect(
-      runTranslate(1, [
-        'outcome=failed',
-        'preexisting=false',
-        'retryable=false',
-        'retryable=true',
-      ]),
-    ).toBe('');
-    // The pre-baseline flag-less shape is indistinguishable from a forgery
-    // and is refused the same way.
-    expect(runTranslate(1, ['outcome=failed', 'retryable=true'])).toBe('');
-    // The evaluated-handoff shape the gate's four non-reject_fix failure
-    // exits write (fail_handoff: failure.md aborts, agent produced
-    // nothing): only outcome=failed crosses the wall — the watermark
-    // advances and the item is handed off, exactly as pre-container; a
-    // flag-less `outcome=failed` never reaches the wall anymore.
-    expect(
-      runTranslate(1, [
-        'outcome=failed',
-        'preexisting=false',
-        'retryable=false',
-      ]),
-    ).toBe('outcome=failed');
-    // An in-container appender cannot silence a genuine rejection: a bare
-    // or duplicated `outcome=` line appended after the gate's write trips
-    // the count check and is refused as tampered (explicit ::error:: and
+      runTranslate(0, ['outcome=fixed', 'verified_head=abc', 'xoutcome=noop']),
+    ).toBe('outcome=fixed\nverified_head=abc');
+    // An in-container appender cannot silence a genuine PASS: a bare or
+    // duplicated `outcome=` line appended after the gate's write trips the
+    // count check and is refused as tampered (explicit ::error:: and
     // crash-retry) instead of emptying OUTCOME through last-wins.
     expect(
-      runTranslate(1, [
-        'outcome=failed',
-        'preexisting=false',
-        'retryable=false',
-        'outcome=',
-      ]),
+      runTranslate(0, ['outcome=fixed', 'verified_head=abc', 'outcome=']),
     ).toBe('');
     expect(
-      runTranslate(1, [
-        'outcome=failed',
-        'preexisting=false',
-        'retryable=false',
-        'outcome=failed',
-      ]),
+      runTranslate(0, ['outcome=fixed', 'verified_head=abc', 'outcome=fixed']),
     ).toBe('');
     rmSync(dir, { recursive: true, force: true });
   });
@@ -9984,7 +10138,7 @@ exit 1
     // runs its own build/test between them), with PATH pinned first.
     expect(
       workflow.match(
-        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c -$/gm,
+        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| timeout 30 sha256sum -c -$/gm,
       ) ?? [],
     ).toHaveLength(2);
     expect(
@@ -10120,6 +10274,60 @@ exit 1
       }).stdout,
     ).not.toContain('xdg-evil');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('pins every post-agent consumer at startup and resanitizes before the first host git', () => {
+    // After an agent step ran branch code on this host, every consumer
+    // pins the startup-time injection channels at env: level — applied
+    // before the step's bash starts, and outranking anything appended to
+    // $GITHUB_ENV; an in-script unset only strips a channel from children
+    // AFTER the step's own bash was already seeded/preloaded (#9214
+    // review). The gate steps pin DOCKER_HOST/DOCKER_CONTEXT instead (no
+    // node runs there), pinned where the docker client reads them.
+    const postAgentSteps = [
+      triageAndAddressStep,
+      repairDeterministicRejectionStep,
+      finalizeVerificationStep,
+      pushAndReportStep,
+    ];
+    for (const step of postAgentSteps) {
+      expect(step).toContain("BASH_ENV: ''");
+      expect(step).toContain("LD_PRELOAD: ''");
+      expect(step).toContain("LD_AUDIT: ''");
+      expect(step).toContain("LD_LIBRARY_PATH: ''");
+      expect(step).toContain("NODE_OPTIONS: ''");
+    }
+    // 'Show run artifacts' runs `git diff` on the host BEFORE any PAT
+    // step's resanitize, and the gate container mounts the workspace rw
+    // at the runner uid — it can plant [diff] external=<payload> in the
+    // repo's .git/config for that diff to fire. The step therefore
+    // resanitizes from the trusted staged copy first (digest-verified,
+    // PATH-pinned, git env stripped), with the wrapper's pre-run
+    // .git/config restore covering the container side (#9214 review).
+    const showRunArtifactsStep =
+      reviewAddressJob.match(
+        /- name: 'Show run artifacts'[\s\S]*?(?=\n[ ]{6}- name: ')/,
+      )?.[0] ?? '';
+    expect(showRunArtifactsStep.length).toBeGreaterThan(200);
+    expect(showRunArtifactsStep).toContain(
+      "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+    );
+    expect(showRunArtifactsStep).toContain(
+      "RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'",
+    );
+    expect(showRunArtifactsStep).toContain("BASH_ENV: ''");
+    const resanitizeCall = 'bash "${RUNNER_TEMP}/resanitize-git-config.sh"';
+    expect(showRunArtifactsStep).toContain(resanitizeCall);
+    expect(showRunArtifactsStep).toContain(
+      'echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null',
+    );
+    expect(showRunArtifactsStep).toContain('export GIT_CONFIG_COUNT=0');
+    expect(showRunArtifactsStep.indexOf(resanitizeCall)).toBeLessThan(
+      showRunArtifactsStep.indexOf('git diff "origin/main...${BRANCH}"'),
+    );
+    expect(
+      showRunArtifactsStep.indexOf('export PATH="${TRUSTED_PATH}"'),
+    ).toBeLessThan(showRunArtifactsStep.indexOf(resanitizeCall));
   });
 
   it('runs both verification gates under a throwaway global git config', () => {
@@ -17582,7 +17790,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
 
   it('charges a failure to the round when the baseline is green', () => {
     const r = runGate({ failAt: ['feature'] });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('retryable=true');
     // The repair agent's only warning that dist/ now holds baseline-built
@@ -17599,7 +17807,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
 
   it('reports pre-existing only on a matching failure signature, with the baseline transcript as evidence', () => {
     const r = runGate({ failAt: ['feature', 'origin/feature'] });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(11);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('preexisting=true');
     // The explicit false baseline rides every rejection — the wrapper
@@ -17628,7 +17836,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       baselineMsg: 'an entirely different defect',
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('DIFFERENT reason');
@@ -17661,7 +17869,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // signature fails closed REGARDLESS of the baseline, so the gate must
     // decide before paying the detach + full baseline re-run + restore.
     const r = runGate({ failAt: ['feature'], noIdentity: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('no failure identity in the head transcript');
@@ -17677,7 +17885,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       trackedDirt: true,
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(11);
     expect(r.outputs).toContain('preexisting=true');
     expect(r.stdout).not.toContain('could not restore the verification tree');
   });
@@ -17691,7 +17899,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       hugeFail: true,
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(11);
     expect(r.outputs).toContain('preexisting=true');
     expect(r.rejection.length).toBeLessThanOrEqual(3900);
     expect(r.rejection.endsWith('````\n')).toBe(true);
@@ -17708,7 +17916,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       headMsg: "Cannot find module './foo'",
       baselineMsg: "Cannot find module './bar'",
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
   });
@@ -17722,7 +17930,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       extraRoundDiag: true,
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
   });
@@ -17738,7 +17946,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       extraBaselineDiag: true,
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(11);
     expect(r.outputs).toContain('preexisting=true');
     expect(r.outputs).not.toContain('retryable=true');
     expect(r.rejection).toContain('pre-existing');
@@ -17752,7 +17960,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       baselineCode: '8888',
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('DIFFERENT reason');
@@ -17771,7 +17979,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       baselineNoIdentity: true,
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('DIFFERENT reason');
@@ -17787,7 +17995,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       failAt: ['feature', 'origin/feature'],
       commFail: true,
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.rejection).toContain('run npm run build before typecheck/tests');
@@ -17807,7 +18015,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
 
   it('keeps the failure text in the evidence window past a chatty green baseline', () => {
     const r = runGate({ failAt: ['feature'], noisySuccess: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.rejection).toContain('stub build FAILED');
   });
@@ -17819,7 +18027,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // or constant change that breaks the invariant fails here, not in a
     // posted comment.
     const r = runGate({ failAt: ['feature'], hugeFail: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.rejection.length).toBeLessThanOrEqual(3900);
     expect(r.rejection.endsWith('````\n')).toBe(true);
     expect(r.rejection).toContain('root cause marker line');
@@ -17831,7 +18039,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       touchCore: true,
       failAt: ['feature'],
     });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).not.toContain('Baseline A/B');
@@ -17842,7 +18050,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // typecheck (sdk-typescript resolves core d.ts from dist) are exempt.
     for (const opts of [{ schemaFail: true }, { typecheckFail: true }]) {
       const r = runGate(opts);
-      expect(r.status).toBe(1);
+      expect(r.status).toBe(10);
       expect(r.outputs).toContain('retryable=true');
       expect(r.outputs).not.toContain('preexisting=true');
       expect(r.stdout).not.toContain('Baseline A/B');
@@ -17857,7 +18065,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
 
   it('never A/Bs package tests (dist-resolving dependencies)', () => {
     const r = runGate({ addWorkspace: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.rejection).toContain('tests failed in packages/newpkg');
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
@@ -17873,7 +18081,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // agentCommit: false leaves the branch == origin/branch with no
     // no-action.md: the 'agent produced nothing' path.
     const r = runGate({ agentCommit: false });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(12);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('preexisting=false');
     expect(r.outputs).toContain('retryable=false');
@@ -17885,7 +18093,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
 
   it('writes the canonical routing flags on the failure.md abort', () => {
     const r = runGate({ failureMd: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(12);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('preexisting=false');
     expect(r.outputs).toContain('retryable=false');
@@ -17898,7 +18106,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // BITE_ENFORCE off for the mid-run read, and the restored bytes pass
     // the compare. The gate-internal digest pin is what catches it (#9214).
     const r = runGate({ biteTamper: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(10);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('retryable=true');
     expect(r.rejection).toContain(

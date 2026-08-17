@@ -5467,6 +5467,16 @@ jobs:
           QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
+          # Startup-time injection channels, pinned at env: level (applied
+          # before the step's bash starts, and outranking $GITHUB_ENV): an
+          # earlier step ran branch code on this host and can plant them —
+          # an in-script unset only strips a channel from children AFTER
+          # this step's own bash was already seeded/preloaded (#9214 review).
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           SETTINGS_JSON: |-
             {
               "maxSessionTurns": 400,
@@ -5578,6 +5588,12 @@ jobs:
           SEVERED_ENV_FILE="${GITHUB_ENV:-}"
           SEVERED_PATH_FILE="${GITHUB_PATH:-}"
           unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT
+          # Mark the agent's whole process tree: env survives setsid and
+          # re-parenting, so the post-run sweep below finds every leftover
+          # the group kill misses (MCP stdio servers from a branch-committed
+          # .mcp.json spawn as HOST processes in this env and outlive the
+          # step's process-group signals) (#9214 review).
+          export AUTOFIX_AGENT_TREE="${GITHUB_RUN_ID:-0}-$$"
           # Trusted staged copy in the mirrored layout — resolves
           # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
           AGENT_RC=0
@@ -5588,6 +5604,26 @@ jobs:
             --workdir "${WORKDIR}" \
             --conflict "${CONFLICT}" \
             --base "${BASE}" || AGENT_RC="$?"
+          # Kill every carrier of the tree marker BEFORE the channel files
+          # are unlinked: a survivor re-creates GITHUB_ENV/GITHUB_PATH
+          # between the rm and the runner's step-END parse, and the runner
+          # injects whatever is there into every later step regardless of
+          # any process environment. Two passes: a process forked after the
+          # first pass's /proc scan inherits the marker and dies in the
+          # second (#9214 review).
+          for _pass in 1 2; do
+            _tree_killed=0
+            for _e in /proc/[0-9]*/environ; do
+              _tree_pid="${_e#/proc/}"
+              _tree_pid="${_tree_pid%/environ}"
+              [[ "${_tree_pid}" == "$$" ]] && continue
+              if tr '\0' '\n' < "${_e}" 2> /dev/null |
+                grep -qs "^AUTOFIX_AGENT_TREE=${AUTOFIX_AGENT_TREE}$"; then
+                kill -KILL "${_tree_pid}" 2> /dev/null && _tree_killed=1 || true
+              fi
+            done
+            [[ "${_tree_killed}" == 0 ]] && break
+          done
           # Runs even when the agent failed (bash -e would otherwise abort
           # at the node line and leave the planted channel files live).
           rm -f "${SEVERED_ENV_FILE}" "${SEVERED_PATH_FILE}"
@@ -5637,6 +5673,11 @@ jobs:
           LD_PRELOAD: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
+          # DOCKER_HOST/DOCKER_CONTEXT reroute the wrapper's `docker run`
+          # to a rogue daemon — a demonstrated entrance the job never
+          # pinned; same precedence rationale as the pins above (#9214).
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: ''
         run: |-
           # The gate decides whether the PAT push runs, and it executes the
           # branch's OWN build/test — so it runs inside an ephemeral container
@@ -5652,6 +5693,29 @@ jobs:
           # the channel from children after this step's own bash was already
           # preloaded (#9214 review).
           export PATH="${TRUSTED_PATH}"
+          # Unload imported shell functions: BASH_FUNC_* env carriers cannot
+          # be pinned by name at env: level, and an imported function
+          # shadows sha256sum/stat/bash ahead of the PATH pin above (#9214).
+          for _fn in $(compgen -A function); do
+            unset -f -- "${_fn}"
+          done
+          # A step-timeout kill of the agent step skips that step's own tree
+          # sweep and channel unlink, so re-sweep this run's tree marker
+          # before the gate trusts anything on this host: env survives
+          # setsid and re-parenting, so the marker finds every leftover the
+          # group kill missed (#9214 review).
+          for _pass in 1 2; do
+            _tree_killed=0
+            for _e in /proc/[0-9]*/environ; do
+              _tree_pid="${_e#/proc/}"
+              _tree_pid="${_tree_pid%/environ}"
+              if tr '\0' '\n' < "${_e}" 2> /dev/null |
+                grep -qs "^AUTOFIX_AGENT_TREE=${GITHUB_RUN_ID:-0}-"; then
+                kill -KILL "${_tree_pid}" 2> /dev/null && _tree_killed=1 || true
+              fi
+            done
+            [[ "${_tree_killed}" == 0 ]] && break
+          done
           # The image must be the resolver's digest-bound reference to the
           # trusted image: a watcher can append a forged `image=` line during
           # the sandbox step's own window (up to the 10-minute pull), and the
@@ -5688,12 +5752,12 @@ jobs:
                 ;;
             esac
           done
-          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
-          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
+          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | timeout 30 sha256sum -c -
+          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | timeout 30 sha256sum -c -
           # The helpers the gate executes are staged in the same writable
           # RUNNER_TEMP, so verify them as one blob before the wrapper copies
           # them across the container wall.
-          GATE_HELPERS_NOW="$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
+          GATE_HELPERS_NOW="$(timeout 30 sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
           if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
             exit 1
@@ -5718,7 +5782,7 @@ jobs:
                 ;;
             esac
           done
-          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)"
+          VERDICT_INPUTS_NOW="$(timeout 30 sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)"
           if [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
             echo "::error::verdict inputs rc.json/rv.json/ic.json no longer match the digest recorded at prepare time; refusing to run the gate."
             exit 1
@@ -5741,6 +5805,16 @@ jobs:
           QWEN_TIMEOUT_MS: '1080000'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
+          # Startup-time injection channels, pinned at env: level (applied
+          # before the step's bash starts, and outranking $GITHUB_ENV): an
+          # earlier step ran branch code on this host and can plant them —
+          # an in-script unset only strips a channel from children AFTER
+          # this step's own bash was already seeded/preloaded (#9214 review).
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           SETTINGS_JSON: |-
             {
               "maxSessionTurns": 400,
@@ -5875,6 +5949,12 @@ jobs:
           SEVERED_ENV_FILE="${GITHUB_ENV:-}"
           SEVERED_PATH_FILE="${GITHUB_PATH:-}"
           unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT
+          # Mark the agent's whole process tree: env survives setsid and
+          # re-parenting, so the post-run sweep below finds every leftover
+          # the group kill misses (MCP stdio servers from a branch-committed
+          # .mcp.json spawn as HOST processes in this env and outlive the
+          # step's process-group signals) (#9214 review).
+          export AUTOFIX_AGENT_TREE="${GITHUB_RUN_ID:-0}-$$"
           AGENT_RC=0
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
@@ -5883,6 +5963,26 @@ jobs:
             --workdir "${WORKDIR}" \
             --conflict "${CONFLICT}" \
             --base "${BASE}" || AGENT_RC="$?"
+          # Kill every carrier of the tree marker BEFORE the channel files
+          # are unlinked: a survivor re-creates GITHUB_ENV/GITHUB_PATH
+          # between the rm and the runner's step-END parse, and the runner
+          # injects whatever is there into every later step regardless of
+          # any process environment. Two passes: a process forked after the
+          # first pass's /proc scan inherits the marker and dies in the
+          # second (#9214 review).
+          for _pass in 1 2; do
+            _tree_killed=0
+            for _e in /proc/[0-9]*/environ; do
+              _tree_pid="${_e#/proc/}"
+              _tree_pid="${_tree_pid%/environ}"
+              [[ "${_tree_pid}" == "$$" ]] && continue
+              if tr '\0' '\n' < "${_e}" 2> /dev/null |
+                grep -qs "^AUTOFIX_AGENT_TREE=${AUTOFIX_AGENT_TREE}$"; then
+                kill -KILL "${_tree_pid}" 2> /dev/null && _tree_killed=1 || true
+              fi
+            done
+            [[ "${_tree_killed}" == 0 ]] && break
+          done
           rm -f "${SEVERED_ENV_FILE}" "${SEVERED_PATH_FILE}"
           exit "${AGENT_RC}"
 
@@ -5924,6 +6024,11 @@ jobs:
           LD_PRELOAD: ''
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
+          # DOCKER_HOST/DOCKER_CONTEXT reroute the wrapper's `docker run`
+          # to a rogue daemon — a demonstrated entrance the job never
+          # pinned; same precedence rationale as the pins above (#9214).
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: ''
         run: |-
           # The gate decides whether the PAT push runs, and it executes the
           # branch's OWN build/test — so it runs inside an ephemeral container
@@ -5939,6 +6044,29 @@ jobs:
           # the channel from children after this step's own bash was already
           # preloaded (#9214 review).
           export PATH="${TRUSTED_PATH}"
+          # Unload imported shell functions: BASH_FUNC_* env carriers cannot
+          # be pinned by name at env: level, and an imported function
+          # shadows sha256sum/stat/bash ahead of the PATH pin above (#9214).
+          for _fn in $(compgen -A function); do
+            unset -f -- "${_fn}"
+          done
+          # A step-timeout kill of the agent step skips that step's own tree
+          # sweep and channel unlink, so re-sweep this run's tree marker
+          # before the gate trusts anything on this host: env survives
+          # setsid and re-parenting, so the marker finds every leftover the
+          # group kill missed (#9214 review).
+          for _pass in 1 2; do
+            _tree_killed=0
+            for _e in /proc/[0-9]*/environ; do
+              _tree_pid="${_e#/proc/}"
+              _tree_pid="${_tree_pid%/environ}"
+              if tr '\0' '\n' < "${_e}" 2> /dev/null |
+                grep -qs "^AUTOFIX_AGENT_TREE=${GITHUB_RUN_ID:-0}-"; then
+                kill -KILL "${_tree_pid}" 2> /dev/null && _tree_killed=1 || true
+              fi
+            done
+            [[ "${_tree_killed}" == 0 ]] && break
+          done
           # The image must be the resolver's digest-bound reference to the
           # trusted image: a watcher can append a forged `image=` line during
           # the sandbox step's own window (up to the 10-minute pull), and the
@@ -5975,12 +6103,12 @@ jobs:
                 ;;
             esac
           done
-          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
-          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
+          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | timeout 30 sha256sum -c -
+          echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | timeout 30 sha256sum -c -
           # The helpers the gate executes are staged in the same writable
           # RUNNER_TEMP, so verify them as one blob before the wrapper copies
           # them across the container wall.
-          GATE_HELPERS_NOW="$(sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
+          GATE_HELPERS_NOW="$(timeout 30 sha256sum "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
           if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
             echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
             exit 1
@@ -6005,7 +6133,7 @@ jobs:
                 ;;
             esac
           done
-          VERDICT_INPUTS_NOW="$(sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)"
+          VERDICT_INPUTS_NOW="$(timeout 30 sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" | sha256sum | cut -d' ' -f1)"
           if [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
             echo "::error::verdict inputs rc.json/rv.json/ic.json no longer match the digest recorded at prepare time; refusing to run the gate."
             exit 1
@@ -6017,6 +6145,16 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         env:
+          # Startup-time injection channels, pinned at env: level (applied
+          # before the step's bash starts, and outranking $GITHUB_ENV): an
+          # earlier step ran branch code on this host and can plant them —
+          # an in-script unset only strips a channel from children AFTER
+          # this step's own bash was already seeded/preloaded (#9214 review).
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           FIRST_OUTCOME: '${{ steps.verify.outputs.outcome }}'
           FIRST_COMMITTED: '${{ steps.verify.outputs.committed }}'
           FIRST_VERIFIED_HEAD: '${{ steps.verify.outputs.verified_head }}'
@@ -6063,7 +6201,44 @@ jobs:
       - name: 'Show run artifacts'
         if: |-
           ${{ always() }}
+        env:
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
+          # Startup-time injection channels, pinned at env: level (applied
+          # before the step's bash starts, and outranking $GITHUB_ENV): an
+          # earlier step ran branch code on this host and can plant them —
+          # an in-script unset only strips a channel from children AFTER
+          # this step's own bash was already seeded/preloaded (#9214 review).
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
         run: |-
+          # The gate container mounts the workspace rw at the runner uid,
+          # so branch code in it can plant git exec vectors ([diff]
+          # external=<payload>) in the repo's .git/config for this step's
+          # `git diff` to fire — this step runs BEFORE the PAT steps' own
+          # resanitize. Resanitize first, with the same staged-copy digest
+          # discipline and env strip as 'Push and report'; the wrapper's
+          # pre-run .git/config restore covers the same plant on the
+          # container side, this is the half that also covers gate skips
+          # (#9214 review).
+          export PATH="${TRUSTED_PATH}"
+          for _fn in $(compgen -A function); do
+            unset -f -- "${_fn}"
+          done
+          unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+            GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-artifacts-gitconfig.XXXXXX")"
+          echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
+          bash "${RUNNER_TEMP}/resanitize-git-config.sh"
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
@@ -6126,6 +6301,16 @@ jobs:
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
+          # Startup-time injection channels, pinned at env: level (applied
+          # before the step's bash starts, and outranking $GITHUB_ENV): an
+          # earlier step ran branch code on this host and can plant them —
+          # an in-script unset only strips a channel from children AFTER
+          # this step's own bash was already seeded/preloaded (#9214 review).
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
         run: |-
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
           # drop any planted token BEFORE the identity check below, so a

@@ -76,7 +76,9 @@ fail_handoff() {
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
   echo "preexisting=false" >> "${GITHUB_OUTPUT}"
   echo "retryable=false" >> "${GITHUB_OUTPUT}"
-  exit 1
+  # Terminal evaluated handoff — same exit class as a reject_fix with both
+  # flags false (see its comment): the watermark advances, no repair runs.
+  exit 12
 }
 
 if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
@@ -152,7 +154,19 @@ reject_fix() {
     echo '````'
   } > "${WORKDIR}/gate-rejection.md" ||
     echo "::warning::could not write the gate rejection detail; the verdict stands."
-  exit 1
+  # Routing rides the EXIT CODE: branch code inside the container can
+  # rewrite the mounted verdict file IN PLACE (open(O_WRONLY|O_TRUNC) keeps
+  # the inode and the type the wrapper pins, and a well-formed rewrite
+  # satisfies its line counts), but it cannot change the code the gate
+  # exits with — 10 = retryable, 11 = pre-existing handoff, 12 = terminal
+  # (#9214 review). The file keeps the flags for human-facing detail.
+  if [[ "${preexisting}" == 'true' ]]; then
+    exit 11
+  fi
+  if [[ "${retryable}" == 'true' ]]; then
+    exit 10
+  fi
+  exit 12
 }
 baseline_also_fails() {
   # A deterministic rejection is only chargeable to this round if the same
@@ -344,22 +358,23 @@ fi
 VERIFICATION_HEAD="$(git rev-parse HEAD)"
 
 # The bite section's three inputs are host-authored before the container and
-# never written by the gate, but they stay attacker-writable for the whole
-# container run. Every read that feeds the enforcement decision therefore
-# happens ONCE, here, before any branch code runs: the old shape digested the
-# live files here but let the bite section RE-READ them after the build legs —
-# check-then-use, with two probe-confirmed entrances: a watcher truncates in
-# the digest→read gap (BITE_ENFORCE flips off for the mid-run read), or
-# substitutes a FIFO that feeds the digest the original bytes while `[[ -s ]]`
-# sees st_size 0 — and restored bytes pass the wrapper's post-run compare.
-# Freezing the decision at gate start makes the mid-run files inert (#9214
-# review). Non-regular inputs crash the gate verdict-less: the wrapper
-# type-checked them before the run, so a non-regular file here moved during
-# container startup, and no verdict may be built on inputs of unknown
-# identity. Absent inputs are legitimate (the -s guards read them as "no
-# defect claim"), matching the wrapper's own fingerprint discipline.
+# never written by the gate, but the live copies stay attacker-writable for
+# the whole run — so the enforcement decision is computed ONCE, here, before
+# any branch code runs, from ONE bounded capture per input: the digest and
+# both jq decisions read the SAME capture (the old shape digested the live
+# files here but let the jq decisions RE-READ them — check-then-use, so a
+# watcher swapping rc.json in the digest→read gap steered BITE_ENFORCE and
+# restored the bytes before the alarm), and a watcher racing the stat→open
+# window hits the capture's timeout instead of hanging the gate out (#9214
+# review). The container gate reads the wrapper's digest-verified snapshot
+# mount (GATE_INPUTS), which nothing inside the container can rewrite; host
+# runs read WORKDIR directly. Non-regular inputs crash the gate verdict-less:
+# no verdict may be built on inputs of unknown identity. Absent inputs are
+# legitimate (the -n guards read them as "no defect claim"), matching the
+# wrapper's own fingerprint discipline.
+GATE_INPUTS="${GATE_INPUTS:-${WORKDIR}}"
 for _bi in rc.json resolved-comments.txt rv.json; do
-  case "$(stat -c '%F' "${WORKDIR}/${_bi}" 2> /dev/null || true)" in
+  case "$(stat -c '%F' "${GATE_INPUTS}/${_bi}" 2> /dev/null || true)" in
     '' | 'regular file' | 'regular empty file') : ;;
     *)
       echo "❌ bite check input ${_bi} is not a regular file at gate start"
@@ -367,20 +382,39 @@ for _bi in rc.json resolved-comments.txt rv.json; do
       ;;
   esac
 done
-bite_input_digest() {
-  { sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/resolved-comments.txt" \
-    "${WORKDIR}/rv.json" 2> /dev/null || true; } |
-    sha256sum | cut -d' ' -f1
+bite_capture() {
+  # $1 = input name, $2 = dir (defaults to GATE_INPUTS). Absent files
+  # capture empty; the timeout bounds the open() so a watcher swapping a
+  # writerless FIFO into the stat→open window is a crash, not a hang.
+  local dir="${2:-${GATE_INPUTS}}"
+  [[ -f "${dir}/${1}" ]] || return 0
+  timeout 10 cat "${dir}/${1}" 2> /dev/null
 }
-BITE_INPUTS_BEFORE="$(bite_input_digest)"
+BITE_RC_CAPTURE="$(bite_capture rc.json)" || {
+  echo "❌ bite check input rc.json could not be captured at gate start"
+  exit 1
+}
+BITE_RESOLVED_CAPTURE="$(bite_capture resolved-comments.txt)" || {
+  echo "❌ bite check input resolved-comments.txt could not be captured at gate start"
+  exit 1
+}
+BITE_RV_CAPTURE="$(bite_capture rv.json)" || {
+  echo "❌ bite check input rv.json could not be captured at gate start"
+  exit 1
+}
+bite_input_digest() {
+  printf '%s\n%s\n%s\n' "${1}" "${2}" "${3}" | sha256sum | cut -d' ' -f1
+}
+BITE_INPUTS_BEFORE="$(bite_input_digest "${BITE_RC_CAPTURE}" "${BITE_RESOLVED_CAPTURE}" "${BITE_RV_CAPTURE}")"
 BITE_ENFORCE='false'
-if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
+if [[ -n "${BITE_RESOLVED_CAPTURE}" && -n "${BITE_RC_CAPTURE}" ]]; then
   # Ids tolerate the rc: prefix and CR the other consumers strip (SKILL
   # tells the agent to write the rc:<id> handle); a reply resolved inside a
   # Critical-rooted thread is a defect claim too, matching how the feedback
   # renderers classify replies.
-  BITE_ENFORCE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
-    --slurpfile reviews "${WORKDIR}/rv.json" '
+  BITE_ENFORCE="$(jq -rs \
+    --rawfile ids <(printf '%s\n' "${BITE_RESOLVED_CAPTURE}") \
+    --slurpfile reviews <(printf '%s\n' "${BITE_RV_CAPTURE}") '
     (add // []) as $comments
     | ($reviews | add // []) as $reviews
     | ($ids | split("\n")
@@ -399,15 +433,16 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
             and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
         or cr_attached($c);
     any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
-    "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
+    <(printf '%s\n' "${BITE_RC_CAPTURE}") 2> /dev/null)" || BITE_ENFORCE='false'
   [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
   # A defect claim whose EVERY resolved-Critical thread sits on a test file
   # is a test-side claim ("this test asserts the wrong behavior"): its fixed
   # test legitimately passes on the pre-round tree, so it takes the advisory
   # arm, never the rejection.
   if [[ "${BITE_ENFORCE}" == 'true' ]]; then
-    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
-      --slurpfile reviews "${WORKDIR}/rv.json" '
+    TESTSIDE="$(jq -rs \
+      --rawfile ids <(printf '%s\n' "${BITE_RESOLVED_CAPTURE}") \
+      --slurpfile reviews <(printf '%s\n' "${BITE_RV_CAPTURE}") '
       (add // []) as $comments
       | ($reviews | add // []) as $reviews
       | ($ids | split("\n")
@@ -430,7 +465,7 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
         | select(critical(.)) | (.path // "") ]
       | (length > 0) and all(.[];
           test("\\.(test|spec)\\.") or test("__tests__/|__snapshots__/|test-utils/|^integration-tests/"))' \
-      "${WORKDIR}/rc.json" 2> /dev/null)" || TESTSIDE='false'
+      <(printf '%s\n' "${BITE_RC_CAPTURE}") 2> /dev/null)" || TESTSIDE='false'
     [[ "${TESTSIDE}" == 'true' ]] && BITE_ENFORCE='advisory'
   fi
 fi
@@ -983,18 +1018,24 @@ BITE_SRC="$(git diff --name-only -z --no-renames "${ROUND_RANGE}" \
 # what it fixed; rc.json/rv.json carry the thread bodies and review states
 # the scan already fetched. Absent/empty inputs read as "no defect claim".
 # BITE_ENFORCE was frozen at gate start from the inputs as captured there;
-# what remains here is the tamper ALARM — re-check the live inputs type-safely
-# (never opening a non-regular file, so a planted FIFO cannot hang the gate
-# out) and refuse loudly if they moved. The decision no longer depends on
-# this re-read, but a tampered round must not carry a verdict built on inputs
-# whose integrity the run cannot vouch for (#9214 review).
+# what remains here is the tamper ALARM — re-capture the LIVE inputs bounded
+# (the timeout converts a watcher swap in the stat→open window into a
+# rejection instead of a hang) and refuse loudly if they moved. The decision
+# no longer depends on this re-read, but a tampered round must not carry a
+# verdict built on inputs whose integrity the run cannot vouch for (#9214
+# review).
 for _bi in rc.json resolved-comments.txt rv.json; do
   case "$(stat -c '%F' "${WORKDIR}/${_bi}" 2> /dev/null || true)" in
     '' | 'regular file' | 'regular empty file') : ;;
     *) reject_fix 'bite check inputs changed during the gate run' ;;
   esac
 done
-if [[ "$(bite_input_digest)" != "${BITE_INPUTS_BEFORE}" ]]; then
+if ! { BITE_RC_NOW="$(bite_capture rc.json "${WORKDIR}")" &&
+  BITE_RESOLVED_NOW="$(bite_capture resolved-comments.txt "${WORKDIR}")" &&
+  BITE_RV_NOW="$(bite_capture rv.json "${WORKDIR}")"; }; then
+  reject_fix 'bite check inputs changed during the gate run'
+fi
+if [[ "$(bite_input_digest "${BITE_RC_NOW}" "${BITE_RESOLVED_NOW}" "${BITE_RV_NOW}")" != "${BITE_INPUTS_BEFORE}" ]]; then
   reject_fix 'bite check inputs changed during the gate run'
 fi
 if [[ -z "${BITE_SRC}" && ( "${BITE_ENFORCE}" == 'true' || "${BITE_ENFORCE}" == 'advisory' ) ]]; then

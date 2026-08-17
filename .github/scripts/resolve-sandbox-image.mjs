@@ -126,21 +126,35 @@ export function pullImage(command, image) {
   });
 }
 
+// The repository part of an image reference: everything before the :tag /
+// @digest. A registry port keeps its colon — the tag only ever follows the
+// LAST '/'.
+export function repoOfImage(image) {
+  const withoutDigest = image.split('@')[0];
+  const lastColon = withoutDigest.lastIndexOf(':');
+  const lastSlash = withoutDigest.lastIndexOf('/');
+  return lastColon > lastSlash
+    ? withoutDigest.slice(0, lastColon)
+    : withoutDigest;
+}
+
 // Resolve a PULLED image to its content digest (repo@sha256:…). The tag
 // alone is a mutable local handle: `docker run <tag>` resolves against the
 // local store without re-pull, and a co-resident process with daemon access
 // can `docker tag` different content under the same name between resolve
 // and gate. A digest reference cannot be moved by `docker tag`/`docker build`.
-// With `expectedDigest` (the pull's own `Digest:` line), the resolved digest
-// must MATCH it: retagged attacker content keeps ITS original repo in
-// RepoDigests[0] (and a requested-repo entry still carries the attacker
-// digest), so only the digest the pull reported binds the export to the
-// content the pull fetched (#9214 review).
+// The export must be the EXACT `<repo>@<expectedDigest>` RepoDigests entry:
+// RepoDigests is shared by every tag of the same content, so `docker tag`
+// of the pulled image adds an alphabetically-sorted entry for the new name
+// and index 0 can move OFF the pulled repo (a suffix-only digest check
+// still passes) — and retagged attacker content keeps ITS original repo, so
+// only the pulled repo + the pull's own `Digest:` line together bind the
+// export to the content the pull fetched (#9214 review).
 export function repoDigestOf(command, image, expectedDigest = '') {
   return new Promise((resolve) => {
     const child = spawn(
       command,
-      ['image', 'inspect', '--format', '{{index .RepoDigests 0}}', image],
+      ['image', 'inspect', '--format', '{{json .RepoDigests}}', image],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let stdout = '';
@@ -172,21 +186,34 @@ export function repoDigestOf(command, image, expectedDigest = '') {
     child.on('close', (code) => {
       finish(code === 0 ? stdout.trim() : '');
     });
-  }).then((digest) => {
-    // `<no value>` is what the Go template prints for an image without
-    // RepoDigests (a locally built one); empty means the inspect failed.
-    // Either way the mutable tag is exactly what must not be exported.
-    if (!digest.includes('@sha256:')) {
+  }).then((raw) => {
+    // `null`/`[]` (no RepoDigests, a locally built image), `<no value>` and
+    // empty (the inspect failed) all mean there is no repository digest —
+    // the mutable tag is exactly what must not be exported.
+    let digests = [];
+    try {
+      const parsed = JSON.parse(raw.trim());
+      if (Array.isArray(parsed)) {
+        digests = parsed.filter((entry) => typeof entry === 'string');
+      }
+    } catch {
+      // Non-JSON output carries no digests.
+    }
+    const repo = repoOfImage(image);
+    const digest = expectedDigest
+      ? digests.find((entry) => entry === `${repo}@${expectedDigest}`) ?? ''
+      : digests.find((entry) => entry.startsWith(`${repo}@sha256:`)) ?? '';
+    if (digest.includes('@sha256:')) {
+      return digest;
+    }
+    if (digests.length > 0) {
       throw new Error(
-        `Pulled image ${image} resolved to no repository digest ('${digest}'); refusing to export a mutable tag.`,
+        `Pulled image ${image} resolved to digests none of which is '${repo}@${expectedDigest || 'sha256:…'}' (${digests.join(', ')}); refusing to export a foreign or mutable reference.`,
       );
     }
-    if (expectedDigest && !digest.endsWith(`@${expectedDigest}`)) {
-      throw new Error(
-        `Pulled image ${image} resolved to a digest the pull did not report ('${digest}' vs '${expectedDigest}') — the tag moved between pull and inspect; refusing.`,
-      );
-    }
-    return digest;
+    throw new Error(
+      `Pulled image ${image} resolved to no repository digest ('${raw.trim()}'); refusing to export a mutable tag.`,
+    );
   });
 }
 

@@ -33,6 +33,14 @@ set -uo pipefail
 # GITHUB_WORKSPACE/GITHUB_OUTPUT are runner-provided, GATE_IMAGE and
 # FOOTPRINT_ENFORCE are step-level env. None is defined here.
 
+# Unload imported shell functions FIRST: BASH_FUNC_* env carriers cannot be
+# pinned by name at step env: level, and an imported function shadows
+# sha256sum/stat/bash ahead of any PATH pin — including the caller's, since
+# bash re-imports the carriers at every startup (#9214 review).
+for _fn in $(compgen -A function); do
+  unset -f -- "${_fn}"
+done
+
 VERDICT="${WORKDIR}/gate-verdict"
 # The container's own RUNNER_TEMP: a fresh directory holding COPIES of just
 # the scripts the gate reads. The real RUNNER_TEMP is never mounted — it holds
@@ -48,6 +56,11 @@ CTEMP="${RUNNER_TEMP}/gate-container-temp"
 # throwaway git config via GATE_TMPDIR).
 CBIN="${CTEMP}/bin"
 CRW="${CTEMP}/rw"
+# Read-only snapshot of the host-authored bite inputs, mounted :ro into the
+# container so the gate's enforcement decision reads bytes that were
+# digest-verified at check time — and which nothing inside the container can
+# rewrite — instead of the live WORKDIR copies (#9214 review).
+CINPUTS="${CTEMP}/inputs"
 # Named so the pool's stale-container janitors (name=qwen-code-*) can see it,
 # and torn down explicitly: --rm only fires on a normal exit, but a step
 # timeout / job cap / cancel kills the docker CLIENT and leaves the container
@@ -103,7 +116,7 @@ VERDICT_INODE="$(stat -c '%i' "${VERDICT}" 2> /dev/null || true)"
 # gate rm -f's gate-advisories.md at its own start.)
 rm -f "${WORKDIR}/gate-rejection.md"
 rm -rf "${CTEMP}"
-mkdir -p "${CBIN}" "${CRW}" || exit 125
+mkdir -p "${CBIN}" "${CRW}" "${CINPUTS}" || exit 125
 for staged in run-autofix-review-verification.sh check-settings-schema.sh \
   check-autofix-contracts.sh resolve-owning-packages.sh; do
   cp "${RUNNER_TEMP}/${staged}" "${CBIN}/${staged}" || {
@@ -111,6 +124,31 @@ for staged in run-autofix-review-verification.sh check-settings-schema.sh \
     exit 125
   }
 done
+# Verify the COPIES against the staging-time digests before docker run: the
+# gate step checked the RUNNER_TEMP bytes at CHECK time, but this cp runs
+# afterwards — a watcher overwriting a staged script in that seam would
+# otherwise be copied in and execute AS the gate. The digests ride step env
+# from GITHUB_OUTPUT, unreachable from a disk write; an empty one fails
+# closed. Bounded reads: a watcher swap in the stat→open window is a refusal
+# here, not a hang until the step timeout (#9214 review).
+copy_digest() { timeout 10 sha256sum "${CBIN}/${1}" 2> /dev/null | cut -d' ' -f1; }
+if [[ -z "${VERIFY_RUNNER_SHA256:-}" ]] ||
+  [[ "$(copy_digest run-autofix-review-verification.sh)" != "${VERIFY_RUNNER_SHA256}" ]]; then
+  echo "::error::the staged gate script copy no longer matches the digest recorded at staging time — refusing to run the gate."
+  exit 125
+fi
+if [[ -z "${GATE_CONTAINER_SHA256:-}" ]] ||
+  [[ "$(copy_digest run-autofix-gate-container.sh)" != "${GATE_CONTAINER_SHA256}" ]]; then
+  echo "::error::the staged wrapper copy no longer matches the digest recorded at staging time — refusing to run the gate."
+  exit 125
+fi
+HELPERS_COPY_NOW="$(timeout 30 sha256sum "${CBIN}/check-settings-schema.sh" \
+  "${CBIN}/check-autofix-contracts.sh" "${CBIN}/resolve-owning-packages.sh" 2> /dev/null |
+  sha256sum | cut -d' ' -f1)"
+if [[ -z "${GATE_HELPERS_SHA256:-}" ]] || [[ "${HELPERS_COPY_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
+  echo "::error::the staged helper copies no longer match the digest recorded at staging time — refusing to run the gate."
+  exit 125
+fi
 
 # --user: the workspace is bind-mounted, so container writes (dist/, vitest
 # caches, the gate log) must land as the runner user or the next steps hit
@@ -140,15 +178,21 @@ done
 # FIFO would block sha256sum's open() until the step's 60-minute timeout with
 # no diagnostic. Neither needs a capability on the rw mount.
 verdict_inputs_digest() {
-  local f type
+  local f type hash
   for f in no-action.md address-summary.md resolved-comments.txt \
     comment-replies.json rc.json rv.json ic.json failure.md handoff.md \
     deferred-feedback.md agent-api-error agent-api-error-kind \
     agent-timeout deferred-findings.json deferred-findings.carry.json; do
     type="$(stat -c '%F' "${WORKDIR}/${f}" 2> /dev/null || true)"
     case "${type}" in
-      '' | 'regular file' | 'regular empty file')
-        printf '%s:%s\n' "${f}" "$(sha256sum "${WORKDIR}/${f}" 2> /dev/null | cut -d' ' -f1)"
+      '') printf '%s:\n' "${f}" ;;
+      'regular file' | 'regular empty file')
+        # Bounded: a watcher swap landing in the stat→open window must
+        # surface as a NONREGULAR refusal, not hang sha256sum's open()
+        # until the step timeout (#9214 review).
+        hash="$(timeout 10 sha256sum "${WORKDIR}/${f}" 2> /dev/null | cut -d' ' -f1)" ||
+          hash='NONREGULAR:read-blocked'
+        printf '%s:%s\n' "${f}" "${hash}"
         ;;
       *) printf '%s:NONREGULAR:%s\n' "${f}" "${type}" ;;
     esac
@@ -168,6 +212,50 @@ fi
 # would ship on the PAT. Pin the host-side HEAD across the run and refuse
 # any move, whatever the verdict file says (#9214 review).
 HOST_HEAD_BEFORE="$(git rev-parse HEAD 2> /dev/null || true)"
+# Snapshot the workspace's .git/config across the run: the mount is rw at
+# the runner uid, so the container can plant exec vectors ([diff]
+# external=<payload>) that fire in the host's post-run git steps — 'Show
+# run artifacts' runs `git diff` before any resanitize. The restore below
+# runs immediately after the container exits, whatever the verdict (#9214
+# review).
+GIT_CONFIG_SNAPSHOT="${CTEMP}/git-config.snapshot"
+if [[ -f "${GITHUB_WORKSPACE}/.git/config" ]]; then
+  timeout 10 cp "${GITHUB_WORKSPACE}/.git/config" "${GIT_CONFIG_SNAPSHOT}" || {
+    echo "::error::could not snapshot the workspace git config — refusing to run the gate."
+    exit 125
+  }
+fi
+# Re-verify the host-authored bite inputs against the prepare-time digest,
+# then snapshot them for the gate: the gate step checked the live bytes at
+# CHECK time, but a surviving host process can truncate rc.json before the
+# gate's own read — the truncation would become the wrapper baseline AND
+# the gate's capture, flipping BITE_ENFORCE off so the bogus-fix round the
+# bite check exists to reject exits 0 as `fixed`. The per-file hashes ride
+# the same expression-context digest; the copies are re-digested after the
+# cp so a swap in the verify→copy seam is refused too (#9214 review).
+VERDICT_INPUTS_DETAIL="$(timeout 30 sha256sum "${WORKDIR}/rc.json" \
+  "${WORKDIR}/rv.json" "${WORKDIR}/ic.json" 2> /dev/null)" || VERDICT_INPUTS_DETAIL=''
+VERDICT_INPUTS_NOW="$(printf '%s\n' "${VERDICT_INPUTS_DETAIL}" | sha256sum | cut -d' ' -f1)"
+if [[ -z "${VERDICT_INPUTS_SHA256:-}" ]] || [[ "${VERDICT_INPUTS_NOW}" != "${VERDICT_INPUTS_SHA256}" ]]; then
+  echo "::error::verdict inputs rc.json/rv.json/ic.json no longer match the digest recorded at prepare time — refusing to run the gate."
+  exit 125
+fi
+for _vi in rc.json rv.json resolved-comments.txt; do
+  if [[ -f "${WORKDIR}/${_vi}" ]]; then
+    timeout 10 cp "${WORKDIR}/${_vi}" "${CINPUTS}/${_vi}" || {
+      echo "::error::could not snapshot verdict input ${_vi} for the gate container"
+      exit 125
+    }
+  fi
+done
+for _vi in rc.json rv.json; do
+  _vi_expected="$(printf '%s\n' "${VERDICT_INPUTS_DETAIL}" | grep -F " ${WORKDIR}/${_vi}" | cut -d' ' -f1)"
+  _vi_now="$(timeout 10 sha256sum "${CINPUTS}/${_vi}" 2> /dev/null | cut -d' ' -f1)"
+  if [[ -z "${_vi_expected}" || "${_vi_now}" != "${_vi_expected}" ]]; then
+    echo "::error::verdict input snapshot ${_vi} no longer matches the digest recorded at prepare time — refusing to run the gate."
+    exit 125
+  fi
+done
 
 # --network none: the gate only runs build/typecheck/lint/test against
 # node_modules already installed on the host side, so it needs no egress —
@@ -183,12 +271,14 @@ docker run --rm --name "${GATE_CONTAINER}" \
   --volume "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
   --volume "${WORKDIR}:${WORKDIR}" \
   --volume "${CBIN}:${CBIN}:ro" \
+  --volume "${CINPUTS}:${CINPUTS}:ro" \
   --volume "${CRW}:${CRW}" \
   --env HOME="${CRW}" \
   --env BRANCH="${BRANCH}" \
   --env WORKDIR="${WORKDIR}" \
   --env RUNNER_TEMP="${CBIN}" \
   --env GATE_TMPDIR="${CRW}" \
+  --env GATE_INPUTS="${CINPUTS}" \
   --env GITHUB_OUTPUT="${VERDICT}" \
   --env FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
   --env CI=true \
@@ -197,6 +287,17 @@ docker run --rm --name "${GATE_CONTAINER}" \
 GATE_RC=$?
 
 echo "🧱 gate container exited ${GATE_RC}"
+
+# Restore the workspace git config BEFORE anything else touches the
+# workspace (host steps below run `git rev-parse`/`git diff`): the
+# container mounts it rw at the runner uid and can plant exec vectors
+# a post-run resanitize may not precede (#9214 review).
+if [[ -f "${GIT_CONFIG_SNAPSHOT}" ]]; then
+  timeout 10 cp "${GIT_CONFIG_SNAPSHOT}" "${GITHUB_WORKSPACE}/.git/config" || {
+    echo "::error::could not restore the workspace git config after the gate run — refusing the verdict."
+    exit 125
+  }
+fi
 
 if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]; then
   # Something in the container rewrote the agent's verdict inputs. The gate's
@@ -237,16 +338,20 @@ case "${VERDICT_TYPE}" in
     ;;
 esac
 
-# Verdict translation. Only these keys are forwarded, last value wins (the
-# gate appends its final verdict last), and `outcome` is gated on the exit
-# code — the file alone is not authority.
+# Verdict translation. Rejection routing rides the container's EXIT CODE —
+# the gate exits 10 (retryable), 11 (pre-existing handoff) or 12 (terminal),
+# and branch code in the container cannot change the code the gate exited
+# with, while it CAN rewrite the mounted verdict file in place:
+# open(O_WRONLY|O_TRUNC) preserves the inode and the type pinned above, and
+# a well-formed rewrite satisfies any line count — so on the rejection arms
+# the file is human-facing detail only. A pass is still file-gated on exit
+# 0, and every read of the file is bounded: a watcher swap in the type→open
+# window is a crash here, not a hang until the step timeout (#9214 review).
 verdict_value() {
-  grep -E "^${1}=" "${VERDICT}" 2> /dev/null | tail -n 1 | cut -d= -f2-
+  timeout 10 grep -E "^${1}=" "${VERDICT}" 2> /dev/null | tail -n 1 | cut -d= -f2-
 }
 OUTCOME="$(verdict_value outcome)"
 COMMITTED="$(verdict_value committed)"
-RETRYABLE="$(verdict_value retryable)"
-PREEXISTING="$(verdict_value preexisting)"
 VERIFIED_HEAD="$(verdict_value verified_head)"
 
 # committed= is a ref-only fact the gate records before any check runs; the
@@ -270,9 +375,9 @@ case "${GATE_RC}" in
       # an unchanged branch), and an appended `verified_head=` is the
       # identity forgery the host-HEAD pin above independently refuses
       # (#9214 review).
-      OUTCOME_LINES="$(grep -c '^outcome=' "${VERDICT}" 2> /dev/null || true)"
-      VERIFIED_HEAD_LINES="$(grep -c '^verified_head=' "${VERDICT}" 2> /dev/null || true)"
-      COMMITTED_LINES="$(grep -c '^committed=' "${VERDICT}" 2> /dev/null || true)"
+      OUTCOME_LINES="$(timeout 10 grep -c '^outcome=' "${VERDICT}" 2> /dev/null || true)"
+      VERIFIED_HEAD_LINES="$(timeout 10 grep -c '^verified_head=' "${VERDICT}" 2> /dev/null || true)"
+      COMMITTED_LINES="$(timeout 10 grep -c '^committed=' "${VERDICT}" 2> /dev/null || true)"
       if [[ "${OUTCOME_LINES:-0}" -ne 1 ]] ||
         [[ "${VERIFIED_HEAD_LINES:-0}" -ne 1 ]] ||
         [[ "${COMMITTED_LINES:-0}" -gt 1 ]]; then
@@ -285,57 +390,28 @@ case "${GATE_RC}" in
       echo "::warning::gate container exited 0 without a verdict (outcome='${OUTCOME}') — treating as a gate crash so the next scan retries."
     fi
     ;;
-  1)
-    # A deterministic rejection (reject_fix) writes outcome=failed plus BOTH
-    # routing flags, exactly once each and mutually exclusive at the source
-    # (a pre-existing failure is NOT retryable — the repair agent may only
-    # amend this round's fix). Any other shape — a flag line missing,
-    # repeated, or both true — is proof the file was touched after the gate
-    # wrote it (branch code can append to the mounted verdict file), so
-    # refuse the verdict BEFORE forwarding any of it: a lone forged
-    # `retryable=true` would otherwise flip a deliberately non-retryable
-    # rejection (e.g. the bite check) into a PAT-backed repair round, and a
-    # planted `preexisting=true` overriding a genuine `retryable=true` would
-    # skip the repair the round is entitled to and permanently misclassify a
-    # fixable rejection as a terminal pre-existing failure. The crash path
-    # retries with a fresh checkout instead.
-    if [[ "${OUTCOME}" == 'failed' ]]; then
-      # The gate writes `outcome=` exactly once on every genuine path, so a
-      # duplicated or emptied outcome line is an in-container append exactly
-      # like a duplicated flag: without the count, a watcher appending a bare
-      # `outcome=` after the gate's write empties OUTCOME through last-wins
-      # and silently turns an EVALUATED rejection into a no-diagnostic
-      # crash-retry loop (#9214 review).
-      OUTCOME_LINES="$(grep -c '^outcome=' "${VERDICT}" 2> /dev/null || true)"
-      RETRYABLE_LINES="$(grep -c '^retryable=' "${VERDICT}" 2> /dev/null || true)"
-      PREEXISTING_LINES="$(grep -c '^preexisting=' "${VERDICT}" 2> /dev/null || true)"
-      if [[ "${OUTCOME_LINES:-0}" -ne 1 ]] ||
-        [[ "${RETRYABLE_LINES:-0}" -ne 1 ]] ||
-        [[ "${PREEXISTING_LINES:-0}" -ne 1 ]] ||
-        [[ "${PREEXISTING}" == 'true' && "${RETRYABLE}" == 'true' ]]; then
-        echo "::error::verdict carries a forged line (outcome lines: ${OUTCOME_LINES:-0}, retryable lines: ${RETRYABLE_LINES:-0}, preexisting lines: ${PREEXISTING_LINES:-0}) — refusing the verdict as tampered."
-        exit 125
-      fi
-      echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-      [[ "${PREEXISTING}" == 'true' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
-      [[ "${RETRYABLE}" == 'true' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
-    else
-      # Take `failed` only from the FILE — the gate also has exit-1 paths
-      # that deliberately write NO verdict (the baseline-A/B and bite
-      # tree-restore failures), where an EVALUATED rejection would advance
-      # the watermark and hand the item off for good, and an unset outcome is
-      # what routes them to the gate-crashed retry instead. A forged
-      # `outcome=fixed` still cannot pass: `fixed` is accepted only on exit 0,
-      # so here it leaves the outcome unset and the round retries.
-      echo "::warning::gate container exited 1 without a deterministic verdict (outcome='${OUTCOME}') — reporting as a gate crash so the next scan retries."
-    fi
+  10 | 11 | 12)
+    # A deterministic rejection: routing comes from the exit code (see the
+    # block comment above), never from the rewriteable file. 10 = retryable
+    # (repair runs), 11 = pre-existing (base-update handoff, NOT retryable —
+    # the repair agent may only amend this round's fix), 12 = terminal
+    # evaluated rejection / failure.md handoff (watermark advances, no
+    # repair). A forged `retryable=true` rewrite can no longer flip a
+    # deliberately non-retryable rejection into a PAT-backed repair round,
+    # nor a planted `preexisting=true` misclassify a fixable one.
+    echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+    [[ "${GATE_RC}" == '10' ]] && echo "retryable=true" >> "${GITHUB_OUTPUT}"
+    [[ "${GATE_RC}" == '11' ]] && echo "preexisting=true" >> "${GITHUB_OUTPUT}"
     ;;
   *)
-    # Docker itself failed (125/126/127), the container was killed (137), or
-    # the gate died before reaching a verdict. Leave outcome UNSET: an
-    # EVALUATED rejection advances the watermark and hands the item off for
-    # good, while an empty outcome takes 'Finalize verification's gate-crashed
-    # path and retries on the next scan's fresh checkout.
+    # Docker itself failed (125/126/127), the container was killed (137),
+    # the gate crashed verdict-less (1 — the baseline-A/B and bite
+    # tree-restore failures), or it died before reaching a verdict. Leave
+    # outcome UNSET: an EVALUATED rejection advances the watermark and hands
+    # the item off for good, while an empty outcome takes 'Finalize
+    # verification's gate-crashed path and retries on the next scan's fresh
+    # checkout. A forged `outcome=fixed` still cannot pass: `fixed` is
+    # accepted only on exit 0.
     echo "::warning::gate container exited ${GATE_RC} without a deterministic verdict — reporting as a gate crash."
     ;;
 esac

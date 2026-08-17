@@ -15,6 +15,7 @@ import {
   validateRequestedImage,
   exportImage,
   repoDigestOf,
+  repoOfImage,
   parsePullDigest,
   pullImage,
 } from './resolve-sandbox-image.mjs';
@@ -103,7 +104,7 @@ async function withDockerStub(scriptBody, fn) {
 
 test('repoDigestOf resolves a pulled image to its content digest', async () => {
   await withDockerStub(
-    'printf "%s\\n" "ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef"',
+    "printf '%s\\n' '[\"ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef\"]'",
     async (stub) => {
       // The exported reference must be pinned by CONTENT: `docker tag` and
       // `docker build` cannot move a digest reference, while the tag the
@@ -122,7 +123,7 @@ test('withDockerStub keeps the stub alive until the async body settles', async (
   // the spawn→open window in a loop.
   for (let i = 0; i < 30; i++) {
     await withDockerStub(
-      'printf "%s\\n" "ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef"',
+      "printf '%s\\n' '[\"ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef\"]'",
       async (stub) => {
         assert.equal(
           await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
@@ -134,15 +135,17 @@ test('withDockerStub keeps the stub alive until the async body settles', async (
 });
 
 test('repoDigestOf refuses an image without a repository digest', async () => {
-  // `<no value>` is what `docker image inspect --format
-  // {{index .RepoDigests 0}}` prints for a locally built image; exporting
-  // the mutable tag in that state is exactly what the pin exists to block.
-  await withDockerStub('printf "%s\\n" "<no value>"', async (stub) => {
-    await assert.rejects(
-      repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
-      /no repository digest/,
-    );
-  });
+  // A locally built image has no RepoDigests — `{{json .RepoDigests}}`
+  // renders `null`, older daemons print `<no value>`; exporting the mutable
+  // tag in either state is exactly what the pin exists to block.
+  for (const shape of ['null', '<no value>', '[]']) {
+    await withDockerStub(`printf "%s\\n" "${shape}"`, async (stub) => {
+      await assert.rejects(
+        repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3'),
+        /no repository digest/,
+      );
+    });
+  }
 });
 
 test('repoDigestOf fails closed when the inspect fails', async () => {
@@ -156,20 +159,20 @@ test('repoDigestOf fails closed when the inspect fails', async () => {
 
 // The exported reference is bound to the digest the PULL itself reported:
 // `docker tag` never rewrites digests, so retagged attacker content keeps
-// its original repo in RepoDigests[0] (measured live: a tag moved to other
+// its original repo in RepoDigests (measured live: a tag moved to other
 // content resolves to `busybox@sha256:…` and passes the `@sha256:` presence
-// check). Only the pull's own Digest line ties the export to the fetched
-// content (#9214 review).
+// check). Only the pulled repo + the pull's own Digest line together tie
+// the export to the fetched content (#9214 review).
 const GENUINE =
   'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
-test('repoDigestOf refuses a digest the pull did not report (retag race)', async () => {
+test('repoDigestOf refuses content whose repo is not the pulled image', async () => {
   await withDockerStub(
-    'printf "%s\\n" "aaa.example/backdoor@sha256:dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2"',
+    "printf '%s\\n' '[\"aaa.example/backdoor@sha256:dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2dc2d74b2\"]'",
     async (stub) => {
       await assert.rejects(
         repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
-        /digest the pull did not report/,
+        /none of which is/,
       );
     },
   );
@@ -177,7 +180,7 @@ test('repoDigestOf refuses a digest the pull did not report (retag race)', async
 
 test('repoDigestOf accepts the digest the pull reported', async () => {
   await withDockerStub(
-    `printf "%s\\n" "ghcr.io/qwenlm/qwen-code@${GENUINE}"`,
+    `printf '%s\\n' '["ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
     async (stub) => {
       assert.equal(
         await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
@@ -185,6 +188,37 @@ test('repoDigestOf accepts the digest the pull reported', async () => {
       );
     },
   );
+});
+
+test('repoDigestOf keeps the pulled repo when a same-content tag sorts first', async () => {
+  // `docker tag` of the SAME content adds an alphabetically-sorted
+  // RepoDigests entry for the new name: index 0 moves off the pulled repo
+  // while a suffix-only digest check still passes (docker 29.1.3 probe:
+  // after `docker tag <pulled> a/a:1`, RepoDigests[0] is `a/a@sha256:…`).
+  // The resolver must export the `<repo>@<digest>` entry, not index 0 —
+  // every gate consumer's shape regex refuses a foreign repo, so exporting
+  // index 0 gate-crashes the autofix loop until a manual `docker rmi`.
+  await withDockerStub(
+    `printf '%s\\n' '["a/a@${GENUINE}","ghcr.io/qwenlm/qwen-code@${GENUINE}"]'`,
+    async (stub) => {
+      assert.equal(
+        await repoDigestOf(stub, 'ghcr.io/qwenlm/qwen-code:1.2.3', GENUINE),
+        `ghcr.io/qwenlm/qwen-code@${GENUINE}`,
+      );
+    },
+  );
+});
+
+test('repoOfImage strips tag and digest but keeps a registry port', () => {
+  assert.equal(
+    repoOfImage('ghcr.io/qwenlm/qwen-code:1.2.3'),
+    'ghcr.io/qwenlm/qwen-code',
+  );
+  assert.equal(
+    repoOfImage('ghcr.io/qwenlm/qwen-code@sha256:ab'),
+    'ghcr.io/qwenlm/qwen-code',
+  );
+  assert.equal(repoOfImage('registry:5000/img:tag'), 'registry:5000/img');
 });
 
 test('parsePullDigest extracts the Digest line from pull output', () => {
