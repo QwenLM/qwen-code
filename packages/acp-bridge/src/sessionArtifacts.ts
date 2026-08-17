@@ -1676,6 +1676,7 @@ function mergeBatchArtifact(
     toolName: refreshDisplay ? next.toolName : existing.toolName,
     source: refreshDisplay ? next.source : existing.source,
     hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
+    toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
     metadata: mergeMetadata(existing, next),
@@ -1774,6 +1775,7 @@ function mergeArtifact(
     // name; write_file/hook auto-records must not clobber it.
     next.title = incoming.title;
     next.description = incoming.description ?? existing.description;
+    next.toolCallId = incoming.toolCallId;
     next.toolName = incoming.toolName;
     next.source = incoming.source;
     next.hookEventName = incoming.hookEventName;
@@ -1806,7 +1808,7 @@ function shouldRefreshWorkspaceDisplay(
   incoming: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
   existing: Pick<NormalizedArtifact, 'toolName' | 'source' | 'hookEventName'>,
 ): boolean {
-  if (incoming.toolName === 'record_artifact') {
+  if (incoming.toolName === 'record_artifact' && incoming.source !== 'hook') {
     return true;
   }
   if (!incoming.toolName) {

@@ -1731,6 +1731,25 @@ describe('workspace artifact metadata guard', () => {
     try {
       expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
         title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('infers kind from the realpath target, not the link name', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'preview.png');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
         workspacePath: 'data/payload.csv',
       });
     } finally {

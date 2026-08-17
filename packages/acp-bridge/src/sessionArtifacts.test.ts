@@ -1007,6 +1007,7 @@ describe('SessionArtifactStore', () => {
           title: 'report.html',
           workspacePath: 'report.html',
           toolName: 'write_file',
+          toolCallId: 'call-write',
         },
       ],
       { strict: true },
@@ -1017,6 +1018,7 @@ describe('SessionArtifactStore', () => {
           title: 'Q3 Report',
           workspacePath: 'report.html',
           toolName: 'record_artifact',
+          toolCallId: 'call-record',
         },
       ],
       { strict: true },
@@ -1035,6 +1037,47 @@ describe('SessionArtifactStore', () => {
     expect((await store.list()).artifacts).toMatchObject([
       {
         title: 'Q3 Report',
+        toolName: 'record_artifact',
+        toolCallId: 'call-record',
+      },
+    ]);
+  });
+
+  it('keeps a curated title when a record_artifact hook re-records the same path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-record-hook',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.html'), '<html>ok</html>');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Q3 Report',
+          workspacePath: 'report.html',
+          source: 'tool',
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          workspacePath: 'report.html',
+          source: 'hook',
+          toolName: 'record_artifact',
+          hookEventName: 'PostToolUse',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        title: 'Q3 Report',
+        source: 'tool',
         toolName: 'record_artifact',
       },
     ]);

@@ -450,6 +450,23 @@ describe('RecordArtifactTool', () => {
     }
   });
 
+  it('rejects UNC locators before resolving them', () => {
+    const tool = makeTool();
+
+    for (const workspacePath of [
+      '\\\\attacker.example\\share\\report.csv',
+      '//attacker.example/share/report.csv',
+      '\\\\?\\UNC\\attacker.example\\share\\report.csv',
+    ]) {
+      expect(() =>
+        tool.build({
+          title: 'UNC',
+          workspacePath,
+        }),
+      ).toThrow(/workspacePath/);
+    }
+  });
+
   it('rejects Windows drive and UNC locators on POSIX', () => {
     if (process.platform === 'win32') {
       return;

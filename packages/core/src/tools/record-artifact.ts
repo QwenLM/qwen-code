@@ -456,7 +456,7 @@ function validateWorkspacePath(value: string, cwd: string): string | null {
       ? '"workspacePath" contains control characters'
       : '"workspacePath" contains unsafe markup';
   }
-  if (isForeignWindowsAbsolute(trimmed)) {
+  if (isUncWorkspacePath(trimmed) || isForeignWindowsAbsolute(trimmed)) {
     return WORKSPACE_PATH_HINT;
   }
   if (isAbsoluteWorkspaceInput(trimmed)) {
@@ -553,6 +553,14 @@ function hasLegacyPathField(params: RecordArtifactParams): boolean {
     Object.prototype.hasOwnProperty.call(raw, 'path') &&
     raw.path != null &&
     raw.path !== ''
+  );
+}
+
+function isUncWorkspacePath(value: string): boolean {
+  const slashes = value.replace(/\//g, '\\');
+  return (
+    /^\\\\[^\\?]+(?:\\|$)/.test(slashes) ||
+    /^\\\\\?\\[Uu][Nn][Cc]\\/.test(slashes)
   );
 }
 
@@ -658,7 +666,7 @@ function workspacePathCandidate(
   root: string,
   preservePosixBackslash: boolean,
 ): { ok: true; path: string } | WorkspaceLocatorFailure {
-  if (isForeignWindowsAbsolute(locator)) {
+  if (isUncWorkspacePath(locator) || isForeignWindowsAbsolute(locator)) {
     return locatorFailure(
       ToolErrorType.INVALID_TOOL_PARAMS,
       WORKSPACE_PATH_HINT,
