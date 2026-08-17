@@ -78,8 +78,7 @@ function getProviderMetadata(
 ): ProviderMetadata {
   const mergedSettings = settings.merged as Record<string, unknown>;
   const ns = mergedSettings[PROVIDER_METADATA_NS] as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   if (!ns) return {};
   const metadata = ns[metadataKey];
   return metadata && typeof metadata === 'object'
@@ -172,8 +171,7 @@ function readInstalledModels(
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
   const modelProviders = mergedSettings['modelProviders'] as
-    | Record<string, ProviderModelConfig[]>
-    | undefined;
+    Record<string, ProviderModelConfig[]> | undefined;
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
@@ -198,7 +196,7 @@ function persistEndpointMetadataMigration(
 ): boolean {
   if (!metadata.version) return false;
   const persistScope = getPersistScopeForModelSelection(settings);
-  const writes: Parameters<LoadedSettings['setValues']>[0] = [
+  const writes: Array<Parameters<LoadedSettings['setValues']>[0][number]> = [
     {
       scope: persistScope,
       key: `${PROVIDER_METADATA_NS}.${metadataKey}.version`,
