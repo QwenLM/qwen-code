@@ -292,6 +292,56 @@ describe('capture-tui without tmux (probe seam)', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'refuses a file-shaped TMPDIR at the gate, not at the sentinel removal',
+    async () => {
+      // The existing-but-unusable shapes the nonexistent-dir test cannot
+      // reach: `force` suppresses ENOENT only, so the clear-phase sentinel
+      // removal threw ENOTDIR here and the --out-attributing catch claimed
+      // it ('--out is not writable: ENOTDIR'), shadowing the dedicated gate
+      // — and the gate itself checked only W_OK|X_OK, which a mode-0777
+      // regular file PASSES (probe-verified), so without the directoryness
+      // check the run burns the full holder-init window and then blames
+      // the pane ('capture never started'), naming TMPDIR nowhere.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-filetmp-'));
+      // Created BEFORE TMPDIR is overridden — mkdtemp reads the same
+      // variable (same discipline as the nonexistent-dir sibling).
+      const fileTmp = join(dir, 'tmp-as-file');
+      writeFileSync(fileTmp, 'not a directory');
+      chmodSync(fileTmp, 0o777);
+      const realTmp = process.env['TMPDIR'];
+      process.env['TMPDIR'] = fileTmp;
+      const started = performance.now();
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 60_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('temporary directory is not usable');
+        expect(stderr).toContain('TMPDIR');
+        expect(stderr).not.toContain('--out is not writable');
+        // Refused in milliseconds, not after the holder-init window: the
+        // sail-through mutant pays the full 10s before blaming the pane.
+        expect(performance.now() - started).toBeLessThan(5_000);
+      } finally {
+        if (realTmp === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = realTmp;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'refuses an over-long tmux socket path up front, naming it',
     async () => {
       // A unix socket path is capped by sockaddr_un (104 bytes on macOS,
@@ -657,6 +707,108 @@ exit 0
       } finally {
         if (realPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = realPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reaps where the server ACTUALLY lives when the socket base moves mid-window',
+    async () => {
+      // tmux resolves the socket base from the CLIENT's environment at kill
+      // time, but the server starts under the first USABLE base: a stale
+      // TMUX_TMPDIR pointing at an unusable path puts the socket under /tmp,
+      // and when the env base becomes usable before the reap, a bare kill
+      // answers tmux's "nothing to kill" wordings ABOUT THE ENV BASE — the
+      // goal state, with the server alive under /tmp — and the reap that
+      // trusted the verdict unlinked the live server's real socket: no
+      // WARNING, and invisible to the orphan sweep that discovers orphans by
+      // readdir of the very socket dirs the unlink emptied (probe-reproduced
+      // on real tmux 3.4). The shim models tmux's own rule: it records which
+      // base a start would use, creates the env base inside the window, and
+      // answers kill-server goal-state only about the base its own env
+      // resolves — so an env-resolved kill reads as a nothing-to-kill here
+      // exactly as it does against real tmux.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-reapbase-'));
+      const envBase = join(dir, 'env-base'); // nonexistent at start
+      const stateDir = join(dir, 'state');
+      mkdirSync(stateDir);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    if [ -n "$TMUX_TMPDIR" ] && [ -d "$TMUX_TMPDIR" ]; then
+      printf '%s' "$TMUX_TMPDIR" > "${stateDir}/alive-base"
+    else
+      printf '%s' /tmp > "${stateDir}/alive-base"
+    fi
+    [ -n "$TMUX_TMPDIR" ] && mkdir -p "$TMUX_TMPDIR"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\n' "\${TMUX_TMPDIR:-}" >> "${stateDir}/kill-calls"
+    if [ "\${TMUX_TMPDIR:-/tmp}" = "$(cat "${stateDir}/alive-base")" ]; then
+      printf 'killed\n' >> "${stateDir}/kills"
+      exit 0
+    fi
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-1000/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        // The kill was pinned to BOTH candidate bases — the env-resolved
+        // call alone answers goal-state about the wrong base.
+        const killCalls = readFileSync(join(stateDir, 'kill-calls'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(killCalls).toContain('/tmp');
+        // ...and a kill actually REACHED the base the server lives under —
+        // the env-resolved verdict never killed anything.
+        expect(existsSync(join(stateDir, 'kills'))).toBe(true);
+        expect(readFileSync(join(stateDir, 'kills'), 'utf8')).toContain(
+          'killed',
+        );
+        // The server is confirmed dead, so the run stays silent: a false
+        // WARNING here would send an operator hunting a reaped server.
+        expect(stderr).not.toContain('WARNING');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
         rmSync(dir, { recursive: true, force: true });
       }
     },

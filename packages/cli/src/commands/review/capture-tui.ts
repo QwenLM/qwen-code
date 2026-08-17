@@ -250,8 +250,13 @@ export const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
  * Tests shorten it; production never does. */
 export const tmuxControl = { timeoutMs: 15_000 };
 
-function tmux(argv: string[]): string {
+function tmux(argv: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync('tmux', argv, {
+    // The reap pins each kill to a candidate socket base (see there): tmux
+    // resolves the base from the CLIENT's environment, and the server lives
+    // where the first USABLE base was at start time — not necessarily where
+    // this process's env points now.
+    ...(env !== undefined ? { env } : {}),
     encoding: 'utf8',
     // A pane of text is small; a runaway TUI writing a scrollback is not our
     // problem — capture-pane returns the visible pane only.
@@ -528,7 +533,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         0o666,
       );
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      // EEXIST never fires without O_EXCL (the atomic create-or-fail form
+      // is the hardening PR's business): the raced shape this guard was
+      // written for — a symlink planted between changed() and the open —
+      // fails the O_NOFOLLOW open with ELOOP, and rethrowing that as a
+      // generic write failure let the write-failure catch delete the very
+      // occupant the collision path one syscall earlier explicitly spared
+      // (probe-verified: same occupant, one microsecond apart, one outcome
+      // deleted it). Both errnos are the collision.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST' || code === 'ELOOP') {
         throw new ArtifactCollision(
           `${path} was claimed during the capture window by something this ` +
             `capture did not write — refusing to replace it`,
@@ -722,9 +736,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // name threw EISDIR (which `force` does not suppress) and refused the
     // run; and recursive removal destroyed that directory on every run,
     // successful ones included (all measured). Ordering still holds — after
-    // the clears, never before — so the one call here that can throw cannot
-    // strand the previous run's evidence:"png" manifest beside a refusal.
-    rmSync(holderReadyPath, { force: true });
+    // the clears, never before — so a removal that throws cannot strand the
+    // previous run's evidence:"png" manifest beside a refusal. The throw
+    // itself belongs to the dedicated TMPDIR gate below: `force` suppresses
+    // ENOENT only, so an existing-but-unusable TMPDIR threw HERE and reached
+    // the --out-attributing catch, shadowing the gate's naming refusal
+    // (probe-reproduced: a mode-0600 directory answered EACCES and a regular
+    // file ENOTDIR, both read as '--out is not writable', which no --out
+    // value can fix).
+    try {
+      rmSync(holderReadyPath, { force: true });
+    } catch {
+      // Belt only — the TMPDIR gate below owns the refusal wording.
+    }
     // Anything still sitting at an artifact path is something this run did
     // not write and did not clear (an unverifiable manifest, an unrelated
     // file the signature check spared). Stamp all three BY IDENTITY: the
@@ -1010,7 +1034,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // named nowhere (probe-verified driving the real command). Probed here,
   // before any server starts, so it refuses in milliseconds and says why.
   try {
-    accessSync(dirname(holderReadyPath), fsConstants.W_OK | fsConstants.X_OK);
+    // Directoryness FIRST, mirroring the TMUX_TMPDIR gate above: a regular
+    // file (or a symlink to one) passes W_OK|X_OK on some hosts, and a
+    // file-shaped TMPDIR then sailed through the very gate added to catch
+    // it — burning the full holder-init window before refusing with a
+    // wording that blamed the pane and named TMPDIR nowhere (probe-
+    // reproduced on a 0777 regular file).
+    const sentinelDir = dirname(holderReadyPath);
+    if (!statSync(sentinelDir).isDirectory()) {
+      throw new Error('not a directory');
+    }
+    accessSync(sentinelDir, fsConstants.W_OK | fsConstants.X_OK);
   } catch (e) {
     refuse(
       `the temporary directory is not usable for this capture's ready ` +
@@ -1175,64 +1209,107 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // running" — the goal state below — so the attempt stays warning-free.
     if (reaped || !serverStarted) return;
     reaped = true;
-    // Unlink the socket ONLY when the server is known dead: kill can throw
+    // Unlink the socket ONLY when the server is known dead — and kill
+    // WHERE THE SERVER ACTUALLY LIVES: tmux resolves the socket base from
+    // the CLIENT's environment at kill time, while the server started under
+    // whichever base was USABLE at start, and the two can diverge inside
+    // one window (a stale TMUX_TMPDIR pointing at an unusable path puts the
+    // socket under /tmp; the env base becoming usable before the reap puts
+    // the CLIENT elsewhere — captures legally run up to an hour). A bare
+    // kill then answers tmux's "nothing to kill" wordings ABOUT THE WRONG
+    // BASE — the goal state, with the server alive under the other base —
+    // and the unlink that trusted the verdict orphaned it: socket gone, no
+    // WARNING, the holder alive up to three hours, invisible to the orphan
+    // sweep that discovers orphans by readdir of the very socket dirs the
+    // unlink just emptied (probe-reproduced on 3.4). Kill can ALSO throw
     // with the server alive (the tmux CLIENT failing to spawn — EMFILE, a
     // wedged server outlasting the 15s timeout), and unlinking then makes
     // the live server unreachable forever — nothing addressable by -L can
-    // ever kill it again, while it holds the pane holder (the bounded
-    // hold loop runs up to three hours).
-    // One retry before giving up: a transient client-spawn failure is the
-    // named shape, and a second attempt reaps it (measured).
-    let serverDead = false;
+    // ever kill it again, while it holds the pane holder (the bounded hold
+    // loop runs up to three hours). So: kill each candidate base with that
+    // base pinned in the environment — the shape cleanup.ts's sweep uses,
+    // "kill it where it was FOUND" — and unlink a base only when THAT
+    // base's own kill answered the goal state.
+    // One retry per base before giving up: a transient client-spawn failure
+    // is the named shape, and a second attempt reaps it (measured).
+    let unconfirmed = false;
     let killSpawnFailed = false;
     let killDirUnusable = false;
-    for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
-      // Back-to-back, the second attempt was a copy of the first: under fd
-      // exhaustion — the condition the comment above names, and the one
-      // that makes the CLIENT fail rather than the server — both threw
-      // EMFILE in the same microsecond and the retry bought nothing
-      // (probe-verified). A pause cannot conjure a descriptor on its own,
-      // but it is the only thing that lets one this process is releasing
-      // elsewhere land before the last attempt. Synchronous by necessity:
-      // reap() runs from `finally` and from a signal handler, neither of
-      // which can await.
-      if (attempt > 0) {
+    const uid = process.getuid?.();
+    // Untrimmed, matching tmux (a padded value is used verbatim). Same
+    // candidate set as before: tmux takes the first USABLE base.
+    const envBase = process.env['TMUX_TMPDIR'];
+    for (const base of new Set([envBase || '/tmp', '/tmp'])) {
+      let baseDead = false;
+      for (let attempt = 0; attempt < 2 && !baseDead; attempt++) {
+        // Back-to-back, the second attempt was a copy of the first: under fd
+        // exhaustion — the condition the comment above names, and the one
+        // that makes the CLIENT fail rather than the server — both threw
+        // EMFILE in the same microsecond and the retry bought nothing
+        // (probe-verified). A pause cannot conjure a descriptor on its own,
+        // but it is the only thing that lets one this process is releasing
+        // elsewhere land before the last attempt. Synchronous by necessity:
+        // reap() runs from `finally` and from a signal handler, neither of
+        // which can await.
+        if (attempt > 0) {
+          try {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+          } catch {
+            // Blocking waits are disallowed on some hosts; the retry still
+            // happens, just without the pause.
+          }
+        }
         try {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-        } catch {
-          // Blocking waits are disallowed on some hosts; the retry still
-          // happens, just without the pause.
+          tmux(plan.kill, { ...process.env, TMUX_TMPDIR: base });
+          baseDead = true;
+        } catch (e) {
+          // A spawn that never ran says nothing about the server: the
+          // WARNING has to separate "tmux told us it failed" from "we could
+          // not run tmux at all", or an operator reads a wedged server where
+          // the real problem is this process's fd table.
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN') {
+            killSpawnFailed = true;
+          }
+          // A kill failing because there was nothing to kill is the goal
+          // state — in every wording tmux uses for it, including the
+          // socket-directory-never-created one a start that failed before the
+          // socket existed produces (measured with a mode-0555 TMUX_TMPDIR:
+          // both attempts answered `couldn't create directory …` and the
+          // one-wording test printed a false orphan WARNING).
+          const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
+          baseDead = isNothingToKill(stderrText);
+          // ...but NOT for a refusal the client made before it looked. Those
+          // two wordings were briefly folded into isNothingToKill, which made
+          // a LIVE server read as reaped: no WARNING, exit 0, and its socket
+          // unlinked under both bases — unreachable forever (probe-verified
+          // by making the socket dir non-0700 after the start).
+          if (isSocketDirUnusable(stderrText)) killDirUnusable = true;
         }
       }
-      try {
-        tmux(plan.kill);
-        serverDead = true;
-      } catch (e) {
-        // A spawn that never ran says nothing about the server: the
-        // WARNING has to separate "tmux told us it failed" from "we could
-        // not run tmux at all", or an operator reads a wedged server where
-        // the real problem is this process's fd table.
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN') {
-          killSpawnFailed = true;
+      if (!baseDead) {
+        // A kill that threw establishes nothing about this base — the server
+        // may be alive under it — so nothing of its is unlinked.
+        unconfirmed = true;
+        continue;
+      }
+      if (uid !== undefined) {
+        try {
+          // tmux does not always unlink the socket of a killed server; a
+          // review that captures often would litter the socket dir with dead
+          // ones. tmux resolves that dir from TMUX_TMPDIR, falling back to
+          // /tmp — it does NOT consult TMPDIR, so neither do we. ONLY the
+          // base this kill answered about: the goal-state verdict that
+          // authorizes the removal is base-scoped, and removing a socket
+          // under a base the kill never established death on is exactly what
+          // orphaned a live server under the other one.
+          rmSync(join(base, `tmux-${uid}`, server), { force: true });
+        } catch {
+          // Litter is cosmetic; never let cleanup mask the capture's result.
         }
-        // A kill failing because there was nothing to kill is the goal
-        // state — in every wording tmux uses for it, including the
-        // socket-directory-never-created one a start that failed before the
-        // socket existed produces (measured with a mode-0555 TMUX_TMPDIR:
-        // both attempts answered `couldn't create directory …` and the
-        // one-wording test printed a false orphan WARNING).
-        const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
-        serverDead = isNothingToKill(stderrText);
-        // ...but NOT for a refusal the client made before it looked. Those
-        // two wordings were briefly folded into isNothingToKill, which made
-        // a LIVE server read as reaped: no WARNING, exit 0, and its socket
-        // unlinked under both bases — unreachable forever (probe-verified
-        // by making the socket dir non-0700 after the start).
-        if (isSocketDirUnusable(stderrText)) killDirUnusable = true;
       }
     }
-    if (!serverDead) {
+    if (unconfirmed) {
       // A presumed-alive private server is never a silent outcome: the
       // holder keeps it up for up to three hours, and the briefs encourage many
       // captures per review — orphans would accumulate invisibly.
@@ -1254,26 +1331,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         }; the private tmux server ${server} may still be running ` +
           `(tmux -L ${server} kill-server to reap it by hand).`,
       );
-      return;
-    }
-    // tmux does not always unlink the socket of a killed server; a review
-    // that captures often would litter the socket dir with dead sockets.
-    // tmux resolves that dir from TMUX_TMPDIR, falling back to /tmp — it
-    // does NOT consult TMPDIR, so neither do we. BOTH candidate bases,
-    // like the orphan sweep: tmux takes the first USABLE base, so a stale
-    // TMUX_TMPDIR pointing at an unusable path puts the socket under /tmp
-    // while a single-base unlink misses it.
-    try {
-      const uid = process.getuid?.();
-      if (uid !== undefined) {
-        // Untrimmed, matching tmux (a padded value is used verbatim).
-        const envBase = process.env['TMUX_TMPDIR'];
-        for (const base of new Set([envBase || '/tmp', '/tmp'])) {
-          rmSync(join(base, `tmux-${uid}`, server), { force: true });
-        }
-      }
-    } catch {
-      // Litter is cosmetic; never let cleanup mask the capture's own result.
     }
   };
   // (REAP_SIGNALS is module-level and exported so the signal tests iterate
