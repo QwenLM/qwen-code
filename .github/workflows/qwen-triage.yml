@@ -2959,24 +2959,6 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # ...but NOT .git. The gate's per-invocation reset restores the
-          # tree with `git checkout HEAD -- .`, and git reads its config,
-          # hooks and attributes from this directory as it does so: with
-          # .git node-owned, a lifecycle script could plant a
-          # `filter.<x>.smudge` command plus `info/attributes` and have
-          # ROOT's reset execute it on every round, or rewrite HEAD so the
-          # "restore" installs a tree of its choosing. Read access is all
-          # the build needs (git describe and friends); write access is
-          # what turns the reset into an execution and content primitive.
-          # Defence in depth, not the only line: the reset already runs
-          # git with the GIT_* env stripped, under a timeout, against an
-          # OID pinned before any PR code ran. Non-fatal so a fixture or
-          # a non-root harness cannot abort the build over it.
-          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
-            chown -R root:root "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
-              echo "::warning::could not re-own .git to root; the gate reset falls back to its env/timeout/pinned-OID defences"
-            chmod -R go-w "$GITHUB_WORKSPACE/.git" 2>/dev/null || true
-          fi
           # Make the npm cache readable+writable by the build user so
           # `npm ci --prefer-offline --cache …` can use it without
           # touching the Actions cache API (whose credentials were

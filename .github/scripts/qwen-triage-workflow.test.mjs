@@ -2028,28 +2028,6 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     assert.match(publishJob.steps[clearIdx].run, /rm -rf verify-results/);
   });
 
-  it('git metadata stays root-owned across the build so the reset cannot be steered', () => {
-    // With .git node-owned, a lifecycle script could plant a smudge
-    // filter plus info/attributes and have ROOT's per-invocation reset
-    // execute it every round, or rewrite HEAD so the "restore" installs
-    // a tree of its choosing (R4-1/R4-2).
-    assert.match(
-      prepareStep.run,
-      /^\s*chown -R root:root "\$GITHUB_WORKSPACE\/\.git"/m,
-      'prepare must re-own .git to root after chowning the workspace',
-    );
-    const wsChown = prepareStep.run.indexOf(
-      'chown -R node:node "$GITHUB_WORKSPACE"',
-    );
-    const gitChown = prepareStep.run.indexOf(
-      'chown -R root:root "$GITHUB_WORKSPACE/.git"',
-    );
-    assert.ok(
-      wsChown !== -1 && gitChown > wsChown,
-      'the .git re-own must come after the workspace chown that would otherwise hand it over',
-    );
-  });
-
   it('the verify job timeout still covers agent + prepare + gate', () => {
     // agent 120m + install/build 15m + gate ~40m (the 15m round budget is
     // checked BEFORE each reset, so the last invocation drags its reset
