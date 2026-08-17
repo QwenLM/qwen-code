@@ -38,7 +38,7 @@ import {
   TaskOwnershipError,
   RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
-import type { SwarmTask } from '../agents/team/types.js';
+import { LEADER_NAME, type SwarmTask } from '../agents/team/types.js';
 import { truncateForConfirmation } from './task-create.js';
 
 export interface TaskUpdateParams {
@@ -518,12 +518,20 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           error: { message: string };
         }
       | undefined;
+    // Compare on the sanitized owner: tasks persisted before the
+    // canonicalization above landed keep their raw spelling, and a
+    // raw-vs-sanitized comparison would fire a fresh assignment prompt
+    // on every innocent touch of such a task.
+    const persistedOwner = task.owner ? sanitizeName(task.owner) : undefined;
     if (
       teamManager &&
       task.status === 'in_progress' &&
-      task.owner &&
-      task.owner !== teammateCallerName &&
-      (task.owner !== existingOwner || statusBecameInProgress)
+      persistedOwner &&
+      // Leader-owned tasks need no delivery: the leader is the session
+      // making the call and sees the task on its next listing.
+      persistedOwner !== LEADER_NAME &&
+      persistedOwner !== teammateCallerName &&
+      (persistedOwner !== existingOwner || statusBecameInProgress)
     ) {
       const dispatched = await teamManager.dispatchAssignedTask(task);
       if (!dispatched) {

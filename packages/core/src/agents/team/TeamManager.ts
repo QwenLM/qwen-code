@@ -56,6 +56,7 @@ import {
   writeTeamFile,
   findMemberByName,
   classifyShutdownResponse,
+  sanitizeName,
 } from './teamHelpers.js';
 import {
   consumeUnread,
@@ -1821,6 +1822,12 @@ export class TeamManager {
    * dispatched to.
    */
   validateTaskOwner(ownerName: string): string | undefined {
+    // The leader is never in teamFile.members but is always deliverable:
+    // the leader's own session owns the task the moment it persists it,
+    // so self-assignment stays legal (#9282).
+    if (sanitizeName(ownerName) === LEADER_NAME) {
+      return undefined;
+    }
     const member = findMemberByName(this.teamFile.members, ownerName);
     if (!member) {
       return (

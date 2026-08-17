@@ -656,6 +656,74 @@ describe('TeamCoordinationHarness', () => {
       expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
     });
 
+    it('does not re-dispatch a legacy raw-spelled owner on a metadata-only edit', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Legacy owner',
+        description: 'Persisted before owner canonicalization',
+      });
+      // Persist the owner in its pre-canonical raw spelling, as task
+      // files written before the normalization landed do. Reserve the
+      // task as owned in_progress BEFORE alice exists so auto-claim
+      // cannot consume it.
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'Alice',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        description: 'metadata-only tweak',
+      });
+      expect(result.error).toBeUndefined();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('Alice');
+    });
+
+    it('lets the leader take a task into its own session', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Leader self-assign',
+        description: 'The leader owns the loop itself',
+      });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      expect(result.error).toBeUndefined();
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('in_progress');
+      expect(reloaded?.owner).toBe('leader');
+    });
+
+    it('still validates a new owner when only the owner changes on an in_progress task', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Owned by leader',
+        description: 'Gate must fall back to the persisted status',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+
+      // No status param: the dispatch gate must fall back to the
+      // persisted in_progress status and still validate the owner.
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        owner: 'ghost',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('ghost');
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('leader');
+    });
+
     it('rejects assigning to a teammate that already terminated', async () => {
       const h = await createHarness();
       const task = await createTask(h.teamName, {

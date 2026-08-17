@@ -66,12 +66,24 @@ class TaskListInvocation extends BaseToolInvocation<
       };
     }
 
+    let ownerFilter: string | undefined;
+    if (this.params.owner !== undefined) {
+      ownerFilter = sanitizeName(this.params.owner);
+      if (!ownerFilter) {
+        const msg =
+          'Cannot filter by owner: owner must include at least one ' +
+          'letter, number, or hyphen.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     const tasks = await listTasks(teamName, {
       status: this.params.status,
-      owner:
-        this.params.owner === undefined
-          ? undefined
-          : sanitizeName(this.params.owner),
+      owner: ownerFilter,
       blockedBy: this.params.blockedBy,
     });
 
