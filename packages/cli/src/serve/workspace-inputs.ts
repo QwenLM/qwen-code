@@ -10,6 +10,30 @@ import { isWithinRoot } from '../config/path-comparison.js';
 
 export const MAX_REGISTERED_WORKSPACES = MAX_DAEMON_WORKSPACES;
 
+export const MAX_REGISTERED_WORKSPACES_ENV = 'QWEN_SERVE_MAX_WORKSPACES';
+
+/**
+ * Resolve the effective workspace registration cap. The built-in default
+ * applies when the env var is absent; a present-but-malformed value throws
+ * so a typo fails the boot loudly instead of silently restoring the default
+ * cap (same stance as `parseDeadlineEnv`).
+ */
+export function resolveMaxRegisteredWorkspaces(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env[MAX_REGISTERED_WORKSPACES_ENV];
+  if (raw === undefined || raw.trim() === '') {
+    return MAX_REGISTERED_WORKSPACES;
+  }
+  const parsed = Number(raw.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `Invalid ${MAX_REGISTERED_WORKSPACES_ENV}="${raw}": must be a positive integer.`,
+    );
+  }
+  return parsed;
+}
+
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {
     super(

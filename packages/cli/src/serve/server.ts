@@ -595,6 +595,11 @@ export interface ServeAppDeps {
   ) => Promise<WorkspaceRuntime>;
   runWorkspaceTrustOperation?: <T>(operation: () => Promise<T>) => Promise<T>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
+  /**
+   * Effective workspace registration cap resolved by `runQwenServe` from
+   * `QWEN_SERVE_MAX_WORKSPACES`. Defaults to `MAX_REGISTERED_WORKSPACES`.
+   */
+  maxRegisteredWorkspaces?: number;
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
@@ -1919,6 +1924,7 @@ export function createServeApp(
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
+    maxRegisteredWorkspaces: deps.maxRegisteredWorkspaces,
   });
 
   if (liveVoiceSurfaceAvailable) {
@@ -2279,6 +2285,7 @@ export function createServeApp(
       deps.validateWorkspaceRuntimeForPublication,
     runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
+    maxRegisteredWorkspaces: deps.maxRegisteredWorkspaces,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
     ...(deps.liveConversationWorkspace

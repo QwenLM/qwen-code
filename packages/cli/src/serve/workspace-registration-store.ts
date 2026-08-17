@@ -15,7 +15,6 @@ import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 
 const SCHEMA_VERSION = 1;
-const MAX_SECONDARY_WORKSPACES = MAX_REGISTERED_WORKSPACES - 1;
 const MAX_STORE_BYTES = 256 * 1024;
 export const MAX_WORKSPACE_DISPLAY_NAME_LENGTH = 256;
 const LOCK_OPTIONS: lockfile.LockOptions = {
@@ -180,6 +179,7 @@ function setSnapshotDisplayName(
 function parseSnapshot(
   raw: string,
   primaryWorkspace: string,
+  maxSecondaryWorkspaces: number,
 ): WorkspaceRegistrationSnapshot {
   let value: unknown;
   try {
@@ -216,9 +216,9 @@ function parseSnapshot(
       'Workspace registration store workspaces must be an array',
     );
   }
-  if (record['workspaces'].length > MAX_SECONDARY_WORKSPACES) {
+  if (record['workspaces'].length > maxSecondaryWorkspaces) {
     throw new WorkspaceRegistrationStoreError(
-      `Workspace registration store exceeds ${MAX_SECONDARY_WORKSPACES} entries`,
+      `Workspace registration store exceeds ${maxSecondaryWorkspaces} entries`,
     );
   }
   const seen = new Set<string>();
@@ -326,16 +326,19 @@ async function acquireFileLock(filePath: string): Promise<AcquiredFileLock> {
 
 export class WorkspaceRegistrationStore {
   readonly filePath: string;
+  readonly maxSecondaryWorkspaces: number;
 
   constructor(
     readonly primaryWorkspace: string,
     qwenHome?: string,
+    maxRegisteredWorkspaces: number = MAX_REGISTERED_WORKSPACES,
   ) {
     validateWorkspacePath(primaryWorkspace, 'primaryWorkspace');
     this.filePath = getWorkspaceRegistrationStorePath(
       primaryWorkspace,
       qwenHome,
     );
+    this.maxSecondaryWorkspaces = Math.max(0, maxRegisteredWorkspaces - 1);
   }
 
   /** Returns an unlocked point-in-time snapshot; mutations re-read under lock. */
@@ -415,6 +418,7 @@ export class WorkspaceRegistrationStore {
       return parseSnapshot(
         buffer.toString('utf8', 0, totalBytesRead),
         this.primaryWorkspace,
+        this.maxSecondaryWorkspaces,
       );
     } finally {
       await file.close();
@@ -444,9 +448,9 @@ export class WorkspaceRegistrationStore {
       ) {
         return false;
       }
-      if (snapshot.workspaces.length >= MAX_SECONDARY_WORKSPACES) {
+      if (snapshot.workspaces.length >= this.maxSecondaryWorkspaces) {
         throw new WorkspaceRegistrationStoreLimitError(
-          `Workspace registration store limit of ${MAX_SECONDARY_WORKSPACES} reached`,
+          `Workspace registration store limit of ${this.maxSecondaryWorkspaces} reached`,
         );
       }
       snapshot.workspaces.push(workspace);
