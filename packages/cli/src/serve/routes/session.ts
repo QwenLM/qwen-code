@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionIdCaseConflictError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -3001,13 +3002,24 @@ export function registerSessionRoutes(
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            if (isInternalWorkspaceRuntime(runtime)) {
-              restoredStorageSessionId =
-                (await sessionService.findSessionIdIgnoringCase(sessionId)) ??
-                '';
-              if (!restoredStorageSessionId) {
-                throw new SessionNotFoundError(sessionId);
+            let persistedSessionId: string | undefined;
+            try {
+              persistedSessionId =
+                await sessionService.findSessionIdIgnoringCase(sessionId);
+            } catch (error) {
+              if (
+                error instanceof SessionIdCaseConflictError &&
+                (await sessionService.getSessionLocation(sessionId)) ===
+                  'conflict'
+              ) {
+                throw new SessionConflictError(sessionId);
               }
+              throw error;
+            }
+            if (persistedSessionId) {
+              restoredStorageSessionId = persistedSessionId;
+            } else if (isInternalWorkspaceRuntime(runtime)) {
+              throw new SessionNotFoundError(sessionId);
             }
             const location = await assertSessionLoadable(
               workspaceCwd,

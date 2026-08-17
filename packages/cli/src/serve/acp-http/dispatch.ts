@@ -12,6 +12,7 @@ import {
   GROUP_COLOR_OPTIONS,
   Storage,
   SessionService,
+  SessionIdCaseConflictError,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
@@ -34,6 +35,7 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
+  SessionConflictError,
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
@@ -1831,14 +1833,24 @@ export class AcpDispatcher {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
                 let storageSessionId = sessionId;
-                if (this.liveSessionIsolation) {
-                  storageSessionId =
-                    (await sessionService.findSessionIdIgnoringCase(
-                      sessionId,
-                    )) ?? '';
-                  if (!storageSessionId) {
-                    throw new SessionNotFoundError(sessionId);
+                let persistedSessionId: string | undefined;
+                try {
+                  persistedSessionId =
+                    await sessionService.findSessionIdIgnoringCase(sessionId);
+                } catch (error) {
+                  if (
+                    error instanceof SessionIdCaseConflictError &&
+                    (await sessionService.getSessionLocation(sessionId)) ===
+                      'conflict'
+                  ) {
+                    throw new SessionConflictError(sessionId);
                   }
+                  throw error;
+                }
+                if (persistedSessionId) {
+                  storageSessionId = persistedSessionId;
+                } else if (this.liveSessionIsolation) {
+                  throw new SessionNotFoundError(sessionId);
                 }
                 await assertSessionLoadable(
                   cwd,

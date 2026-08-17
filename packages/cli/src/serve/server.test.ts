@@ -11991,6 +11991,80 @@ describe('createServeApp', () => {
       },
     );
 
+    it.each(['load', 'resume'] as const)(
+      'hides mixed-case explicit standalone transcripts from generic %s',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440140';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId
+              ? { sourceType: 'standalone' }
+              : {},
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(404);
+          expect(res.body.code).toBe('session_not_found');
+          expect(findSessionId).toHaveBeenCalledWith(sessionId);
+          expect(readCreationMetadata).toHaveBeenCalledWith(storageSessionId);
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects ordinary %s case conflicts before bridge dispatch',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440141';
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(new SessionIdCaseConflictError(sessionId));
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({
+            code: 'session_conflict',
+            sessionId,
+          });
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
     it('releases restore ownership after invalid approvalMode', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(

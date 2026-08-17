@@ -4575,10 +4575,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
       const [frame] = (await got) as Array<{
         id: number;
-        error: { code: number; data?: { errorKind?: string } };
+        error: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
       }>;
       expect(frame.id).toBe(212);
       expect(frame.error.code).toBe(-32603);
+      expect(frame.error.message).toContain(
+        'Delete the session with POST /sessions/delete',
+      );
       expect(frame.error.data?.errorKind).toBe('session_conflict');
     });
   });
@@ -4835,6 +4842,106 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
         expect(bridge.loadRequests).toHaveLength(loadCount);
         expect(bridge.resumeRequests).toHaveLength(resumeCount);
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s hides mixed-case explicit standalone transcripts from generic restore',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440133'
+            : '550e8400-e29b-41d4-a716-446655440134';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(
+          storageSessionId,
+          'active',
+          undefined,
+          'standalone',
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId
+              ? { sourceType: 'standalone' }
+              : {},
+          );
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 219,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 219,
+            error: { message: expect.stringContaining('No session with id') },
+          });
+          reader.close();
+
+          expect(findSessionId).toHaveBeenCalledWith(sessionId);
+          expect(readCreationMetadata).toHaveBeenCalledWith(storageSessionId);
+          expect(bridge.loadRequests).toHaveLength(loadCount);
+          expect(bridge.resumeRequests).toHaveLength(resumeCount);
+        } finally {
+          readCreationMetadata.mockRestore();
+          findSessionId.mockRestore();
+        }
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s rejects ordinary case conflicts before bridge dispatch',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440142'
+            : '550e8400-e29b-41d4-a716-446655440143';
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(new SessionIdCaseConflictError(sessionId));
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 220,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 220,
+            error: {
+              data: expect.objectContaining({
+                errorKind: 'session_conflict',
+                sessionId,
+              }),
+            },
+          });
+          reader.close();
+
+          expect(bridge.loadRequests).toHaveLength(loadCount);
+          expect(bridge.resumeRequests).toHaveLength(resumeCount);
+        } finally {
+          findSessionId.mockRestore();
+        }
       });
     },
   );
