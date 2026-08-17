@@ -363,9 +363,32 @@ export function runRepoContext(
   if (isSameFile(planPath, outPath)) {
     throw new Error('repo-context: --out must differ from --plan');
   }
-  const worktree = realpathSync(resolve(args.worktree));
-  if (!statSync(worktree).isDirectory()) {
-    throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
+  // A worktree removed after fetch-pr created it — the #9205 shape, a
+  // concurrent same-PR cleanup mid-review, or a plain manual delete — used to
+  // surface as a bare `ENOENT … lstat '<path>'` from `realpathSync`, which
+  // names neither the cause nor the remedy. Name both.
+  const worktreeRoot = resolve(args.worktree);
+  let worktree: string;
+  try {
+    worktree = realpathSync(worktreeRoot);
+    if (!statSync(worktree).isDirectory()) {
+      throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
+    }
+  } catch (err) {
+    // Only ENOENT is a missing worktree. ENOTDIR — a regular file as a path
+    // COMPONENT — is a malformed --worktree argument; re-running fetch-pr
+    // cannot fix it, and absorbing it here would lose the precise
+    // diagnosis, so it rethrows below. (`isAbsentError` treats both as
+    // absent, which is right for the identity-file lookups, not here.)
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // fetch-pr only recreates a PR target's worktree; repo-context also
+      // runs for local and file-path reviews, so scope the remedy.
+      throw new Error(
+        `repo-context: worktree ${worktreeRoot} is missing — recreate the ` +
+          `review worktree (for PR targets: re-run \`qwen review fetch-pr\`)`,
+      );
+    }
+    throw err;
   }
 
   // The plan's identity, captured BEFORE the provider work. The providers
