@@ -63,6 +63,8 @@ const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
+const MEDIA_UNAVAILABLE_TEXT = '[Attached media is no longer available]';
+
 export function normalizeDaemonEvent(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions = {},
@@ -576,24 +578,67 @@ function normalizeMidTurnMessageInjected(
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  const messages = Array.isArray(event.data['messages'])
-    ? event.data['messages'].filter(
-        (message): message is string =>
-          typeof message === 'string' && message.length > 0,
-      )
-    : [];
-  if (messages.length === 0) {
+  const data = event.data;
+  const rawMessages = data['messages'];
+  const messages =
+    Array.isArray(rawMessages) &&
+    rawMessages.every(
+      (message): message is string => typeof message === 'string',
+    )
+      ? rawMessages
+      : [];
+  const items = data['items'];
+  // An injected message is renderable when its text is non-empty OR its
+  // content carries an image or a non-empty text block. The drain's
+  // degraded-media path publishes `messages: ['']` whose items hold only the
+  // '[Attached media is no longer available]' text block — dropping that
+  // frame as malformed would erase the echo of the user's message.
+  const hasRenderableItemContent =
+    Array.isArray(items) &&
+    items.some(
+      (item) =>
+        isRecord(item) &&
+        Array.isArray(item['content']) &&
+        item['content'].some(
+          (block) =>
+            isRecord(block) &&
+            (block['type'] === 'image' ||
+              (block['type'] === 'text' &&
+                typeof block['text'] === 'string' &&
+                (block['text'] as string).length > 0)),
+        ),
+    );
+  if (
+    messages.length === 0 ||
+    (!messages.some(Boolean) && !hasRenderableItemContent)
+  ) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  return [
-    {
+  const messageIds = Array.isArray(data['messageIds'])
+    ? data['messageIds']
+    : [];
+  return messages.map((text, index) => {
+    const item = Array.isArray(items) ? items[index] : undefined;
+    const messageId = messageIds[index];
+    return {
       ...base,
       type: 'status',
-      text: `Inserted message: ${messages.join('\n')}`,
+      text,
       source: 'mid_turn_message_injected',
-      data: event.data,
-    },
-  ];
+      data: {
+        ...data,
+        messages: [text],
+        ...(Array.isArray(items)
+          ? { items: item !== undefined ? [item] : [] }
+          : {}),
+        ...(typeof messageId === 'string'
+          ? { messageIds: [messageId] }
+          : Array.isArray(data['messageIds'])
+            ? { messageIds: [] }
+            : {}),
+      },
+    };
+  });
 }
 
 function createBase(
@@ -692,6 +737,24 @@ function parseTimestamp(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/**
+ * True for the session-media reference shape (`mediaId` instead of inline
+ * data/url/source) that replay producers persist for uploaded attachments.
+ * `extractContentPart` cannot render it; see the `user_message_chunk` case
+ * below for how it degrades instead of vanishing.
+ */
+function isMediaReferenceContent(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value['type'] === 'image' &&
+    typeof value['mediaId'] === 'string' &&
+    (value['mediaId'] as string).length > 0 &&
+    value['data'] === undefined &&
+    value['url'] === undefined &&
+    value['source'] === undefined
+  );
+}
+
 function normalizeSessionUpdate(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -738,7 +801,15 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
-            return [{ ...base, type: 'user.image.delta', data, mimeType }];
+            return [
+              {
+                ...base,
+                type: 'user.image.delta',
+                data,
+                mimeType,
+                ...(meta ? { meta } : {}),
+              },
+            ];
           }
           return [];
         }
@@ -755,6 +826,19 @@ function normalizeSessionUpdate(
             : [];
         }
         return [];
+      }
+      // Live consumers hydrate reference blocks before normalization; a path
+      // that reaches this point with one (offline record projection, failed
+      // hydrate) keeps the user's message visible via the placeholder.
+      if (isMediaReferenceContent(content)) {
+        return [
+          {
+            ...base,
+            type: 'user.text.delta',
+            text: MEDIA_UNAVAILABLE_TEXT,
+            ...(meta ? { meta } : {}),
+          },
+        ];
       }
       const text = getTextContent(content);
       return text

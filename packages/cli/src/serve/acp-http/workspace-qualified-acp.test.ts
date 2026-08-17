@@ -65,6 +65,11 @@ function makeBridge(): HttpAcpBridge {
     }),
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => {}),
+    getSessionCatalogVersion: vi.fn(() => ({
+      generation: 'wq-acp-fake-catalog-generation',
+      revision: 0,
+    })),
+    markSessionCatalogChanged: vi.fn(),
     executeShellCommand: vi.fn(async () => ({
       exitCode: 0,
       output: 'ok',
