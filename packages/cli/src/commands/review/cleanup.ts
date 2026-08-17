@@ -16,6 +16,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -42,7 +43,7 @@ import {
   reviewBranch,
   REVIEW_TMP_DIR,
   REVIEW_WORKFLOWS_DIR,
-  REVIEW_WORKFLOW_PREFIX,
+  reviewWorkflowScriptPath,
   tmpFile,
   tmpPrefix,
 } from './lib/paths.js';
@@ -597,38 +598,45 @@ export function runCleanup(target: string): void {
     }
   }
 
-  // --- Generated fan-out scripts (under .qwen/workflows/) ---------------
-  // `emit-workflow` has to write its script into the saved-workflow dir —
-  // `Workflow({scriptPath})` refuses to load anything outside it. That dir is
-  // also the user's own saved workflows, and each generated script is a
-  // `/<name>` slash command in their session, so a review that leaves one
-  // behind hands the user a permanent command for a diff that no longer
-  // exists. Swept by prefix, not by name: a run killed before it could report
-  // its path still leaves a file, and the target it belonged to is not
-  // recoverable from the name (which is a plan-path digest).
-  let workflowEntries: string[] = [];
+  // --- Generated fan-out script (under .qwen/workflows/) ----------------
+  // The plan path is deterministic for every cleanup target, so it identifies
+  // the one generated script this run owns, including after a killed run.
+  const workflowPaths = [
+    reviewWorkflowScriptPath(tmpFile(target, 'plan.json')),
+    ...(/^pr-\d+$/u.test(target)
+      ? [reviewWorkflowScriptPath(tmpFile(target, 'fetch.json'))]
+      : []),
+  ];
+  let workflowRootSafe = false;
   try {
-    workflowEntries = existsSync(REVIEW_WORKFLOWS_DIR)
-      ? readdirSync(REVIEW_WORKFLOWS_DIR)
-      : [];
+    if (existsSync(REVIEW_WORKFLOWS_DIR)) {
+      if (lstatSync(REVIEW_WORKFLOWS_DIR).isSymbolicLink()) {
+        writeStderrLine(
+          `Skipping workflow cleanup: ${REVIEW_WORKFLOWS_DIR} is a symlink.`,
+        );
+      } else {
+        workflowRootSafe = true;
+      }
+    }
   } catch (err) {
     writeStderrLine(
-      `Failed to read ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
+      `Failed to inspect ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
     );
   }
 
-  for (const file of workflowEntries) {
-    if (!file.startsWith(REVIEW_WORKFLOW_PREFIX) || !file.endsWith('.js')) {
-      continue;
-    }
-    const full = join(REVIEW_WORKFLOWS_DIR, file);
-    try {
-      rmSync(full, { force: true });
-      writeStdoutLine(`Removed generated workflow: ${full}`);
-      removedAny = true;
-    } catch (err) {
-      writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
-      failedAny = true;
+  if (workflowRootSafe) {
+    for (const workflowPath of workflowPaths) {
+      if (!existsSync(workflowPath)) continue;
+      try {
+        rmSync(workflowPath, { force: true });
+        writeStdoutLine(`Removed generated workflow: ${workflowPath}`);
+        removedAny = true;
+      } catch (err) {
+        writeStderrLine(
+          `Failed to remove ${workflowPath}: ${(err as Error).message}`,
+        );
+        failedAny = true;
+      }
     }
   }
 

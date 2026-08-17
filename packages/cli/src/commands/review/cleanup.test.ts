@@ -7,6 +7,9 @@ import { join } from 'node:path';
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
+  lstatSync: vi.fn((): { isSymbolicLink: () => boolean } => ({
+    isSymbolicLink: () => false,
+  })),
   // The return type is declared so `mockReturnValue` can take string arrays —
   // the sweep-retention tests hand it the tmp-dir listing.
   readdirSync: vi.fn((): string[] => []),
@@ -49,11 +52,13 @@ vi.mock('node:fs', async (importOriginal) => {
     default: {
       ...actual,
       existsSync: mocks.existsSync,
+      lstatSync: mocks.lstatSync,
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
+    lstatSync: mocks.lstatSync,
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     rmSync: mocks.rmSync,
@@ -98,7 +103,11 @@ vi.mock('./lib/paths.js', () => ({
     `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
   tmpPrefix: (target: string) => `qwen-review-${target}-`,
   REVIEW_WORKFLOWS_DIR: '/repo/.qwen/workflows',
-  REVIEW_WORKFLOW_PREFIX: 'qwen-review-',
+  reviewWorkflowScriptPath: (planPath: string) =>
+    `/repo/.qwen/workflows/${planPath
+      .split('/')
+      .at(-1)!
+      .replace(/\.json$/u, '.js')}`,
 }));
 
 import {
@@ -113,6 +122,7 @@ describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.existsSync.mockReturnValue(false);
+    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -147,30 +157,54 @@ describe('runCleanup', () => {
   // that dir is also the user's own saved workflows, where each file is a
   // `/<name>` slash command. A review that left one behind would hand the user
   // a permanent command for a diff that no longer exists.
-  it('sweeps generated fan-out scripts out of the saved-workflow dir', () => {
+  it('removes only this target generated fan-out scripts', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockImplementation(
-      ((p: string) => p === '/repo/.qwen/workflows') as never,
+      ((p: string) =>
+        p === '/repo/.qwen/workflows' ||
+        p === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
+        p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
-    mocks.readdirSync.mockImplementation(((dir: string) =>
-      dir === '/repo/.qwen/workflows'
-        ? ['qwen-review-9ea13ef11a.js', 'my-own-workflow.js', 'notes.md']
-        : []) as never);
 
     runCleanup('pr-123');
 
     expect(mocks.rmSync).toHaveBeenCalledWith(
-      '/repo/.qwen/workflows/qwen-review-9ea13ef11a.js',
+      '/repo/.qwen/workflows/qwen-review-pr-123-plan.js',
       { force: true },
     );
-    // A user's own saved workflow shares the directory and must survive.
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js',
+      { force: true },
+    );
     expect(mocks.rmSync).not.toHaveBeenCalledWith(
-      '/repo/.qwen/workflows/my-own-workflow.js',
+      '/repo/.qwen/workflows/qwen-review-a749ec7145.js',
       expect.anything(),
     );
     expect(mocks.rmSync).not.toHaveBeenCalledWith(
-      '/repo/.qwen/workflows/notes.md',
+      '/repo/.qwen/workflows/qwen-review-checklist.js',
       expect.anything(),
+    );
+  });
+
+  it('does not remove a workflow through a symlinked root', () => {
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => true });
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/qwen-review-pr-123-plan.js',
+      expect.anything(),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js',
+      expect.anything(),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      'Skipping workflow cleanup: /repo/.qwen/workflows is a symlink.',
     );
   });
 
