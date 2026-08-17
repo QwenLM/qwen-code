@@ -449,7 +449,10 @@ jobs:
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
       # Keep non-runnable PR/comment triggers out of the shared per-number
-      # group so they cannot cancel or replace an authorized run.
+      # group so they cannot cancel or replace an authorized run — including
+      # bot-created issues runs (#9264): the job `if` skips them, but a run
+      # left in the shared group would still cancel an in-progress triage of
+      # the same issue before its own skip is evaluated.
       group: >-
         ${{
           (
@@ -459,7 +462,10 @@ jobs:
             (github.event_name == 'issue_comment' &&
              (github.event.issue.state != 'open' ||
               needs.authorize.outputs.should_run != 'true' ||
-              !startsWith(github.event.comment.body, '@qwen-code /triage')))
+              !startsWith(github.event.comment.body, '@qwen-code /triage'))) ||
+            (github.event_name == 'issues' &&
+             github.event.issue.user.login ==
+               (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot'))
           ) &&
           format('{0}-run-{1}', github.workflow, github.run_id) ||
           format('{0}-{1}', github.workflow, github.event.issue.number || github.event.pull_request.number || github.event.inputs.number)
@@ -501,9 +507,17 @@ jobs:
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
     # skipped (issues / workflow_dispatch paths, which need no permission gate).
+    # The issues clause is conditioned on the creator NOT being the autofix
+    # bot (#9264): every PR that defers findings for the first time opens a
+    # tracking issue upserted by that bot, and the open issues trigger triaged
+    # the bookkeeping issue with a full agent run per deferral. The identity
+    # is the same one qwen-autofix.yml upserts under (AUTOFIX_BOT), so the
+    # guard tracks a rename on either side via the shared variable.
     if: >-
       always() && (
-        github.event_name == 'issues' ||
+        (github.event_name == 'issues' &&
+         github.event.issue.user.login !=
+           (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot')) ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
          github.event.inputs.tmux_pr == '') ||

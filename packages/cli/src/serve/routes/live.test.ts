@@ -15,6 +15,7 @@ import {
   LIVE_HOST_PROTOCOL_VERSION,
 } from '../live/types.js';
 import { registerLiveRoutes } from './live.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 class FakeSocket extends EventEmitter {
   readyState: number = WebSocket.OPEN;
@@ -116,6 +117,43 @@ afterEach(() => {
 });
 
 describe('Live routes', () => {
+  it.each(['/live/start', '/live/new'])(
+    'serializes runtime ownership failures from %s without leaking details',
+    async (route) => {
+      const { coordinator } = harness();
+      connectReady(coordinator);
+      const app = express();
+      app.use(express.json());
+      registerLiveRoutes(app, {
+        coordinator,
+        mutate: () => ((_req, _res, next) => next()) as RequestHandler,
+        ensureRuntimeReady: async () => {
+          throw new ConversationRuntimeOwnershipError(
+            'conversation_runtime_in_use',
+            true,
+            {
+              cause: new Error(
+                '/private/conversations owner=1234 nonce=secret',
+              ),
+            },
+          );
+        },
+      });
+
+      const response = await request(app).post(route).send({});
+
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({
+        error: 'The Conversations runtime is owned by another daemon.',
+        code: 'conversation_runtime_in_use',
+        retryable: true,
+      });
+      expect(JSON.stringify(response.body)).not.toContain('/private');
+      expect(JSON.stringify(response.body)).not.toContain('1234');
+      expect(JSON.stringify(response.body)).not.toContain('secret');
+    },
+  );
+
   it('returns non-secret readiness and a structured unavailable response', async () => {
     const { app } = harness(false);
 
