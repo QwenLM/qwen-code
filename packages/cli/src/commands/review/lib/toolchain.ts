@@ -17,10 +17,18 @@ export interface ToolchainRunArgs {
   buildOnly?: boolean;
   /**
    * Whole-call wall-clock budget in seconds, measured from the top of the
-   * call — undefined leaves the adapter its default (2× `timeout` minus
-   * startup headroom, floored at one per-command deadline).
+   * call — undefined leaves the adapter its default (what the shell tool's
+   * hard 600s ceiling leaves usable, floored at one per-command deadline).
    */
   budget?: number;
+  /**
+   * The report a `--resume` call continues: its install and build are reused
+   * as-is, and the continuation runs the suites it killed on a
+   * budget-shortened deadline FIRST (their provisional results are replaced),
+   * then the suites it could not reach at all. Undefined is a fresh run,
+   * which is every call that is not a continuation.
+   */
+  previous?: BuildTestReport;
   exec: (command: string, cwd: string, timeoutMs: number) => CommandResult;
 }
 

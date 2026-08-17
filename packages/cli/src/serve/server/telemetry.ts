@@ -181,6 +181,24 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/media',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/media',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/media/:mediaId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/media/:mediaId',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/media/:mediaId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/media/:mediaId',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/prompt',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/prompt',
