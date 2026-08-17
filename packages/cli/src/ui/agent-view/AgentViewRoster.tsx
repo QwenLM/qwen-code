@@ -154,6 +154,9 @@ export function AgentViewRoster({
   );
 
   useInput((input, key) => {
+    // The roster uses ink's raw useInput, which bypasses KeypressContext's
+    // FOCUS_EVENT_PATTERN filter, so focus in/out sequences must be dropped
+    // here as well or they would be treated as stray keystrokes.
     if (isTerminalFocusInput(input)) {
       return;
     }
@@ -210,7 +213,7 @@ export function AgentViewRoster({
       !peekInputActive &&
       !(
         isReturnInput(input, key) &&
-          isExactSlashCommand(currentPrompt, loadedSlashCommands)
+        isExactSlashCommand(currentPrompt, loadedSlashCommands)
       ) &&
       promptInput.handleCompletionKey(input, key)
     ) {
@@ -334,8 +337,8 @@ export function AgentViewRoster({
           ) : (
             <>
               <Text bold>{peekPanel.title}</Text>
-              {peekPanel.lines.map((line) => (
-                <Text key={line} dimColor>
+              {peekPanel.lines.map((line, index) => (
+                <Text key={index} dimColor>
                   {line}
                 </Text>
               ))}
@@ -346,8 +349,8 @@ export function AgentViewRoster({
       {notice ? (
         <Box flexDirection="column" marginBottom={1}>
           {notice.title ? <Text bold>{notice.title}</Text> : null}
-          {notice.lines.map((line) => (
-            <Text key={line} color={theme.text.secondary}>
+          {notice.lines.map((line, index) => (
+            <Text key={index} color={theme.text.secondary}>
               {line}
             </Text>
           ))}
@@ -819,10 +822,9 @@ function getPanelDisplayLines(
     parsed.summary ??
     parsed.other.at(-1);
   const queuedLine = getQueuedPromptLine(queuedPrompts);
-  return [
-    output,
-    queuedLine ?? formatWaitingLine(row.waitingFor),
-  ].filter((line): line is string => Boolean(line));
+  return [output, queuedLine ?? formatWaitingLine(row.waitingFor)].filter(
+    (line): line is string => Boolean(line),
+  );
 }
 
 function formatWaitingLine(waitingFor: string | undefined): string | undefined {

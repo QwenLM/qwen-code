@@ -49,12 +49,7 @@ import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
-  answerAgentViewPendingToolCall,
-  applyAgentViewWorkerControlEventForUi,
   dedupeNewestFirst,
-  getAgentViewAnswerableToolCalls,
-  getAgentViewWorkerStateForUi,
-  getLastAgentViewModelOutputLine,
   getSpeculativeToolResult,
   getNextRenderMode,
   isInputActiveForState,
@@ -65,6 +60,13 @@ import {
   shouldDrainMessageQueue,
   useQueuedSubmissionDrain,
 } from './AppContainer.js';
+import {
+  answerAgentViewPendingToolCall,
+  applyAgentViewWorkerControlEventForUi,
+  getAgentViewAnswerableToolCalls,
+  getAgentViewWorkerStateForUi,
+  getLastAgentViewModelOutputLine,
+} from './agent-view/worker-ui-bridge.js';
 import {
   formatSessionWindowTitle,
   writeTerminalTitle,

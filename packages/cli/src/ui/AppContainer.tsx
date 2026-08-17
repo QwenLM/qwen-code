@@ -63,8 +63,6 @@ import {
   ConditionalRulesRegistry,
   MCPDiscoveryState,
   ToolConfirmationOutcome,
-  type ToolConfirmationPayload,
-  type ToolCallConfirmationDetails,
   type WaitingToolCall,
   ToolNames,
   SendMessageType,
@@ -252,12 +250,13 @@ import {
   reportAgentViewWorkerState,
   sendAgentViewWorkerEvent,
 } from '../agent-view/worker-sideband.js';
-import type {
-  AgentViewSessionState,
-  AgentViewWorkerControlEvent,
-  AgentViewWorkerAnswerOutcome,
-} from '../agent-view/protocol.js';
 import { getTipHistory } from '../services/tips/index.js';
+import {
+  applyAgentViewWorkerControlEventForUi,
+  getAgentViewAnswerableToolCalls,
+  getAgentViewWorkerStateForUi,
+  getLastAgentViewModelOutputLine,
+} from './agent-view/worker-ui-bridge.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
@@ -274,6 +273,9 @@ import {
 import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+// Stable empty default so the destructured `pendingToolCalls` doesn't get a
+// fresh array identity each render, which would re-run dependent effects.
+const EMPTY_TOOL_CALLS: WaitingToolCall[] = [];
 const debugLogger = createDebugLogger('APP_CONTAINER');
 
 export function isRenderModeToggleKey(key: Key): boolean {
@@ -315,270 +317,6 @@ function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
     (item) =>
       item.type === MessageType.COMPRESSION && item.compression.isPending,
   );
-}
-
-interface AgentViewStatusToolCall {
-  status: string;
-  request?: {
-    callId?: string;
-    name?: string;
-  };
-  liveOutput?: unknown;
-  confirmationDetails?: ToolCallConfirmationDetails;
-}
-
-export interface AgentViewWorkerUiStateReport {
-  sessionState: AgentViewSessionState;
-  summary?: string;
-  waitingFor?: string;
-  inputKind?: 'blocking' | 'soft';
-  lastResult?: string;
-}
-
-export function getAgentViewWorkerStateForUi({
-  initError,
-  streamingState,
-  pendingToolCalls,
-  lastResult,
-}: {
-  initError: unknown;
-  streamingState: StreamingState;
-  pendingToolCalls?: AgentViewStatusToolCall[];
-  lastResult?: string;
-}): AgentViewWorkerUiStateReport {
-  if (initError) {
-    const summary =
-      initError instanceof Error ? initError.message : String(initError);
-    return { sessionState: 'failed', summary };
-  }
-
-  const toolCalls = pendingToolCalls ?? [];
-  const waitingTool = toolCalls.find(
-    (tool) => tool.status === 'awaiting_approval',
-  );
-  const waitingFor =
-    waitingTool?.request?.name ?? getNestedAgentViewWaitingFor(toolCalls);
-  if (streamingState === StreamingState.WaitingForConfirmation) {
-    return {
-      sessionState: 'needs_input',
-      ...(waitingFor ? { waitingFor } : {}),
-      inputKind: 'blocking',
-      ...(lastResult ? { lastResult } : {}),
-    };
-  }
-
-  if (streamingState === StreamingState.Responding) {
-    return {
-      sessionState: 'working',
-      ...(lastResult ? { lastResult } : {}),
-    };
-  }
-
-  if (lastResult && looksLikeUserQuestion(lastResult)) {
-    return {
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-      inputKind: 'soft',
-      lastResult,
-    };
-  }
-
-  return {
-    sessionState: 'idle',
-    ...(lastResult ? { lastResult } : {}),
-  };
-}
-
-function looksLikeUserQuestion(text: string): boolean {
-  return /[?？]\s*$/.test(text.trim());
-}
-
-export function getLastAgentViewModelOutputLine(
-  items: readonly HistoryItemWithoutId[],
-): string | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (!item || (item.type !== 'gemini' && item.type !== 'gemini_content')) {
-      continue;
-    }
-    const lastLine = item.text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .at(-1);
-    if (lastLine) return lastLine;
-  }
-  return undefined;
-}
-
-export async function answerAgentViewPendingToolCall(
-  event: Extract<AgentViewWorkerControlEvent, { type: 'answer' }>,
-  pendingToolCalls: WaitingToolCall[],
-): Promise<boolean> {
-  const toolCall = pendingToolCalls.find(
-    (call) =>
-      call.status === 'awaiting_approval' &&
-      (!event.callId || call.request.callId === event.callId),
-  );
-  if (!toolCall?.confirmationDetails?.onConfirm) {
-    return false;
-  }
-
-  const outcome = toToolConfirmationOutcome(event.outcome, event.text);
-  if (toolCall.confirmationDetails.type === 'ask_user_question') {
-    await toolCall.confirmationDetails.onConfirm(
-      outcome,
-      getAgentViewAnswerPayload(event),
-    );
-    return true;
-  }
-
-  await toolCall.confirmationDetails.onConfirm(outcome);
-  return true;
-}
-
-export function getAgentViewAnswerableToolCalls(
-  pendingToolCalls: readonly unknown[],
-): WaitingToolCall[] {
-  const answerable: WaitingToolCall[] = [];
-  for (const toolCall of pendingToolCalls) {
-    if (!isRecord(toolCall)) continue;
-    if (
-      toolCall['status'] === 'awaiting_approval' &&
-      isRecord(toolCall['confirmationDetails'])
-    ) {
-      answerable.push(toolCall as unknown as WaitingToolCall);
-      continue;
-    }
-
-    const pendingConfirmation = getNestedAgentViewPendingConfirmation(
-      toolCall['liveOutput'],
-    );
-    if (pendingConfirmation) {
-      answerable.push({
-        status: 'awaiting_approval',
-        request: isRecord(toolCall['request'])
-          ? {
-              callId:
-                typeof toolCall['request']['callId'] === 'string'
-                  ? toolCall['request']['callId']
-                  : '',
-              name:
-                typeof toolCall['request']['name'] === 'string'
-                  ? toolCall['request']['name']
-                  : 'Agent',
-            }
-          : { callId: '', name: 'Agent' },
-        confirmationDetails: pendingConfirmation,
-      } as unknown as WaitingToolCall);
-    }
-  }
-  return answerable;
-}
-
-export async function applyAgentViewWorkerControlEventForUi(
-  event: AgentViewWorkerControlEvent,
-  pendingToolCalls: readonly unknown[],
-  enqueuePrompt: (text: string) => void,
-  stopCurrentTurn?: () => void,
-): Promise<void> {
-  if (event.type === 'prompt') {
-    enqueuePrompt(event.text);
-    return;
-  }
-
-  if (event.type === 'stop') {
-    stopCurrentTurn?.();
-    return;
-  }
-
-  if (event.type !== 'answer') {
-    return;
-  }
-
-  const answeredToolCall = await answerAgentViewPendingToolCall(
-    event,
-    getAgentViewAnswerableToolCalls(pendingToolCalls),
-  );
-  if (!answeredToolCall && event.text?.trim()) {
-    enqueuePrompt(event.text);
-  }
-}
-
-function getNestedAgentViewWaitingFor(
-  toolCalls: readonly AgentViewStatusToolCall[],
-): string {
-  const nested = toolCalls.find((toolCall) =>
-    Boolean(getNestedAgentViewPendingConfirmation(toolCall.liveOutput)),
-  );
-  return nested?.request?.name ?? 'user input';
-}
-
-function getNestedAgentViewPendingConfirmation(
-  liveOutput: unknown,
-): ToolCallConfirmationDetails | undefined {
-  if (
-    !isRecord(liveOutput) ||
-    liveOutput['type'] !== 'task_execution' ||
-    !isRecord(liveOutput['pendingConfirmation'])
-  ) {
-    return undefined;
-  }
-  return liveOutput[
-    'pendingConfirmation'
-  ] as unknown as ToolCallConfirmationDetails;
-}
-
-function toToolConfirmationOutcome(
-  outcome: AgentViewWorkerAnswerOutcome | undefined,
-  text: string | undefined,
-): ToolConfirmationOutcome {
-  switch (outcome) {
-    case 'proceed_always':
-      return ToolConfirmationOutcome.ProceedAlways;
-    case 'proceed_always_project':
-      return ToolConfirmationOutcome.ProceedAlwaysProject;
-    case 'proceed_always_user':
-      return ToolConfirmationOutcome.ProceedAlwaysUser;
-    case 'modify_with_editor':
-      return ToolConfirmationOutcome.ModifyWithEditor;
-    case 'restore_previous':
-      return ToolConfirmationOutcome.RestorePrevious;
-    case 'cancel':
-      return ToolConfirmationOutcome.Cancel;
-    case 'proceed_once':
-      return ToolConfirmationOutcome.ProceedOnce;
-    default:
-      break;
-  }
-
-  const normalized = text?.trim().toLowerCase();
-  if (
-    normalized === 'n' ||
-    normalized === 'no' ||
-    normalized === 'deny' ||
-    normalized === 'cancel'
-  ) {
-    return ToolConfirmationOutcome.Cancel;
-  }
-  return ToolConfirmationOutcome.ProceedOnce;
-}
-
-function getAgentViewAnswerPayload(
-  event: Extract<AgentViewWorkerControlEvent, { type: 'answer' }>,
-): ToolConfirmationPayload | undefined {
-  if (isRecord(event.payload)) {
-    return event.payload as unknown as ToolConfirmationPayload;
-  }
-  const text = event.text?.trim();
-  if (!text) {
-    return undefined;
-  }
-  return { answers: { 0: text } };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function isInputActiveForState({
@@ -2443,7 +2181,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
-    pendingToolCalls = [],
+    pendingToolCalls = EMPTY_TOOL_CALLS,
     streamingResponseLengthRef,
     isReceivingContent,
   } = useGeminiStream(
@@ -5329,6 +5067,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
 type SpawnSyncFn = typeof spawnSync;
 
+// Deliberately synchronous: the roster relaunch is a terminal handoff — the
+// current process must exit and hand stdio to the child before returning, so
+// an async spawn would leave two processes racing for the same TTY.
 export function runAgentViewRosterCommand(
   cwd: string,
   spawn: SpawnSyncFn = spawnSync,

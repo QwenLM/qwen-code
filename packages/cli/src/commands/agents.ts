@@ -229,6 +229,9 @@ function resetTerminalForRoster(): void {
   process.stdout.write('\x1b[0m\x1b[?25h\x1b[?1049l\x1b[2J\x1b[H');
 }
 
+// One macrotask tick is enough: resetTerminalForRoster writes synchronously
+// to stdout, and a single setImmediate lets ink flush its final unmount output
+// before the next TUI (session picker) takes over the terminal.
 async function waitForTerminalHandoff(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
