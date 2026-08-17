@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -348,6 +349,69 @@ describe('worktreeResidue', () => {
     expect(got.paths).toEqual(['__probe__.test.ts']);
     expect(got.total).toBe(1);
   });
+});
+
+describe('worktreeResidue — the blind sets', () => {
+  let repo: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'qwen-blind-'));
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'config', 'user.email', 't@t.t');
+    git(repo, 'config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'x\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'head');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports UNMEASURED for a gitlink it cannot read, not clean',
+    () => {
+      // The filter that decides "nothing to hide there" used to answer the same
+      // way for an ABSENT directory (the shape `worktree add` leaves — genuinely
+      // clean) and an unreadable one, which is a place neither `git status` nor
+      // this probe can see.
+      const wt = join(repo, 'wt');
+      git(repo, 'worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      // A committed gitlink, made unreadable in the worktree.
+      const sub = join(repo, 'sub-origin');
+      mkdirSync(sub, { recursive: true });
+      git(sub, 'init', '-q', '-b', 'main');
+      git(sub, 'config', 'user.email', 't@t.t');
+      git(sub, 'config', 'user.name', 't');
+      writeFileSync(join(sub, 's.txt'), 'x\n');
+      git(sub, 'add', '-A');
+      git(sub, 'commit', '-qm', 'one');
+      git(
+        repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor',
+      );
+      git(repo, 'commit', '-qm', 'sub');
+      git(wt, 'checkout', '--detach', '-q', git(repo, 'rev-parse', 'main'));
+      mkdirSync(join(wt, 'vendor'), { recursive: true });
+      chmodSync(join(wt, 'vendor'), 0o000);
+      try {
+        expect(worktreeResidue(wt).unmeasured).toBeTruthy();
+      } finally {
+        chmodSync(join(wt, 'vendor'), 0o755);
+      }
+    },
+  );
 });
 
 describe('exposeDependencies', () => {

@@ -1387,6 +1387,22 @@ function existsAtRev(cwd: string, rev: string, path: string): boolean {
  */
 export function safeRmWithin(worktree: string, relPath: string): void {
   const parts = relPath.split(/[/\\]+/).filter((s) => s && s !== '.');
+  // The ROOT is an ancestor too, and the one this guarantee was missing: a
+  // symlink at the tree root resolves the whole prefix in the kernel, so every
+  // component below it lstats as an ordinary entry and the delete lands
+  // wherever the root points — the shared review worktree, in the shape that
+  // reached this function after a mid-run relink.
+  try {
+    if (lstatSync(worktree).isSymbolicLink()) {
+      throw new Error(
+        `refusing to delete through a symlink: ${relPath} ` +
+          `(the tree root ${worktree} is a symlink)`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('refusing')) throw err;
+    return; // No root to delete within.
+  }
   let cur = worktree;
   for (let i = 0; i < parts.length; i++) {
     cur = join(cur, parts[i]);
@@ -2555,6 +2571,18 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
 
     if (created) {
       try {
+        // The tree must still BE the tree. The mutation phase above can end by
+        // detecting that the probe tree was relinked mid-run — and this phase
+        // then ran `git checkout base -- …` and `safeRmWithin` with a cwd that
+        // resolves through the link into the shared review worktree, which is
+        // the one thing this whole command exists to keep untouched. Detection
+        // that is followed by the damage it detected is not detection.
+        if (probeTargetEscapes(probeTree, '.')) {
+          throw new Error(
+            'the probe tree no longer resolves to itself (a symlink at its ' +
+              'root), so the revert would run against whatever it points at',
+          );
+        }
         // "Revert to base" is two operations, confined to the throwaway tree. A
         // file the PR MODIFIED is checked out from base; a file the PR ADDED did
         // not exist at base, so it is removed — through `safeRmWithin`, which

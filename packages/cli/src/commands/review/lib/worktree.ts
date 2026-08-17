@@ -506,12 +506,16 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // rendered form quotes a non-ASCII gitlink name into a spelling that never
   // resolves on disk, so the entry drops out of the blind set and a dirty
   // gitlink is certified clean.
-  const stage = spawnSync('git', ['ls-files', '-s', '-z'], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: sanitizedGitEnv(),
-  });
+  const stage = spawnSync(
+    'git',
+    ['-c', 'core.fsmonitor=', 'ls-files', '-s', '-z'],
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
   if (stage.error || stage.status !== 0 || typeof stage.stdout !== 'string') {
     const why = stage.error
       ? ((stage.error as NodeJS.ErrnoException).code ?? stage.error.message)
@@ -525,9 +529,13 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     .filter((gitlink) => {
       try {
         return readdirSync(join(cwd, gitlink)).length > 0;
-      } catch {
-        // Absent or unreadable: nothing to hide there.
-        return false;
+      } catch (err) {
+        // ABSENT is the clean shape `worktree add` leaves, and only that one
+        // is treated as nothing-to-hide. Anything else — a directory this
+        // process cannot read, an I/O error — is a place the status could not
+        // see AND this probe could not see either, which is the definition of
+        // unmeasured, not of clean.
+        return (err as NodeJS.ErrnoException).code !== 'ENOENT';
       }
     });
   if (blind.length > 0) {
@@ -730,12 +738,58 @@ function removeUnownedNodeModules(
         }
         continue;
       }
-      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
       if (entry.name === '.git') continue;
+      if (entry.isSymbolicLink()) {
+        // Never FOLLOWED — the farm's own entries are links pointing out of the
+        // tree, and following one would walk into the shared worktree. But a
+        // link the COMMIT contains can hide a `node_modules` from every
+        // rebuild, so a link that resolves back INSIDE this tree is disclosed
+        // rather than silently skipped: the caller reports what it could not
+        // clear.
+        try {
+          const real = realpathSync(full);
+          const root = realpathSync(tree);
+          if (
+            (real === root || real.startsWith(root + sep)) &&
+            statSync(full).isDirectory() &&
+            holdsNodeModules(real)
+          ) {
+            done.failed++;
+          }
+        } catch {
+          // Dangling or unreadable: nothing resolvable to hide anything.
+        }
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
       walk(full);
     }
   };
   walk(tree);
+}
+
+/**
+ * Does this subtree hold a `node_modules` at any depth?
+ *
+ * Used only to DISCLOSE what the wipe walk deliberately did not follow: a
+ * symlinked directory inside the tree can hide dependencies from every rebuild,
+ * and the walk must not follow it (the farm's own entries are links out of the
+ * tree), so the honest answer is a counted failure rather than silence.
+ */
+function holdsNodeModules(dir: string): boolean {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (entry.name.toLowerCase() === 'node_modules') return true;
+    if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+    if (entry.name === '.git') continue;
+    if (holdsNodeModules(join(dir, entry.name))) return true;
+  }
+  return false;
 }
 
 /**

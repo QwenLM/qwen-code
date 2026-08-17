@@ -427,11 +427,25 @@ function scratchWorktreesOf(worktree: string): {
   // probes, `git worktree remove`, `releaseWorktree`'s recursive `rmSync` —
   // would run inside wherever that link points. Refusing the whole family is the
   // only answer that scopes: one entry cannot be trusted more than its parent.
+  // Every ancestor, not just the immediate parent: `lstat` refuses to
+  // dereference only the LAST component, so a symlink one hop higher
+  // (`.qwen` above `.qwen/tmp`) resolves silently and redirects the same
+  // deletes. The walk stops at the filesystem root.
   try {
+    for (let dir = parent; ; dir = dirname(dir)) {
+      if (lstatSync(dir).isSymbolicLink()) {
+        writeStderrLine(
+          `Refusing to sweep scratch worktrees: ${dir} is a symlink ` +
+            '(every delete below it would land wherever it points)',
+        );
+        return { paths: [], failed: true };
+      }
+      const up = dirname(dir);
+      if (up === dir) break;
+    }
     if (!lstatSync(parent).isDirectory()) {
       writeStderrLine(
-        `Refusing to sweep scratch worktrees: ${parent} is not a directory ` +
-          '(a symlink there would redirect every delete below it)',
+        `Refusing to sweep scratch worktrees: ${parent} is not a directory`,
       );
       return { paths: [], failed: true };
     }
