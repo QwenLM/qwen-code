@@ -39,11 +39,15 @@ describe('safeTarget', () => {
   });
 
   it('bounds deep targets to the one-component cap, keeping them distinct', () => {
-    // A 30-level nested path flattens past POSIX's 255-byte filename
-    // component cap (ENAMETOOLONG): truncate and carry a hash of the
-    // ORIGINAL target so distinct deep paths stay distinct.
-    const deepA = Array.from({ length: 30 }, (_, i) => `level${i}`).join('/');
-    const deepB = Array.from({ length: 30 }, (_, i) => `layer${i}`).join('/');
+    // Deep nested paths flatten past POSIX's 255-byte filename component cap
+    // (ENAMETOOLONG): truncate and carry a hash of the ORIGINAL target so
+    // distinct deep paths stay distinct. The fixtures share a flattened
+    // prefix longer than the kept window (≥187 chars) and differ only in the
+    // tail, so a truncation-only slug — one that dropped the digest — would
+    // collide here instead of shipping green.
+    const shared = Array.from({ length: 30 }, (_, i) => `level${i}`).join('/');
+    const deepA = `${shared}/alpha`;
+    const deepB = `${shared}/beta`;
     const slugA = safeTarget(deepA);
     const slugB = safeTarget(deepB);
     expect(slugA.length).toBeLessThanOrEqual(200);
