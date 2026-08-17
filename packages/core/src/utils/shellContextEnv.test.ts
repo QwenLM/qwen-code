@@ -480,6 +480,20 @@ describe('getShellContextEnvVars', () => {
       );
     });
 
+    it('drops \u2014 does not mis-qualify \u2014 a model NAMED like a qualified one', () => {
+      // `foo@1a2b3c4d` is a legal model id, and the suffix rule cannot tell it
+      // from `foo` qualified by a digest. The head then reads as `foo`, which
+      // is not this session's model, so the identity is dropped. That costs
+      // the qualification and nothing else: the subprocess falls back to the
+      // bare id, which is coarser and true. Mis-qualifying would be the
+      // failure; being coarse is the fail-safe direction.
+      process.env['QWEN_CODE_MODEL'] = 'foo@1a2b3c4d';
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = 'foo@1a2b3c4d';
+      const env = getShellContextEnvVars();
+      expect(env['QWEN_CODE_MODEL']).toBe('foo@1a2b3c4d');
+      expect(env['QWEN_CODE_MODEL_IDENTITY']).toBe('');
+    });
+
     it('blanks the key when nothing published one', () => {
       // `''`, not absent: the spawn-site spread would otherwise leak an
       // inherited value from a parent qwen-code process. `roundModelIdFrom`
