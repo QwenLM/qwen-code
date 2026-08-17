@@ -394,6 +394,30 @@ describe('saveReviewArtifact', () => {
     },
   );
 
+  it('refuses an absent output spelled through a symlink onto an absent input', () => {
+    // The hardened absent-side semantics: neither file is on disk yet, but
+    // the output is spelled through a symlinked directory component, so its
+    // canonical identity is the findings input's. A revert to the old local
+    // sameFile — false whenever a side is absent — passes green and lets
+    // saveReviewArtifact overwrite an input it is about to read.
+    const paths = fixture();
+    symlinkSync(join(root, '.qwen/tmp'), join(root, '.qwen/reviews/link'));
+    const absentInput = join(root, '.qwen/tmp/next.json');
+    const out = join(root, '.qwen/reviews/link/next.json');
+
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        findings: absentInput,
+        out,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/must not overwrite/);
+    expect(existsSync(out)).toBe(false);
+    expect(existsSync(absentInput)).toBe(false);
+  });
+
   it.skipIf(!caseInsensitiveFs)(
     'refuses a case-insensitive output alias of the Markdown report',
     () => {
