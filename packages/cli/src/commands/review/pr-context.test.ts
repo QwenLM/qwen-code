@@ -1299,6 +1299,32 @@ describe('renderLedgerSection', () => {
       sha: 'abc1234def56789',
     });
     expect(anchored).toContain('reviewed at `abc1234def56789`');
+    // The routing instruction itself, not just the sha: reverting this tail
+    // to the pre-`--since` wording would render "hand-validate the anchor"
+    // into every ledger-carrying context file — the skippable hand check
+    // the CLI now owns — with no other test red.
+    expect(anchored).toContain('pass it as `--since <sha>`');
+    expect(anchored).toContain('never run git against an anchor yourself');
+    // The tail's other two load-bearing fragments, each deletable while this
+    // file stayed green: the antecedent that says WHAT to pass, and the
+    // statement that the CLI is what validates and scopes it. Without the
+    // first, `pass it as --since <sha>` refers to nothing.
+    expect(anchored).toContain('The reviewed-at sha is the incremental anchor');
+    expect(anchored).toContain('validates it against the fetched history');
+    // …and the two fragments the block's own comment claims but does not
+    // reach: the command that takes the flag, and what it does with it.
+    // Without the first, the tail names no command and the relative clause
+    // dangles.
+    expect(anchored).toContain('on a `fetch-pr` re-run');
+    expect(anchored).toContain('scopes the diff and plan');
+    // The CONDITION, not just the instruction. Dropping the clause leaves the
+    // tail telling the orchestrator, unconditionally and in imperative tone,
+    // to re-run with a sha that may already have been deterministically
+    // refused — `not-an-ancestor`, `hunks-outside-pr-diff`, `partition-failed`
+    // — which the recovered-anchor flow says must NOT be retried.
+    expect(anchored).toContain(
+      "when Step 1's recovered-anchor check rules a re-run admissible",
+    );
     expect(
       renderLedgerSection({
         v: 1,
@@ -1306,6 +1332,29 @@ describe('renderLedgerSection', () => {
         findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
       }),
     ).not.toContain('reviewed at');
+    // …and the routing tail goes with it: asserting only the space-form
+    // phrase let a mutant hoist the tail out of the ternary, since its own
+    // wording says "reviewed-at sha".
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('--since');
+    // Every sentence of the tail, not just the ones carrying `--since`. The
+    // first one is written "reviewed-at sha" — hyphenated — so it matches
+    // neither the space-form phrase nor `--since`, and could be hoisted out
+    // of the ternary with every assertion above still green: a sha-less
+    // ledger would then render a dangling reference to a reviewed-at sha the
+    // side file deliberately withholds.
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('reviewed-at sha');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {

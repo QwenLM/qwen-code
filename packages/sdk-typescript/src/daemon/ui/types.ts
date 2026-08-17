@@ -10,6 +10,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionResponse,
 } from '../types.js';
 
@@ -484,6 +485,7 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   key: string;
   scope: string;
   value: unknown;
+  mutation?: DaemonSkillToggleMutation;
 }
 
 export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {
