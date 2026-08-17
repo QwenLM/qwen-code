@@ -31,42 +31,39 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { buildLaunch } from './agent-prompt.js';
 import { recordPrompt } from './lib/prompt-record.js';
 import { readPlanReport, type PlanReport } from './lib/report.js';
 import { reviewWorkflowScriptPath } from './lib/paths.js';
+import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import {
-  isTerritoryFanOut,
-  requiredAgents,
-  reviewMode,
-  type RosterPlan,
-} from './lib/roster.js';
+  resolveOrchestration,
+  structuralBlocker,
+} from './lib/orchestration.js';
 import {
   buildReviewWorkflowScript,
   type WorkflowAgentSpec,
 } from './workflow-script.js';
 
+/**
+ * Exit code for "this review runs on the legacy path".
+ *
+ * A distinct code, not a failure and not a silent exit 0, because the caller
+ * has to branch on it: exit 0 means a script exists to run, exit 6 means build
+ * the roster the old way, and exit 1 means something is broken. Collapsing the
+ * middle case into either neighbour is what turns a routine ineligibility into
+ * either a swallowed error or an abandoned review. Mirrors the reverse-audit
+ * builder's exit 4 (budget stop) and exit 5 (converged), which are termination
+ * verdicts in the same sense.
+ */
+export const EXIT_LEGACY_ORCHESTRATION = 6;
+
+export { workflowsEnabled } from './lib/orchestration.js';
+
 interface EmitWorkflowArgs {
   plan: string;
   rules?: string;
-}
-
-/**
- * Are workflows available to run what this emits?
- *
- * Mirrors `Config.isWorkflowsEnabled`'s env half. The settings half is not
- * visible from a subcommand, which has no Config — so a project that enabled
- * workflows only through settings is refused here and has to set the env var
- * as well. That is the fail-closed direction: emitting a script nothing can
- * run wastes a step and reports no reason, while this refusal names the
- * variable to set.
- */
-export function workflowsEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
-  return env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1';
 }
 
 /**
@@ -86,29 +83,15 @@ export function buildFanOutRoster(
 ): WorkflowAgentSpec[] {
   const plan = report as RosterPlan;
 
-  // 3B is not a bigger 3A. Its chunk agents carry a per-territory contract —
-  // paging rules, the uncoverable rule, a `Covered:` receipt — and its
-  // retirement ledger reads transcripts per chunk. Emitting a 3A-shaped
-  // fan-out for one would launch the wrong agents over the right diff.
-  if (isTerritoryFanOut(plan)) {
+  // The env half of eligibility is the command's, decided before anything is
+  // written. What is left here is what this plan itself cannot express — the
+  // same facts `resolveOrchestration` routes on, read from the same function,
+  // so a caller reaching this with an ineligible plan is refused rather than
+  // handed a roster the script cannot dispatch.
+  const blocker = structuralBlocker(plan);
+  if (blocker) {
     throw new Error(
-      'emit-workflow: this plan is a territory fan-out (Step 3B) and this ' +
-        'build emits the Step 3A roster only. Use `agent-prompt --roster` for ' +
-        'this review.',
-    );
-  }
-
-  // Every review agent is pinned to the PR worktree today (`working_dir` on
-  // the Agent tool). A workflow dispatch has no equivalent, so the agents
-  // would run in the user's main checkout and review whatever is there —
-  // findings that look plausible and describe the wrong tree.
-  const mode = reviewMode(plan);
-  if (mode === 'pr-worktree') {
-    throw new Error(
-      'emit-workflow: this review has a worktree, and a workflow dispatch ' +
-        'cannot yet be pinned to it (`agent()` takes no working directory), so ' +
-        'its agents would read the main checkout instead of the PR. Use ' +
-        '`agent-prompt --roster` for worktree reviews.',
+      `emit-workflow: ${blocker} Use \`agent-prompt --roster\` for this review.`,
     );
   }
 
@@ -144,19 +127,24 @@ export function buildFanOutRoster(
 }
 
 function runEmitWorkflow(args: EmitWorkflowArgs): void {
-  // Checked before anything is written: the refusal is about this environment,
-  // not about this plan, and a run that cannot execute what it emits should
-  // not leave a script and a set of prompt records behind implying it did.
-  if (!workflowsEnabled()) {
-    throw new Error(
-      'emit-workflow: workflows are not enabled in this environment, so ' +
-        'nothing could run what this emits. Set QWEN_CODE_ENABLE_WORKFLOWS=1 ' +
-        '(and leave QWEN_CODE_DISABLE_WORKFLOWS unset), or use ' +
-        '`agent-prompt --roster` for this review.',
-    );
-  }
-
   const report = readPlanReport('emit-workflow', args.plan);
+
+  // Decided before anything is written. A run that will not take the workflow
+  // path must not leave a script and a set of prompt records behind implying
+  // it did — the records are what `check-coverage` matches launches against,
+  // so records for a fan-out that never dispatched would read as a roster
+  // that was launched and returned nothing.
+  const verdict = resolveOrchestration(report as RosterPlan);
+  if (verdict.mode === 'legacy') {
+    writeStderrLine(`orchestration: legacy — ${verdict.reason}`);
+    writeStderrLine(
+      'Build the roster with `qwen review agent-prompt --roster` and launch ' +
+        'it as Step 3A describes. This is a routing verdict, not an error: ' +
+        'nothing was written and nothing needs repairing.',
+    );
+    process.exitCode = EXIT_LEGACY_ORCHESTRATION;
+    return;
+  }
 
   // Same refusal as `agent-prompt`, for the same reason: a rules path that
   // does not resolve would silently review without the project rules the run

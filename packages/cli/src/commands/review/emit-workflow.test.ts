@@ -18,6 +18,7 @@ import {
   buildFanOutRoster,
   emitWorkflowCommand,
   workflowsEnabled,
+  EXIT_LEGACY_ORCHESTRATION,
 } from './emit-workflow.js';
 import { buildLaunch } from './agent-prompt.js';
 import { readRecordedPrompts } from './lib/prompt-record.js';
@@ -192,19 +193,41 @@ describe('emit-workflow — the workflows gate', () => {
     ).toBe(false);
   });
 
-  // Checked before anything is written: a run that cannot execute what this
-  // emits must not leave a script and a set of prompt records behind
-  // implying it did.
-  it('refuses before writing anything when workflows are disabled', () => {
+  // Decided before anything is written: prompt records are what
+  // `check-coverage` matches launches against, so records left by a fan-out
+  // that never dispatched would read as a roster that ran and returned
+  // nothing — a review reported as covered by agents that do not exist.
+  it('routes to legacy without writing anything when workflows are disabled', () => {
     const dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    const priorExit = process.exitCode;
     try {
       const plan = join(dir, 'plan.json');
       writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
-      expect(() =>
-        (emitWorkflowCommand.handler as (a: unknown) => void)({ plan }),
-      ).toThrow(/workflows are not enabled/);
+      (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
+      expect(process.exitCode).toBe(EXIT_LEGACY_ORCHESTRATION);
       expect(readRecordedPrompts(plan).size).toBe(0);
     } finally {
+      process.exitCode = priorExit;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The runtime gate and the /review gate answer different questions, so a
+  // project that turned workflows on for something else has NOT opted its
+  // reviews in — and rolling reviews back does not take the runtime with it.
+  it('still routes to legacy when the runtime is on but /review is not opted in', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    const priorExit = process.exitCode;
+    vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+      (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
+      expect(process.exitCode).toBe(EXIT_LEGACY_ORCHESTRATION);
+      expect(readRecordedPrompts(plan).size).toBe(0);
+    } finally {
+      process.exitCode = priorExit;
+      vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -216,6 +239,7 @@ describe('emit-workflow — what it writes', () => {
 
   beforeEach(() => {
     vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
+    vi.stubEnv('QWEN_REVIEW_WORKFLOW', '1');
     dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
     cwd = process.cwd();
     // The script path is repo-relative, like every other review path, so the

@@ -314,6 +314,25 @@ Launch **14 agents** for same-repo **PR** reviews (Agent 1 has three procedural 
 
 **At medium effort, launch the reduced set:** skip the three adversarial personas (Agents 6a/6b/6c) and the Agent 8 diff-specialists, launching Agents 0 (PR targets only), 1a, 1b, 1c, 2, 3a, 3b, 3c, 4, 5, and 7 — **11 agents** for a same-repo PR, **10** for a local-diff or file-path review (no Agent 0), **9** for cross-repo lightweight (drop Agent 7 and 1c too, as above). Everything else about 3A is identical — the briefs, the `working_dir` pin, the whiff check, coverage; medium changes only which dimensions launch, not how any agent runs. **Build the roster with `agent-prompt --roster`** — it reads the effort the plan recorded at Step 1 (`plan.effort`), so on a medium plan it omits 6a/6b/6c from the roster it prints (Agent 8 was never in it) and you launch exactly these agents. `check-coverage` (Step 3D) reads the **same** `plan.effort` and requires exactly these too — no flag to pass, and no way for the roster you launched and the gate that checks it to disagree. (The effort lives in the plan, not in a flag, on purpose: a roster a caller could shrink by omitting a flag is a roster that gets shrunk. If Step 1 recorded no effort, the full roster is required, personas included — the fail-safe, not a medium review.)
 
+### Which engine dispatches this fan-out — ask, do not decide
+
+**Run this first. It answers, and its answer is the branch:**
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review emit-workflow --plan <the plan report from Step 1> \
+  [--rules <the rules file from Step 2, if the project has any>]
+```
+
+- **Exit 6** — this review runs the **legacy** path. The command wrote nothing; it prints the reason to stderr (workflows not enabled, `QWEN_REVIEW_WORKFLOW` not set, a territory fan-out, or a PR-worktree review). Continue with `agent-prompt --roster` exactly as described below. This is the default and the expected outcome; it is a routing verdict, not an error, and there is nothing to repair or retry.
+- **Exit 0** — the fan-out is a **workflow**. It printed `scriptPath: <abs path>`. Make **ONE** tool call — `Workflow({ scriptPath: "<that path>" })` — with **no `args`**, and do **not** build agent calls by hand for this step. The roster is inside the script; you neither read it nor relay it. Then go to Step 3D, which is unchanged: coverage still reads the harness's own transcripts, and the prompts the script dispatched were recorded on disk when it was generated.
+- Any other non-zero exit is a real failure — read the message rather than falling back silently.
+
+Why it is a command and not your judgment: eligibility depends on facts spread across the environment and the plan (two gates, the topology, whether there is a worktree), and a caller that decides for itself is a caller that can decide wrong in the one direction that matters — taking the workflow path for a worktree review would point every agent at the main checkout and produce findings that describe the wrong tree.
+
+The workflow path is **opt-in and under A/B**: it needs both `QWEN_CODE_ENABLE_WORKFLOWS=1` and `QWEN_REVIEW_WORKFLOW=1`. Unsetting the second is the one-switch rollback and changes nothing else about the runtime. What the two paths share is everything that decides quality — the same plan, the same roster, the same briefs, the same prompts built by the same function, the same `general-purpose` subagent type, the same coverage gate. What differs is who launches them.
+
+**Everything below is the legacy path** (and, since the workflow path builds the same prompts from the same plan, it stays the description of what the agents receive either way).
+
 **Do not write these prompts, and do not ask for them one at a time. One call builds all of them:**
 
 ```bash
