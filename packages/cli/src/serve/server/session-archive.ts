@@ -121,6 +121,9 @@ export class SessionArchiveCoordinator {
     sessionIds: string[],
     fn: () => Promise<T>,
   ): Promise<T> {
+    if (this.maintenanceSealed) {
+      throw new DaemonDrainingError();
+    }
     const uniqueSessionIds = [...new Set(sessionIds)];
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
@@ -128,6 +131,7 @@ export class SessionArchiveCoordinator {
     for (const sessionId of uniqueSessionIds) {
       this.shared.set(sessionId, (this.shared.get(sessionId) ?? 0) + 1);
     }
+    this.activeMaintenance++;
     try {
       return await fn();
     } finally {
@@ -138,6 +142,11 @@ export class SessionArchiveCoordinator {
         } else {
           this.shared.set(sessionId, count);
         }
+      }
+      this.activeMaintenance--;
+      if (this.activeMaintenance === 0) {
+        this.maintenanceDrain?.resolve();
+        this.maintenanceDrain = undefined;
       }
     }
   }
@@ -367,21 +376,31 @@ export async function deleteDaemonSessions(params: {
   service: SessionService;
   bridge: Pick<AcpSessionBridge, 'closeSession'>;
   coordinator: SessionArchiveCoordinator;
+  coordinatorLockHeld?: boolean;
   onError?: (entry: {
     phase: DaemonDeleteErrorPhase;
     sessionId: string;
     error: string;
   }) => void;
 }): Promise<DaemonDeleteSessionsResult> {
-  const { sessionIds, service, bridge, coordinator, onError } = params;
+  const {
+    sessionIds,
+    service,
+    bridge,
+    coordinator,
+    coordinatorLockHeld = false,
+    onError,
+  } = params;
   const uniqueSessionIds = [...new Set(sessionIds)];
-  for (const sessionId of uniqueSessionIds) {
-    coordinator.assertNotTransitioning(sessionId);
+  if (!coordinatorLockHeld) {
+    for (const sessionId of uniqueSessionIds) {
+      coordinator.assertNotTransitioning(sessionId);
+    }
   }
   const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
-        return await coordinator.runExclusiveMany([sessionId], async () => {
+        const mutateSession = async () => {
           try {
             await bridge.closeSession(sessionId);
           } catch (error) {
@@ -423,7 +442,10 @@ export async function deleteDaemonSessions(params: {
             });
           }
           return result;
-        });
+        };
+        return await (coordinatorLockHeld
+          ? mutateSession()
+          : coordinator.runExclusiveMany([sessionId], mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -596,16 +618,25 @@ export async function archiveDaemonSessions(params: {
   service: SessionService;
   bridge: Pick<AcpSessionBridge, 'closeSession'>;
   coordinator: SessionArchiveCoordinator;
+  coordinatorLockHeld?: boolean;
 }): Promise<DaemonArchiveSessionsResult> {
-  const { sessionIds, service, bridge, coordinator } = params;
+  const {
+    sessionIds,
+    service,
+    bridge,
+    coordinator,
+    coordinatorLockHeld = false,
+  } = params;
   const uniqueSessionIds = [...new Set(sessionIds)];
-  for (const sessionId of uniqueSessionIds) {
-    coordinator.assertNotTransitioning(sessionId);
+  if (!coordinatorLockHeld) {
+    for (const sessionId of uniqueSessionIds) {
+      coordinator.assertNotTransitioning(sessionId);
+    }
   }
   const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
-        return await coordinator.runExclusiveMany([sessionId], async () => {
+        const mutateSession = async () => {
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
@@ -701,7 +732,10 @@ export async function archiveDaemonSessions(params: {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
           };
-        });
+        };
+        return await (coordinatorLockHeld
+          ? mutateSession()
+          : coordinator.runExclusiveMany([sessionId], mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -745,16 +779,24 @@ export async function unarchiveDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
   coordinator: SessionArchiveCoordinator;
+  coordinatorLockHeld?: boolean;
 }): Promise<DaemonUnarchiveSessionsResult> {
-  const { sessionIds, service, coordinator } = params;
+  const {
+    sessionIds,
+    service,
+    coordinator,
+    coordinatorLockHeld = false,
+  } = params;
   const uniqueSessionIds = [...new Set(sessionIds)];
-  for (const sessionId of uniqueSessionIds) {
-    coordinator.assertNotTransitioning(sessionId);
+  if (!coordinatorLockHeld) {
+    for (const sessionId of uniqueSessionIds) {
+      coordinator.assertNotTransitioning(sessionId);
+    }
   }
   const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
-        return await coordinator.runExclusiveMany([sessionId], async () => {
+        const mutateSession = async () => {
           const initialLocation = await classifySessionLocation(
             service,
             sessionId,
@@ -858,7 +900,10 @@ export async function unarchiveDaemonSessions(params: {
             mutationApplied: mutation.mutationApplied,
             maintenanceError: mutation.maintenanceError,
           };
-        });
+        };
+        return await (coordinatorLockHeld
+          ? mutateSession()
+          : coordinator.runExclusiveMany([sessionId], mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
