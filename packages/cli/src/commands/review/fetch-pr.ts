@@ -76,11 +76,12 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
+import { deriveRepositoryContext } from './repo-context.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { SHA_RE } from './lib/ledger.js';
 import {
   appendRunSession,
-  sessionEntryCount,
+  ledgerResumeCount,
   readResumeMarker,
   recordResume,
   recordRestart,
@@ -755,7 +756,17 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   let liveHeadSha: string | null = null;
   let liveBaseRefName: string | null = null;
   let liveHeadRefName: string | null = null;
+  let liveIsCrossRepository: boolean | null = null;
+  let livePrDescriptionHasHan: boolean | null = null;
+  let liveDiffStat: {
+    files: number;
+    additions: number;
+    deletions: number;
+  } | null = null;
   try {
+    // The same query also fetches the facts the four consumed report
+    // fields below re-derive from — one forge read, never an extra round
+    // trip per field.
     const view = JSON.parse(
       gh(
         'pr',
@@ -764,12 +775,17 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         '--repo',
         ownerRepo,
         '--json',
-        'headRefOid,headRefName,baseRefName',
+        'headRefOid,headRefName,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
       ),
     ) as {
       headRefOid?: unknown;
       headRefName?: unknown;
       baseRefName?: unknown;
+      additions?: unknown;
+      deletions?: unknown;
+      changedFiles?: unknown;
+      isCrossRepository?: unknown;
+      body?: unknown;
     };
     liveHeadSha =
       typeof view.headRefOid === 'string' && view.headRefOid !== ''
@@ -783,10 +799,39 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
       typeof view.headRefName === 'string' && view.headRefName !== ''
         ? view.headRefName
         : null;
+    // The head OID is the one field every genuine view carries; its absence
+    // names an unreachable or malformed forge, which leaves every derived
+    // value null — the ruling then refuses the fields it cannot compare.
+    if (liveHeadSha !== null) {
+      liveIsCrossRepository =
+        typeof view.isCrossRepository === 'boolean'
+          ? view.isCrossRepository
+          : null;
+      livePrDescriptionHasHan = /\p{Script=Han}/u.test(
+        typeof view.body === 'string' ? view.body : '',
+      );
+      const additions = view.additions;
+      const deletions = view.deletions;
+      const changedFiles = view.changedFiles;
+      if (
+        typeof additions === 'number' &&
+        typeof deletions === 'number' &&
+        typeof changedFiles === 'number'
+      ) {
+        liveDiffStat = {
+          files: changedFiles,
+          additions,
+          deletions,
+        };
+      }
+    }
   } catch {
     liveHeadSha = null;
     liveBaseRefName = null;
     liveHeadRefName = null;
+    liveIsCrossRepository = null;
+    livePrDescriptionHasHan = null;
+    liveDiffStat = null;
   }
   // Worktree identity BEFORE any worktree answer is trusted: the `.git`
   // pointer file lives inside the attempt-1-writable tree, and a relinked
@@ -886,6 +931,38 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
       args.maxChunkLines,
     );
   }
+  // The recorded repository context is compared whole against what the
+  // fresh enrichment's own providers derive from THIS worktree and the
+  // re-derived merge base. A derivation failure is a mismatch: an
+  // uncomparable field is an attacker's.
+  let repositoryContextMatches = false;
+  if (prev !== null) {
+    try {
+      const derived = deriveRepositoryContext(
+        wt,
+        prev as { files?: unknown },
+        rederivedMergeBase,
+      );
+      repositoryContextMatches = isDeepStrictEqual(
+        prev.repositoryContext ?? null,
+        derived,
+      );
+    } catch {
+      repositoryContextMatches = false;
+    }
+  }
+  // The collapse flag re-derives from the re-derived range and the
+  // forge's live stat — the same predicate the fresh path applies — and is
+  // underivable when either side is.
+  const collapsedRederived =
+    rederivedText !== null && liveDiffStat !== null
+      ? isCollapsedFromUpstream({
+          diffText: rederivedText,
+          baseFetchFailed: false,
+          additions: liveDiffStat.additions,
+          deletions: liveDiffStat.deletions,
+        })
+      : null;
   const marker = readResumeMarker(out);
   // The cap reads BOTH counters: the marker is the primary record, and the
   // session ledger cross-caps it — a deleted marker must not read as an
@@ -897,8 +974,14 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // the two-counter cap it was supposed to backstop collapsed to one counter
   // that deleting `resume.json` resets. A count is not evidence.
   //
-  // Minus one: the ledger's first entry is the original run's own session,
-  // which is not a resume.
+  // The ledger term counts entries PAST the first — the first entry is the
+  // original run's own session, which is not a resume — with the resuming
+  // session excluded from the remainder. The exclusion and the minus-one
+  // must not double-count the original: when the resuming session IS the
+  // original, the exclusion has already removed the first entry, and
+  // subtracting it again undercounted the cap by one — admitting a resume
+  // past the cap through the exact backstop path (a deleted marker, the
+  // original session resuming) the ledger term exists to hold.
   // The current session is excluded from BOTH terms or neither — stated
   // below, and previously true of only the marker term: a resume leaves the
   // plan untouched, so a resumed session's own ledger entry stays inside the
@@ -906,10 +989,9 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // resume over the cap. The retry's fresh fall-through then force-removed
   // the very worktree being resumed.
   const currentSessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
-  const ledgerResumes = Math.max(
-    0,
-    sessionEntryCount(out, { excludeSessionId: currentSessionId }) - 1,
-  );
+  const ledgerResumes = ledgerResumeCount(out, {
+    excludeSessionId: currentSessionId,
+  });
   // `recordResume` dedupes per session — a second `--resume` in the same
   // session is the same resume — so counting this session's own marker entry
   // refuses its retry as `resume-cap`. A retry of the last permitted resume
@@ -993,6 +1075,11 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
         ? reportChunksTile(prev?.chunks, rederivedText)
         : null,
     planReportMatches,
+    repositoryContextMatches,
+    prDescriptionHasHan: livePrDescriptionHasHan,
+    isCrossRepository: liveIsCrossRepository,
+    diffStat: liveDiffStat,
+    collapsedRederived,
     nowMs: Date.now(),
     graftsAbsent,
     resumeCount: Math.max(markerResumes, ledgerResumes),
@@ -1019,12 +1106,24 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // admission stamps span the death gap and would price a round at hours;
   // without them the gate falls back to its conservative constant.
   const stop = readBudgetStop(out);
-  if (stop !== null && stop.cause !== 'round-cap') {
-    clearBudgetStop(out);
-  } else if (stop !== null && !stampsCorroborateRoundCap(out, stop.cap)) {
+  const roundCapStands =
+    stop !== null &&
+    stop.cause === 'round-cap' &&
+    stampsCorroborateRoundCap(out, stop.cap);
+  if (stop !== null && !roundCapStands) {
     clearBudgetStop(out);
   }
-  clearRoundStamps(out);
+  // The stamps are the kept stop's corroboration — the NEXT resume re-reads
+  // them to decide whether it still stands. Clearing them here would make
+  // that read see an empty set, drop the genuine stop, and silently reset
+  // the exhausted cap on the second resume; the check-before-clear
+  // discipline above is disarmed for every later resume unless the kept
+  // stop keeps its corroboration with it. While the stop stands no round
+  // is admitted, so the death gap the clearing paces cannot fire through
+  // it.
+  if (!roundCapStands) {
+    clearRoundStamps(out);
+  }
   appendRunSession(out);
   recordResume(out);
   // Read the marker back: `recordResume` deduplicates by session, so a

@@ -295,7 +295,10 @@ export function assignedChunk(rec: AgentRecord): number | null {
  * recoverable from the harness's own copy of its launch prompt, in either
  * topology, without the agent having to claim anything afterwards.
  */
-function pointedAt(prompt: string, plan: Plan): Array<[number, number]> {
+export function pointedAt(
+  prompt: string,
+  plan: { chunks: Array<{ id: number; startLine: number; endLine: number }> },
+): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   const re = /offset\s*[=:]\s*(\d+)\s*,\s*limit\s*[=:]\s*(\d+)/gi;
   for (const m of prompt.matchAll(re)) {

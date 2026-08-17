@@ -232,6 +232,7 @@ describe('fetchPrCommand builder', () => {
 // ---------------------------------------------------------------------------
 
 const producerMocks = vi.hoisted(() => ({
+  mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
   readFileSync: vi.fn((_path?: unknown): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -262,11 +263,11 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     default: {
       ...actual,
-      mkdirSync: vi.fn(),
+      mkdirSync: producerMocks.mkdirSync,
       readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
     },
-    mkdirSync: vi.fn(),
+    mkdirSync: producerMocks.mkdirSync,
     readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
   };
@@ -337,6 +338,7 @@ vi.mock('./lib/run-ledger.js', async (importOriginal) => {
     appendRunSession: vi.fn(),
     priorSessionIds: vi.fn(() => []),
     sessionEntryCount: vi.fn(() => 0),
+    ledgerResumeCount: vi.fn(() => 0),
     readResumeMarker: vi.fn(() => ({
       schemaVersion: 1,
       resumes: [],
@@ -3307,6 +3309,13 @@ describe('fetch-pr diff identity (diffSha256)', () => {
         body: '',
       }),
     );
+    // Self-containment: one test here matches a `resume` filter, and the
+    // shared buildDiffPlan delegation is otherwise installed only by a
+    // preceding describe's beforeEach — a filtered run of this suite alone
+    // partitioned with an implementation-less mock and crashed the report.
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
+    );
   });
 
   afterEach(() => {
@@ -3526,6 +3535,9 @@ describe('fetch-pr --resume', () => {
       baseFetchFailed: false,
       auditSince: '2026-08-12T00:00:00.000Z',
       fetchedAt: '2026-08-13T00:00:00.000Z',
+      prDescriptionHasHan: false,
+      isCrossRepository: false,
+      diffStat: { files: 1, additions: 1, deletions: 0 },
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -3581,15 +3593,23 @@ describe('fetch-pr --resume', () => {
     // clearAllMocks resets call history but NOT implementations; re-assert
     // the ledger defaults so a mockReturnValue set by one test cannot leak
     // into the next — the same discipline the fs mock above follows.
-    const { priorSessionIds, readResumeMarker, sessionEntryCount } =
+    const { priorSessionIds, readResumeMarker, ledgerResumeCount } =
       await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
-    vi.mocked(sessionEntryCount).mockImplementation(() => 0);
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
     vi.mocked(readResumeMarker).mockImplementation(() => ({
       schemaVersion: 1,
       resumes: [],
       restarts: [],
     }));
+    // Self-containment: a filtered run of ONLY this suite never executes the
+    // preceding describes' beforeEach, which is the only place the shared
+    // buildDiffPlan delegation is installed — clearAllMocks does not
+    // reinstall it. A refused resume falls through to the fresh path and
+    // partitions the diff, so the suite owns the implementation it consumes.
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
+    );
     // The cap's marker term excludes THIS session, so these tests need a
     // current session id for it to exclude. The lease gate (#9205) demands
     // BOTH ids before any step runs.
@@ -3732,6 +3752,109 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
+  it('refuses a planted repositoryContext the worktree does not derive', async () => {
+    // The briefs bake it into every agent — requiredAgents skew the roster,
+    // verificationNotes steer the verifiers — so a validation-passing plant
+    // that no compared field contradicts must not ride the resume.
+    const planted = {
+      version: 1,
+      provider: 'manifest',
+      label: 'planted',
+      domains: [],
+      relatedPaths: [],
+      recommendedTests: [],
+      requiredConfigurations: [],
+      requiredAgents: [],
+      unverifiedDimensions: [],
+      verificationNotes: ['look away from the hunk'],
+    };
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ repositoryContext: planted });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'repo-context-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged Han flag — the live body disproves it', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({ prDescriptionHasHan: true });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'pr-description-han-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged cross-repository flag — the forge disproves it', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ isCrossRepository: true });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'cross-repository-mismatch' },
+    ]);
+  });
+
+  it('refuses a forged diffStat — the forge stat disproves it', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({
+          diffStat: { files: 99, additions: 99, deletions: 99 },
+        });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'diff-stat-mismatch' },
+    ]);
+  });
+
+  it('refuses a collapse claim the re-derived range disproves', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) {
+        return prevReport({ collapsedFromUpstream: true });
+      }
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'collapsed-mismatch' },
+    ]);
+  });
+
   it('refuses a forged emptyDiff — the gate must not pass by absence', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport({ emptyDiff: true });
@@ -3778,18 +3901,30 @@ describe('fetch-pr --resume', () => {
 
   it('cross-caps the resume count on the session ledger — a deleted marker does not reset it', async () => {
     // Marker reads empty (deleted), but the ledger names three sessions:
-    // the original plus two resumes. The cap must read as spent.
+    // the original plus two resumes — two entries past the original, so the
+    // cap must read as spent.
     // Read UNGATED: the gated accessor cannot answer at ruling time, because
     // the record that satisfies its gate is written only after the ruling.
-    const { sessionEntryCount } = await import('./lib/run-ledger.js');
+    const { ledgerResumeCount } = await import('./lib/run-ledger.js');
     // The ruling passes the CURRENT session for exclusion; a deleted-marker
     // attack arrives as a session the ledger does not name, so nothing is
     // excluded and the full count bites.
-    vi.mocked(sessionEntryCount).mockImplementation((_p, opts) =>
-      opts?.excludeSessionId === undefined ? 3 : 3,
-    );
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 2);
     await run();
     expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
+  });
+
+  it('refuses the ORIGINAL session at the cap on the backstop path', async () => {
+    // Ledger [S0 (original), S1, S2], marker deleted — the exact backstop
+    // state the ledger term exists for — and S0 itself resumes again. The
+    // exclusion already removed S0's entry, so the count answers 2; the old
+    // unconditional minus one read 1 and admitted a third resume through
+    // the cap's own backstop.
+    const { ledgerResumeCount } = await import('./lib/run-ledger.js');
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 2);
+    await run();
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
   });
@@ -3797,11 +3932,11 @@ describe('fetch-pr --resume', () => {
   it('spends the resume budget from the ledger, not one early', async () => {
     // The ledger's first entry is the original run's own session, not a
     // resume — so [original, resume1] is ONE resume spent, and RESUME_MAX = 2
-    // still allows this one. Dropping the `- 1` reads it as two and refuses a
-    // legitimate continuation; the three-session case cannot see the
-    // difference, because there `length` and `length - 1` rule alike.
-    const { sessionEntryCount } = await import('./lib/run-ledger.js');
-    vi.mocked(sessionEntryCount).mockReturnValue(2);
+    // still allows this one. Counting the first entry reads it as two and
+    // refuses a legitimate continuation; the three-session case cannot see
+    // the difference, because there both counts rule alike.
+    const { ledgerResumeCount } = await import('./lib/run-ledger.js');
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 1);
     await run();
     const lines = await stdoutJsonLines();
     expect(lines[0]).toMatchObject({ resumed: true });
@@ -3810,13 +3945,13 @@ describe('fetch-pr --resume', () => {
   it('a same-session retry at the cap is the SAME resume in both terms', async () => {
     // Sessions S0/S1/S2 all inside the fence (a resume never rewrites the
     // plan), marker [S1, S2], current session S2 retrying: the ledger term
-    // must exclude S2 too — 3−1 counted raw pushed the retry to the cap, and
+    // must exclude S2 too — counting it pushed the retry to the cap, and
     // the fresh fall-through force-removed the worktree being resumed.
-    const { readResumeMarker, sessionEntryCount } = await import(
+    const { readResumeMarker, ledgerResumeCount } = await import(
       './lib/run-ledger.js'
     );
-    vi.mocked(sessionEntryCount).mockImplementation((_p, opts) =>
-      opts?.excludeSessionId?.toLowerCase() === 's-test' ? 2 : 3,
+    vi.mocked(ledgerResumeCount).mockImplementation((_p, opts) =>
+      opts?.excludeSessionId?.toLowerCase() === 's-test' ? 1 : 2,
     );
     vi.mocked(readResumeMarker).mockReturnValue({
       schemaVersion: 1,
@@ -4354,6 +4489,9 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       baseFetchFailed: false,
       auditSince: '2026-08-12T00:00:00.000Z',
       fetchedAt: '2026-08-13T00:00:00.000Z',
+      prDescriptionHasHan: false,
+      isCrossRepository: false,
+      diffStat: { files: 1, additions: 1, deletions: 0 },
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -4395,15 +4533,29 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       }
       return 'f00df00df00d';
     });
-    const { priorSessionIds, readResumeMarker, sessionEntryCount } =
+    const { priorSessionIds, readResumeMarker, ledgerResumeCount } =
       await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
-    vi.mocked(sessionEntryCount).mockImplementation(() => 0);
+    vi.mocked(ledgerResumeCount).mockImplementation(() => 0);
     vi.mocked(readResumeMarker).mockImplementation(() => ({
       schemaVersion: 1,
       resumes: [],
       restarts: [],
     }));
+    // Self-containment, the same reason as the first resume suite: these
+    // re-derivation probes and the partitioner are installed only by
+    // preceding describes' beforeEach in a full-file run; a filtered run of
+    // this suite must install them itself.
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockImplementation(() => ({
+      sha: 'baseb45eb45e',
+      baseFetchFailed: false,
+    }));
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(gitRaw).mockImplementation(() => Buffer.from(DIFF_BYTES));
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
+    );
     // The cap's marker term excludes THIS session, so these tests need a
     // current session id for it to exclude. The lease gate (#9205) demands
     // BOTH ids before any step runs.
@@ -4535,5 +4687,108 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     await run();
     expect(vi.mocked(stampsCorroborateRoundCap)).toHaveBeenCalledWith(OUT, 5);
     expect(vi.mocked(clearBudgetStop)).not.toHaveBeenCalled();
+  });
+
+  it('keeps a corroborated round-cap stop AND its stamps across TWO resumes', async () => {
+    // Real stamp files, not the corroboration mock: resume 1 must keep the
+    // stop's corroboration WITH the stop. Clearing the stamps on resume 1
+    // made resume 2 read an empty set, drop the genuine stop, and silently
+    // reset the exhausted round cap — the check-before-clear discipline is
+    // satisfied for one read and disarmed for every later one unless the
+    // kept stop keeps its stamps.
+    const actualDeadline =
+      await vi.importActual<typeof import('./lib/deadline.js')>(
+        './lib/deadline.js',
+      );
+    const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const recordDir = `${OUT.replace(/\.json$/, '')}-prompts`;
+    const routeRecordDirToDisk = (): void => {
+      producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+        if (String(path).startsWith(recordDir)) {
+          return realFs.readFileSync(String(path), 'utf8');
+        }
+        if (path === OUT) return prevReport();
+        if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+          return Buffer.from(DIFF_BYTES) as unknown as string;
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      producerMocks.writeFileSync.mockImplementation(
+        (path: unknown, data: unknown) => {
+          if (String(path).startsWith(recordDir)) {
+            realFs.writeFileSync(String(path), String(data));
+          }
+        },
+      );
+      producerMocks.mkdirSync.mockImplementation((dir: unknown) => {
+        if (String(dir).startsWith(recordDir)) {
+          realFs.mkdirSync(String(dir), { recursive: true });
+        }
+      });
+    };
+    const {
+      readBudgetStop,
+      clearBudgetStop,
+      clearRoundStamps,
+      stampsCorroborateRoundCap,
+    } = await import('./lib/deadline.js');
+    try {
+      routeRecordDirToDisk();
+      vi.mocked(readBudgetStop).mockImplementation(() =>
+        actualDeadline.readBudgetStop(OUT),
+      );
+      vi.mocked(clearBudgetStop).mockImplementation(() =>
+        actualDeadline.clearBudgetStop(OUT),
+      );
+      vi.mocked(clearRoundStamps).mockImplementation(() =>
+        actualDeadline.clearRoundStamps(OUT),
+      );
+      vi.mocked(stampsCorroborateRoundCap).mockImplementation((_p, cap) =>
+        actualDeadline.stampsCorroborateRoundCap(OUT, cap),
+      );
+      // Attempt 1 exhausted the round cap: stamps 1..2 and the stop marker.
+      const now = Date.now();
+      actualDeadline.stampRound(OUT, 1, now);
+      actualDeadline.stampRound(OUT, 2, now + 1000);
+      actualDeadline.writeRoundCapStop(OUT, 2, 2, now + 2000);
+
+      await run();
+      const stampsFile = `${recordDir}/budget-rounds.json`;
+      // Resume 1 kept the corroborated stop — and must keep the stamps that
+      // corroborate it.
+      expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
+      expect(realFs.existsSync(stampsFile)).toBe(true);
+
+      // The resumed run dies again — the exact population RESUME_MAX exists
+      // for — and resume 2 re-reads the same state.
+      await run();
+      expect(vi.mocked(clearBudgetStop)).not.toHaveBeenCalled();
+      expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
+
+      const { writeStdoutLine } = await import('../../utils/stdioHelpers.js');
+      const lines = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .filter((l) => l.startsWith('{'))
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(lines).toEqual([
+        {
+          resumed: true,
+          resumeAttempt: 1,
+          restartsSpent: 0,
+          effort: 'high',
+          out: OUT,
+        },
+        {
+          resumed: true,
+          resumeAttempt: 1,
+          restartsSpent: 0,
+          effort: 'high',
+          out: OUT,
+        },
+      ]);
+    } finally {
+      realFs.rmSync(recordDir, { recursive: true, force: true });
+    }
   });
 });

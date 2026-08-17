@@ -35,6 +35,9 @@ const prev = () => ({
   auditSince: '2026-01-01T00:00:00.000Z',
   fetchedAt: '2026-01-01T00:00:00.000Z',
   chunks: [{ id: 1, startLine: 1, endLine: 5, lines: 5, chars: 10 }],
+  prDescriptionHasHan: false,
+  isCrossRepository: false,
+  diffStat: { files: 2, additions: 7, deletions: 3 },
 });
 
 const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
@@ -55,6 +58,11 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   mergeBaseSha: MERGE_BASE,
   chunksTile: true,
   planReportMatches: true,
+  repositoryContextMatches: true,
+  prDescriptionHasHan: false,
+  isCrossRepository: false,
+  diffStat: { files: 2, additions: 7, deletions: 3 },
+  collapsedRederived: false,
   nowMs: Date.now(),
   graftsAbsent: true,
   resumeCount: 0,
@@ -440,6 +448,23 @@ describe('assessResume — every report field the pipeline consumes is compared'
     ).toEqual({ ok: false, reason: 'window-corrupt' });
   });
 
+  it('refuses an auditSince AFTER fetchedAt — the opening only moves backward', () => {
+    // The writers maintain `auditSince <= fetchedAt` by construction (the
+    // window opening is a min over inherited openings). A forward-shifted
+    // forgery still in the past clears both <=now checks while blinding
+    // cleanup's bypass-write audit to every write before the forgery.
+    expect(
+      assessResume(
+        {
+          ...prev(),
+          auditSince: '2026-01-02T00:00:00.000Z',
+          fetchedAt: '2026-01-01T00:00:00.000Z',
+        },
+        probes(),
+      ),
+    ).toEqual({ ok: false, reason: 'window-corrupt' });
+  });
+
   it('refuses an unparsable fetchedAt', () => {
     expect(
       assessResume({ ...prev(), fetchedAt: 'not-a-date' }, probes()),
@@ -509,6 +534,64 @@ describe('assessResume — every report field the pipeline consumes is compared'
     expect(assessResume(prev(), probes({ planReportMatches: false }))).toEqual({
       ok: false,
       reason: 'plan-mismatch',
+    });
+  });
+
+  it('refuses a recorded repository context the worktree does not derive', () => {
+    // The briefs bake it into every agent and compose relays its gate — a
+    // planted context steers the resumed run while every compared field
+    // stays genuine.
+    expect(
+      assessResume(prev(), probes({ repositoryContextMatches: false })),
+    ).toEqual({ ok: false, reason: 'repo-context-mismatch' });
+  });
+
+  it('refuses a recorded Han flag the live body contradicts', () => {
+    expect(
+      assessResume(
+        { ...prev(), prDescriptionHasHan: true },
+        probes({ prDescriptionHasHan: false }),
+      ),
+    ).toEqual({ ok: false, reason: 'pr-description-han-mismatch' });
+  });
+
+  it('refuses the Han comparison when the forge is unreachable', () => {
+    expect(assessResume(prev(), probes({ prDescriptionHasHan: null }))).toEqual(
+      { ok: false, reason: 'pr-description-han-mismatch' },
+    );
+  });
+
+  it('refuses a recorded cross-repo flag the forge contradicts', () => {
+    expect(
+      assessResume(
+        { ...prev(), isCrossRepository: true },
+        probes({ isCrossRepository: false }),
+      ),
+    ).toEqual({ ok: false, reason: 'cross-repository-mismatch' });
+  });
+
+  it('refuses a recorded diff stat the forge contradicts', () => {
+    expect(
+      assessResume(
+        { ...prev(), diffStat: { files: 99, additions: 99, deletions: 99 } },
+        probes(),
+      ),
+    ).toEqual({ ok: false, reason: 'diff-stat-mismatch' });
+  });
+
+  it('refuses a collapse claim the re-derived range contradicts', () => {
+    expect(
+      assessResume(
+        { ...prev(), collapsedFromUpstream: true },
+        probes({ collapsedRederived: false }),
+      ),
+    ).toEqual({ ok: false, reason: 'collapsed-mismatch' });
+  });
+
+  it('refuses a withheld collapse flag over a genuinely collapsed range', () => {
+    expect(assessResume(prev(), probes({ collapsedRederived: true }))).toEqual({
+      ok: false,
+      reason: 'collapsed-mismatch',
     });
   });
 

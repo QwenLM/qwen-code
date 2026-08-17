@@ -316,7 +316,7 @@ function readPlan(path: string): MutablePlan {
   return value as MutablePlan;
 }
 
-function changedPaths(plan: MutablePlan): string[] {
+function changedPaths(plan: Pick<MutablePlan, 'files'>): string[] {
   if (!Array.isArray(plan.files)) {
     throw new Error('repo-context: plan.files must be an array');
   }
@@ -352,6 +352,28 @@ function contextFromProviders(
     if (context !== null) return validateRepositoryContext(context);
   }
   return null;
+}
+
+/**
+ * The repository context the providers derive from THIS worktree and merge
+ * base — the exact derivation `runRepoContext` enriches the plan with,
+ * extracted so the resume ruling can compare a recorded `repositoryContext`
+ * against it instead of trusting a field that sits on attempt-1-writable
+ * disk. Null when no provider claims the worktree. Throws what the
+ * providers throw — the caller decides what an underivable context means.
+ */
+export function deriveRepositoryContext(
+  worktree: string,
+  plan: Pick<MutablePlan, 'files'>,
+  mergeBaseSha: string | null,
+  providers: readonly RepositoryContextProvider[] = REPOSITORY_CONTEXT_PROVIDERS,
+): RepositoryContext | null {
+  return contextFromProviders(
+    providers,
+    worktree,
+    changedPaths(plan),
+    identityReader(worktree, mergeBaseSha),
+  );
 }
 
 export function runRepoContext(

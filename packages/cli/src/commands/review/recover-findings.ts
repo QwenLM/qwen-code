@@ -46,7 +46,7 @@ import {
   findingsPointerOf,
 } from './lib/prompt-record.js';
 import { priorSessionIds } from './lib/run-ledger.js';
-import { assignedChunk } from './lib/coverage.js';
+import { assignedChunk, pointedAt } from './lib/coverage.js';
 import { readBudgetStop, type BudgetStop } from './lib/deadline.js';
 
 interface RecoverFindingsArgs {
@@ -135,6 +135,7 @@ function meetsBar(
   planPath: string,
   key: string,
   builtPrompt: string,
+  plan: { chunks: Array<{ id: number; startLine: number; endLine: number }> },
 ): boolean {
   // RETURNED first, like every certification consumer: `finalText` keeps the
   // last non-empty assistant text, which includes progress narrated between
@@ -177,18 +178,28 @@ function meetsBar(
     // verify key to.
     return rec.diffToolCalls > 0;
   }
+  // The chunk-less roles (whole-diff auditors) have no chunk floor, but the
+  // live walk still holds them to the reads their OWN prompt spelled out —
+  // pointed at diff lines and never opened the diff is `unopenedAgents`
+  // there. Mirrored here, or a round-level auditor that opened the brief
+  // and the findings list but never the diff certifies, its round counts
+  // as reviewed, and the territory is never relaunched.
+  const chunklessFloor =
+    pointedAt(builtPrompt, plan).length === 0 || rec.diffToolCalls > 0;
   // The findings floor keys on the POINTER the recorded prompt names — not a
   // path derived from the record key, which never matches for per-chunk
   // reverse-audit keys (their findings file is keyed without the chunk).
   // Deriving from the key made the floor silently vanish for exactly those
   // auditors, and compose-time then ruled the same key `findings-unread`.
   const pointer = findingsPointerOf(builtPrompt);
-  if (pointer === null) return chunk !== null ? rec.diffToolCalls > 0 : true;
+  if (pointer === null) {
+    return chunk !== null ? rec.diffToolCalls > 0 : chunklessFloor;
+  }
   const readList = rec.successfulReadFileArgs.some((a) =>
     a.includes(JSON.stringify(pointer)),
   );
   if (!readList) return false;
-  return chunk !== null ? rec.diffToolCalls > 0 : true;
+  return chunk !== null ? rec.diffToolCalls > 0 : chunklessFloor;
 }
 
 export function recoverFindings(
@@ -208,7 +219,17 @@ export function recoverFindings(
       `could not read the plan report ${planPath}: ${(err as Error).message}`,
     );
   }
-  const plan = planRaw as { diffPathAbsolute?: unknown };
+  const plan = planRaw as { diffPathAbsolute?: unknown; chunks?: unknown };
+  const planChunks = {
+    chunks: (Array.isArray(plan.chunks) ? plan.chunks : []).filter(
+      (c): c is { id: number; startLine: number; endLine: number } =>
+        typeof c === 'object' &&
+        c !== null &&
+        typeof (c as { id?: unknown }).id === 'number' &&
+        typeof (c as { startLine?: unknown }).startLine === 'number' &&
+        typeof (c as { endLine?: unknown }).endLine === 'number',
+    ),
+  };
   const diffPath =
     typeof plan.diffPathAbsolute === 'string' && plan.diffPathAbsolute !== ''
       ? plan.diffPathAbsolute
@@ -254,7 +275,9 @@ export function recoverFindings(
   for (const [rec, keys] of matchesOf) {
     if (keys.length !== 1) continue; // unmatched, or the injectivity refusal
     const key = keys[0];
-    if (!meetsBar(rec, planPath, key, built.get(key) ?? '')) continue;
+    if (!meetsBar(rec, planPath, key, built.get(key) ?? '', planChunks)) {
+      continue;
+    }
     if (rec.finalText.trim() === '') continue;
     // Prefer the newest certified transcript per key — a relaunch supersedes
     // the launch it repaired.
@@ -356,7 +379,15 @@ export function recoverFindings(
   ];
   for (const key of recoveredKeys) {
     const rec = recovered.get(key) as AgentRecord;
-    sections.push(`## ${key}`, '', rec.finalText.trim(), '');
+    // Keys embed PR file paths (the invariant agents), and git allows
+    // newlines in filenames — a raw key would let a hostile path forge
+    // `## ` section boundaries in the one channel this command exists to
+    // keep clean. Control characters carry no finding text; a space
+    // cannot forge structure.
+    const header =
+      // eslint-disable-next-line no-control-regex -- control chars are exactly what must not reach the markdown
+      key.replace(/[\u0000-\u001f\u007f]+/g, ' ');
+    sections.push(`## ${header}`, '', rec.finalText.trim(), '');
   }
   // The sibling with the identical --plan/--out contract does this too. The
   // recovered list can be the only surviving copy of an interrupted attempt's
