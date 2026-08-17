@@ -1783,8 +1783,9 @@ describe('qwen-triage verify hardening', () => {
   // A symlink INSIDE the runner workspace pointing outside is the
   // spelling only the realpath line can catch: canonicalized, it lands
   // outside and the allowlist refuses it; with the line deleted the raw
-  // link path matches "$RWS"/* and find reaches rm through the link
-  // target.
+  // link path matches "$RWS"/*, but find's default -P mode does not
+  // descend symlink operands, so the mutant exits 0 having wiped nothing
+  // — caught by the non-zero-status assertion below, not the rm recorder.
   const extractRun = (stepName) => {
     const run = stepIn('verify', stepName)
       .match(/run: \|-\n([\s\S]*)$/)?.[1]

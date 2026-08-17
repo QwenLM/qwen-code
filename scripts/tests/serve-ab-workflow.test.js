@@ -190,7 +190,9 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       // wipe path containing ..', rm log empty). A symlink INSIDE the
       // recorder dir pointing outside is the spelling only `realpath -m`
       // can catch: with the line deleted the raw link path matches
-      // "$RWS"/* and find reaches rm through the link target.
+      // "$RWS"/*, but find's default -P mode does not descend symlink
+      // operands, so the mutant exits 0 having wiped nothing — caught by
+      // the non-zero-status assertion, not the rm recorder.
       const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-escape-'));
       const outside = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-outside-'));
       writeFileSync(join(outside, 'canary'), 'x');
