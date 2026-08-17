@@ -30823,6 +30823,9 @@ describe('Live conversation runtime lifecycle', () => {
         sourceType: 'default',
         sourceId: `realtime_voice:p1:h1:a1:${sessionId}`,
       });
+    const readMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (candidateId) => readMetadata(candidateId));
     const updateOrganization = vi
       .spyOn(
         qwenCore.SessionOrganizationService.prototype,
@@ -30915,6 +30918,7 @@ describe('Live conversation runtime lifecycle', () => {
       getLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
+      readMetadataIfReadable.mockRestore();
       updateOrganization.mockRestore();
     }
   });
@@ -31059,6 +31063,9 @@ describe('Live conversation runtime lifecycle', () => {
             }
           : {};
       });
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
@@ -31160,6 +31167,7 @@ describe('Live conversation runtime lifecycle', () => {
       findSessionId.mockRestore();
       getLocation.mockRestore();
       readCreationMetadata.mockRestore();
+      readCreationMetadataIfReadable.mockRestore();
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();
@@ -31185,6 +31193,9 @@ describe('Live conversation runtime lifecycle', () => {
         sourceType: 'default',
         sourceId: `realtime_voice:p1:h1:a1:${canonicalSessionId}`,
       });
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
     try {
       const restored = await request(setup.app)
         .post(`/session/${canonicalSessionId}/load`)
@@ -31218,6 +31229,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(setup.liveBridge.resumeCalls).toHaveLength(0);
     } finally {
       readCreationMetadata.mockRestore();
+      readCreationMetadataIfReadable.mockRestore();
       getLocation.mockRestore();
       findSessionId.mockRestore();
       await (

@@ -306,7 +306,10 @@ describe('Live conversation workspace root', () => {
       workspace.inspectStandaloneDirectory('standalone', recreated.identity),
     ).resolves.toMatchObject({ status: 'ready' });
 
-    await rm(recreated.identity.canonicalPath, { recursive: true });
+    // Keep the original inode alive under a sibling name so the replacement
+    // cannot reuse it (ext4/overlayfs recycle freed inodes immediately).
+    const preserved = `${recreated.identity.canonicalPath}.preserved`;
+    await rename(recreated.identity.canonicalPath, preserved);
     await mkdir(recreated.identity.canonicalPath, { mode: 0o700 });
     const compromised = await workspace.inspectStandaloneDirectory(
       'standalone',

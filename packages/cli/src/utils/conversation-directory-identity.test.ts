@@ -97,7 +97,10 @@ describe('conversation directory identity', () => {
       root,
       'replace',
     );
-    await rm(original.identity.canonicalPath, { recursive: true });
+    // Keep the original inode alive under a sibling name so the replacement
+    // cannot reuse it (ext4/overlayfs recycle freed inodes immediately).
+    const preserved = `${original.identity.canonicalPath}.preserved`;
+    await rename(original.identity.canonicalPath, preserved);
     await mkdir(original.identity.canonicalPath, { mode: 0o700 });
 
     await expect(
