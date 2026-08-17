@@ -29,13 +29,23 @@
 // limitations in the PR description rather than assuming parity.
 
 import type { CommandModule } from 'yargs';
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { buildLaunch } from './agent-prompt.js';
 import { recordPrompt } from './lib/prompt-record.js';
 import { readPlanReport, type PlanReport } from './lib/report.js';
-import { REVIEW_WORKFLOWS_DIR, reviewWorkflowScriptPath } from './lib/paths.js';
+import {
+  findSymlinkedReviewWorkflowPath,
+  reviewWorkflowScriptPath,
+} from './lib/paths.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import {
   resolveOrchestration,
@@ -161,20 +171,33 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
     }
   }
 
-  try {
-    if (lstatSync(REVIEW_WORKFLOWS_DIR).isSymbolicLink()) {
-      throw new Error(
-        `emit-workflow: refusing to save into a symlinked saved-workflow directory: '${REVIEW_WORKFLOWS_DIR}'.`,
-      );
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  const unsafePath = findSymlinkedReviewWorkflowPath();
+  if (unsafePath) {
+    throw new Error(
+      `emit-workflow: refusing to save through a symlinked saved-workflow path component: '${unsafePath}'.`,
+    );
+  }
+
+  const scriptPath = reviewWorkflowScriptPath(args.plan);
+  mkdirSync(dirname(scriptPath), { recursive: true });
+  const createdUnsafePath = findSymlinkedReviewWorkflowPath();
+  if (createdUnsafePath) {
+    throw new Error(
+      `emit-workflow: refusing to save through a symlinked saved-workflow path component: '${createdUnsafePath}'.`,
+    );
   }
 
   const agents = buildFanOutRoster(report, args.plan, rules);
-  const scriptPath = reviewWorkflowScriptPath(args.plan);
-  mkdirSync(dirname(scriptPath), { recursive: true });
-  writeFileSync(scriptPath, buildReviewWorkflowScript(agents), 'utf8');
+  const temporaryPath = `${scriptPath}.${randomUUID()}.tmp`;
+  writeFileSync(temporaryPath, buildReviewWorkflowScript(agents), {
+    encoding: 'utf8',
+    flag: 'wx',
+  });
+  try {
+    renameSync(temporaryPath, scriptPath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
 
   // One path and a count. Nothing here is a prompt: the prompts are inside the
   // script, which nobody is asked to read, retype or relay — which is the

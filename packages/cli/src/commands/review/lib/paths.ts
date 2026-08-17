@@ -10,8 +10,8 @@
 // concatenation so Windows backslashes are produced when needed.
 
 import { createHash } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, lstatSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 /**
  * Classify a `--out` target BEFORE the command fetches anything: an empty /
@@ -50,6 +50,20 @@ export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
  * `.qwen/tmp` is a script the tool will not open.
  */
 export const REVIEW_WORKFLOWS_DIR = join('.qwen', 'workflows');
+
+export function findSymlinkedReviewWorkflowPath(): string | undefined {
+  for (const candidate of [
+    dirname(REVIEW_WORKFLOWS_DIR),
+    REVIEW_WORKFLOWS_DIR,
+  ]) {
+    try {
+      if (lstatSync(candidate).isSymbolicLink()) return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  return undefined;
+}
 
 /** Filename prefix for generated fan-out scripts; the cleanup sweep globs it. */
 export const REVIEW_WORKFLOW_PREFIX = 'qwen-review-';

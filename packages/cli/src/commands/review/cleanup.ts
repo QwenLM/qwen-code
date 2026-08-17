@@ -43,6 +43,7 @@ import {
   reviewBranch,
   REVIEW_TMP_DIR,
   REVIEW_WORKFLOWS_DIR,
+  findSymlinkedReviewWorkflowPath,
   reviewWorkflowScriptPath,
   tmpFile,
   tmpPrefix,
@@ -609,15 +610,12 @@ export function runCleanup(target: string): void {
   ];
   let workflowRootSafe = false;
   try {
-    if (existsSync(REVIEW_WORKFLOWS_DIR)) {
-      if (lstatSync(REVIEW_WORKFLOWS_DIR).isSymbolicLink()) {
-        writeStderrLine(
-          `Skipping workflow cleanup: ${REVIEW_WORKFLOWS_DIR} is a symlink.`,
-        );
-        failedAny = true;
-      } else {
-        workflowRootSafe = true;
-      }
+    const unsafePath = findSymlinkedReviewWorkflowPath();
+    if (unsafePath) {
+      writeStderrLine(`Skipping workflow cleanup: ${unsafePath} is a symlink.`);
+      failedAny = true;
+    } else if (existsSync(REVIEW_WORKFLOWS_DIR)) {
+      workflowRootSafe = true;
     }
   } catch (err) {
     writeStderrLine(

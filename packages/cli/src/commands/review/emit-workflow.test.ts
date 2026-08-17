@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -303,9 +304,46 @@ describe('emit-workflow — what it writes', () => {
     try {
       expect(() =>
         (emitWorkflowCommand.handler as (a: unknown) => void)({ plan }),
-      ).toThrow(/symlinked saved-workflow directory/);
+      ).toThrow(/symlinked saved-workflow path component/);
       expect(readRecordedPrompts(plan).size).toBe(0);
       expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(false);
+    } finally {
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a symlinked .qwen ancestor before recording prompts', () => {
+    const external = mkdtempSync(join(tmpdir(), 'emit-wf-outside-'));
+    const plan = join(dir, 'plan.json');
+    symlinkSync(external, join(dir, '.qwen'), 'dir');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+
+    try {
+      expect(() =>
+        (emitWorkflowCommand.handler as (a: unknown) => void)({ plan }),
+      ).toThrow(/symlinked saved-workflow path component/);
+      expect(readRecordedPrompts(plan).size).toBe(0);
+      expect(existsSync(join(external, 'workflows'))).toBe(false);
+    } finally {
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a symlinked script entry without writing through it', () => {
+    const external = mkdtempSync(join(tmpdir(), 'emit-wf-victim-'));
+    const victim = join(external, 'victim.js');
+    const plan = join(dir, 'plan.json');
+    const scriptPath = reviewWorkflowScriptPath(plan);
+    mkdirSync(join(dir, '.qwen', 'workflows'), { recursive: true });
+    writeFileSync(victim, 'keep me', 'utf8');
+    symlinkSync(victim, scriptPath);
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+
+    try {
+      (emitWorkflowCommand.handler as (a: unknown) => void)({ plan });
+      expect(readFileSync(victim, 'utf8')).toBe('keep me');
+      expect(lstatSync(scriptPath).isSymbolicLink()).toBe(false);
+      expect(readFileSync(scriptPath, 'utf8')).toContain('export const meta');
     } finally {
       rmSync(external, { recursive: true, force: true });
     }

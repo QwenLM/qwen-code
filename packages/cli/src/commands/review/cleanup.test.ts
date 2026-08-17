@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   lstatSync: vi.fn((_path: string): { isSymbolicLink: () => boolean } => ({
     isSymbolicLink: () => false,
   })),
+  findSymlinkedReviewWorkflowPath: vi.fn((): string | undefined => undefined),
   // The return type is declared so `mockReturnValue` can take string arrays —
   // the sweep-retention tests hand it the tmp-dir listing.
   readdirSync: vi.fn((): string[] => []),
@@ -103,6 +104,7 @@ vi.mock('./lib/paths.js', () => ({
     `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
   tmpPrefix: (target: string) => `qwen-review-${target}-`,
   REVIEW_WORKFLOWS_DIR: '/repo/.qwen/workflows',
+  findSymlinkedReviewWorkflowPath: mocks.findSymlinkedReviewWorkflowPath,
   reviewWorkflowScriptPath: (planPath: string) =>
     `/repo/.qwen/workflows/${planPath
       .split('/')
@@ -122,6 +124,7 @@ describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.existsSync.mockReturnValue(false);
+    mocks.findSymlinkedReviewWorkflowPath.mockReturnValue(undefined);
     mocks.lstatSync.mockImplementation((path: string) => {
       if (path === '/repo/.qwen/workflows') {
         return { isSymbolicLink: () => false };
@@ -201,7 +204,9 @@ describe('runCleanup', () => {
         p === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
         p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => true });
+    mocks.findSymlinkedReviewWorkflowPath.mockReturnValue(
+      '/repo/.qwen/workflows',
+    );
 
     runCleanup('pr-123');
 
@@ -221,13 +226,33 @@ describe('runCleanup', () => {
     );
   });
 
+  it('does not remove a workflow through a symlinked ancestor', () => {
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.refExists.mockReturnValue(false);
+    mocks.existsSync.mockReturnValue(true);
+    mocks.findSymlinkedReviewWorkflowPath.mockReturnValue('/repo/.qwen');
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('/workflows/'),
+      expect.anything(),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      'Skipping workflow cleanup: /repo/.qwen is a symlink.',
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      'Nothing to clean for target "pr-123".',
+    );
+  });
+
   it('does not claim nothing when workflow-root inspection fails', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.refExists.mockReturnValue(false);
     mocks.existsSync.mockImplementation(
       ((p: string) => p === '/repo/.qwen/workflows') as never,
     );
-    mocks.lstatSync.mockImplementation(() => {
+    mocks.findSymlinkedReviewWorkflowPath.mockImplementation(() => {
       throw new Error('EACCES');
     });
 
