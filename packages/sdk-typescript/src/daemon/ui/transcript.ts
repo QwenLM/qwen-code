@@ -23,7 +23,7 @@ import type {
 } from './types.js';
 import {
   DAEMON_PLAN_TOOL_CALL_ID,
-  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isUnrecognizedDiagnosticReason,
 } from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
 import { isRecord } from './utils.js';
@@ -1292,23 +1292,12 @@ type UnrecognizedDiagnosticEvent = DaemonUiStatusEvent & {
   debugReason: DaemonUnrecognizedDiagnosticReason;
 };
 
-/** Membership over the runtime reason array, so a reason added there is
- *  routed here without a second hand-edited literal list (#8823 review). */
-function isUnrecognizedReason(
-  reason: DaemonUiStatusEvent['debugReason'],
-): reason is DaemonUnrecognizedDiagnosticReason {
-  return (
-    reason !== undefined &&
-    (DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]).includes(
-      reason,
-    )
-  );
-}
-
 function isUnrecognizedDiagnostic(
   event: DaemonUiStatusEvent,
 ): event is UnrecognizedDiagnosticEvent {
-  return event.type === 'debug' && isUnrecognizedReason(event.debugReason);
+  return (
+    event.type === 'debug' && isUnrecognizedDiagnosticReason(event.debugReason)
+  );
 }
 
 /**
@@ -1326,6 +1315,16 @@ function appendUnrecognizedDiagnostic(
   state: DaemonTranscriptState,
   event: UnrecognizedDiagnosticEvent,
 ): void {
+  // The replaced `appendStatusBlock` path also reset the user pointer
+  // (its non-user block append runs `state.activeUserBlockId = undefined`).
+  // Keep that reset: diagnostics carry no association with the active user
+  // block, and a stale pointer lets a later mergeable `user.text.delta`
+  // with no promptId stamp (e.g. a peer client's `$ <cmd>` echo) append
+  // onto an earlier user block, collapsing two turns into one and skewing
+  // `rewindTranscriptToUserTurn`'s turn indexing. The streaming
+  // assistant/thought pointer stays untouched — that is the whole point of
+  // the sidechannel (see the doc above).
+  state.activeUserBlockId = undefined;
   // The replaced `appendStatusBlock` path capped exactly these diagnostics at
   // `MAX_TEXT_BLOCK_LENGTH`; a single SSE frame can carry ~16M code units and
   // up to `UNRECOGNIZED_DIAGNOSTICS_LIMIT` entries persist, so the cap stays.

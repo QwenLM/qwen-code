@@ -321,6 +321,23 @@ export type DaemonUnrecognizedDiagnosticReason =
   (typeof DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS)[number];
 
 /**
+ * Membership over the runtime reason array, exported so every routing guard
+ * (reducer sidechannel here, provider flush/drop guard pair in webui)
+ * classifies against one source. A reason added to the array routes onto the
+ * sidechannel everywhere without hand-editing each consumer (#8823 review).
+ */
+export function isUnrecognizedDiagnosticReason(
+  reason: DaemonUiDebugReason | string | undefined,
+): reason is DaemonUnrecognizedDiagnosticReason {
+  return (
+    reason !== undefined &&
+    (DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]).includes(
+      reason,
+    )
+  );
+}
+
+/**
  * One forward-compatibility diagnostic mirrored onto the transcript
  * sidechannel. Carries the normalizer classification, the correlation
  * fields `createBase` stamps onto every normalized projection, and the SSE

@@ -17,13 +17,13 @@ import {
   useSyncExternalStore,
 } from 'react';
 import {
-  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
   DaemonClient,
   DaemonHttpError,
   DaemonSessionClient,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   extractServerTimestamp,
+  isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -2206,12 +2206,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const hasBlockPathDebugEvent = uiEvents.some(
                 (e) =>
                   e.type === 'debug' &&
-                  !(
-                    e.debugReason !== undefined &&
-                    (
-                      DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]
-                    ).includes(e.debugReason)
-                  ),
+                  !isUnrecognizedDiagnosticReason(e.debugReason),
               );
               // The debug guard below reads the committed store's active
               // assistant block, but batching leaves earlier chunks from this
@@ -2235,10 +2230,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? transcriptUiEvents.filter(
                     (e) =>
                       e.type !== 'debug' ||
-                      (e.debugReason !== undefined &&
-                        (
-                          DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]
-                        ).includes(e.debugReason)),
+                      isUnrecognizedDiagnosticReason(e.debugReason),
                   )
                 : transcriptUiEvents;
               enqueueTranscriptEvents(eventsToDispatch);

@@ -107,6 +107,7 @@ export {
   getSessionUpdatePayload,
   isDaemonUiSensitiveKey,
   isSubagentChildBlock,
+  isUnrecognizedDiagnosticReason,
   normalizeDaemonEvent,
   redactDaemonUiSensitiveFields,
   rebuildDaemonTranscriptBlockIndex,

@@ -529,6 +529,36 @@ describe('unrecognized diagnostics stay out of the chat transcript', () => {
     ).toEqual(['unrecognized_event', 'unrecognized_session_update']);
   });
 
+  it('resets the active user pointer across a sidechanneled diagnostic', () => {
+    // The replaced `appendStatusBlock` path reset `activeUserBlockId` for
+    // every non-user block; the sidechannel must keep that reset. Without
+    // it, a later mergeable `user.text.delta` with no promptId stamp (e.g.
+    // a peer client's `$ <cmd>` echo) appends onto the earlier user block
+    // across the diagnostic, collapsing two user turns into one and
+    // skewing `rewindTranscriptToUserTurn`'s turn indexing.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: '$ cmd1' },
+        {
+          type: 'debug',
+          text: 'some_future_event (unrecognized daemon event): {"a":1}',
+          debugReason: 'unrecognized_event',
+        },
+        { type: 'user.text.delta', text: '$ cmd2' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual(['user', 'user']);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['$ cmd1', '$ cmd2']);
+    // The pointer follows the latest user block, not the pre-diagnostic one.
+    expect(state.activeUserBlockId).toBe(state.blocks[1]?.id);
+    expect(state.unrecognizedDiagnostics).toHaveLength(1);
+  });
+
   it('keeps malformed-payload diagnostics in the transcript', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

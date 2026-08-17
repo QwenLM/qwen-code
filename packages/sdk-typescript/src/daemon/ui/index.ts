@@ -65,6 +65,7 @@ export {
   DAEMON_PLAN_TOOL_CALL_ID,
   DAEMON_UI_DEBUG_REASONS,
   DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isUnrecognizedDiagnosticReason,
 } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
