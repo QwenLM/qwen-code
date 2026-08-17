@@ -94,7 +94,10 @@ jobs:
           # Objects and refs — the reason the .git is kept — are untouched,
           # and actions/checkout re-establishes remote/auth when it reuses
           # the repo.
-          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
+          # -H follows a symlinked workspace root: without it, find treats the
+          # symlink itself as the start point and -mindepth 1 silently wipes
+          # nothing, leaving a swapped-in workspace intact for every later job.
+          find -H "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
           rm -rf "$GITHUB_WORKSPACE/.git/hooks" "$GITHUB_WORKSPACE/.git/info/attributes"
           { git config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
 

@@ -277,8 +277,8 @@ describe('serve-ab.yml runner routing', () => {
     assert.equal(executed[0], 'set -uo pipefail');
     assert.equal(
       executed[1],
-      'find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
-      'the wipe must keep only a REAL .git directory — a symlink or gitfile named .git can point outside the workspace',
+      'find -H "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
+      'the wipe must keep only a REAL .git directory — a symlink or gitfile named .git can point outside the workspace; -H stops a symlinked workspace root from silently no-oping the wipe',
     );
     assert.equal(
       executed[2],
