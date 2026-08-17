@@ -614,6 +614,7 @@ export function runCleanup(target: string): void {
         writeStderrLine(
           `Skipping workflow cleanup: ${REVIEW_WORKFLOWS_DIR} is a symlink.`,
         );
+        failedAny = true;
       } else {
         workflowRootSafe = true;
       }
@@ -622,11 +623,21 @@ export function runCleanup(target: string): void {
     writeStderrLine(
       `Failed to inspect ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
     );
+    failedAny = true;
   }
 
   if (workflowRootSafe) {
     for (const workflowPath of workflowPaths) {
-      if (!existsSync(workflowPath)) continue;
+      try {
+        lstatSync(workflowPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        writeStderrLine(
+          `Failed to inspect ${workflowPath}: ${(err as Error).message}`,
+        );
+        failedAny = true;
+        continue;
+      }
       try {
         rmSync(workflowPath, { force: true });
         writeStdoutLine(`Removed generated workflow: ${workflowPath}`);

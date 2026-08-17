@@ -7,9 +7,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -289,6 +291,24 @@ describe('emit-workflow — what it writes', () => {
       expect(script).toContain(JSON.stringify(prompt));
     }
     expect(existsSync(join(dir, 'args.json'))).toBe(false);
+  });
+
+  it('refuses a symlinked workflow root before recording prompts', () => {
+    const external = mkdtempSync(join(tmpdir(), 'emit-wf-outside-'));
+    const plan = join(dir, 'plan.json');
+    mkdirSync(join(dir, '.qwen'), { recursive: true });
+    symlinkSync(external, join(dir, '.qwen', 'workflows'), 'dir');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+
+    try {
+      expect(() =>
+        (emitWorkflowCommand.handler as (a: unknown) => void)({ plan }),
+      ).toThrow(/symlinked saved-workflow directory/);
+      expect(readRecordedPrompts(plan).size).toBe(0);
+      expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(false);
+    } finally {
+      rmSync(external, { recursive: true, force: true });
+    }
   });
 
   it('names a script per plan, so concurrent reviews do not overwrite each other', () => {

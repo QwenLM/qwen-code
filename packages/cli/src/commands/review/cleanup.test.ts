@@ -7,7 +7,7 @@ import { join } from 'node:path';
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
-  lstatSync: vi.fn((): { isSymbolicLink: () => boolean } => ({
+  lstatSync: vi.fn((_path: string): { isSymbolicLink: () => boolean } => ({
     isSymbolicLink: () => false,
   })),
   // The return type is declared so `mockReturnValue` can take string arrays —
@@ -122,7 +122,12 @@ describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.existsSync.mockReturnValue(false);
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
+    mocks.lstatSync.mockImplementation((path: string) => {
+      if (path === '/repo/.qwen/workflows') {
+        return { isSymbolicLink: () => false };
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -165,6 +170,7 @@ describe('runCleanup', () => {
         p === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
         p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
+    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
 
     runCleanup('pr-123');
 
@@ -188,8 +194,12 @@ describe('runCleanup', () => {
 
   it('does not remove a workflow through a symlinked root', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.refExists.mockReturnValue(false);
     mocks.existsSync.mockImplementation(
-      ((p: string) => p === '/repo/.qwen/workflows') as never,
+      ((p: string) =>
+        p === '/repo/.qwen/workflows' ||
+        p === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
+        p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
     mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => true });
 
@@ -205,6 +215,76 @@ describe('runCleanup', () => {
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       'Skipping workflow cleanup: /repo/.qwen/workflows is a symlink.',
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      'Nothing to clean for target "pr-123".',
+    );
+  });
+
+  it('does not claim nothing when workflow-root inspection fails', () => {
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.refExists.mockReturnValue(false);
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.lstatSync.mockImplementation(() => {
+      throw new Error('EACCES');
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      'Failed to inspect /repo/.qwen/workflows: EACCES',
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      'Nothing to clean for target "pr-123".',
+    );
+  });
+
+  it('unlinks a dangling generated workflow without following it', () => {
+    const planPath = '/repo/.qwen/workflows/qwen-review-pr-123-plan.js';
+    const fetchPath = '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js';
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.lstatSync.mockImplementation((path: string) => {
+      if (path === '/repo/.qwen/workflows' || path === planPath) {
+        return { isSymbolicLink: () => path === planPath };
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(planPath, { force: true });
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(fetchPath, expect.anything());
+  });
+
+  it('does not claim nothing when generated-workflow inspection fails', () => {
+    const planPath = '/repo/.qwen/workflows/qwen-review-pr-123-plan.js';
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.refExists.mockReturnValue(false);
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.lstatSync.mockImplementation((path: string) => {
+      if (path === '/repo/.qwen/workflows') {
+        return { isSymbolicLink: () => false };
+      }
+      if (path === planPath) {
+        throw new Error('EACCES');
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      `Failed to inspect ${planPath}: EACCES`,
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      'Nothing to clean for target "pr-123".',
     );
   });
 

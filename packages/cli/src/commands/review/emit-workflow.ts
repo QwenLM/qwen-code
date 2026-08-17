@@ -29,13 +29,13 @@
 // limitations in the PR description rather than assuming parity.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { buildLaunch } from './agent-prompt.js';
 import { recordPrompt } from './lib/prompt-record.js';
 import { readPlanReport, type PlanReport } from './lib/report.js';
-import { reviewWorkflowScriptPath } from './lib/paths.js';
+import { REVIEW_WORKFLOWS_DIR, reviewWorkflowScriptPath } from './lib/paths.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import {
   resolveOrchestration,
@@ -159,6 +159,16 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
           `${(err as Error).message}. Omit --rules if this review has none.`,
       );
     }
+  }
+
+  try {
+    if (lstatSync(REVIEW_WORKFLOWS_DIR).isSymbolicLink()) {
+      throw new Error(
+        `emit-workflow: refusing to save into a symlinked saved-workflow directory: '${REVIEW_WORKFLOWS_DIR}'.`,
+      );
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 
   const agents = buildFanOutRoster(report, args.plan, rules);
