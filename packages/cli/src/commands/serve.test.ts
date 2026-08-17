@@ -501,8 +501,15 @@ describe('serve rate limit env parsing', () => {
       url: 'https://127.0.0.1/',
       webShellMounted: true,
       runtimeReady: Promise.resolve(),
+      close: vi.fn().mockResolvedValue(undefined),
       getLocalControl: () => ({
-        enable: vi.fn().mockResolvedValue({ active: true }),
+        enable: vi.fn().mockResolvedValue({
+          active: true,
+          url: 'http://192.168.1.20:4170/#token=pairing',
+          interfaceName: 'en0',
+          sleepInhibited: false,
+          encrypted: false,
+        }),
       }),
     });
 

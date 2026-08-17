@@ -5765,7 +5765,7 @@ const ZH: Messages = {
   'settings.localControl.awake': '这台 Mac 将保持唤醒',
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.localControl.urlRedacted':
-    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到终端中扫码配对。',
+    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',

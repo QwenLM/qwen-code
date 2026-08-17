@@ -37,10 +37,6 @@ export interface RegisterWorkspaceLocalControlRoutesDeps {
 async function withUiData(status: LocalControlStatus) {
   let qrText: string | undefined;
   if (status.url) {
-    const { default: qrcode } = (await import('qrcode-terminal')) as {
-      default: typeof import('qrcode-terminal');
-    };
-    qrcode.setErrorLevel('Q');
     // QR rendering is best-effort and must never fail the request. The pairing
     // URL is caller-influenced (`target` deep-links), so an over-capacity URL
     // can exceed the QR encoder's limit; if that threw, enable/status would 500
@@ -48,6 +44,10 @@ async function withUiData(status: LocalControlStatus) {
     // with no way to disable. The Web Shell still shows the raw URL text, so
     // pairing remains possible without the QR block.
     try {
+      const { default: qrcode } = (await import('qrcode-terminal')) as {
+        default: typeof import('qrcode-terminal');
+      };
+      qrcode.setErrorLevel('Q');
       qrcode.generate(status.url, { small: true }, (code) => {
         qrText = code.trimEnd();
       });
