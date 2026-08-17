@@ -105,11 +105,11 @@ export interface GoalRecord {
   turnCount: number;
   activeTimeMs: number;
   /**
-   * Model tokens billed to this Goal so far, summed across its turns.
+   * Model tokens billed to this Goal so far, summed across its turn windows.
    *
-   * Measured the way the session already measures itself, so the number a Goal
-   * reports and the number `/stats` reports mean the same thing. Zero on Goals
-   * recovered from a transcript written before the field existed.
+   * Measured from the same session token source as `/stats`. Verification and
+   * checkpoint side queries run between turn windows and are not included.
+   * Zero on Goals recovered from a transcript written before the field existed.
    */
   tokensUsed: number;
   createdAt: number;

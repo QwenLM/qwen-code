@@ -7711,8 +7711,9 @@ export class Config {
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
       tokenMeter: {
-        // The same figure `/stats` reports, so a Goal's spend and the
-        // session's spend are the same number measured once.
+        // The figure `/stats` reports within Goal turn windows. Spend from
+        // verification and checkpoint side queries lands between turns and
+        // is not billed here.
         readSessionTokens: () =>
           Object.values(
             uiTelemetryService.getMetricsForSession(sessionId).models,

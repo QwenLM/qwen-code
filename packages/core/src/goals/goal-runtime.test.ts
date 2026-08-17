@@ -335,6 +335,33 @@ describe('goal runtime', () => {
     });
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+    'finishes the turn when the token meter returns %s',
+    async (invalidTotal) => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({
+        journal,
+        tokenMeter: {
+          readSessionTokens: vi
+            .fn()
+            .mockReturnValueOnce(0)
+            .mockReturnValue(invalidTotal),
+        },
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      await expect(
+        runtime.finishTurn(host.started[0]!),
+      ).resolves.toBeUndefined();
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        turnCount: 1,
+        tokensUsed: 0,
+      });
+    },
+  );
+
   it('persists verifier acceptance before completing a verified proposal', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];

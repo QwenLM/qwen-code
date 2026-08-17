@@ -35,6 +35,7 @@ import {
   refreshSessionContext,
   logStartSession,
   logSessionEnd,
+  uiTelemetryService,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -55,6 +56,11 @@ import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { getSessionProjectDir } from '../utils/sessionIdContext.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
+import {
+  EVENT_API_RESPONSE,
+  UiTelemetryService,
+} from '../telemetry/uiTelemetry.js';
+import type { ApiResponseEvent } from '../telemetry/types.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -318,6 +324,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     refreshSessionContext: vi.fn(),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
+      getMetricsForSession: vi.fn(),
     },
   };
 });
@@ -2612,6 +2619,57 @@ describe('Server Config (config.ts)', () => {
       await expect(
         first.dispatch({ action: 'create', objective: 'stale' }),
       ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('bills only the current session telemetry to its Goal', async () => {
+      const sessionId = 'metered-session';
+      const telemetry = new UiTelemetryService();
+      vi.mocked(uiTelemetryService.getMetricsForSession).mockImplementation(
+        (requestedSessionId) =>
+          telemetry.getMetricsForSession(requestedSessionId),
+      );
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionId,
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      vi.spyOn(recorder, 'recordGoalState').mockResolvedValue({} as ChatRecord);
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const permit = runtime.beginTurn('turn-1');
+      if (!permit) throw new Error('expected a Goal turn permit');
+      const apiResponse = (
+        model: string,
+        totalTokens: number,
+      ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+        ({
+          'event.name': EVENT_API_RESPONSE,
+          model,
+          duration_ms: 1,
+          input_token_count: totalTokens,
+          output_token_count: 0,
+          total_token_count: totalTokens,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+        }) as ApiResponseEvent & {
+          'event.name': typeof EVENT_API_RESPONSE;
+        };
+      telemetry.addEvent(apiResponse('model-a', 40), sessionId);
+      telemetry.addEvent(apiResponse('model-b', 60), sessionId);
+      telemetry.addEvent(apiResponse('decoy-model', 1_000), 'other-session');
+
+      await runtime.finishTurn(permit);
+
+      expect(runtime.getSnapshot().goal?.tokensUsed).toBe(100);
+      expect(
+        vi
+          .mocked(uiTelemetryService.getMetricsForSession)
+          .mock.calls.every(([requestedSessionId]) =>
+            Object.is(requestedSessionId, sessionId),
+          ),
+      ).toBe(true);
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {
