@@ -159,6 +159,7 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  BridgeSessionCatalogVersion,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -2142,7 +2143,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     }
   };
+  // In-memory session-catalog clock for the workspace live-state protocol.
+  // The generation changes only with this bridge instance; the revision
+  // advances on daemon-observed catalog membership and static-metadata
+  // changes. Getters return fresh value snapshots so a later mark never
+  // mutates a previously handed-out version.
+  const sessionCatalogGeneration = randomUUID();
+  let sessionCatalogRevision = 0;
+  const getSessionCatalogVersion = (): BridgeSessionCatalogVersion => ({
+    generation: sessionCatalogGeneration,
+    revision: sessionCatalogRevision,
+  });
+  const markSessionCatalogChanged = (): void => {
+    sessionCatalogRevision += 1;
+  };
   const emitSessionLifecycle = (event: BridgeSessionLifecycleEvent): void => {
+    // Membership marks advance through this single choke point — every
+    // bridge map insertion, deletion, and clear emits here after the
+    // mutation. Marking before the host callback keeps a throwing
+    // `sessionLifecycle` listener from suppressing the revision change.
+    markSessionCatalogChanged();
     try {
       opts.sessionLifecycle?.(event);
     } catch (err) {
@@ -3554,6 +3574,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             if (!currentInfo) return;
             applyActiveWorkSnapshot(currentInfo, snapshot);
           },
+          // Child-side automatic title updates change persisted catalog
+          // metadata the bridge never sees; forward the catalog-clock mark.
+          markSessionCatalogChanged,
         );
         const rawConnection = new ClientSideConnection(
           () =>
@@ -8606,6 +8629,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
             );
           }
+          // The fork is durably committed at this point, including the
+          // persisted-only path that never becomes a live session. Mark
+          // before any restore attempt so a committed branch is visible to
+          // catalog-version watchers even when the restore later fails.
+          markSessionCatalogChanged();
           const rawBranchName = result.displayName ?? result.title;
           const branchDisplayName =
             typeof rawBranchName === 'string'
@@ -8854,6 +8882,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (entry) {
         entry.worktree = worktree;
+        markSessionCatalogChanged();
       }
     },
 
@@ -8893,6 +8922,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const nextDisplayName = metadata.displayName || undefined;
         if (entry.displayName !== nextDisplayName) {
           entry.displayName = nextDisplayName;
+          // The catalog exposes display names; an actual rename is a
+          // static-metadata change. Mark before the SSE publish so the
+          // revision never trails the client-visible event.
+          markSessionCatalogChanged();
           writeStderrLine(
             `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
               `displayName=${entry.displayName === undefined ? 'cleared' : 'set'}` +
@@ -8986,6 +9019,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return out;
     },
+
+    getSessionCatalogVersion,
+
+    markSessionCatalogChanged,
 
     getSessionSummary(sessionId) {
       const entry = byId.get(sessionId);

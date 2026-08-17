@@ -178,6 +178,9 @@ function makeFakeBridge(opts?: {
       kills.push(sessionId);
       return opts?.killSessionResult ?? true;
     },
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: () => {},
     detachClient: async (sessionId: string, clientId?: string) => {
       operations.push(`detach:${sessionId}`);
       detaches.push({ sessionId, ...(clientId ? { clientId } : {}) });

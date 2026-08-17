@@ -813,6 +813,13 @@ export class BridgeClient implements Client {
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
     private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
+    /**
+     * Catalog-clock mark forwarded from the bridge factory. Invoked when a
+     * child-side notification changes persisted catalog metadata the bridge
+     * never sees directly (currently: automatic title updates). Trailing and
+     * optional so existing direct constructors stay source-compatible.
+     */
+    private readonly onSessionCatalogChanged?: () => void,
   ) {}
 
   async requestPermission(
@@ -2010,6 +2017,10 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      // The child persists the automatic title before notifying, so this is
+      // a daemon-observed catalog change. Mark before the SSE publish so the
+      // revision never trails the client-visible event.
+      this.onSessionCatalogChanged?.();
       try {
         entry.events.publish({
           type: 'session_metadata_updated',

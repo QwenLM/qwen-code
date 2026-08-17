@@ -1065,7 +1065,10 @@ describe('deleteDaemonSessions', () => {
       deleteDaemonSessionIfOrphan({
         sessionId,
         service,
-        bridge: { killSession: vi.fn().mockResolvedValue(false) },
+        bridge: {
+          killSession: vi.fn().mockResolvedValue(false),
+          markSessionCatalogChanged: vi.fn(),
+        },
         coordinator: new SessionArchiveCoordinator(),
       }),
     ).resolves.toBe(false);
@@ -1098,18 +1101,23 @@ describe('deleteDaemonSessions', () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440083';
     writeSessionFile(workspaceDir, sessionId, 'active');
     const service = new SessionService(workspaceDir);
+    const markSessionCatalogChanged = vi.fn();
 
     await expect(
       deleteDaemonSessionIfOrphan({
         sessionId,
         service,
-        bridge: { killSession: vi.fn().mockResolvedValue(true) },
+        bridge: {
+          killSession: vi.fn().mockResolvedValue(true),
+          markSessionCatalogChanged,
+        },
         coordinator: new SessionArchiveCoordinator(),
       }),
     ).resolves.toBe(true);
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       false,
     );
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
   });
 
   it('deletes the transcript when killSession throws SessionNotFoundError', async () => {
@@ -1125,6 +1133,7 @@ describe('deleteDaemonSessions', () => {
           killSession: vi
             .fn()
             .mockRejectedValue(new SessionNotFoundError(sessionId)),
+          markSessionCatalogChanged: vi.fn(),
         },
         coordinator: new SessionArchiveCoordinator(),
       }),
@@ -1147,7 +1156,10 @@ describe('deleteDaemonSessions', () => {
       deleteDaemonSessionIfOrphan({
         sessionId,
         service,
-        bridge: { killSession: vi.fn().mockResolvedValue(true) },
+        bridge: {
+          killSession: vi.fn().mockResolvedValue(true),
+          markSessionCatalogChanged: vi.fn(),
+        },
         coordinator: new SessionArchiveCoordinator(),
       }),
     ).rejects.toThrow(SessionWriterConflictError);

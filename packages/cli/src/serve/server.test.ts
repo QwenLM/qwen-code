@@ -641,6 +641,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_live_state',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -700,6 +701,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
+      f !== 'workspace_session_live_state' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
   ),
@@ -755,6 +757,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
+  'workspace_session_live_state',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -1286,6 +1289,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  let catalogRevision = 0;
+  const catalogGeneration = `server-fake-catalog-gen-${Math.random()
+    .toString(36)
+    .slice(2)}`;
   const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
   const setSessionWorktreeCalls: Array<{
     sessionId: string;
@@ -2091,6 +2098,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listWorkspaceSessions(workspaceCwd) {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
+    },
+    getSessionCatalogVersion() {
+      return { generation: catalogGeneration, revision: catalogRevision };
+    },
+    markSessionCatalogChanged() {
+      catalogRevision += 1;
     },
     getSessionSummary(sessionId) {
       summaryCalls.push(sessionId);

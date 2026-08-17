@@ -139,6 +139,9 @@ function makeHarness(
     ),
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: vi.fn(),
     getSessionLastEventId: vi.fn(() => 0),
     getSessionSummary: vi.fn(() => ({
       pendingInteractions: options.pendingInteractions ?? [],

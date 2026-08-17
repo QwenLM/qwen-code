@@ -385,6 +385,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // This remains independent from active export so older daemons cannot ignore
   // archive intent and return an active transcript with the same session id.
   workspace_archived_session_export: { since: 'v1' },
+  // Workspace-qualified, memory-only session live-state snapshot plus the
+  // in-memory catalog version token
+  // (`GET /workspaces/:workspace/sessions/live-state`). Independent from
+  // `workspace_qualified_rest_core`: released daemons can advertise that tag
+  // without implementing this route, so clients must pre-flight it directly.
+  // The route stays subject to the per-workspace trust check even when the
+  // tag is advertised.
+  workspace_session_live_state: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

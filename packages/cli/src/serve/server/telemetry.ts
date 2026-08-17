@@ -471,6 +471,12 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  if (
+    req.method === 'GET' &&
+    /^\/workspaces\/[^/]+\/sessions\/live-state$/.test(path)
+  ) {
+    return { route: 'GET /workspaces/:workspace/sessions/live-state' };
+  }
   if (req.method === 'GET' && /^\/workspace\/[^/]+\/session-info$/.test(path)) {
     return { route: 'GET /workspace/:id/session-info' };
   }
