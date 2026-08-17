@@ -475,7 +475,11 @@ describe('WeixinChannel', () => {
       const base = keepaliveEvent('user-stale', 'session-stale');
 
       channel.emitLifecycle({ ...base, type: 'started' });
-      channel.emitLifecycle({ ...base, type: 'cancelled' });
+      channel.emitLifecycle({
+        ...base,
+        type: 'cancelled',
+        reason: 'cancel_command',
+      });
       // Turn 2 starts before turn 1's stalled request settles.
       channel.emitLifecycle({ ...base, type: 'started' });
       await vi.advanceTimersByTimeAsync(0);
@@ -506,7 +510,11 @@ describe('WeixinChannel', () => {
       const base = keepaliveEvent('user-late-success', 'session-ls');
 
       channel.emitLifecycle({ ...base, type: 'started' });
-      channel.emitLifecycle({ ...base, type: 'cancelled' });
+      channel.emitLifecycle({
+        ...base,
+        type: 'cancelled',
+        reason: 'cancel_command',
+      });
       // Turn 2 starts and confirms before turn 1's stalled request settles.
       channel.emitLifecycle({ ...base, type: 'started' });
       await vi.advanceTimersByTimeAsync(0);
