@@ -4946,6 +4946,52 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s keys the shared restore guard on the persisted session id spelling',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440145'
+            : '550e8400-e29b-41d4-a716-446655440146';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(storageSessionId);
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 230,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 230,
+            result: expect.any(Object),
+          });
+          reader.close();
+
+          // Parity with the REST restore handler: the exclusive batch
+          // delete locks the raw caller ids, so the shared restore guard
+          // must key on the persisted spelling, not the normalized request
+          // id.
+          expect(runSharedMany).toHaveBeenCalledWith(
+            [storageSessionId],
+            expect.any(Function),
+          );
+        } finally {
+          runSharedMany.mockRestore();
+        }
+      });
+    },
+  );
+
   it('keeps the bridge key canonical while isolating mixed-case storage', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440135';
     const storageSessionId = sessionId.toUpperCase();

@@ -2997,8 +2997,28 @@ export function registerSessionRoutes(
       }
       let restoredStorageSessionId = sessionId;
       try {
+        // Batch delete locks its exclusive guard on the raw caller ids, so
+        // key this shared guard on the resolved persisted spelling too —
+        // otherwise a delete of the uppercase-spelled file proceeds while
+        // restore still holds the normalized request id.
+        const guardSessionService =
+          createWorkspaceRuntimeSessionService(runtime);
+        let persistedGuardId: string | undefined;
+        try {
+          persistedGuardId =
+            await guardSessionService.findSessionIdIgnoringCase(sessionId);
+        } catch (error) {
+          if (
+            error instanceof SessionIdCaseConflictError &&
+            (await guardSessionService.getSessionLocation(sessionId)) ===
+              'conflict'
+          ) {
+            throw new SessionConflictError(sessionId);
+          }
+          throw error;
+        }
         const session = await archiveCoordinator.runSharedMany(
-          [sessionId],
+          [persistedGuardId ?? sessionId],
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);

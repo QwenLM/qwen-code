@@ -197,6 +197,7 @@ import {
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -12026,6 +12027,50 @@ describe('createServeApp', () => {
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);
         } finally {
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'keys the %s shared guard on the persisted session id spelling',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440144';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({});
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          // The exclusive batch delete locks the raw caller ids, so the
+          // restore guard must contend on the persisted spelling (uppercase
+          // here) rather than the normalized request id.
+          expect(runSharedMany).toHaveBeenCalledWith(
+            [storageSessionId],
+            expect.any(Function),
+          );
+        } finally {
+          runSharedMany.mockRestore();
           findSessionId.mockRestore();
           readCreationMetadata.mockRestore();
         }
