@@ -344,6 +344,8 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const workingDir = boundedString(rawInput?.['working_dir'], 240);
+  const agentName = boundedString(rawInput?.['name'], 120);
   const todoId =
     typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
@@ -357,9 +359,11 @@ function projectSubagentToolUpdate(
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
         ...(todoId ? { todo_id: todoId } : {}),
-        ...(rawInput['run_in_background'] === true
-          ? { run_in_background: true }
+        ...(typeof rawInput['run_in_background'] === 'boolean'
+          ? { run_in_background: rawInput['run_in_background'] }
           : {}),
+        ...(workingDir ? { working_dir: workingDir } : {}),
+        ...(agentName ? { name: agentName } : {}),
       }
     : undefined;
   const projectedOutput = rawOutput
