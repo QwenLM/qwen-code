@@ -62,8 +62,13 @@ export function createDaemonTranscriptStore(
       text: string,
       images?: Array<{ data: string; mimeType: string }>,
       meta?: DaemonTextDeltaMeta,
+      files?: Array<{ name: string; mimeType: string }>,
     ) {
-      state = appendLocalUserTranscriptMessage(state, text, { images, meta });
+      state = appendLocalUserTranscriptMessage(state, text, {
+        images,
+        meta,
+        files,
+      });
       scheduleNotify();
     },
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {

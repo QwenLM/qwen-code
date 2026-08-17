@@ -35,6 +35,7 @@ vi.mock('../telemetry/index.js', () => ({
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
   refreshSessionContext: vi.fn(),
+  logSessionEnd: vi.fn(),
 }));
 vi.mock('../core/contentGenerator.js', () => ({
   resolveContentGeneratorConfigWithSources: vi.fn().mockReturnValue({

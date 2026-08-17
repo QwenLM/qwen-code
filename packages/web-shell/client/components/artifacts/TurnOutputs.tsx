@@ -78,6 +78,14 @@ export type TurnOutputOpenRequest = (
       workspaceId?: string;
     }
   | {
+      id: 'image';
+      kind: 'image';
+      title: string;
+      turnId: string;
+      src: string;
+      alt?: string;
+    }
+  | {
       id: string;
       kind: 'artifact';
       title: string;

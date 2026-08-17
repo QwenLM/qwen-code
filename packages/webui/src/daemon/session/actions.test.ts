@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
+  DaemonPendingPromptLimitError,
   type DaemonCapabilities,
   type DaemonSessionClient,
 } from '@qwen-code/sdk/daemon';
@@ -168,6 +169,72 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('rejects a concurrent source-bound branch request', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const first = createDeferred<{
+      sessionId: string;
+      displayName: string;
+      clientId: string;
+    }>();
+    source.client.branchSession.mockReturnValueOnce(first.promise);
+    const { actions } = createActionsHarness({
+      session: source,
+    });
+
+    const firstBranch = actions.branchSession('First');
+    const secondBranch = actions.branchSession('Second');
+    await expect(secondBranch).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    expect(source.client.branchSession).toHaveBeenCalledOnce();
+
+    first.resolve({
+      sessionId: 'session-b',
+      displayName: 'First',
+      clientId: 'client-b',
+    });
+    await expect(firstBranch).resolves.toEqual({
+      sessionId: 'session-b',
+      displayName: 'First',
+      switchStarted: true,
+    });
+  });
+
+  it('does not open a branch that resolves after its source is cleared', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const branched = createDeferred<{
+      sessionId: string;
+      displayName: string;
+      clientId: string;
+    }>();
+    source.client.branchSession.mockReturnValueOnce(branched.promise);
+    const { actions, pendingSessionLoadRef, sessionRef } = createActionsHarness(
+      {
+        session: source,
+      },
+    );
+
+    const pending = actions.branchSession('Late branch');
+    await actions.clearSession();
+    branched.resolve({
+      sessionId: 'session-b',
+      displayName: 'Late branch',
+      clientId: 'client-b',
+    });
+
+    await expect(pending).resolves.toEqual({
+      sessionId: 'session-b',
+      displayName: 'Late branch',
+      switchStarted: false,
+    });
+    await Promise.resolve();
+    expect(sessionRef.current).toBeUndefined();
+    expect(pendingSessionLoadRef.current).toBeUndefined();
+    expect(source.client.detachSession).toHaveBeenCalledWith(
+      'session-b',
+      'client-b',
+    );
+  });
   it('creates from the active session client when the connection matches', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');
@@ -339,6 +406,8 @@ describe('createDaemonSessionActions', () => {
     void actions.loadSession('session-b').catch(() => undefined);
 
     expect(existingSession.detach).toHaveBeenCalledOnce();
+    expect(existingSession.cancel).not.toHaveBeenCalled();
+    expect(existingSession.submitPrompt).not.toHaveBeenCalled();
     expect(sessionRef.current).toBeUndefined();
     expect(getConnection()).toMatchObject({
       status: 'connecting',
@@ -400,6 +469,40 @@ describe('createDaemonSessionActions', () => {
     pendingLoad?.resolve();
     await loadPromise;
     expect(existingSession.detach).toHaveBeenCalledOnce();
+  });
+
+  it('clears the transcript when the same session id changes workspace', async () => {
+    const existingSession = createMockSession('session-a');
+    existingSession.workspaceCwd = '/work/a';
+    const { actions, getConnection, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          workspaceCwd: '/work/a',
+        },
+        session: existingSession,
+      });
+
+    const loadPromise = actions.loadSession('session-a', {
+      workspaceCwd: '/work/b',
+    });
+
+    expect(existingSession.detach).toHaveBeenCalledOnce();
+    expect(sessionRef.current).toBeUndefined();
+    expect(store.reset).toHaveBeenCalledOnce();
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-a',
+      workspaceCwd: '/work/b',
+      loadingTranscript: true,
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.resolve();
+    await loadPromise;
   });
 
   it('keeps the old same-session attachment when its replacement fails', async () => {
@@ -499,6 +602,83 @@ describe('createDaemonSessionActions', () => {
     expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
   });
 
+  it('does not inherit a failed load target workspace on the next switch', async () => {
+    const existingSession = createMockSession('session-a');
+    existingSession.workspaceCwd = '/work/a';
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          workspaceCwd: '/work/a',
+        },
+        session: existingSession,
+        setRestoreWorkspaceCwd,
+      });
+
+    const first = actions.loadSession('session-b', {
+      workspaceCwd: '/work/b',
+    });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+      loadingTranscript: true,
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(first).rejects.toThrow('load failed');
+    // The failed target stays visible for the error state...
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+      error: 'load failed',
+    });
+
+    // ...but the next workspace-less switch must not inherit it.
+    void actions.loadSession('session-c');
+    expect(setRestoreWorkspaceCwd).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('does not roll back the workspace for a superseded load', async () => {
+    const existingSession = createMockSession('session-a');
+    existingSession.workspaceCwd = '/work/a';
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          workspaceCwd: '/work/a',
+        },
+        session: existingSession,
+      });
+
+    const first = actions.loadSession('session-b', { workspaceCwd: '/work/b' });
+    const second = actions.loadSession('session-c', {
+      workspaceCwd: '/work/c',
+    });
+
+    // The first load was superseded; its rejection must not roll the
+    // workspace back over the second load's connecting state.
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-c',
+      workspaceCwd: '/work/c',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.resolve();
+    await second;
+  });
+
   it('forwards the workspace when resuming a session', () => {
     const setRestoreWorkspaceCwd = vi.fn();
     const { actions } = createActionsHarness({
@@ -517,9 +697,13 @@ describe('createDaemonSessionActions', () => {
     vi.useFakeTimers();
     try {
       const existingSession = createMockSession('session-a');
+      const manualSessionClearRef = { current: false };
+      const setRestoreSessionId = vi.fn();
       const { actions, getConnection } = createActionsHarness({
         connection: { status: 'connected', sessionId: 'session-a' },
+        manualSessionClearRef,
         session: existingSession,
+        setRestoreSessionId,
       });
 
       const loadPromise = actions.loadSession('session-b');
@@ -541,10 +725,12 @@ describe('createDaemonSessionActions', () => {
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
         status: 'disconnected',
-        sessionId: 'session-b',
+        sessionId: undefined,
         loadingTranscript: undefined,
         catchingUp: undefined,
       });
+      expect(manualSessionClearRef.current).toBe(true);
+      expect(setRestoreSessionId).toHaveBeenLastCalledWith(undefined);
     } finally {
       vi.useRealTimers();
     }
@@ -852,6 +1038,449 @@ describe('createDaemonSessionActions', () => {
     expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('uploads prompt images and submits media references instead of base64', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('look', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadMedia).toHaveBeenCalledWith(
+      expect.any(Blob),
+      'image/png',
+      undefined,
+    );
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: 'look' },
+        {
+          type: 'image',
+          mediaId: 'media-1',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+    });
+  });
+
+  it('keeps images without a concrete mime type inline instead of uploading', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('look', {
+      images: [{ data: 'AQID', mimeType: 'image/*' }],
+    });
+
+    // The media route matches concrete image types only; uploading a literal
+    // image/* Content-Type 400s, so such images must stay inline (untyped,
+    // matching the legacy shape).
+    expect(session.uploadMedia).not.toHaveBeenCalled();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: 'look' },
+        { type: 'image', data: 'AQID' },
+      ],
+    });
+  });
+
+  it('does not mark admission started when media upload fails', async () => {
+    const onAdmissionStarted = vi.fn();
+    const session = createMockSession('session-a');
+    session.uploadMedia.mockRejectedValueOnce(new Error('upload failed'));
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await expect(
+      actions.sendPrompt('look', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+        onAdmissionStarted,
+      }),
+    ).rejects.toThrow('upload failed');
+
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('falls back to inline image data when the media route is unavailable', async () => {
+    const session = createMockSession('session-a');
+    session.uploadMedia.mockRejectedValueOnce(
+      new DaemonHttpError(404, undefined, 'Not found'),
+    );
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('look', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: 'look' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ],
+    });
+  });
+
+  it('removes successful media uploads when another upload fails', async () => {
+    const session = createMockSession('session-a');
+    session.uploadMedia
+      .mockResolvedValueOnce({
+        type: 'image',
+        mediaId: 'uploaded-before-failure',
+        mimeType: 'image/png',
+        size: 3,
+      })
+      .mockRejectedValueOnce(new Error('second upload failed'));
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await expect(
+      actions.submitPrompt('look', {
+        images: [
+          { data: 'AQID', mimeType: 'image/png' },
+          { data: 'BAUG', mimeType: 'image/png' },
+        ],
+      }),
+    ).rejects.toThrow('second upload failed');
+
+    expect(session.removeMedia).toHaveBeenCalledWith('uploaded-before-failure');
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('removes uploaded media when prompt admission is rejected', async () => {
+    const session = createMockSession('session-a');
+    session.submitPrompt.mockRejectedValueOnce(
+      new DaemonPendingPromptLimitError('session-a', 20, 20),
+    );
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await expect(
+      actions.sendPrompt('look', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+    ).rejects.toThrow('Pending prompts full');
+
+    expect(session.removeMedia).toHaveBeenCalledWith('media-1');
+  });
+
+  it('keeps uploaded media when prompt admission is uncertain', async () => {
+    const session = createMockSession('session-a');
+    session.submitPrompt.mockRejectedValueOnce(new TypeError('fetch failed'));
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await expect(
+      actions.submitPrompt('look', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+    ).rejects.toThrow('fetch failed');
+
+    expect(session.removeMedia).not.toHaveBeenCalled();
+  });
+
+  it('removes uploaded media when cancelled before prompt admission', async () => {
+    const upload = createDeferred<{
+      type: 'image';
+      mediaId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    const session = createMockSession('session-a');
+    session.uploadMedia.mockReturnValueOnce(upload.promise);
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    const prompt = actions.sendPrompt('look', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+    await vi.waitFor(() => expect(session.uploadMedia).toHaveBeenCalled());
+    await actions.cancel();
+    upload.resolve({
+      type: 'image',
+      mediaId: 'media-1',
+      mimeType: 'image/png',
+      size: 3,
+    });
+
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(session.removeMedia).toHaveBeenCalledWith('media-1');
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('removes uploaded media when an admitted pending prompt is removed', async () => {
+    const controller = new AbortController();
+    const session = createMockSession('session-a');
+    session.submitPrompt.mockImplementationOnce(async () => {
+      controller.abort();
+      return { promptId: 'prompt-1' };
+    });
+    session.removePendingPrompt.mockResolvedValueOnce({ removed: true });
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await expect(
+      actions.submitPrompt('look', {
+        signal: controller.signal,
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+    ).resolves.toEqual({ promptId: 'prompt-1', removedAfterAbort: true });
+
+    expect(session.removeMedia).toHaveBeenCalledWith('media-1');
+  });
+
+  it('keeps uploaded media when the admitted prompt already started', async () => {
+    const controller = new AbortController();
+    const session = createMockSession('session-a');
+    session.submitPrompt.mockImplementationOnce(async () => {
+      controller.abort();
+      return { promptId: 'prompt-1' };
+    });
+    session.removePendingPrompt.mockResolvedValueOnce({ removed: false });
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await expect(
+      actions.submitPrompt('look', {
+        signal: controller.signal,
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(session.removeMedia).not.toHaveBeenCalled();
+  });
+
+  it('keeps prompt images inline for an older daemon', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({ session });
+
+    await actions.submitPrompt('look', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadMedia).not.toHaveBeenCalled();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: 'look' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+        },
+      ],
+    });
+  });
+
+  it('removes an orphaned upload from its original session after a switch', async () => {
+    const session = createMockSession('session-current', 'client-current');
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.removeMedia('media-old', { sessionId: 'session-old' }),
+    ).resolves.toBe(true);
+
+    expect(session.removeMedia).not.toHaveBeenCalled();
+    expect(session.client.removeSessionMedia).toHaveBeenCalledWith(
+      'session-old',
+      'media-old',
+    );
+  });
+
+  it('removes an orphaned upload after the active session is cleared', async () => {
+    const session = createMockSession('session-old', 'client-old');
+    const { actions, sessionRef } = createActionsHarness({ session });
+    await actions.uploadMedia({ data: 'AQID', mimeType: 'image/png' });
+    sessionRef.current = undefined;
+
+    await expect(
+      actions.removeMedia('media-old', { sessionId: 'session-old' }),
+    ).resolves.toBe(true);
+
+    expect(session.client.removeSessionMedia).toHaveBeenCalledWith(
+      'session-old',
+      'media-old',
+      { clientId: 'client-old' },
+    );
+  });
+
+  it('uses the target session client id when removing old media', async () => {
+    vi.stubGlobal('window', {
+      sessionStorage: {
+        getItem: vi.fn(() => 'client-old'),
+      },
+    });
+    try {
+      const session = createMockSession('session-current', 'client-current');
+      const { actions } = createActionsHarness({ session });
+
+      await actions.removeMedia('media-old', { sessionId: 'session-old' });
+
+      expect(session.client.removeSessionMedia).toHaveBeenCalledWith(
+        'session-old',
+        'media-old',
+        { clientId: 'client-old' },
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('retries cross-session media removal without the client id when it is stale', async () => {
+    // Detach unregisters the persisted client id on the daemon; the cleanup
+    // must degrade to a no-clientId removal instead of orphaning the media.
+    vi.stubGlobal('window', {
+      sessionStorage: {
+        getItem: vi.fn(() => 'client-old'),
+      },
+    });
+    try {
+      const session = createMockSession('session-current', 'client-current');
+      session.client.removeSessionMedia = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            400,
+            { code: 'invalid_client_id' },
+            'invalid client id',
+          ),
+        )
+        .mockResolvedValueOnce(true);
+      const { actions } = createActionsHarness({ session });
+
+      await expect(
+        actions.removeMedia('media-old', { sessionId: 'session-old' }),
+      ).resolves.toBe(true);
+
+      expect(session.client.removeSessionMedia).toHaveBeenCalledTimes(2);
+      expect(session.client.removeSessionMedia).toHaveBeenNthCalledWith(
+        1,
+        'session-old',
+        'media-old',
+        { clientId: 'client-old' },
+      );
+      expect(session.client.removeSessionMedia).toHaveBeenNthCalledWith(
+        2,
+        'session-old',
+        'media-old',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not restart the event stream when the admitted prompt is stale', async () => {
     const restartEventStream = vi.fn();
     const session = createMockSession('session-a');
@@ -868,6 +1497,153 @@ describe('createDaemonSessionActions', () => {
 
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     expect(restartEventStream).not.toHaveBeenCalled();
+  });
+
+  it('rethrows a stale branch point error without a generic notice', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.client.branchSession.mockRejectedValueOnce(
+      new DaemonHttpError(409, { code: 'branch_point_invalid' }, 'Conflict'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
+      _alreadyDispatched: true,
+    });
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const branchResult = createDeferred<{
+        sessionId: string;
+        displayName: string;
+      }>();
+      session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+      const addNotice = vi.fn((notice) => notice);
+      const { actions, pendingSessionLoadRef } = createActionsHarness({
+        addNotice,
+        session,
+      });
+
+      let settled = false;
+      const branch = actions
+        .branchSession(undefined, 'checkpoint-1')
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(settled).toBe(false);
+      expect(addNotice).not.toHaveBeenCalled();
+
+      branchResult.resolve({
+        sessionId: 'session-b',
+        displayName: 'Historical branch',
+      });
+      await expect(branch).resolves.toEqual({
+        sessionId: 'session-b',
+        displayName: 'Historical branch',
+        switchStarted: true,
+      });
+      if (pendingSessionLoadRef.current) {
+        clearTimeout(pendingSessionLoadRef.current.timeout);
+        pendingSessionLoadRef.current.resolve();
+        pendingSessionLoadRef.current = undefined;
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a late branch result supersede newer navigation', async () => {
+    const session = createMockSession('session-a');
+    const branchResult = createDeferred<{
+      sessionId: string;
+      displayName: string;
+    }>();
+    session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      session,
+    });
+
+    const branch = actions.branchSession(undefined, 'checkpoint-1');
+    const newerLoad = actions.loadSession('session-b');
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+
+    branchResult.resolve({
+      sessionId: 'session-c',
+      displayName: 'Historical branch',
+    });
+    await expect(branch).resolves.toEqual({
+      sessionId: 'session-c',
+      displayName: 'Historical branch',
+      switchStarted: false,
+    });
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+
+    if (pendingSessionLoadRef.current) {
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.resolve();
+      pendingSessionLoadRef.current = undefined;
+    }
+    await expect(newerLoad).resolves.toBeUndefined();
+  });
+
+  it('preserves ambiguous stable-id admission failures for reconciliation', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('response lost')),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+    ).rejects.toThrow('response lost');
+    // The stable id must reach the session client verbatim: the daemon's
+    // messageId-keyed idempotency and the reconciliation rings never match
+    // if this hop drops the option.
+    expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
+      messageId: 'stable-id',
+    });
+  });
+
+  it('keeps legacy mid-turn admission failures best-effort', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('daemon unavailable')),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.enqueueMidTurnMessage('follow up')).resolves.toEqual({
+      accepted: false,
+    });
+  });
+
+  it('resolves undefined when getMidTurnMessages fails instead of throwing', async () => {
+    // Snapshot failure is unknown state. The caller must not infer that it is
+    // safe to resend.
+    const session = {
+      ...createMockSession('session-a'),
+      getMidTurnMessages: vi.fn().mockRejectedValue(new Error('daemon 500')),
+    };
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('resolves undefined from getMidTurnMessages when no session exists', async () => {
+    const { actions } = createActionsHarness();
+
+    await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
   });
 
   it('does not apply a late model update to a replacement attachment', async () => {
@@ -1010,6 +1786,42 @@ describe('createDaemonSessionActions', () => {
       currentMode: 'target-mode',
     });
   });
+
+  it('forwards text file attachments as resource blocks and chip metadata', async () => {
+    const session = createMockSession('session-a');
+    const { actions, store } = createActionsHarness({ session });
+
+    const prompt = actions.sendPrompt('check this', {
+      files: [{ name: 'app.log', text: 'line1', media_type: 'text/plain' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            { type: 'text', text: 'check this\n\n@attachment:///app.log' },
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///app.log',
+                mimeType: 'text/plain',
+                text: 'line1',
+              },
+            },
+          ],
+        }),
+        expect.any(AbortSignal),
+      );
+    });
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      'check this',
+      [],
+      undefined,
+      [{ name: 'app.log', text: 'line1', mimeType: 'text/plain' }],
+    );
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
 });
 
 function createActionsHarness(
@@ -1024,6 +1836,7 @@ function createActionsHarness(
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
+    setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -1057,6 +1870,7 @@ function createActionsHarness(
     settledPromptsRef: { current: new Map<string, SettledPrompt>() },
     pendingSessionLoadRef,
     pendingSessionLoadIdRef: { current: 0 },
+    sessionConfigGeneration: new WeakMap(),
     heartbeatSupportedRef: { current: false },
     manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
     skipNextCleanupDetachSessionRef: { current: undefined },
@@ -1079,7 +1893,7 @@ function createActionsHarness(
       connection = typeof update === 'function' ? update(connection) : update;
     },
     setPromptStatus: vi.fn(),
-    setRestoreSessionId: vi.fn(),
+    setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
     setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),
@@ -1107,6 +1921,8 @@ function createMockSession(
     clientId,
     client: {
       createOrAttachSession: vi.fn(),
+      branchSession: vi.fn(),
+      detachSession: vi.fn(async () => undefined),
       setSessionApprovalMode: vi.fn(async () => ({
         sessionId,
         mode: 'default',
@@ -1115,11 +1931,20 @@ function createMockSession(
       })),
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
+      removeSessionMedia: vi.fn(async () => true),
     },
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    uploadMedia: vi.fn(async (_data: Blob, mimeType: string) => ({
+      type: 'image' as const,
+      mediaId: 'media-1',
+      mimeType,
+      size: 3,
+    })),
+    removeMedia: vi.fn(async () => true),
+    removePendingPrompt: vi.fn(async () => ({ removed: true })),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),

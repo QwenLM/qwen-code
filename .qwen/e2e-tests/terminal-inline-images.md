@@ -32,7 +32,7 @@ baseline is grounded in issue #8090 and the unchanged `main` event mapping.
 3. Return a PNG in a successful tool's top-level and nested
    `functionResponse.parts`.
 4. Confirm the successful tool row retains its images.
-5. Open Ctrl+O and resume the session; confirm successful tool image order is
+5. Use `/resume` (or `--continue`) to resume the session; confirm successful tool image order is
    reconstructed from persisted parts. Assistant output resumes its persisted
    text; assistant inline images are not persisted by the current Core recorder.
 6. Return six images in one assistant output and one tool response; confirm the
@@ -66,7 +66,7 @@ baseline is grounded in issue #8090 and the unchanged `main` event mapping.
 4. Confirm no raw image sequence is written. Confirm the oversized payload is
    dropped before UI history, while admitted malformed/non-PNG data uses a
    deterministic placeholder.
-5. Repeat with `INK_SCREEN_READER=true`; confirm only the placeholder is
+5. Repeat with `--screen-reader` (or `ui.accessibility.screenReader: true`); confirm only the placeholder is
    emitted.
 
 ### Stream lifecycle

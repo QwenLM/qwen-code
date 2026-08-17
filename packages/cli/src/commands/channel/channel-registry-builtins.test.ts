@@ -108,18 +108,26 @@ describe('built-in channel registry', () => {
     const entry = (await supportedChannelCatalog()).find(
       (candidate) => candidate.type === 'valid-nested-type-key',
     );
-    expect(entry).toEqual({
+    expect(entry).toMatchObject({
       type: 'valid-nested-type-key',
       displayName: 'valid-nested-type-key',
       manageable: true,
-      fields: [
-        {
-          key: 'settings',
-          label: 'Settings',
-          kind: 'object',
-          properties: [{ key: 'type', label: 'Type', kind: 'string' }],
-        },
-      ],
     });
+    expect(entry?.fields[0]).toEqual({
+      key: 'settings',
+      label: 'Settings',
+      kind: 'object',
+      properties: [{ key: 'type', label: 'Type', kind: 'string' }],
+    });
+    expect(entry?.fields.map((field) => field.key)).toEqual([
+      'settings',
+      'senderPolicy',
+      'allowedUsers',
+      'groupPolicy',
+      'sessionScope',
+    ]);
+    expect(
+      entry?.fields.find((field) => field.key === 'senderPolicy'),
+    ).toMatchObject({ default: 'pairing' });
   });
 });

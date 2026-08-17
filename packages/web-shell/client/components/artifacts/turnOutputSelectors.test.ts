@@ -221,7 +221,7 @@ describe('turnOutputSelectors', () => {
     ]);
   });
 
-  it('omits stats for large full-content diffs', () => {
+  it('shows stats for large full-content diffs', () => {
     const oldContent = Array.from({ length: 1001 }, (_, index) => `${index}`)
       .join('\n')
       .concat('\n');
@@ -245,11 +245,50 @@ describe('turnOutputSelectors', () => {
     ];
 
     const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
-    expect(change?.additions).toBeUndefined();
-    expect(change?.deletions).toBeUndefined();
+    expect(change).toMatchObject({
+      additions: 1001,
+      deletions: 1001,
+    });
     expect(change?.diffs).toEqual([
       { oldText: oldContent, newText: newContent, fullContent: true },
     ]);
+  });
+
+  it('shows accurate stats for a large file with a small edit', () => {
+    const oldContent = Array.from(
+      { length: 2000 },
+      (_, index) => `line ${index}`,
+    )
+      .join('\n')
+      .concat('\n');
+    const newContent = [
+      ...oldContent.split('\n').slice(0, 1000),
+      'inserted line',
+      ...oldContent.split('\n').slice(1000, -1),
+    ]
+      .join('\n')
+      .concat('\n');
+    const messages = [
+      userMessage('u1', 'edit large file'),
+      toolGroup('tg1', [
+        {
+          callId: 'edit-1',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'src/app.ts' },
+          rawOutput: {
+            originalContent: oldContent,
+            newContent,
+          },
+        },
+      ]),
+    ];
+
+    const change = getFileChangesByTurn(messages, new Map()).get('u1')?.[0];
+    expect(change).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
   });
 
   it('omits stats for unrelated partial diffs', () => {

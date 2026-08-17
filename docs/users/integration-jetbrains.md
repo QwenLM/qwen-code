@@ -8,6 +8,7 @@
 - **Agent Client Protocol**: Full support for ACP enabling advanced IDE interactions
 - **Symbol management**: #-mention files to add them to the conversation context
 - **Conversation history**: Access to past conversations within the IDE
+- **Reasoning effort**: Choose Default, Low, Medium, High, Extra high, or Max from the agent's session options; each provider maps or clamps the requested tier for the active model
 - **Context usage**: See the current context-window occupancy while Qwen Code works
 
 ### Requirements

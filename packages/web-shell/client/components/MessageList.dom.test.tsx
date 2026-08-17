@@ -17,6 +17,12 @@ import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
+const virtualizerTestState = vi.hoisted(() => ({
+  itemSizeCache: new Map<string | number, number>(),
+  resizeItem: vi.fn(),
+  renderItems: true,
+}));
+
 // Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
 vi.mock('../App', async () => {
@@ -30,6 +36,9 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      showAssistantBranch,
+      onBranchSession,
+      branchRecordId,
       isLocateFlashing,
       assistantTurnFooterInfo,
       sendFailed,
@@ -37,6 +46,9 @@ vi.mock('./MessageItem', async () => {
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      showAssistantBranch?: boolean;
+      onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+      branchRecordId?: string;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
@@ -53,6 +65,11 @@ vi.mock('./MessageItem', async () => {
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
+          'data-timestamp': message.timestamp,
+          'data-tool-ids':
+            message.role === 'tool_group'
+              ? message.tools.map((tool) => tool.callId).join(',')
+              : undefined,
         },
         sendFailed
           ? React.createElement(
@@ -69,6 +86,12 @@ vi.mock('./MessageItem', async () => {
           ? React.createElement('button', {
               'aria-expanded': 'false',
               'data-testid': `disclosure-${message.id}`,
+            })
+          : null,
+        showAssistantBranch
+          ? React.createElement('button', {
+              'data-testid': `branch-${message.id}`,
+              onClick: () => onBranchSession?.(branchRecordId),
             })
           : null,
         assistantTurnFooter,
@@ -88,23 +111,27 @@ vi.mock('@tanstack/react-virtual', () => ({
     enabled: boolean;
     getItemKey: (index: number) => string | number;
   }) => {
-    const virtualItems = enabled
-      ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
-          key: getItemKey(index),
-          index,
-          start: index * 80,
-        }))
-      : [];
+    const virtualItems =
+      enabled && virtualizerTestState.renderItems
+        ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
+            key: getItemKey(index),
+            index,
+            start: index * 80,
+          }))
+        : [];
     return {
       getVirtualItems: () => virtualItems,
       getTotalSize: () => (enabled ? count * 80 : 0),
       measureElement: () => {},
+      resizeItem: virtualizerTestState.resizeItem,
+      itemSizeCache: virtualizerTestState.itemSizeCache,
       scrollToIndex: () => {},
     };
   },
 }));
 
 const { MessageList } = await import('./MessageList');
+const { CompactModeContext } = await import('../App');
 type MessageListHandle = import('./MessageList').MessageListHandle;
 
 (
@@ -114,12 +141,15 @@ type MessageListHandle = import('./MessageList').MessageListHandle;
 // jsdom provides neither ResizeObserver (MessageList's resize guard) nor a real
 // scrollIntoView (the non-virtual scroll path) — stub both.
 const resizeObserverCallbacks: ResizeObserverCallback[] = [];
+let resizeObserversFireOnObserve = true;
 class ResizeObserverStub {
   constructor(private readonly callback: ResizeObserverCallback) {
     resizeObserverCallbacks.push(callback);
   }
   observe() {
-    this.callback([], this as unknown as ResizeObserver);
+    if (resizeObserversFireOnObserve) {
+      this.callback([], this as unknown as ResizeObserver);
+    }
   }
   unobserve() {}
   disconnect() {}
@@ -140,6 +170,7 @@ const mounted: Array<{
   root: Root;
   container: HTMLElement;
   transcriptRenderMode: TranscriptRenderMode;
+  compactMode: boolean;
 }> = [];
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
@@ -147,7 +178,12 @@ afterEach(() => {
     container.remove();
   }
   resizeObserverCallbacks.length = 0;
+  resizeObserversFireOnObserve = true;
+  virtualizerTestState.itemSizeCache.clear();
+  virtualizerTestState.resizeItem.mockClear();
+  virtualizerTestState.renderItems = true;
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 type UserMessage = Extract<Message, { role: 'user' }>;
@@ -186,6 +222,11 @@ const agentMsg = (id: string): ToolGroupMessage => ({
       args: { subagent_type: 'explore', run_in_background: true },
     },
   ],
+});
+const standaloneToolMsg = (id: string, toolName: string): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [{ callId: `call-${id}`, toolName, status: 'completed' }],
 });
 const asstMsg = (id: string): AssistantMessage => ({
   id,
@@ -275,8 +316,10 @@ function mount(
       cachedTokens?: number;
     };
     includeSubagentToolUsageInMetrics?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
+    compactMode?: boolean;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
   } = {},
@@ -288,35 +331,38 @@ function mount(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={opts.customization ?? {}}>
-          <TranscriptRenderModeProvider
-            value={opts.transcriptRenderMode ?? 'interactive'}
-          >
-            <MessageList
-              ref={ref}
-              messages={messages}
-              pendingApproval={null}
-              hideSessionTimeline={opts.hideSessionTimeline}
-              loadingTranscript={opts.loadingTranscript}
-              catchingUp={opts.catchingUp}
-              hasOlderHistory={opts.hasOlderHistory}
-              loadingOlderHistory={opts.loadingOlderHistory}
-              historyCapacityReached={opts.historyCapacityReached}
-              historyPaginationError={opts.historyPaginationError}
-              onLoadOlderHistory={opts.onLoadOlderHistory}
-              transcriptBlockCount={opts.transcriptBlockCount}
-              transcriptActivity={opts.transcriptActivity}
-              onReloadTranscript={opts.onReloadTranscript}
-              isResponding={opts.isResponding}
-              hideFirstUserMessage={opts.hideFirstUserMessage}
-              firstTurnMetrics={opts.firstTurnMetrics}
-              includeSubagentToolUsageInMetrics={
-                opts.includeSubagentToolUsageInMetrics
-              }
-              onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
-              failedPromptMessageId={opts.failedPromptMessageId}
-              onRetryFailedPrompt={opts.onRetryFailedPrompt}
-            />
-          </TranscriptRenderModeProvider>
+          <CompactModeContext.Provider value={opts.compactMode ?? false}>
+            <TranscriptRenderModeProvider
+              value={opts.transcriptRenderMode ?? 'interactive'}
+            >
+              <MessageList
+                ref={ref}
+                messages={messages}
+                pendingApproval={null}
+                hideSessionTimeline={opts.hideSessionTimeline}
+                loadingTranscript={opts.loadingTranscript}
+                catchingUp={opts.catchingUp}
+                hasOlderHistory={opts.hasOlderHistory}
+                loadingOlderHistory={opts.loadingOlderHistory}
+                historyCapacityReached={opts.historyCapacityReached}
+                historyPaginationError={opts.historyPaginationError}
+                onLoadOlderHistory={opts.onLoadOlderHistory}
+                transcriptBlockCount={opts.transcriptBlockCount}
+                transcriptActivity={opts.transcriptActivity}
+                onReloadTranscript={opts.onReloadTranscript}
+                isResponding={opts.isResponding}
+                hideFirstUserMessage={opts.hideFirstUserMessage}
+                firstTurnMetrics={opts.firstTurnMetrics}
+                includeSubagentToolUsageInMetrics={
+                  opts.includeSubagentToolUsageInMetrics
+                }
+                onBranchSession={opts.onBranchSession}
+                onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+                failedPromptMessageId={opts.failedPromptMessageId}
+                onRetryFailedPrompt={opts.onRetryFailedPrompt}
+              />
+            </TranscriptRenderModeProvider>
+          </CompactModeContext.Provider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -325,6 +371,7 @@ function mount(
     root,
     container,
     transcriptRenderMode: opts.transcriptRenderMode ?? 'interactive',
+    compactMode: opts.compactMode ?? false,
   });
   return container;
 }
@@ -344,15 +391,17 @@ function rerenderMessages(
     entry.root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={{}}>
-          <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
-            <MessageList
-              messages={messages}
-              pendingApproval={null}
-              loadingTranscript={opts.loadingTranscript}
-              catchingUp={opts.catchingUp}
-              isResponding={opts.isResponding}
-            />
-          </TranscriptRenderModeProvider>
+          <CompactModeContext.Provider value={entry.compactMode}>
+            <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
+              <MessageList
+                messages={messages}
+                pendingApproval={null}
+                loadingTranscript={opts.loadingTranscript}
+                catchingUp={opts.catchingUp}
+                isResponding={opts.isResponding}
+              />
+            </TranscriptRenderModeProvider>
+          </CompactModeContext.Provider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -377,6 +426,7 @@ function renderInto(
     loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
 ) {
@@ -390,6 +440,7 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
+          onBranchSession={opts.onBranchSession}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -467,6 +518,172 @@ describe('MessageList — failed prompt retry', () => {
         ?.click(),
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MessageList — compact mode', () => {
+  it('keeps thinking without adjacent tools visible in compact mode', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+
+    rerenderMessages(container, [
+      userMsg('u1'),
+      thinkingMsg('t1'),
+      thinkingMsg('t2'),
+      asstMsg('a1'),
+    ]);
+    // With turn collapsing back on, the completed thinking folds behind the
+    // turn summary instead of hiding the surrounding transcript.
+    expect(container.querySelector('[data-testid="msg-t2"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('merges tool groups separated by completed thinking', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        { ...toolMsg('g1'), timestamp: 1_000 },
+        thinkingMsg('t1'),
+        { ...toolMsg('g2'), timestamp: 2_000 },
+        asstMsg('a1'),
+        userMsg('u2'),
+        toolMsg('g3'),
+      ],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container.querySelector('[data-testid="msg-summary-g1"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-g1"]')
+        ?.getAttribute('data-timestamp'),
+    ).toBe('1000');
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-g1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1,call-g2');
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-g3"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps visible thinking and tool groups in transcript order', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        toolMsg('g1'),
+        thinkingMsg('t1'),
+        toolMsg('g2'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      { customization: { collapseCompletedTurns: false } },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g2"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('[data-testid^="msg-"]')).map(
+        (element) => element.getAttribute('data-testid'),
+      ),
+    ).toEqual(['msg-u1', 'msg-g1', 'msg-t1', 'msg-g2', 'msg-a1']);
+  });
+
+  it('keeps agent groups on their parallel-agent path', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        thinkingMsg('t1'),
+        agentMsg('agent-2'),
+      ],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(parallelAgentsSummary(container)).not.toBeNull();
+  });
+
+  it.each(['TodoWrite', 'AskUserQuestion'])(
+    'keeps %s groups separate across hidden thinking',
+    (toolName) => {
+      const container = mount(
+        [
+          toolMsg('g1'),
+          thinkingMsg('t1'),
+          standaloneToolMsg('special', toolName),
+        ],
+        undefined,
+        {
+          compactMode: true,
+          customization: { collapseCompletedTurns: false },
+        },
+      );
+
+      expect(
+        container.querySelector('[data-testid="msg-summary-g1"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="msg-special"]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it.each([
+    ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
+    ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
+    ['agent', agentMsg('special')],
+  ])('does not merge a leading %s group with later tools', (_name, special) => {
+    const container = mount(
+      [special, thinkingMsg('t1'), toolMsg('g2')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container.querySelector('[data-testid="msg-special"]'),
+    ).not.toBeNull();
+    // The completed thinking folds into the adjacent tool group, which keeps
+    // the tool while the standalone group stays separate.
+    expect(
+      container
+        .querySelector('[data-testid="msg-special"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-special');
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g2');
+    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
   });
 });
 
@@ -584,7 +801,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('keeps the final answer when active agents are pinned after it', () => {
+  it('keeps latest assistant content when active agents are pinned after it', () => {
     const activeAgent = agentMsg('agent-1');
     activeAgent.tools[0]!.status = 'pending';
     const c = mount([
@@ -594,14 +811,579 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(
-      c
-        .querySelector('[data-testid="msg-a1"]')
-        ?.getAttribute('data-assistant-actions'),
-    ).toBe('true');
+    expect(assistantActions(c, 'a1')).toBe('false');
     click(toggle(c, 'u1'));
     expect(has(c, 'a1')).toBe(true);
     expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('does not mark narration as final before agents are summarized', () => {
+    const activeAgent = agentMsg('agent-1');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      activeAgent,
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    const awaitingSummaryMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ];
+    rerenderMessages(c, awaitingSummaryMessages);
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    rerenderMessages(c, [...awaitingSummaryMessages, asstMsg('summary')]);
+    expect(assistantActions(c, 'a1')).toBe('false');
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps actions suppressed for stale agents until they reconcile terminal', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent, asstMsg('a1')];
+    const c = mount(messages, undefined, {
+      catchingUp: true,
+      isResponding: false,
+    });
+
+    rerenderMessages(c, messages, {
+      catchingUp: false,
+      isResponding: false,
+    });
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    rerenderMessages(
+      c,
+      [userMsg('u1'), agentMsg('agent-1'), agentMsg('agent-2'), asstMsg('a1')],
+      { catchingUp: false, isResponding: false },
+    );
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows final actions for stale agents in a readonly transcript', () => {
+    const staleAgent = agentMsg('agent-1');
+    staleAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), staleAgent, asstMsg('a1')], undefined, {
+      transcriptRenderMode: 'readonly',
+    });
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('keeps final actions for a pending foreground agent in a completed turn', () => {
+    const foregroundAgent = agentMsg('agent-1');
+    foregroundAgent.tools[0]!.status = 'pending';
+    foregroundAgent.tools[0]!.args = {
+      subagent_type: 'explore',
+      run_in_background: false,
+    };
+    const c = mount([userMsg('u1'), foregroundAgent, asstMsg('a1')]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('keeps turn-2 final actions while a turn-1 agent stays pending', () => {
+    const pendingAgent = agentMsg('agent-1');
+    pendingAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      pendingAgent,
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a2')).toBe('true');
+    expect(assistantActions(c, 'a1')).toBe('false');
+  });
+
+  it('releases a delayed sibling footer hold only after a bounded grace', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    // The sibling reconciles terminal before its notification arrives: the
+    // hold stays until the grace expires, in case the notification is merely
+    // delayed.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A late notification still re-hides the narration until the summary.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('restores final actions when a completed sibling notification is lost', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    // The hold survives until the grace expires, in case the sibling
+    // notification is merely delayed; afterwards the lost notification can
+    // no longer hide the final answer.
+    expect(assistantActions(c, 'summary')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('does not restart the unmatched-completion grace for a non-agent notification', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    // The sibling's completion notification is lost: the hold is bounded.
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    // A non-agent notification must not restart the grace timer; the bound
+    // still runs from the agent notification.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+      monitorNotificationMsg('monitor'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps a released footer released for a monitor notification after a catch-up cycle', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    // The second sibling reconciles terminal before its notification arrives;
+    // the hold lasts until the bounded grace expires.
+    const settled = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ];
+    rerenderMessages(c, settled);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A catch-up cycle re-establishes the notification baseline, so the
+    // grace deactivates without any agent notification or turn change.
+    rerenderMessages(c, settled, { catchingUp: true });
+    rerenderMessages(c, settled, { catchingUp: false });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A non-agent notification reactivates the coarse grace afterwards but
+    // cannot change which agents are unmatched, so it must not re-arm the
+    // expired latch and re-hide the already-released footer. The turn stays
+    // released: `undefined` means it even collapsed (the narration row is
+    // folded away), which is the opposite of a re-hide.
+    rerenderMessages(c, [...settled, monitorNotificationMsg('monitor')], {
+      catchingUp: false,
+    });
+    expect(assistantActions(c, 'waiting')).not.toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).not.toBe('false');
+
+    // A genuine new lost-completion episode in the same turn still receives
+    // a full grace window after the catch-up cycle. The model narrates after
+    // launching agent-3, so the turn's final footer is gated again.
+    rerenderMessages(
+      c,
+      [
+        ...settled,
+        monitorNotificationMsg('monitor'),
+        agentMsg('agent-3'),
+        asstMsg('final'),
+      ],
+      { catchingUp: false },
+    );
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(assistantActions(c, 'final')).toBe('true');
+  });
+
+  it('does not consume the unmatched-completion grace while the turn is still streaming', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount(
+      [userMsg('u1'), firstAgent, secondAgent, asstMsg('launched')],
+      undefined,
+      { isResponding: true },
+    );
+
+    // Agent-1 completes mid-response while the model keeps streaming.
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        secondAgentStillActive,
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: true },
+    );
+
+    // Agent-2 reconciles terminal with its notification delayed. isResponding
+    // hides the turn anyway, so streaming past the grace window must not
+    // consume the budget before the hold can actually gate the footer.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: true },
+    );
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    // When streaming ends, the full grace window must still be available.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: false },
+    );
+    expect(assistantActions(c, 'launched')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(assistantActions(c, 'launched')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(assistantActions(c, 'launched')).toBe('true');
+  });
+
+  it('releases the footer after grace when the final narration precedes the notification', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    // The sibling's notification lands after the turn's final narration (the
+    // ordinary placement) and agent-2 reconciles terminal without its own
+    // notification ever arriving.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+    ]);
+    expect(assistantActions(c, 'launched')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    // Grace expiry must release the footer even though the narration
+    // precedes the notification; a truly lost notification cannot hide the
+    // final footer forever.
+    expect(assistantActions(c, 'launched')).toBe('true');
+  });
+
+  it('gives a later lost-completion episode a full grace after an earlier matched hold', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    firstAgent.tools[0]!.status = 'pending';
+    const c = mount(
+      [userMsg('u1'), firstAgent, asstMsg('launched')],
+      undefined,
+      {
+        isResponding: true,
+      },
+    );
+
+    // Agent-1 completes mid-turn and its (matched) notification lands while
+    // the model keeps working: a benign hold arms the grace timer.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: true },
+    );
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+
+    // The model launches agent-2 in the same turn and emits the final
+    // answer; agent-2 is still active, so the footer stays suppressed.
+    const secondAgent = agentMsg('agent-2');
+    secondAgent.tools[0]!.status = 'pending';
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        secondAgent,
+        asstMsg('final'),
+      ],
+      { isResponding: false },
+    );
+    expect(assistantActions(c, 'final')).toBe('false');
+
+    // Agent-2 reconciles terminal but its notification is lost. The genuine
+    // unmatched episode must receive a fresh grace window even though the
+    // benign mid-turn hold already expired the latch.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        agentMsg('agent-2'),
+        asstMsg('final'),
+      ],
+      { isResponding: false },
+    );
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(assistantActions(c, 'final')).toBe('true');
+  });
+
+  it('restarts the unmatched-completion grace when another agent notification lands mid-hold', () => {
+    vi.useFakeTimers();
+    const agents = [
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+    ];
+    for (const agent of agents) {
+      agent.tools[0]!.status = 'pending';
+    }
+    const c = mount([userMsg('u1'), ...agents, asstMsg('launched')]);
+
+    // All three reconcile terminal but only agent-1's notification arrives,
+    // so the hold arms a 5s bound from T0.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(4_000);
+    });
+
+    // Agent-2's notification lands mid-hold while agent-3 stays unmatched;
+    // the bound restarts from the new notification (keep the final narration
+    // after it so the ordering rule does not mask the grace state).
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    // The original bound (T0+5s) has passed; the restarted one still holds.
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(4_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps completed turn actions while the latest turn awaits agents', () => {
+    const activeAgent = agentMsg('agent-2');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      agentMsg('agent-1'),
+      activeAgent,
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(assistantActions(c, 'a2')).toBe('false');
   });
 
   it('keeps an automatically expanded terminal group mounted until its delay expires', () => {
@@ -1450,6 +2232,51 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.textContent).toContain('Processing 3s');
   });
 
+  it('folds streaming thinking into the tool summary while it runs', () => {
+    const c = mount(
+      [
+        userMsg('u1'),
+        { ...thinkingMsg('t1'), isStreaming: true },
+        toolMsg('g1'),
+      ],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // Streaming thinking merges into the group like a running tool.
+    expect(
+      c
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1');
+    expect(c.querySelector('[data-testid="msg-g1"]')).toBeNull();
+  });
+
+  it('folds completed thinking into the merged tool summary in compact mode', () => {
+    const c = mount(
+      [userMsg('u1'), thinkingMsg('t1'), toolMsg('g1'), asstMsg('a1')],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // The thinking and the adjacent tool collapse into one group carrying
+    // the tool; the standalone thinking row is gone.
+    expect(
+      c
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1');
+    expect(c.querySelector('[data-testid="msg-g1"]')).toBeNull();
+  });
+
+  it('does not fold completed thinking without adjacent tools', () => {
+    const c = mount(
+      [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // No adjacent tool group: the thinking stays a standalone row.
+    expect(c.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+  });
+
   it('toggle round-trip reveals then re-hides the step', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     click(toggle(c, 'u1'));
@@ -2136,6 +2963,40 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
   });
 
+  it('loads earlier history after a fast wheel reaches the top', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    await nextFrame();
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 200,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -500 }));
+      list.scrollTop = 0;
+      await Promise.resolve();
+    });
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves the scroll anchor after prepending earlier history', async () => {
     let scrollHeight = 1200;
     let scrollTop = 40;
@@ -2177,9 +3038,218 @@ describe('MessageList — turn collapse (DOM)', () => {
       list.dispatchEvent(new Event('scroll'));
       await Promise.resolve();
     });
+    await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
     expect(scrollTop).toBe(640);
+  });
+
+  it('drops a pending history anchor when the transcript changes', async () => {
+    resizeObserversFireOnObserve = false;
+    const rectSpy = mockMessageListWidth(1000);
+    let scrollHeight = 1200;
+    let scrollTop = 40;
+    const resolveLoads: Array<() => void> = [];
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveLoads.push(resolve);
+        }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+    const render = (messages: Message[]) =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={messages}
+            pendingApproval={null}
+            hasOlderHistory
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+
+    act(() => render([userMsg('old')]));
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(list, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await Promise.resolve();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    scrollHeight = 1300;
+    act(() => render([userMsg('old'), asstMsg('streaming')]));
+    await nextFrame();
+    expect(scrollTop).toBe(40);
+
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+    });
+    await nextFrame();
+
+    scrollHeight = 1800;
+    act(() => render([userMsg('new')]));
+    await nextFrame();
+
+    expect(scrollTop).toBe(40);
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await Promise.resolve();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveLoads[0]?.());
+    await nextFrame();
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await Promise.resolve();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveLoads[1]?.());
+    await nextFrame();
+    rectSpy.mockRestore();
+  });
+
+  it('releases pagination when a virtual anchor never mounts', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const messages = simpleTurns(110);
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+    const render = (nextMessages: Message[]) =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={nextMessages}
+            pendingApproval={null}
+            hasOlderHistory
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+
+    virtualizerTestState.renderItems = false;
+    act(() => render(messages));
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    act(() => {
+      list.dispatchEvent(new Event('scroll'));
+    });
+    for (let frame = 0; frame < 32; frame++) await nextFrame();
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+
+    virtualizerTestState.renderItems = true;
+    act(() => render([...messages]));
+    await nextFrame();
+    expect(
+      container.querySelectorAll('[data-message-row-key]').length,
+    ).toBeGreaterThan(0);
+    list.scrollTop = 0;
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await nextFrame();
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('measures newly prepended virtual rows before they can overlap the anchor', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const currentMessages = simpleTurns(110);
+    const earlierMessages = simpleTurns(3).map((message) => ({
+      ...message,
+      id: `earlier-${message.id}`,
+    }));
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+    const render = (messages: Message[]) =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={messages}
+            pendingApproval={null}
+            hasOlderHistory
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+
+    act(() => render(currentMessages));
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    await nextFrame();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    virtualizerTestState.resizeItem.mockClear();
+    act(() => render([...earlierMessages, ...currentMessages]));
+
+    expect(virtualizerTestState.resizeItem).toHaveBeenCalled();
   });
 
   it('loads earlier history when the transcript does not overflow', async () => {
@@ -2237,6 +3307,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       await Promise.resolve();
     });
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    await nextFrame();
 
     await act(async () => {
       render(true);
@@ -2261,6 +3332,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
       await Promise.resolve();
     });
+    await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
   });
@@ -2301,6 +3373,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
       await Promise.resolve();
     });
+    await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
   });
@@ -2630,6 +3703,99 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
+  it('finishes cooldown following unless the user scrolls up', () => {
+    resizeObserversFireOnObserve = false;
+    let scrollHeight = 1200;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      nextFrameId += 1;
+      frames.set(nextFrameId, callback);
+      return nextFrameId;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((frameId) => {
+      frames.delete(frameId);
+    });
+    const messages = [userMsg('u1'), thinkingMsg('t1')];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const ref = createRef<MessageListHandle>();
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+
+    renderInto(root, messages, ref, {
+      catchingUp: true,
+      isResponding: true,
+    });
+    renderInto(root, messages, ref, {
+      catchingUp: false,
+      isResponding: true,
+    });
+    expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    renderInto(
+      root,
+      [userMsg('u1'), { ...thinkingMsg('t1'), content: 'thinking more' }],
+      ref,
+      {
+        catchingUp: false,
+        isResponding: true,
+      },
+    );
+    expect(scrollTop).toBe(600);
+
+    act(() => {
+      const pendingFrames = [...frames.values()];
+      frames.clear();
+      pendingFrames.forEach((callback) => callback(0));
+    });
+    expect(scrollTop).toBe(1200);
+
+    frames.clear();
+    act(() => ref.current?.scrollToBottom('auto'));
+    scrollHeight = 2400;
+    renderInto(
+      root,
+      [userMsg('u1'), { ...thinkingMsg('t1'), content: 'thinking even more' }],
+      ref,
+      {
+        catchingUp: false,
+        isResponding: true,
+      },
+    );
+    const list = container.querySelector('[data-web-shell-message-list]');
+    act(() => {
+      list?.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, deltaY: -10 }),
+      );
+      scrollTop = 900;
+      list?.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    act(() => {
+      const pendingFrames = [...frames.values()];
+      frames.clear();
+      pendingFrames.forEach((callback) => callback(0));
+    });
+    expect(scrollTop).toBe(900);
+  });
+
   it('does not treat a user_shell row as a new chat prompt', () => {
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
@@ -2663,6 +3829,53 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows branch only for anchored replies and forwards the checkpoint', () => {
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const c = mount(
+      [userMsg('u1'), anchored, userMsg('u2'), asstMsg('unanchored')],
+      undefined,
+      { onBranchSession },
+    );
+
+    expect(c.querySelector('[data-testid="branch-unanchored"]')).toBeNull();
+    click(c.querySelector('[data-testid="branch-anchored"]')!);
+    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
+  });
+
+  it('hides branch actions while a later turn is responding', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const messages = [userMsg('u1'), anchored, userMsg('u2'), asstMsg('live')];
+
+    renderInto(root, messages, undefined, {
+      isResponding: false,
+      onBranchSession,
+    });
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).not.toBeNull();
+
+    renderInto(root, messages, undefined, {
+      isResponding: true,
+      onBranchSession,
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).toBeNull();
   });
 
   it('reports when the user has scrolled away from the bottom', async () => {
@@ -2706,6 +3919,40 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('pauses bottom follow for a small upward wheel during scroll cooldown', async () => {
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const container = mount([asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    const list = container.firstElementChild as HTMLElement;
+
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -8 }));
+      list.scrollTop = 592;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
   });
 
   it('reports no scroll-to-bottom affordance when the list has no scrollbar', async () => {
@@ -2777,6 +4024,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
     await nextFrame();
 
+    expect(scrollTop).toBe(600);
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
   });
 

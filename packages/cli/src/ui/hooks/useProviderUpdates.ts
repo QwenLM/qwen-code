@@ -205,8 +205,9 @@ function findAllPendingUpdates(
     if (!metadata.version) continue;
 
     const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentTemplate = buildProviderTemplate(provider, baseUrl);
-    const currentVersion = computeModelListVersion(currentTemplate);
+    const currentVersion = computeModelListVersion(
+      buildProviderTemplate(provider, baseUrl),
+    );
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
@@ -255,9 +256,10 @@ export function useProviderUpdates(
   const migrated = useRef(false);
 
   const executeUpdate = useCallback(
-    async (providerCfg: ProviderConfig, baseUrl?: string) => {
+    async (pending: PendingUpdate) => {
       try {
-        const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        const providerCfg = pending.provider;
+        const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
@@ -270,7 +272,12 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
+        installPlan.providerState![
+          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+        ]!['version'] = pending.currentVersion;
         delete installPlan.env;
+        // Template updates never change the selected model.
+        delete installPlan.modelSelection;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
@@ -280,14 +287,6 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
-        );
-        // Only the active provider may migrate model selection.
-        if (!updatesActiveProvider || previousModelStillAvailable) {
-          delete installPlan.modelSelection;
-        }
         const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
@@ -386,7 +385,7 @@ export function useProviderUpdates(
         setUpdateRequest(undefined);
         if (choice === 'update') {
           for (const p of pendingList) {
-            await executeUpdate(p.provider, p.baseUrl);
+            await executeUpdate(p);
           }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);

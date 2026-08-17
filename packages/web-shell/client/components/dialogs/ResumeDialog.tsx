@@ -25,6 +25,7 @@ export function ResumeDialog({
   const connection = useConnection();
   const { sessions, loading, error } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
+    maxAgeMs: 1_000,
   });
   const currentSessionId = connection.sessionId;
   // -1 = no highlight. The dialog opens with nothing highlighted and resets to

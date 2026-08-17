@@ -11,12 +11,14 @@ const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
+const repoRoot = path.resolve(packageDir, '../..');
 const executable = process.argv[2];
 if (!executable)
   throw new Error('Usage: node scripts/smoke-packaged.js <executable>');
 if (!fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
   throw new Error(`Packaged executable is missing: ${executable}`);
 }
+verifyMacRuntimeCommit();
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-desktop-smoke-'));
 const isolatedHome = path.join(workspace, 'home');
@@ -206,5 +208,25 @@ function terminate(pid) {
     }
   } catch {
     // The process may already have exited after the smoke succeeded or failed.
+  }
+}
+
+function verifyMacRuntimeCommit() {
+  if (process.platform !== 'darwin') return;
+  const manifestPath = path.resolve(
+    path.dirname(executable),
+    '../Resources/runtime/qwen-code/manifest.json',
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const expected =
+    process.env.QWEN_CODE_COMMIT ||
+    execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.env.QWEN_CODE_ROOT || repoRoot,
+      encoding: 'utf8',
+    }).trim();
+  if (manifest.qwenCodeCommit !== expected) {
+    throw new Error(
+      `Packaged runtime commit mismatch: expected ${expected}, found ${manifest.qwenCodeCommit || 'missing'}`,
+    );
   }
 }

@@ -1519,6 +1519,9 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toBe(
         'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
       );
+      expect(channel.inboundEnvelopes[0]!.displayText).toBe(
+        'Review requested: feat: divide',
+      );
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'For review_requested, return a formal review summary',
       );
@@ -1654,6 +1657,7 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         isMentioned: true,
         text: 'Triage this issue and respond with the next action.',
+        displayText: 'Issue assigned: broken build',
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
@@ -1702,6 +1706,9 @@ describe('GithubChannel', () => {
         );
         expect(channel.inboundEnvelopes[0]!.text).toContain('@alice: first');
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
+        expect(channel.inboundEnvelopes[0]!.displayText).toBe(
+          '- @alice: first\n- @bob: second',
+        );
       },
     );
 
@@ -2047,6 +2054,60 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('a'.repeat(401));
       expect(channel.inboundEnvelopes[0]!.text).toContain('latest');
+    });
+
+    it('sanitizes crafted comment bodies in the aggregate display projection', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            body: 'line one\u202e hidden\u200b\u0007\r\nline two [BUG] kept',
+          }),
+        ]);
+
+      await pollOnce();
+
+      const displayText = channel.inboundEnvelopes[0]!.displayText!;
+      // eslint-disable-next-line no-control-regex
+      const craftedChars = /[\u202a-\u202e\u2066-\u2069\u200b\u0007\r]/;
+      expect(displayText).not.toMatch(craftedChars);
+      // Newlines and brackets are display content and must survive.
+      expect(displayText).toContain('line one');
+      expect(displayText).toContain('\nline two [BUG] kept');
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        displayText.slice('- @alice: '.length),
+      );
+    });
+
+    it('truncates aggregated comments on code-point boundaries', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          // 399 ASCII + one 2-unit emoji + tail: a UTF-16 slice(0, 400) would
+          // land mid-surrogate-pair and leave a lone surrogate behind.
+          makeComment({ body: 'a'.repeat(399) + '\ud83c\udf89' + 'tail' }),
+        ]);
+
+      await pollOnce();
+
+      const displayText = channel.inboundEnvelopes[0]!.displayText!;
+      expect(displayText).toContain('a'.repeat(399) + '\ud83c\udf89');
+      expect(displayText).not.toContain('tail');
+      expect(displayText).not.toMatch(
+        /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+      );
     });
 
     it('records aggregated comments that exceed the summary cap', async () => {
