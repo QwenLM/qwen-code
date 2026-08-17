@@ -15,6 +15,7 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
+  DaemonSessionMediaReference,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
@@ -39,6 +40,7 @@ import type {
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SessionMetadataResult,
   SetModelResult,
@@ -148,7 +150,11 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Restart the SSE event stream after each accepted prompt. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. A stream that
+   * is already down is always rebuilt immediately on prompt admission,
+   * regardless of this flag.
+   */
   restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
@@ -440,14 +446,25 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  uploadMedia(
+    image: DaemonPromptImage,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonSessionMediaReference>;
+  removeMedia(mediaId: string, opts?: { sessionId?: string }): Promise<boolean>;
   /**
    * Queue a message typed while a turn is running. Calls without an id support
    * old daemons and are best-effort; calls with a stable `messageId` may reject
-   * on an ambiguous transport failure so the caller can reconcile.
+   * on an ambiguous transport failure so the caller can reconcile. `content`
+   * carries image blocks — pre-flight the daemon's
+   * `session_media` capability before attaching them.
    */
   enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal; messageId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
     messageId: string,
