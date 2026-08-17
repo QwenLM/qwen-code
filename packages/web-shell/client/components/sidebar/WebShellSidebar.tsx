@@ -567,36 +567,6 @@ function SessionMenu({
   );
 }
 
-// React fires no blur when a focused input unmounts (a poll re-sort or
-// preview slice removing the edited row), so the rename editor cancels on
-// unmount; otherwise its stale draft remounts when the row returns.
-function CancelOnUnmount({
-  onCancel,
-  children,
-}: {
-  onCancel: () => void;
-  children: ReactNode;
-}) {
-  const cancelRef = useRef(onCancel);
-  cancelRef.current = onCancel;
-  const pendingCancelRef = useRef<number | undefined>(undefined);
-  useEffect(() => {
-    // StrictMode replays setup -> cleanup -> setup at mount; defer the cancel
-    // so the replay's re-setup clears it and only a real unmount cancels.
-    if (pendingCancelRef.current !== undefined) {
-      window.clearTimeout(pendingCancelRef.current);
-      pendingCancelRef.current = undefined;
-    }
-    return () => {
-      pendingCancelRef.current = window.setTimeout(() => {
-        pendingCancelRef.current = undefined;
-        cancelRef.current();
-      }, 0);
-    };
-  }, []);
-  return children;
-}
-
 function SidebarSessionSurface({
   collapsed,
   label,
@@ -2156,15 +2126,6 @@ export function WebShellSidebar({
     editingSessionIdentityRef.current = null;
     setEditingName('');
   }, []);
-  const cancelRenameIfEditing = useCallback(
-    (sessionIdentity: string) => {
-      if (editingSessionIdentityRef.current === sessionIdentity) {
-        cancelRename();
-      }
-    },
-    [cancelRename],
-  );
-
   useEffect(() => {
     if (editingSession && !canRenameSession(editingSession)) {
       cancelRename();
@@ -3406,32 +3367,28 @@ export function WebShellSidebar({
             }
           >
             {isEditing ? (
-              <CancelOnUnmount
-                onCancel={() => cancelRenameIfEditing(sessionIdentity)}
+              <form
+                className={styles.renameForm}
+                onKeyDown={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  saveRename();
+                }}
               >
-                <form
-                  className={styles.renameForm}
-                  onKeyDown={(event) => event.stopPropagation()}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    saveRename();
+                <input
+                  autoFocus
+                  aria-label={`${t('sidebar.rename')}: ${label}`}
+                  className={styles.renameInput}
+                  maxLength={256}
+                  value={editingName}
+                  onChange={(event) => setEditingName(event.target.value)}
+                  onBlur={cancelRename}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') cancelRename();
                   }}
-                >
-                  <input
-                    autoFocus
-                    aria-label={`${t('sidebar.rename')}: ${label}`}
-                    className={styles.renameInput}
-                    maxLength={256}
-                    value={editingName}
-                    onChange={(event) => setEditingName(event.target.value)}
-                    onBlur={cancelRename}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') cancelRename();
-                    }}
-                  />
-                </form>
-              </CancelOnUnmount>
+                />
+              </form>
             ) : (
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
@@ -3561,36 +3518,32 @@ export function WebShellSidebar({
             ) : null}
           </span>
           {isEditing && canRenameSession(session) ? (
-            <CancelOnUnmount
-              onCancel={() => cancelRenameIfEditing(sessionIdentity)}
+            <form
+              className={styles.renameForm}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveRename();
+              }}
             >
-              <form
-                className={styles.renameForm}
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={(event) => event.stopPropagation()}
-                onDoubleClick={(event) => event.stopPropagation()}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  saveRename();
+              <input
+                autoFocus
+                aria-label={`${t('sidebar.rename')}: ${label}`}
+                className={styles.renameInput}
+                maxLength={256}
+                value={editingName}
+                onChange={(event) => setEditingName(event.target.value)}
+                onBlur={cancelRename}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    cancelRename();
+                  }
                 }}
-              >
-                <input
-                  autoFocus
-                  aria-label={`${t('sidebar.rename')}: ${label}`}
-                  className={styles.renameInput}
-                  maxLength={256}
-                  value={editingName}
-                  onChange={(event) => setEditingName(event.target.value)}
-                  onBlur={cancelRename}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      cancelRename();
-                    }
-                  }}
-                />
-              </form>
-            </CancelOnUnmount>
+              />
+            </form>
           ) : (
             <>
               <span className={styles.sessionText} data-web-shell-session-title>
@@ -3845,7 +3798,6 @@ export function WebShellSidebar({
       canUnarchiveSession,
       canMutateSessionArchive,
       cancelRename,
-      cancelRenameIfEditing,
       completedUnreadIds,
       editingName,
       editingSessionIdentity,

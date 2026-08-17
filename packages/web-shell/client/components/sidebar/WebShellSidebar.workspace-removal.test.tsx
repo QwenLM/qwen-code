@@ -4254,62 +4254,6 @@ describe('WebShellSidebar session list notices', () => {
     expect(container.textContent).toContain('Preview session 6');
   });
 
-  it('cancels the rename editor when its row slides out of the preview slice', async () => {
-    active.sessions = Array.from({ length: 6 }, (_, index) => ({
-      sessionId: `session-${index + 1}`,
-      displayName: `Preview session ${index + 1}`,
-      workspaceCwd: '/tmp/project',
-    }));
-
-    renderSidebar({
-      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
-    });
-    await ensureWorkspaceExpanded('project');
-    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
-
-    await act(async () => {
-      click(inlineSessionAction('Preview session 5', 'Rename')!);
-      await Promise.resolve();
-    });
-    const input = container.querySelector<HTMLInputElement>('input');
-    expect(input).not.toBeNull();
-    await act(async () => {
-      setInputValue(input!, 'Renaming five');
-      await Promise.resolve();
-    });
-
-    // A poll inserts a fresh session ahead of the edited row, pushing it
-    // past the preview limit so its row unmounts mid-edit.
-    active.sessions = [
-      {
-        sessionId: 'session-fresh',
-        displayName: 'A fresh session',
-        workspaceCwd: '/tmp/project',
-      },
-      ...active.sessions,
-    ];
-    renderSidebar({
-      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).not.toContain('Preview session 5');
-    expect(container.querySelector('form[class*="renameForm"]')).toBeNull();
-
-    const showAll = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button'),
-    ).find((button) => button.textContent === 'Show all');
-    expect(showAll).toBeDefined();
-    act(() => click(showAll!));
-
-    // The row returns as plain text; a stale editor must not remount with
-    // its abandoned draft and steal focus.
-    expect(container.textContent).toContain('Preview session 5');
-    expect(container.querySelector('form[class*="renameForm"]')).toBeNull();
-  });
-
   it('keeps a settled filtered-empty view while a refresh is in flight', async () => {
     active.sessions = [
       {
