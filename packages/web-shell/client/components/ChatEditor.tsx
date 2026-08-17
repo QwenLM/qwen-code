@@ -172,7 +172,6 @@ interface ChatEditorProps {
   cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
-  animatePlaceholder?: boolean;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
@@ -1412,7 +1411,6 @@ export const ChatEditor = memo(
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
-      animatePlaceholder = true,
       commands,
       skills = [],
       slashCommandCategoryOrder,
@@ -1846,7 +1844,6 @@ export const ChatEditor = memo(
     const hasSlashMenu = Boolean(slashMenu);
     const hasAtMenu = Boolean(atMenu);
     const showTypewriterPlaceholder =
-      animatePlaceholder &&
       !disabled &&
       Boolean(placeholderText) &&
       !core.hasInput() &&

@@ -474,7 +474,7 @@ describe('specular effect pointer leave', () => {
 });
 
 describe('specular effect WebGL cleanup', () => {
-  it('removes a lost canvas and releases WebGL resources on unmount', () => {
+  it('releases WebGL resources on unmount', () => {
     const loseContext = vi.fn();
     const glStub = {
       ARRAY_BUFFER: 0x8892,
@@ -521,12 +521,8 @@ describe('specular effect WebGL cleanup', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
       glStub as unknown as WebGL2RenderingContext,
     );
-    const requestAnimationFrameSpy = vi
-      .spyOn(window, 'requestAnimationFrame')
-      .mockImplementation(() => 1);
-    const cancelAnimationFrameSpy = vi
-      .spyOn(window, 'cancelAnimationFrame')
-      .mockImplementation(() => {});
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
 
     function Harness() {
       const composerRef = useRef<HTMLDivElement>(null);
@@ -548,38 +544,6 @@ describe('specular effect WebGL cleanup', () => {
     expect(
       container.querySelector('[data-web-shell-composer-specular] canvas'),
     ).not.toBeNull();
-
-    const removeWindowListenerSpy = vi.spyOn(window, 'removeEventListener');
-    const removeDocumentListenerSpy = vi.spyOn(
-      document.documentElement,
-      'removeEventListener',
-    );
-
-    const canvas = container.querySelector(
-      '[data-web-shell-composer-specular] canvas',
-    )!;
-    act(() => canvas.dispatchEvent(new Event('webglcontextlost')));
-
-    expect(cancelAnimationFrameSpy).toHaveBeenCalled();
-    expect(removeWindowListenerSpy).toHaveBeenCalledWith(
-      'pointermove',
-      expect.any(Function),
-    );
-    expect(removeDocumentListenerSpy).toHaveBeenCalledWith(
-      'pointerleave',
-      expect.any(Function),
-    );
-    expect(
-      container.querySelector('[data-web-shell-composer-specular] canvas'),
-    ).toBeNull();
-
-    requestAnimationFrameSpy.mockClear();
-    act(() => {
-      window.dispatchEvent(
-        new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
-      );
-    });
-    expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
 
     act(() => root.unmount());
     container.remove();

@@ -351,7 +351,6 @@ interface ChatEditorRenderProps {
   contextWindow?: number;
   onShowContextUsage?: () => void;
   placeholderText?: string;
-  animatePlaceholder?: boolean;
   disabled?: boolean;
   atWorkspaceCwd?: string;
   sessionId?: string;
@@ -640,18 +639,6 @@ describe('ChatEditor animation layers', () => {
 
   it('does not mount the typewriter for an empty placeholder', () => {
     const container = renderChatEditor({ placeholderText: '' });
-
-    expect(
-      container.querySelector('[data-web-shell-composer-typewriter]'),
-    ).toBeNull();
-    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
-  });
-
-  it('does not mount the typewriter when placeholder animation is disabled', () => {
-    const container = renderChatEditor({
-      placeholderText: 'abc',
-      animatePlaceholder: false,
-    });
 
     expect(
       container.querySelector('[data-web-shell-composer-typewriter]'),
