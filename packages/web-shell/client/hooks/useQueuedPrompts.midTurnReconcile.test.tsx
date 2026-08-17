@@ -1095,7 +1095,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('restores a rejected stable-id admission after returning to its workspace', async () => {
+  it('cleans up a rejected stable-id admission after switching workspaces', async () => {
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
       | undefined;
@@ -1122,17 +1122,17 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await Promise.resolve();
       });
 
+      expect(harness.editor.setText).toHaveBeenCalledWith(
+        'rejected in workspace-a',
+      );
+      expect(harness.reportError).toHaveBeenCalledTimes(1);
+
       await harness.render({
         streamingState: 'responding',
         workspaceCwd: '/workspace-a',
       });
 
-      expect(harness.result().queuedPrompts).toEqual([
-        expect.objectContaining({
-          text: 'rejected in workspace-a',
-          admissionOutcome: 'unknown',
-        }),
-      ]);
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
@@ -1406,7 +1406,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('restores text when a failed enqueue is absent from the reconciliation snapshot', async () => {
+  it('keeps an ambiguous enqueue when the first reconciliation snapshot is empty', async () => {
     const onComplete = vi.fn();
     let failedId: string | undefined;
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
@@ -1439,16 +1439,22 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         });
       }
 
-      // The daemon never saw the message: hand the text back for a retry.
-      expect(harness.editor.setText).toHaveBeenCalledWith('lost in transit');
-      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith('media-1', {
-        sessionId: 'session-a',
-      });
+      // An empty snapshot cannot prove that the timed-out POST will not land
+      // after this read. Keep both the stable admission and its uploaded media
+      // until a later snapshot settles the id.
+      expect(harness.editor.setText).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeMedia).not.toHaveBeenCalled();
       expect(harness.reportError).toHaveBeenCalledTimes(1);
       expect(onComplete).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'lost in transit',
+          midTurnMessageId: failedId,
+          admissionOutcome: 'unknown',
+        }),
+      ]);
 
-      // The catch path also deregistered the callback: a later snapshot
-      // settling the id must not fire it.
+      // A later authoritative snapshot settles the retained admission once.
       sdkMock.actions.getMidTurnMessages.mockResolvedValue({
         messages: [],
         settledMessageIds: [failedId],
@@ -1461,7 +1467,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           await Promise.resolve();
         });
       }
-      expect(onComplete).not.toHaveBeenCalled();
+      expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
       await harness.dispose();
     }

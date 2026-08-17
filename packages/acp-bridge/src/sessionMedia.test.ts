@@ -8,13 +8,28 @@ import { promises as fs } from 'node:fs';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  SESSION_MEDIA_UNAVAILABLE_TEXT,
   SESSION_MEDIA_MAX_ITEM_BYTES,
   SESSION_MEDIA_MAX_ITEMS,
   SESSION_MEDIA_MAX_TOTAL_BYTES,
   SessionMediaStore,
+  withMediaDegradationMarker,
 } from './sessionMedia.js';
 
 describe('SessionMediaStore', () => {
+  it('does not append the media degradation marker twice', () => {
+    const once = withMediaDegradationMarker([
+      { type: 'text', text: 'look at this' },
+    ]);
+
+    expect(withMediaDegradationMarker(once)).toEqual([
+      {
+        type: 'text',
+        text: `look at this\n${SESSION_MEDIA_UNAVAILABLE_TEXT}`,
+      },
+    ]);
+  });
+
   it('stores bytes by reference and resolves them only at dispatch', async () => {
     const store = new SessionMediaStore();
     try {

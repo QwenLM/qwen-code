@@ -1379,14 +1379,25 @@ export function useQueuedPrompts({
             if (!result.accepted) {
               await removeUploadedMedia();
               completionCallbacksRef.current.delete(midTurnMessageId);
+              const pendingAdmissionStillOwned =
+                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               if (
                 latestSessionIdRef.current !== targetSessionId ||
                 latestWorkspaceCwdRef.current !== targetWorkspaceCwd
               ) {
+                if (pendingAdmissionStillOwned) {
+                  restoreQueuedPromptsToEditor(
+                    [pendingAdmission],
+                    undefined,
+                    true,
+                  );
+                  reportError(
+                    new Error('Daemon rejected mid-turn message'),
+                    t('queue.queueFailed'),
+                  );
+                }
                 return;
               }
-              const pendingAdmissionStillOwned =
-                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               if (!pendingAdmissionStillOwned) return;
               const next = queuedPromptsRef.current.filter(
                 (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
@@ -1496,35 +1507,28 @@ export function useQueuedPrompts({
               reportError(error, t('queue.admissionUnknown'));
               return;
             }
-            const pendingAdmissionStillOwned =
-              pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
             const known =
               snapshot.messages.some(
                 (message) => message.messageId === midTurnMessageId,
               ) ||
               snapshot.settledMessageIds.includes(midTurnMessageId) ||
               snapshot.promotedMessageIds.includes(midTurnMessageId);
-            if (known || !pendingAdmissionStillOwned) return;
-            await removeUploadedMedia();
-            completionCallbacksRef.current.delete(midTurnMessageId);
-            const next = queuedPromptsRef.current.filter(
-              (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
+            if (known) return;
+            if (!pendingMidTurnAdmissionsRef.current.has(midTurnMessageId)) {
+              return;
+            }
+            const next = queuedPromptsRef.current.map((prompt) =>
+              prompt.midTurnMessageId === midTurnMessageId
+                ? {
+                    ...prompt,
+                    midTurnState: undefined,
+                    admissionOutcome: 'unknown' as const,
+                  }
+                : prompt,
             );
             queuedPromptsRef.current = next;
             setQueuedPrompts(next);
-            restoreQueuedPromptsToEditor(
-              [
-                {
-                  id: nextQueuedPromptIdRef.current++,
-                  sessionId: targetSessionId,
-                  text: trimmed,
-                  images: images ? [...images] : undefined,
-                  payloadCompleteness: 'complete',
-                },
-              ],
-              targetSessionId,
-            );
-            reportError(error, t('queue.queueFailed'));
+            reportError(error, t('queue.admissionUnknown'));
           });
         return true;
       }

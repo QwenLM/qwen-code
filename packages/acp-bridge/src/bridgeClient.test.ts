@@ -3478,35 +3478,28 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(publish).toHaveBeenCalledOnce();
   });
 
-  it('bounds aggregate resolved media per drain batch and degrades the excess', async () => {
-    // Admission dedupes a mediaId only within ONE message: the same stored
-    // blob referenced from every queued message used to be re-serialized
-    // into each message's content at drain, amplifying the bounded store
-    // into gigabytes of response. The drain must budget the aggregate
-    // resolved bytes across the batch and degrade the excess references.
-    const publish = vi.fn().mockReturnValue(true);
+  it('drains every valid media reference even when their total exceeds 16 MiB', async () => {
     const media = new SessionMediaStore();
     try {
-      const blob = new Uint8Array(SESSION_MEDIA_MAX_ITEM_BYTES).fill(7);
+      const large = new Uint8Array(SESSION_MEDIA_MAX_ITEM_BYTES);
       const refs = [
-        await media.put(blob, 'image/png'),
-        await media.put(blob, 'image/png'),
-        await media.put(blob, 'image/png'),
+        await media.put(large, 'image/png'),
+        await media.put(large, 'image/png'),
+        await media.put(Uint8Array.of(1), 'image/png'),
       ];
       const entry = {
-        sessionId: 'sess:budget',
+        sessionId: 'sess:large-drain',
         midTurnMessageQueue: [
-          { messageId: 'mid-a', text: 'a', content: [...refs] },
-          { messageId: 'mid-b', text: 'b', content: [...refs] },
+          { messageId: 'mid-large', text: 'all images', content: refs },
         ],
         settledMidTurnMessageIds: [] as string[],
-        events: { publish },
+        events: { publish: vi.fn().mockReturnValue(true) },
         media,
       };
-      const client = makeClientWithEntry('sess:budget', entry);
+      const client = makeClientWithEntry('sess:large-drain', entry);
 
       const result = (await client.extMethod('craft/drainMidTurnQueue', {
-        sessionId: 'sess:budget',
+        sessionId: 'sess:large-drain',
       })) as {
         items: Array<{
           content: Array<Record<string, unknown>>;
@@ -3514,27 +3507,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         }>;
       };
 
-      const [itemA, itemB] = result.items;
-      // Two 8 MiB references fit the 16 MiB drain budget; the third
-      // degrades to the marker (merged into the message text) while its
-      // fitting siblings survive.
-      expect(itemA?.content.filter((b) => b['type'] === 'image')).toHaveLength(
-        2,
-      );
-      expect(itemA?.content[0]).toEqual({
-        type: 'text',
-        text: 'a\n[Attached media is no longer available]',
-      });
-      expect(itemA?.mediaReferences).toEqual(refs.slice(0, 2));
-      // The second message arrives after the budget is spent: all of its
-      // references degrade.
-      expect(itemB?.content).toEqual([
-        {
-          type: 'text',
-          text: 'b\n[Attached media is no longer available]',
-        },
-      ]);
-      expect(itemB?.mediaReferences).toBeUndefined();
+      expect(
+        result.items[0]?.content.filter((block) => block['type'] === 'image'),
+      ).toHaveLength(3);
+      expect(result.items[0]?.mediaReferences).toEqual(refs);
     } finally {
       await media.close();
     }
@@ -3885,6 +3861,34 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     );
     const result = await client.extMethod('craft/drainMidTurnQueue', {});
     expect(result).toEqual({ messages: [], items: [], hasQueuedPrompt: false });
+  });
+
+  it('does not drain a session not owned by this channel', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'sess:other-channel',
+      midTurnMessageQueue: [{ messageId: 'mid-1', text: 'private message' }],
+      settledMidTurnMessageIds: [] as string[],
+      events: { publish },
+    };
+    const client = makeClientWithEntry(
+      'sess:other-channel',
+      entry,
+      () => false,
+    );
+
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:other-channel',
+      }),
+    ).resolves.toEqual({
+      messages: [],
+      items: [],
+      hasQueuedPrompt: false,
+    });
+    expect(entry.midTurnMessageQueue).toHaveLength(1);
+    expect(entry.settledMidTurnMessageIds).toEqual([]);
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('reports only complete, non-aborted queued prompts', async () => {

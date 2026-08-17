@@ -502,22 +502,21 @@ export class DaemonSessionClient {
     mimeType: string,
     signal?: AbortSignal,
   ): Promise<DaemonSessionMediaReference> {
-    return await this.client.uploadSessionMedia(
-      this.sessionId,
-      data,
-      mimeType,
-      {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.uploadSessionMedia(this.sessionId, data, mimeType, {
         ...(signal ? { signal } : {}),
         ...(this.clientId ? { clientId: this.clientId } : {}),
-      },
+      }),
     );
   }
 
   async removeMedia(mediaId: string): Promise<boolean> {
-    const removed = await this.client.removeSessionMedia(
-      this.sessionId,
-      mediaId,
-      this.clientId ? { clientId: this.clientId } : undefined,
+    const removed = await this.withClientIdSelfHeal(() =>
+      this.client.removeSessionMedia(
+        this.sessionId,
+        mediaId,
+        this.clientId ? { clientId: this.clientId } : undefined,
+      ),
     );
     if (removed) {
       const cached = this.mediaCache.get(mediaId);
@@ -1123,12 +1122,10 @@ export class DaemonSessionClient {
       this.mediaCache.delete(block.mediaId);
       this.mediaCache.set(block.mediaId, cached);
     } else {
-      const pending = this.client.readSessionMedia(
-        this.sessionId,
-        block.mediaId,
-        {
+      const pending = this.withClientIdSelfHeal(() =>
+        this.client.readSessionMedia(this.sessionId, block.mediaId, {
           ...(this.clientId ? { clientId: this.clientId } : {}),
-        },
+        }),
       );
       cached = { pending, size: block.size };
       this.mediaCache.set(block.mediaId, cached);

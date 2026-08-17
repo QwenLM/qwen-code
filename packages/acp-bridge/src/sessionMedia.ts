@@ -13,12 +13,6 @@ import type { ContentBlock } from '@agentclientprotocol/sdk';
 export const SESSION_MEDIA_MAX_ITEM_BYTES = 8 * 1024 * 1024;
 export const SESSION_MEDIA_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 export const SESSION_MEDIA_MAX_ITEMS = 256;
-// One drain re-serializes the resolved base64 of every referenced blob into
-// each queued message's content, so a shared blob fans out once per message.
-// Budget the aggregate resolved bytes per drain batch at the transcript page
-// budget's order of magnitude; references over budget degrade to the
-// unavailable marker instead of materializing gigabytes from a bounded store.
-export const SESSION_MEDIA_MAX_DRAIN_BYTES = 16 * 1024 * 1024;
 
 // Text the degrade paths substitute for media the model will not receive. The
 // SDK's DaemonSessionClient.hydrateBlock and the web shell's degradation
@@ -73,6 +67,9 @@ export function withMediaDegradationMarker<
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
     if (block.type === 'text') {
+      if (block.text.endsWith(SESSION_MEDIA_UNAVAILABLE_TEXT)) {
+        return [...blocks];
+      }
       const next = [...blocks];
       next[i] = {
         type: 'text',

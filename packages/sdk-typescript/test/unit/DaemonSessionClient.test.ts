@@ -2667,6 +2667,85 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(resumeReq?.body).toBe(JSON.stringify({ cwd: '/work/a' }));
   });
 
+  it('re-registers and retries media upload, removal, and hydration', async () => {
+    let resumeCalls = 0;
+    const attempts = new Map<string, number>();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls += 1;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: `client-${resumeCalls + 1}`,
+          state: {},
+        });
+      }
+      const operation = `${req.method} ${new URL(req.url).pathname}`;
+      const attempt = (attempts.get(operation) ?? 0) + 1;
+      attempts.set(operation, attempt);
+      if (attempt === 1) return invalidClientIdResponse();
+      if (req.method === 'POST') {
+        return jsonResponse(201, {
+          type: 'image',
+          mediaId: 'media-uploaded',
+          mimeType: 'image/png',
+          size: 3,
+        });
+      }
+      if (req.method === 'DELETE') {
+        return jsonResponse(200, { removed: true });
+      }
+      if (req.method === 'GET') {
+        return new Response(Uint8Array.of(1, 2, 3), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+
+    await expect(
+      session.uploadMedia(new Blob([Uint8Array.of(1, 2, 3)]), 'image/png'),
+    ).resolves.toMatchObject({ mediaId: 'media-uploaded' });
+    await expect(session.removeMedia('media-uploaded')).resolves.toBe(true);
+    const hydrateBlock = (
+      session as unknown as {
+        hydrateBlock(block: unknown): Promise<unknown>;
+      }
+    ).hydrateBlock.bind(session);
+    await expect(
+      hydrateBlock({
+        type: 'image',
+        mediaId: 'media-read',
+        mimeType: 'image/png',
+        size: 3,
+      }),
+    ).resolves.toEqual({
+      type: 'image',
+      data: 'AQID',
+      mimeType: 'image/png',
+    });
+
+    expect(resumeCalls).toBe(3);
+    expect(session.clientId).toBe('client-4');
+    expect(
+      calls
+        .filter((call) => !call.url.endsWith('/resume'))
+        .map((call) => call.headers['x-qwen-client-id']),
+    ).toEqual([
+      'client-1',
+      'client-2',
+      'client-2',
+      'client-3',
+      'client-3',
+      'client-4',
+    ]);
+  });
+
   it('re-registers and retries once on the non-blocking prompt path', async () => {
     let promptCalls = 0;
     let resumeCalls = 0;

@@ -87,7 +87,6 @@ import type {
 import {
   isSessionMediaReference,
   SessionMediaReferenceError,
-  SESSION_MEDIA_MAX_DRAIN_BYTES,
   withMediaDegradationMarker,
   type SessionMediaReference,
   type SessionMediaStore,
@@ -1240,6 +1239,9 @@ export class BridgeClient implements Client {
     // multi-session channel (and `resolveEntry(undefined)` would throw there),
     // so answer with an empty drain rather than poisoning the turn.
     if (!sessionId) return { messages: [], items: [], hasQueuedPrompt: false };
+    if (!this.ownsSession(sessionId)) {
+      return { messages: [], items: [], hasQueuedPrompt: false };
+    }
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [], items: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
@@ -1264,13 +1266,6 @@ export class BridgeClient implements Client {
     // several queued messages reference is read and base64-encoded once
     // instead of once per message.
     const mediaMemo = new Map<string, Promise<ContentBlock>>();
-    // Admission dedupes a mediaId only WITHIN one message, so one stored blob
-    // can be referenced once per queued message and the drain re-serializes
-    // its base64 into every referencing message's content — unbounded
-    // amplification of the bounded store. Budget the aggregate resolved bytes
-    // across the batch in queue order; references over budget degrade to the
-    // unavailable marker instead of materializing on the wire.
-    let drainMediaBudget = SESSION_MEDIA_MAX_DRAIN_BYTES;
     const items: Array<{
       messageId: string;
       displayText: string;
@@ -1279,18 +1274,9 @@ export class BridgeClient implements Client {
     }> = [];
     try {
       for (const item of drained) {
-        const planned: Array<ContentBlock | SessionMediaReference> = [];
+        const planned: Array<ContentBlock | SessionMediaReference> =
+          item.content ?? [];
         let degraded = 0;
-        for (const block of item.content ?? []) {
-          if (isSessionMediaReference(block)) {
-            if (block.size > drainMediaBudget) {
-              degraded += 1;
-              continue;
-            }
-            drainMediaBudget -= block.size;
-          }
-          planned.push(block);
-        }
         let resolvedBlocks: ContentBlock[];
         let mediaReferences: SessionMediaReference[];
         try {
