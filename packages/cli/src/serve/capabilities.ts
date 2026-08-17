@@ -52,6 +52,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  // Prompts and mid-turn messages support session-scoped media uploaded once
+  // and referenced by `mediaId`. The bridge resolves bytes only when ACP input
+  // is dispatched, keeping base64 out of JSON and SSE payloads.
+  session_media: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
   // `GET /session/:id/mid-turn-messages` returns the messages still waiting
@@ -385,6 +389,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // This remains independent from active export so older daemons cannot ignore
   // archive intent and return an active transcript with the same session id.
   workspace_archived_session_export: { since: 'v1' },
+  // Workspace-qualified, memory-only session live-state snapshot plus the
+  // in-memory catalog version token
+  // (`GET /workspaces/:workspace/sessions/live-state`). Independent from
+  // `workspace_qualified_rest_core`: released daemons can advertise that tag
+  // without implementing this route, so clients must pre-flight it directly.
+  // The route stays subject to the per-workspace trust check even when the
+  // tag is advertised.
+  workspace_session_live_state: { since: 'v1' },
+  // Workspace-qualified metadata updates for active, inactive, and archived
+  // persisted sessions.
+  workspace_session_metadata: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

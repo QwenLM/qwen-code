@@ -49,6 +49,86 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     ['Main.java', true],
     ['src/main/kotlin/Main.kt', false],
     ['docs/notes.java.md', false],
+    ['scripts/build.sh', true],
+    ['tools/release.bash', true],
+    // pathTool routes .ksh/.dash to shellcheck, so the lane syllabus is owed
+    // to the same files; the rest pin every remaining extension alternative.
+    ['scripts/deploy.ksh', true],
+    ['tools/setup.dash', true],
+    ['scripts/win/setup.ps1', true],
+    ['ci/cleanup.zsh', true],
+    ['tools/win/build.bat', true],
+    ['tools/win/setup.cmd', true],
+    ['.github/scripts/label-pr.mjs', true],
+    // py/rb/pl are matched by no lane branch of their own — they reach the
+    // lane syllabus only through the rule's composition with the
+    // GITHUB_ACTIONS arm; these rows pin each spelling of the filter.
+    ['.github/scripts/triage.py', true],
+    ['.github/scripts/hook.rb', true],
+    ['.github/scripts/tool.pl', true],
+    // The node spellings the script arm admits that no lane arm rescues:
+    // js pins the bare [cm]? form, cjs the c-branch, tsx the x-suffix.
+    ['.github/scripts/helper.js', true],
+    ['.github/scripts/helper.cjs', true],
+    ['.github/scripts/helper.tsx', true],
+    ['.github/actions/setup/entrypoint.sh', true],
+    ['.github/actions/setup/README.md', false],
+    // A document under .github/scripts has no lanes and no shell.
+    ['.github/scripts/README.md', false],
+    ['scripts/tests/install-script.test.js', true],
+    ['scripts/tests/install-script.test.mts', true],
+    ['packages/cli/scripts/tests/pack.spec.ts', true],
+    // The suite config decides which lanes collect the script tests, and it
+    // carries a live platform gate — the lane-inventory question applies.
+    ['scripts/tests/vitest.config.ts', true],
+    ['scripts/tests/vitest.config.mts', true],
+    // Mid-path form: the anchor is a scripts/tests directory wherever it
+    // sits, not the repo root.
+    ['packages/cli/scripts/tests/vitest.config.ts', true],
+    // The scripts-test branch is anchored to a scripts/ directory, not to a
+    // directory that merely ends in the word.
+    ['myscripts/install.test.ts', false],
+    ['prescripts/tests/vitest.config.ts', false],
+    // A Dockerfile's RUN lines are shell in the image's userland; every
+    // spelling pathTool's hadolint branch recognises is governed.
+    ['Dockerfile', true],
+    ['docker/build.dockerfile', true],
+    ['ci/Dockerfile.alpine', true],
+    ['src/mydockerfile', false],
+    // The lane rule composes pathTool's basename-based hadolint branch: a
+    // file UNDER a directory merely named Dockerfile.* is not a Dockerfile.
+    ['Dockerfile.d/README.md', false],
+    ['docker/Dockerfile.prod/app.conf', false],
+    // The hadolint arm narrows pathTool's basename-prefix branch for the
+    // brief: a document about Dockerfiles is prose, not a build recipe —
+    // every extension the guard names is pinned, or a narrowing of the
+    // list ships green.
+    ['docs/dockerfile.md', false],
+    ['docs/dockerfile.best-practices.md', false],
+    ['docs/dockerfile.txt', false],
+    ['docs/dockerfile.rst', false],
+    ['docs/dockerfile.adoc', false],
+    ['docs/dockerfile.html', false],
+    ['docs/dockerfile.org', false],
+    ['docs/dockerfile.yaml', false],
+    ['docs/dockerfile.json', false],
+    ['Dockerfile.swp', false],
+    ['docker/Dockerfile.lock', false],
+    // A test outside the script layer is not handed a shell syllabus, and a
+    // document that merely talks about one is not code.
+    ['src/pay.test.ts', false],
+    ['scripts/build.js', false],
+    ['docs/how-to-run.sh.md', false],
+    // The security checklist's script arm stops at the two workflow-helper
+    // conventions under .github: which scripts a workflow calls beyond them
+    // is content-defined, and a path matcher that cannot see run: lines
+    // must not pretend otherwise.
+    ['scripts/triage.py', false],
+    // Extensionless hooks are shellchecked by toolFor's shebang branch,
+    // which reads content; matches() sees the path alone and cannot tell a
+    // hook from a README, so it declines to guess — a visible decision.
+    ['.husky/pre-commit', false],
+    ['hooks/prepush', false],
   ])('%s → governed by a rule: %s', (path, governed) => {
     expect(PATH_RULES.some((r) => r.matches(path))).toBe(governed);
   });
@@ -119,6 +199,237 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     expect(out).toContain('.github/workflows/ci9.yml');
     expect(out).not.toContain('.github/workflows/ci10.yml');
   });
+});
+
+describe('pathRulesFor — the shell/CI-lane rule', () => {
+  // The gap it closes, measured on a real PR (#9220): eight review rounds on
+  // Linux runners hardened a workflow's wipe script, added `realpath -m` to
+  // canonicalize its path guard, and added a test pinning that line. `-m` is a
+  // GNU coreutils extension — Darwin's realpath(1) exits 1 on it — so the
+  // script's `|| printf` fallback silently keeps the raw path and the new test
+  // is red on the `test_macos` lane. Nothing caught it: every agent ran on a
+  // GNU host, and no dimension asks which lanes execute a file. A human
+  // reviewer running the suite on a Mac found it in one round.
+  it('attaches to shell, CI scripts, and the tests that drive them', () => {
+    const out = pathRulesFor([
+      'scripts/tests/qwen-pr-review-workflow.test.js',
+      'src/pay.ts',
+    ]);
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+    expect(out).toContain('scripts/tests/qwen-pr-review-workflow.test.js');
+    expect(out).not.toContain('src/pay.ts');
+  });
+
+  it('stacks with the workflow rule on a diff that changes embedded shell', () => {
+    // The security checklist owns what the workflow does with its token; this
+    // one owns whether its `run:` block works on the hosts it runs on. A
+    // workflow diff needs both, and neither subsumes the other.
+    const out = pathRulesFor(['.github/workflows/ci.yml']);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('pins the composite-action branch of the shell rule itself', () => {
+    // A table row only proves SOME rule matched; this pins that the lane
+    // syllabus itself reaches a diff touching only a composite action, whose
+    // `run:` blocks are the miss this rule exists to catch — per rule, and
+    // in both metadata spellings GitHub accepts: nothing else rescues an
+    // actions/ path, so a narrowing to one spelling fails here.
+    for (const name of ['action.yml', 'action.yaml']) {
+      const out = pathRulesFor([`.github/actions/setup/${name}`]);
+      expect(out).toContain('Shell and CI scripts — the lanes that run them');
+      expect(out).toContain('GitHub Actions workflows');
+    }
+  });
+
+  it.each([
+    '.github/scripts/pr-safety-precheck.mjs',
+    '.github/scripts/cleanup.sh',
+    '.github/scripts/deploy.ps1',
+    '.github/scripts/release.ts',
+    '.github/actions/setup/helper.py',
+    // Spellings the lane rule rescues through its own arms — only these
+    // per-rule assertions can pin them for the workflow arm.
+    '.github/scripts/provision.bash',
+    '.github/scripts/ci/lint.zsh',
+    '.github/scripts/provision.ksh',
+    '.github/scripts/provision.dash',
+    '.github/scripts/win/build.bat',
+    '.github/scripts/win/setup.cmd',
+    // The node spellings the arm admits beyond mjs/ts.
+    '.github/scripts/helper.js',
+    '.github/scripts/helper.cjs',
+    '.github/scripts/helper.tsx',
+  ])('pairs both checklists on a script-only diff (%s)', (path) => {
+    // The security checklist says the scripts a workflow calls are part of
+    // the workflow, so a diff touching only such a script needs the
+    // expression-injection eyes and the lane eyes together — asserted per
+    // rule, because the lane rule rescues bash/ksh/dash through pathTool's
+    // shellcheck branch and zsh/ps1/bat/cmd through its own suffix arm: a
+    // `.some()` row then stays green when the workflow arm alone drops a
+    // spelling, and only these assertions can see the deletion.
+    const out = pathRulesFor([path]);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('pairs both checklists on a composite-action script', () => {
+    // A script under a composite action is as much "a script the workflow
+    // calls" as one under .github/scripts — the action's shell invokes it
+    // with the same interpolated arguments — so it draws the same pairing.
+    const out = pathRulesFor(['.github/actions/setup/entrypoint.sh']);
+    expect(out).toContain('GitHub Actions workflows');
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('does not govern non-script files under .github/scripts', () => {
+    // The scripts arm filters on script extensions: a README or JSON fixture
+    // there has no lanes and no shell, so it draws neither checklist.
+    expect(pathRulesFor(['.github/scripts/README.md'])).toBe('');
+  });
+
+  it('attaches to Dockerfiles, and only to the lane checklist', () => {
+    // A RUN line is shell executing in the image's userland — the
+    // Alpine/busybox lane the GNU-ism bullet is written about — but a
+    // Dockerfile is not a workflow, so the security checklist stays absent.
+    const out = pathRulesFor(['Dockerfile']);
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+    expect(out).not.toContain('GitHub Actions workflows');
+  });
+
+  it('attaches to the suite config that decides which lanes collect the tests', () => {
+    // scripts/tests/vitest.config.ts carries the suite's platform gate; a
+    // diff editing that gate is exactly what the lane-inventory question is
+    // for.
+    const out = pathRulesFor(['scripts/tests/vitest.config.ts']);
+    expect(out).toContain('Shell and CI scripts — the lanes that run them');
+  });
+
+  it('makes the lane inventory the first question, including the skipped ones', () => {
+    // The trap is structural, not linguistic: a merge_group-only job reports as
+    // "skipped" on the PR page, so a fully green PR is not evidence about it,
+    // and the first red lands in the queue where it ejects the whole batch.
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('which lanes execute this file');
+    expect(out).toContain('merge_group');
+    expect(out).toMatch(/reports as \*\*skipped\*\*|reports as \*\*skipped/);
+    expect(out).toContain('merge-queue failure');
+    // A suite excluded on one platform is not excluded on the others — the
+    // exact shape of the miss on #9220 (vitest.config.ts gated win32 only).
+    expect(out).toMatch(/gated off Windows is \*\*not\*\* gated off macOS/);
+  });
+
+  it('names the non-GNU userlands and the flags that differ', () => {
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('realpath -m');
+    expect(out).toContain('busybox');
+    expect(out).toContain('sed -i');
+    // The silent-degradation shape: the fallback means nothing fails, the
+    // guard just stops happening.
+    expect(out).toContain('silently skips the canonicalization');
+  });
+
+  it('separates the two findings a GNU-ism produces, at different severities', () => {
+    // A Linux-only production script with a GNU-ism is not a bug; the test that
+    // asserts the GNU behaviour on a macOS lane is. Collapsing the two produces
+    // either a false alarm on the script or a missed red lane.
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toMatch(/not the same severity/);
+    expect(out).toMatch(/gate the \*\*test\*\*, not to weaken the script/);
+  });
+
+  it('pins the path-identity and privilege traps', () => {
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('/private/var/folders');
+    expect(out).toContain('realpathSync');
+    expect(out).toContain('CAP_DAC_OVERRIDE');
+    // A vacuously-passing test is the failure mode root hides behind.
+    expect(out).toMatch(/assertion vacuous/);
+  });
+
+  it('prescribes a capability probe rather than a platform check', () => {
+    // `skipIf(platform === 'darwin')` is wrong in both directions, so the fix
+    // shape has to be named — it is the part the model does not supply itself.
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('probe the capability, not the platform');
+    expect(out).toContain("spawnSync('realpath'");
+    expect(out).toContain('busybox lane');
+  });
+
+  it('keeps the severity and scoping discipline of the skill', () => {
+    const out = pathRulesFor(['scripts/build.sh']);
+    expect(out).toContain('reviewing this diff, not auditing this file');
+    expect(out).toContain('Favour precision over recall');
+    // The receipt: a lane and a mechanism, or it is a worry, not a finding.
+    expect(out).toMatch(/If you cannot name the lane, you do not have one/);
+  });
+
+  it('keeps the lane heading in diff order — no JVM-layout demotion', () => {
+    // The demotion that pushes src/test paths past the heading cap belongs
+    // to the JAVA rule's own scoping. The lane rule's first blocker bullet
+    // is written ABOUT the test scripts, so its heading must keep showing
+    // them — under the cap they are the first files owed the inventory
+    // question, not the first elided.
+    const fixtures = [
+      'src/test/resources/scripts/deploy.sh',
+      'src/test/resources/scripts/provision.sh',
+      'src/test/resources/scripts/teardown.sh',
+    ];
+    const prod = Array.from({ length: 10 }, (_, i) => `scripts/s${i}.sh`);
+    const out = pathRulesFor([...fixtures, ...prod]);
+    const heading =
+      out.split('\n').find((l) => l.startsWith('### Shell and CI scripts')) ??
+      '';
+    for (const f of fixtures) {
+      expect(heading).toContain(f);
+    }
+  });
+});
+
+describe('pathRulesFor — matcher cost stays linear on attacker-shaped paths', () => {
+  // A pull request's file paths are attacker-controlled and flow uncapped
+  // into matches() — git accepts a 96,481-character path — so a matcher
+  // that backtracks quadratically stalls every agent-brief build of the
+  // review synchronously: the JAVA checklist in this file grades exactly
+  // that shape Critical. The bound is generous to slow runners; linear
+  // matchers finish these inputs in microseconds.
+  const BOUND_MS = 250;
+
+  const msOf = (fn: () => unknown): number => {
+    const t0 = performance.now();
+    fn();
+    return performance.now() - t0;
+  };
+
+  it("the workflow rule's script arm pays no nested-quantifier cost", () => {
+    // Many segments and no dot anywhere: the arm never matches, and a
+    // nested pair of unbounded quantifiers pays that failed match once per
+    // split point — quadratic in the path length.
+    const path = `.github/actions/${'a/'.repeat(48_000)}a`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it("the workflow rule's scripts sub-alternative stays linear too", () => {
+    // The symmetric `.github/scripts/` side of the same arm, on the same
+    // many-segments-no-dot shape: a future edit that re-anchors it with an
+    // unbounded suffix must not ship with every timing test green.
+    const path = `.github/scripts/${'a/'.repeat(48_000)}a`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it("the lane rule's scripts-test arm pays no per-anchor cost", () => {
+    // A scripts/ directory at every level: a leading anchor followed by a
+    // backtracking suffix pays the failed suffix once per anchor.
+    const path = `scripts/${'scripts/'.repeat(40_000)}x`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
+
+  it('pathTool pays no per-anchor cost on a repeated workflows prefix', () => {
+    // The lane rule routes every path through pathTool, whose workflow
+    // regex pays its failed suffix once per anchor whose prefix matches.
+    const path = `.github/workflows/${'.github/workflows/'.repeat(16_000)}x`;
+    expect(msOf(() => pathRulesFor([path]))).toBeLessThan(BOUND_MS);
+  }, 60_000);
 });
 
 describe('pathRulesFor — the Java/JVM rule', () => {

@@ -1108,11 +1108,14 @@ export class LiveTaskService {
       removed = false;
     }
     if (removed) {
-      await runWithWorkspaceRuntimeStorage(runtime, () =>
-        createWorkspaceRuntimeSessionService(runtime)
-          .removeSession(session.sessionId)
-          .catch(() => undefined),
+      const persistedRemoved = await runWithWorkspaceRuntimeStorage(
+        runtime,
+        () =>
+          createWorkspaceRuntimeSessionService(runtime)
+            .removeSession(session.sessionId)
+            .catch(() => false),
       );
+      if (persistedRemoved) runtime.bridge.markSessionCatalogChanged();
     }
     if (projectless && removed) {
       await this.options
