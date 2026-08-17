@@ -43,6 +43,7 @@ import {
   type ServeAppLifecycle,
 } from './serve-app-lifecycle.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import { tagListener } from './local-control/index.js';
 import {
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
   registerChannelWorkerPromptAuthorization,
@@ -24453,6 +24454,28 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
+    });
+
+    it('requires the listener-scoped credential for LAN health checks', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' });
+      const server = createServer(app);
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const port = (server.address() as AddressInfo).port;
+      tagListener(server, {
+        kind: 'local-control',
+        authority: `127.0.0.1:${port}`,
+        origin: `http://127.0.0.1:${port}`,
+      });
+      try {
+        const res = await request(server)
+          .get('/health?deep=1')
+          .set('Host', `127.0.0.1:${port}`);
+        expect(res.status).toBe(401);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
     });
 
     it('gates /health behind bearer auth when --require-auth is set on loopback (#4175 PR 15)', async () => {
