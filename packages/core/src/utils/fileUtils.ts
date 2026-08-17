@@ -63,6 +63,9 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
 // (image/heic, image/tiff, ...) must never be forwarded verbatim: providers
 // reject the unknown media during request validation, and the resulting 400
 // aborts the whole session instead of surfacing a recoverable result (#9291).
+// Keep in sync with PIPELINE_IMAGE_MIME_TYPES in
+// request-tokenizer/supportedImageFormats.ts, which advertises this contract
+// to users.
 const PROVIDER_SAFE_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/jpg',
