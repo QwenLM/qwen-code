@@ -6333,13 +6333,14 @@ describe('AppContainer State Management', () => {
   describe('context files announcement (#5267)', () => {
     const renderAnnouncementHarness = (contextFilePaths: string[]) => {
       const addItem = vi.fn();
+      const loadHistory = vi.fn();
       const enqueueMessage = vi.fn();
       mockedUseHistory.mockReturnValue({
         history: [],
         addItem,
         updateItem: vi.fn(),
         clearItems: vi.fn(),
-        loadHistory: vi.fn(),
+        loadHistory,
         truncateToItem: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
@@ -6355,7 +6356,7 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'getContextFilePaths').mockReturnValue(
         contextFilePaths,
       );
-      render(
+      const view = render(
         <AppContainer
           config={mockConfig}
           settings={mockSettings}
@@ -6363,7 +6364,7 @@ describe('AppContainer State Management', () => {
           initializationResult={mockInitResult}
         />,
       );
-      return { addItem, enqueueMessage };
+      return { addItem, enqueueMessage, loadHistory, view };
     };
 
     const announcementCalls = (addItem: ReturnType<typeof vi.fn>) =>
@@ -6465,6 +6466,83 @@ describe('AppContainer State Management', () => {
         submittedPrompt: 'again',
       });
       expect(announcementCalls(addItem)).toHaveLength(2);
+    });
+
+    it('re-arms the latch when sessionStats.sessionId changes (startNewSession)', () => {
+      mockedUseSessionStats.mockReturnValue({
+        stats: { sessionId: 'session-a' },
+        seedPromptCount: vi.fn(),
+      });
+      const { addItem, view } = renderAnnouncementHarness(['QWEN.md']);
+
+      capturedUIActions.handleFinalSubmit('hello', {
+        submittedPrompt: 'hello',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
+
+      // /clear flows through SessionContext.startNewSession, which swaps
+      // the session id. The effect must re-arm the latch so the new
+      // session's first prompt re-announces the still-attached files.
+      mockedUseSessionStats.mockReturnValue({
+        stats: { sessionId: 'session-b' },
+        seedPromptCount: vi.fn(),
+      });
+      act(() => {
+        view.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      capturedUIActions.handleFinalSubmit('again', {
+        submittedPrompt: 'again',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(2);
+    });
+
+    it('arms the latch after a startup --resume restore (announcement is UI-only)', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 'session-1',
+              timestamp: '2024-01-01T00:00:00Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'hello' }] },
+              cwd: '/test/workspace',
+              version: '1.0.0',
+            },
+          ],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'u1',
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      const { addItem, loadHistory } = renderAnnouncementHarness(['QWEN.md']);
+
+      // The startup resume path must route through the reconciling
+      // wrapper: the rebuilt history has no announcement (the INFO is
+      // UI-only and never persisted), so the latch stays armed and the
+      // next prompt announces.
+      await vi.waitFor(() => {
+        expect(loadHistory).toHaveBeenCalled();
+      });
+
+      capturedUIActions.handleFinalSubmit('hello', {
+        submittedPrompt: 'hello',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
     });
 
     it('does not consume the latch on a whitespace-only prompt', () => {

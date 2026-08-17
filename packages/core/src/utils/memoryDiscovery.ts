@@ -360,9 +360,15 @@ function concatenateInstructions(
     .filter(hasAttachedContent)
     .map((item) => {
       const trimmedContent = (item.content as string).trim();
-      const displayPath = path.isAbsolute(item.filePath)
-        ? path.relative(currentWorkingDirectoryForDisplay, item.filePath)
-        : item.filePath;
+      // Sanitize the marker path: paths under attacker-influenceable
+      // directory names could otherwise forge or hide entries in the
+      // `/context` parser (newline/control chars break its line-oriented
+      // markers), contradicting the sanitized announcement surface.
+      const displayPath = stripAnsiAndControl(
+        path.isAbsolute(item.filePath)
+          ? path.relative(currentWorkingDirectoryForDisplay, item.filePath)
+          : item.filePath,
+      );
       return `--- Context from: ${displayPath} ---\n${trimmedContent}\n--- End of Context from: ${displayPath} ---`;
     })
     .join('\n\n');
@@ -376,6 +382,8 @@ export interface LoadServerHierarchicalMemoryResponse {
    * inside the CWD tree, `~/...` shortcuts for files under the user home.
    * Display-only — do not resolve them against the CWD.
    * Lets callers tell users which files were actually attached (see #5267).
+   * Top-level files only: content pulled in via `@import` is inlined into
+   * the importing file and is not listed separately.
    * Baseline rules (`.qwen/rules/`) are injected separately and deliberately
    * not listed here (see `ruleCount`).
    */
@@ -553,9 +561,11 @@ export async function loadServerHierarchicalMemory(
       memoryFilenames.has(path.basename(item.filePath)),
     );
     fileCount = memoryItems.length;
-    // Announce every file whose content actually reached the system prompt
-    // (see hasAttachedContent) — not just memory-named files — so the list
-    // matches what concatenateInstructions attached.
+    // Announce every top-level file whose content actually reached the
+    // system prompt (see hasAttachedContent) — not just memory-named files —
+    // so the list matches what concatenateInstructions attached. Files
+    // pulled in via @import are inlined into their importer's content and
+    // are not listed separately.
     contextFilePaths = contentsWithPaths
       .filter(hasAttachedContent)
       .map((item) =>

@@ -867,14 +867,21 @@ export const AppContainer = (props: AppContainerProps) => {
   // consumed (prevents duplicates); otherwise it's armed (allows
   // re-announcement). This covers /restore and same-id /resume, which the
   // sessionId effect does not catch because the id is unchanged.
+  // Destructure loadHistory so the useCallback can depend on the function
+  // (stable, empty-deps) instead of the whole historyManager object, whose
+  // identity changes on every history mutation — passing the wrapper into
+  // useSlashCommandProcessor would otherwise put `history` back into the
+  // commandContext useMemo deps (the historyRef pattern exists to avoid
+  // exactly that).
+  const { loadHistory: rawLoadHistory } = historyManager;
   const loadHistoryWithLatchReconciliation = useCallback(
     (newHistory: HistoryItem[]) => {
-      historyManager.loadHistory(newHistory);
+      rawLoadHistory(newHistory);
       contextFilesAnnouncedRef.current = newHistory.some(
         isContextFilesAnnouncement,
       );
     },
-    [historyManager],
+    [rawLoadHistory],
   );
   const activeWorktree = useMemo(
     () =>
@@ -1621,6 +1628,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     settings,
     historyManager,
+    // Route the interactive /resume through the latch-reconciling wrapper
+    // so same-id resume (no sessionId change → no effect re-arm) still
+    // re-arms the latch when the rebuilt history has no announcement.
+    loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
