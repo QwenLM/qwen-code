@@ -170,13 +170,12 @@ export class DaemonSessionClient {
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
   /**
-   * Backing store for {@link replaySnapshot}. Mutable so consumers can
-   * `consumeReplaySnapshot()` once the snapshot has been injected into a
-   * transcript store, releasing the raw wire events (which can reach tens
-   * of MiB for busy sessions) instead of retaining them for the lifetime
-   * of the session client.
+   * Not `readonly`: {@link consumeReplaySnapshot} swaps it for an empty
+   * snapshot once the provider has injected it into the transcript store,
+   * releasing the raw wire events (tens of MiB on busy sessions) instead of
+   * retaining them for the session client's lifetime.
    */
-  private retainedReplaySnapshot: DaemonReplaySnapshot;
+  replaySnapshot: DaemonReplaySnapshot;
   readonly replaySnapshotComplete: boolean;
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
@@ -231,7 +230,7 @@ export class DaemonSessionClient {
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
-    this.retainedReplaySnapshot = opts.replaySnapshot ?? {
+    this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
     };
@@ -411,14 +410,6 @@ export class DaemonSessionClient {
   }
 
   /**
-   * The replay snapshot captured by `load()`. Empty after
-   * {@link consumeReplaySnapshot} has been called.
-   */
-  get replaySnapshot(): DaemonReplaySnapshot {
-    return this.retainedReplaySnapshot;
-  }
-
-  /**
    * Returns the retained replay snapshot and drops the client's reference
    * to it. Call once the snapshot has been injected into a transcript
    * store; the raw wire events are no longer needed (SSE continues from
@@ -426,8 +417,8 @@ export class DaemonSessionClient {
    * otherwise pin tens of MiB per session client.
    */
   consumeReplaySnapshot(): DaemonReplaySnapshot {
-    const snapshot = this.retainedReplaySnapshot;
-    this.retainedReplaySnapshot = { compactedReplay: [], liveJournal: [] };
+    const snapshot = this.replaySnapshot;
+    this.replaySnapshot = { compactedReplay: [], liveJournal: [] };
     return snapshot;
   }
 
