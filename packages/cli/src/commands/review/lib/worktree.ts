@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
   mkdirSync,
@@ -57,10 +58,32 @@ const GIT_ENV_REDIRECTS = [
   'GIT_COMMON_DIR',
 ];
 
+/**
+ * The environment's other half: variables that inject CONFIG rather than
+ * redirect discovery.
+ *
+ * Dropping the discovery redirects and keeping these would be a gate on the
+ * front door with the window open — `GIT_CONFIG_COUNT` plus
+ * `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` sets any config key for the run
+ * (`core.fsmonitor` and the `filter.*` pair are command execution), and
+ * `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_PARAMETERS` do the same
+ * by other routes. The numbered keys are removed by scanning the environment,
+ * because the count that names them is itself the thing being removed.
+ */
+const GIT_ENV_CONFIG = [
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_PARAMETERS',
+];
+
 /** Git invocations must resolve the tree they are given, not the caller shell's redirects. */
 export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of GIT_ENV_REDIRECTS) delete env[key];
+  for (const key of [...GIT_ENV_REDIRECTS, ...GIT_ENV_CONFIG]) delete env[key];
+  for (const key of Object.keys(env)) {
+    if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key)) delete env[key];
+  }
   return env;
 }
 
@@ -100,6 +123,13 @@ export function discardWorktree(
   } catch {
     // Absent: nothing for the guard, and the rmSync below is a no-op.
   }
+  // Read BEFORE anything is removed: the tree's own `.git` file names the admin
+  // directory that belongs to it (`gitdir: <common>/worktrees/<id>`). That
+  // pointer is the only trustworthy link between a path and its registration —
+  // the `gitdir` files on the other side are writable by anything running as
+  // the user, so scanning THEM and matching on content lets a rewritten one
+  // aim this cleanup at a live sibling's registration.
+  const ownAdminDir = adminDirOf(tree);
   let sweep: SweepResult | undefined;
   if (!symlink) {
     sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
@@ -137,7 +167,7 @@ export function discardWorktree(
   // concurrently against one common dir), or the user's own worktree on a
   // volume that happens to be unmounted. So the entry is found by its own
   // `gitdir` file and removed alone.
-  dropWorktreeRegistration(cwd, tree);
+  dropWorktreeRegistration(cwd, tree, ownAdminDir);
   return sweep;
 }
 
@@ -172,7 +202,25 @@ export interface WorktreeResidue {
  * `worktree add` at this path, which the caller reports; guessing wider costs
  * somebody else's worktree.
  */
-function dropWorktreeRegistration(cwd: string, tree: string): void {
+function dropWorktreeRegistration(
+  cwd: string,
+  tree: string,
+  adminDir: string | null,
+): void {
+  if (adminDir !== null) {
+    try {
+      rmSync(adminDir, { recursive: true, force: true });
+    } catch {
+      // Unremovable: the next `worktree add` here says "already registered",
+      // which is loud and recoverable.
+    }
+    return;
+  }
+  // No usable pointer — the case this whole step exists for, since a tree whose
+  // `.git` is corrupt is exactly the one `worktree remove` refuses and the next
+  // `add` then calls "already registered". Fall back to the reverse scan, and
+  // only for entries whose named tree is GONE: a live worktree's registration
+  // is never this cleanup's business, whatever its `gitdir` file claims.
   const common = spawnSync(
     'git',
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
@@ -190,12 +238,38 @@ function dropWorktreeRegistration(cwd: string, tree: string): void {
   for (const id of ids) {
     try {
       const gitdir = readFileSync(join(dir, id, 'gitdir'), 'utf8').trim();
-      // `gitdir` names `<tree>/.git`; compare the tree it belongs to.
-      if (samePath(dirname(gitdir)) !== wanted) continue;
+      const named = dirname(gitdir);
+      if (samePath(named) !== wanted) continue;
+      if (existsSync(named)) continue;
       rmSync(join(dir, id), { recursive: true, force: true });
     } catch {
       // Unreadable entry: leave it. The next `add` will say so.
     }
+  }
+}
+
+/**
+ * The admin directory a worktree's own gitfile points at, or null.
+ *
+ * `<tree>/.git` holds `gitdir: <common>/worktrees/<id>`. Reading the pointer
+ * FROM THE TREE is what makes the later removal precise: the reverse mapping —
+ * scanning every `<common>/worktrees/<id>/gitdir` for one whose content names
+ * this path — reads files any same-user process can rewrite, so a tampered one
+ * would hand this cleanup somebody else's registration to delete.
+ */
+function adminDirOf(tree: string): string | null {
+  try {
+    const pointer = readFileSync(join(tree, '.git'), 'utf8').trim();
+    const match = /^gitdir:\s*(.+)$/.exec(pointer);
+    if (!match) return null;
+    const dir = resolve(dirname(resolve(tree)), match[1].trim());
+    // It must look like a linked-worktree admin dir, and it must still name
+    // this tree back: `<id>/gitdir` is written by git when the worktree is
+    // created, and a mismatch means the pointer is not describing this pair.
+    const back = readFileSync(join(dir, 'gitdir'), 'utf8').trim();
+    return samePath(dirname(back)) === samePath(tree) ? dir : null;
+  } catch {
+    return null;
   }
 }
 
@@ -228,11 +302,20 @@ let pipelineExcludesFile: string | null = null;
 function pipelineExcludeArgs(): string[] {
   if (pipelineExcludesFile === null) {
     try {
-      // Forward slashes: git's config parser reads backslashes as escapes.
-      const file = join(tmpdir(), 'qwen-review-residue-excludes')
+      // A PRIVATE directory, created fresh: the first cut wrote a constant name
+      // in the shared temp dir, which git then re-read on every later `status`
+      // — so anything able to write that path could add `*` to it and blind the
+      // tripwire, and a pre-planted symlink there could redirect the write.
+      // `mkdtempSync` yields a path nobody can predict, and `wx` refuses to
+      // follow a link or overwrite.
+      const file = join(
+        mkdtempSync(join(tmpdir(), 'qwen-review-excludes-')),
+        'excludes',
+      )
+        // Forward slashes: git's config parser reads backslashes as escapes.
         .split(sep)
         .join('/');
-      writeFileSync(file, 'node_modules/\ndist/\n');
+      writeFileSync(file, 'node_modules/\ndist/\n', { flag: 'wx' });
       pipelineExcludesFile = file;
     } catch {
       // No tmp file: fall back to the commit's own ignore rules, which cover
@@ -368,6 +451,13 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
     'git',
     [
       ...pipelineExcludeArgs(),
+      // The measurement must not itself become the execution: `core.fsmonitor`
+      // runs a command on `status`, and this tree's config is writable by
+      // anything running as the user. Emptying it here is the same discipline
+      // as the checkouts' `core.hooksPath` — the tripwire is the one command
+      // that must not be steerable by the tree it is measuring.
+      '-c',
+      'core.fsmonitor=',
       'status',
       '--porcelain',
       '--untracked-files=all',
@@ -575,7 +665,7 @@ export function exposeDependencies(
     }
   }
   if (opts.rebuild === true) {
-    removeUnownedNodeModules(probeTree, owned);
+    removeUnownedNodeModules(probeTree, owned, done);
   }
   return done;
 }
@@ -597,17 +687,26 @@ export function exposeDependencies(
  * already wiped and re-linked them. `.git` holds nothing that resolves as a
  * dependency.
  */
-function removeUnownedNodeModules(tree: string, owned: Set<string>): void {
+function removeUnownedNodeModules(
+  tree: string,
+  owned: Set<string>,
+  done: DependencyFarm,
+): void {
   const walk = (dir: string): void => {
     let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
+      done.failed++;
       return;
     }
     for (const entry of entries) {
       const full = join(dir, entry.name);
-      if (entry.name === 'node_modules') {
+      // Case-INSENSITIVE: APFS and NTFS are the two filesystems this file
+      // already special-cases (macOS path spellings, Windows junctions), and on
+      // both a `Node_Modules` a probe created resolves exactly like the real
+      // one while an exact-match sweep walks past it.
+      if (entry.name.toLowerCase() === 'node_modules') {
         // The owned set mixes spellings: the root path is held as the caller
         // spelled the tree, a member path as `containedIn` resolved it — on
         // macOS those disagree (`/var/...` vs `/private/var/...`), so compare
@@ -623,7 +722,10 @@ function removeUnownedNodeModules(tree: string, owned: Set<string>): void {
             rmSync(full, { recursive: true, force: true });
           } catch {
             // Same best-effort contract as the farm itself: a wipe that throws
-            // would re-class every probe `inconclusive`.
+            // must not re-class every probe `inconclusive`. But it is COUNTED —
+            // a planted `node_modules` that resists deletion otherwise survives
+            // every rebuild and decides later verdicts with nothing disclosed.
+            done.failed++;
           }
         }
         continue;

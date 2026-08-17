@@ -17,6 +17,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -28,6 +29,7 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
+  sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
 } from './worktree.js';
@@ -746,6 +748,38 @@ describe('discardWorktree', () => {
     expect(existsSync(join(victim, 'keep.txt'))).toBe(true);
   });
 
+  it("clears its OWN entry by the tree's pointer, not by scanning gitdir files", () => {
+    // The reverse scan reads `<id>/gitdir` files, which anything running as the
+    // user can rewrite — so a sibling's entry can be made to name this path and
+    // the cleanup would delete the SIBLING's registration. The tree's own
+    // `.git` pointer is the trustworthy direction, and it is read before
+    // anything is removed.
+    const mine = join(repo, 'mine');
+    const other = join(repo, 'other');
+    git(repo, 'worktree', 'add', '--detach', '-q', mine, 'HEAD');
+    git(repo, 'worktree', 'add', '--detach', '-q', other, 'HEAD');
+    const common = git(
+      repo,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    // Aim `other`'s entry at `mine`, the way tampering would.
+    for (const id of readdirSync(join(common, 'worktrees'))) {
+      const gitdirFile = join(common, 'worktrees', id, 'gitdir');
+      if (readFileSync(gitdirFile, 'utf8').includes(`${other}/.git`)) {
+        writeFileSync(gitdirFile, `${mine}/.git\n`);
+      }
+    }
+
+    discardWorktree(repo, mine);
+
+    // `mine` is gone and `other`'s registration survived the tampering.
+    expect(existsSync(mine)).toBe(false);
+    expect(existsSync(join(common, 'worktrees'))).toBe(true);
+    expect(readdirSync(join(common, 'worktrees')).length).toBe(1);
+  });
+
   it('drops only its OWN registration, never a sibling worktree', () => {
     // The prune this replaced was repo-wide: it deregistered any entry whose
     // directory was momentarily absent — another shard's `worktree add`
@@ -760,6 +794,41 @@ describe('discardWorktree', () => {
     discardWorktree(repo, mine);
 
     expect(git(repo, 'worktree', 'list')).toContain(other);
+  });
+});
+
+describe('sanitizedGitEnv', () => {
+  it('drops config injection as well as discovery redirects', () => {
+    // Dropping `GIT_DIR` and keeping `GIT_CONFIG_*` is a gate on the front door
+    // with the window open: `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_0` sets any
+    // key for the run, and `core.fsmonitor`/`filter.*` are command execution.
+    const saved = { ...process.env };
+    try {
+      process.env['GIT_DIR'] = '/tmp/elsewhere/.git';
+      process.env['GIT_CONFIG_COUNT'] = '1';
+      process.env['GIT_CONFIG_KEY_0'] = 'core.fsmonitor';
+      process.env['GIT_CONFIG_VALUE_0'] = 'touch /tmp/pwned';
+      process.env['GIT_CONFIG_GLOBAL'] = '/tmp/evil-global';
+      process.env['GIT_CONFIG_PARAMETERS'] = "'core.pager=cat'";
+      process.env['PATH'] = saved['PATH'];
+
+      const env = sanitizedGitEnv();
+
+      for (const key of [
+        'GIT_DIR',
+        'GIT_CONFIG_COUNT',
+        'GIT_CONFIG_KEY_0',
+        'GIT_CONFIG_VALUE_0',
+        'GIT_CONFIG_GLOBAL',
+        'GIT_CONFIG_PARAMETERS',
+      ]) {
+        expect(env[key]).toBeUndefined();
+      }
+      // And it is still the caller's environment otherwise.
+      expect(env['PATH']).toBe(saved['PATH']);
+    } finally {
+      process.env = saved;
+    }
   });
 });
 

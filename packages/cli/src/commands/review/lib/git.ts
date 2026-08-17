@@ -9,6 +9,7 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
+import { sanitizedGitEnv } from './worktree.js';
 import { existsSync, rmSync } from 'node:fs';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
@@ -33,7 +34,13 @@ const GIT_TIMEOUT_MS = 120_000;
 function gitOpts() {
   return {
     timeout: GIT_TIMEOUT_MS,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    // `sanitizedGitEnv`, not `process.env`: an exported `GIT_DIR` redirects
+    // discovery for every command here at once — `releaseWorktree`'s
+    // `worktree remove --force` included, which is a delete — and the
+    // `GIT_CONFIG_*` family injects config the same way. The disposable-tree
+    // commands were given this treatment first; these run against the user's
+    // own repository, so they need it more, not less.
+    env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
   };
 }
 

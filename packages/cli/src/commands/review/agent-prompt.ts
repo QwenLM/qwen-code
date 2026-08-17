@@ -1129,11 +1129,15 @@ function worktreeEvidenceBlock(
             '(without `--untracked-files=all` it collapses a whole probe directory ' +
             'to one entry)'
           : '') +
-        ". None of it is the PR's code, so **a failure, a behaviour or a defect " +
-        'confined to those paths is not a finding** — a build or test failure they ' +
-        'cause included. Take your evidence for them from `git show HEAD:<path>`, ' +
-        'not from the file on disk; where that command answers that the path is not ' +
-        'in HEAD, it was written into the tree after the commit, which settles it. ' +
+        ". **What is not the PR's code is the DIFFERENCE, not always the file.** " +
+        'A path `git show HEAD:<path>` cannot produce was written into the tree ' +
+        "after the commit: none of it is the PR's code, and a failure, a behaviour " +
+        'or a defect confined to it is not a finding — a build or test failure it ' +
+        'causes included. A path that DOES have a HEAD version is a file the ' +
+        'commit contains, possibly one this PR changes: only the uncommitted edit ' +
+        'is foreign, so read `git show HEAD:<path>` and judge THAT — a defect ' +
+        'present in the committed version is a finding like any other, and only a ' +
+        'defect that exists solely in the working copy is not. ' +
         'The names above are flattened for display (a filename can carry control ' +
         'or invisible characters); `git status --porcelain --untracked-files=all` ' +
         'in that worktree has the exact bytes if one does not match. Say in your ' +

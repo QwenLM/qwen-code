@@ -422,6 +422,22 @@ function scratchWorktreesOf(worktree: string): {
     }
     return { paths: [], failed: false };
   }
+  // The LEAF checks below cannot see an ancestor: a symlink at `.qwen/tmp`
+  // resolves for every path built under it, so the whole sweep — the `existsSync`
+  // probes, `git worktree remove`, `releaseWorktree`'s recursive `rmSync` —
+  // would run inside wherever that link points. Refusing the whole family is the
+  // only answer that scopes: one entry cannot be trusted more than its parent.
+  try {
+    if (!lstatSync(parent).isDirectory()) {
+      writeStderrLine(
+        `Refusing to sweep scratch worktrees: ${parent} is not a directory ` +
+          '(a symlink there would redirect every delete below it)',
+      );
+      return { paths: [], failed: true };
+    }
+  } catch {
+    return { paths: [], failed: false };
+  }
   return {
     paths: entries
       .map((name) => join(parent, name))
@@ -561,7 +577,13 @@ export function runCleanup(target: string): void {
     // path that does not exist, and nothing outside the review's own temp dir
     // can match the prefix.
     const scratch = scratchWorktreesOf(wt);
-    if (scratch.failed) failedAny = true;
+    if (scratch.failed) {
+      failedAny = true;
+      // A family that could not even be LISTED means whole checkouts may still
+      // stand, registered — the same class as a worktree that would not free,
+      // so the lease stays held rather than releasing over an unswept review.
+      failedDestruction = true;
+    }
     for (const path of scratch.paths) {
       report('scratch worktree', path);
     }

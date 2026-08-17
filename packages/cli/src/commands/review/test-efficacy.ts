@@ -1710,8 +1710,21 @@ function newSideLength(header: string): number {
  * disk escapes nothing — the read or write fails on its own.
  */
 function probeTargetEscapes(probeTree: string, file: string): boolean {
-  const parts = file.split(/[/\\]+/).filter((part) => part && part !== '.');
+  // The separator set is platform-dependent: on POSIX a backslash is an
+  // ordinary NAME character, so splitting on it turns `x\\y.test.ts` into two
+  // phantom components, the first `lstat` dies ENOENT, and the catch below
+  // reports "no escape" for a leaf nobody ever looked at.
+  const separators = process.platform === 'win32' ? /[/\\]+/ : /\/+/;
+  const parts = file.split(separators).filter((part) => part && part !== '.');
+  // The ROOT first: replacing the probe tree itself with a symlink defeats
+  // every per-component check at once, because the kernel resolves the prefix
+  // and each component below it lstats as an ordinary entry.
   let cur = probeTree;
+  try {
+    if (lstatSync(cur).isSymbolicLink()) return true;
+  } catch {
+    return true; // No tree to write into is not a tree to trust.
+  }
   for (const part of parts) {
     cur = join(cur, part);
     let st;
@@ -2087,6 +2100,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // `let` because probes committed as symlinks are dropped from it below,
   // before any vitest run collects them.
   let { probes } = efficacyPlan;
+  // The probe set as PLANNED, kept whole: the symlink drop below narrows
+  // `probes` to what will actually run, while the collocated-test hold has to
+  // keep asking whether a mutant's own test EXISTS at all.
+  let allProbes = probes;
 
   // The report JSON is untrusted input, and `revert` paths become both git
   // pathspecs and `join(worktree, …)` filesystem targets we check out and
@@ -2286,6 +2303,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // prevent, reached without tripping any write guard.
       const linked = committedSymlinkProbes(probeTree, probes);
       if (linked.size > 0) {
+        // The hold below asks "does this mutant's own collocated test exist,
+        // and did it run green?" against the probe LIST. Reassigning `probes`
+        // to the survivors answers "there is no such test" for a dropped one —
+        // so the mutant it covers is scored `survived` on the strength of the
+        // other probes passing, which is exactly what the hold exists to
+        // refuse. The full list is kept for that lookup.
+        allProbes = [...probes];
         const kept: string[] = [];
         for (const file of probes) {
           if (linked.has(file)) {
@@ -2428,7 +2452,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             const heldDetail = heldForRedCollocatedTest(
               'mutant',
               c.file,
-              probes,
+              allProbes,
               greenProbes,
               baseline.perFile,
             );
@@ -2478,7 +2502,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             const heldDetail = heldForRedCollocatedTest(
               'hunk',
               h.file,
-              probes,
+              allProbes,
               greenProbes,
               baseline.perFile,
             );

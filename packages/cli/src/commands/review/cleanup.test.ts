@@ -7,9 +7,12 @@ import { join } from 'node:path';
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
-  lstatSync: vi.fn((): { isSymbolicLink: () => boolean } => ({
-    isSymbolicLink: () => false,
-  })),
+  lstatSync: vi.fn(
+    (): { isSymbolicLink: () => boolean; isDirectory: () => boolean } => ({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    }),
+  ),
   // The return type is declared so `mockReturnValue` can take string arrays —
   // the sweep-retention tests hand it the tmp-dir listing.
   readdirSync: vi.fn((): string[] => []),
@@ -120,7 +123,10 @@ describe('runCleanup', () => {
     // set in one test would otherwise decide what the next one's directory
     // sweep sees.
     mocks.readdirSync.mockReturnValue([]);
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
     mocks.existsSync.mockReturnValue(false);
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
@@ -372,7 +378,14 @@ describe('runCleanup', () => {
       'review-pr-123-scratch-verify--round-1--aaa',
     ] as unknown as []);
     mocks.existsSync.mockReturnValue(false);
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => true });
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      // Only the family entry is a link; its parent directory is a directory.
+      isSymbolicLink: () => String(p).includes('-scratch-'),
+      isDirectory: () => !String(p).includes('-scratch-'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
 
     runCleanup('pr-123');
 
@@ -394,7 +407,10 @@ describe('runCleanup', () => {
     // to wedge the next review's `worktree add`. Both shapes are unlinked
     // the way the scratch family's always were.
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => true });
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => true,
+      isDirectory: () => false,
+    });
 
     runCleanup('pr-123');
 
@@ -728,7 +744,10 @@ describe('runCleanup — bypass-write audit', () => {
     // the other describe would otherwise decide what this one's directory
     // sweep sees — the same drift the sibling beforeEach pins against.
     mocks.readdirSync.mockReturnValue([]);
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
     mocks.existsSync.mockReturnValue(false);
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.readFileSync.mockImplementation(() => {
