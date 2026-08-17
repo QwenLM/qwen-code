@@ -67,6 +67,7 @@ interface StubBridge {
       isArchived?: boolean;
     }
   >;
+  markSessionCatalogChanged: ReturnType<typeof vi.fn>;
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
@@ -83,6 +84,7 @@ function makeStubBridge(): StubBridge {
     spawnSources: [],
     closed: [],
     named: [],
+    markSessionCatalogChanged: vi.fn(),
     failNext: false,
     liveSessions: new Map(),
     async spawnOrAttach(req) {
@@ -845,6 +847,29 @@ describe('scheduled-tasks routes', () => {
       expect(h.bridge.spawned).toHaveLength(1); // spawn happened
       expect(h.bridge.closed).toEqual([h.bridge.spawned[0]]); // closed
       expect(removeSpy).toHaveBeenCalledWith(h.bridge.spawned[0]); // and removed
+      // The persisted removal changes the catalog, so the catalog clock must
+      // advance with it.
+      expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      removeSpy.mockRestore();
+    }
+  });
+
+  it('does not mark the catalog when the rollback removal is a no-op', async () => {
+    // Same failure shape as the rollback test above, but the persisted session
+    // is already gone — a no-op removal carries no catalog change and must not
+    // advance the version.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, 'CORRUPT {{{', 'utf8');
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(false);
+    try {
+      const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+      expect(res.status).toBe(500);
+      expect(h.bridge.closed).toEqual([h.bridge.spawned[0]]);
+      expect(h.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
     } finally {
       removeSpy.mockRestore();
     }
