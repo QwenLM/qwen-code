@@ -18,6 +18,15 @@ import {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+const catalogController = vi.hoisted(() => ({
+  invalidateWorkspace: vi.fn(),
+  sessionCreated: vi.fn(),
+  promptAdmitted: vi.fn(),
+  promptAdmissionUncertain: vi.fn(),
+  renamed: vi.fn(),
+  turnCompleted: vi.fn(),
+}));
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let streamingStateValue: string;
@@ -31,6 +40,7 @@ let latestOnSubmit:
     ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
+let renderRealChatEditor: boolean;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
   | ((tool: {
@@ -67,6 +77,10 @@ const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
 let queuedTextsMock: string[] = [];
 
+const latestComposerCoreOptions = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
+
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
@@ -94,9 +108,21 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     dispatch: transcriptDispatch,
   }),
   usePromptStatus: () => 'idle',
+  useOptionalWorkspace: () => undefined,
   useWorkspaceActions: () => ({}),
-  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
+  useWorkspace: () => ({
+    capabilities: connectionState.capabilities,
+    client: {},
+    workspaceCwd: '/primary',
+  }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
+  useDaemonSessionOwnerGuard: () => ({
+    capture: () => ({ isCurrent: () => true }),
+  }),
+}));
+
+vi.mock('../session-catalog/session-catalog-hooks', () => ({
+  useSessionCatalogController: () => catalogController,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -174,6 +200,57 @@ vi.mock('./StreamingStatus', () => ({
     />
   ),
 }));
+vi.mock('../hooks/useComposerCore', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/useComposerCore')>();
+  return {
+    ...actual,
+    useComposerCore: (...args: Parameters<typeof actual.useComposerCore>) => {
+      latestComposerCoreOptions.current = args[0] as Record<string, unknown>;
+      const noop = vi.fn();
+      const fallback: ProxyHandler<object> = {
+        get(target, property) {
+          return Reflect.has(target, property)
+            ? Reflect.get(target, property)
+            : noop;
+        },
+      };
+      return new Proxy(
+        {
+          containerRef: { current: null },
+          viewRef: { current: null },
+          handle: new Proxy({ hasAttachments: () => false }, fallback),
+          searchState: new Proxy(
+            {
+              searchMode: false,
+              searchInputRef: { current: null },
+              searchUiRef: { current: null },
+            },
+            fallback,
+          ),
+          imageTransferHandlers: {},
+          pastedImages: [],
+          composerTags: [],
+          hasAttachments: false,
+          hasContent: false,
+          canSubmit: false,
+          pendingImageBatchCount: 0,
+          imageDragActive: false,
+          mobileComposer: null,
+          shellMode: false,
+          currentMode: 'default',
+          showShortcutHints: false,
+          disabled: false,
+          followupState: { isVisible: false, suggestion: '' },
+          slashMenu: null,
+          atMenu: null,
+        },
+        fallback,
+      );
+    },
+  };
+});
+
 vi.mock('./ChatEditor', () => ({
   ChatEditor: forwardRef(function MockChatEditor(props: any, ref: any) {
     latestOnSubmit = props.onSubmit;
@@ -181,6 +258,9 @@ vi.mock('./ChatEditor', () => ({
     useImperativeHandle(ref, () => ({
       insertText,
     }));
+    if (renderRealChatEditor) {
+      return <RealChatEditor {...props} visibleToolbarActions={[]} />;
+    }
     return (
       <div data-web-shell-composer>
         <button
@@ -233,6 +313,9 @@ vi.mock('./ChatEditor', () => ({
     );
   }),
 }));
+vi.mock('./SpecularComposerEffect', () => ({
+  SpecularComposerEffect: () => null,
+}));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
     <div
@@ -269,6 +352,9 @@ vi.mock('./messages/AskUserQuestion', () => ({
   ),
 }));
 
+const RealChatEditor = (
+  await vi.importActual<typeof import('./ChatEditor')>('./ChatEditor')
+).ChatEditor;
 const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
@@ -289,6 +375,8 @@ beforeEach(() => {
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
+  renderRealChatEditor = false;
+  latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
   sendPromptAdmit = undefined;
@@ -315,6 +403,10 @@ beforeEach(() => {
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
   transcriptDispatch.mockClear();
+  catalogController.invalidateWorkspace.mockClear();
+  catalogController.promptAdmitted.mockClear();
+  catalogController.promptAdmissionUncertain.mockClear();
+  catalogController.turnCompleted.mockClear();
 });
 
 afterEach(() => {
@@ -528,6 +620,26 @@ describe('ChatPane', () => {
       'workspace',
     );
     expect(latestChatEditorProps.workspaceName).toBeUndefined();
+  });
+
+  it('does not thread host at mention props onto ChatEditor', () => {
+    render(
+      { title: 'Refactor core' },
+      {
+        atProviders: [
+          {
+            id: 'tables',
+            label: 'Tables',
+            async search() {
+              return [];
+            },
+          },
+        ],
+        builtinAtProviders: { exclude: ['extensions'] },
+      },
+    );
+    expect(latestChatEditorProps.atProviders).toBeUndefined();
+    expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
   });
 
   it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
@@ -859,13 +971,52 @@ describe('ChatPane', () => {
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('hi', undefined, commit);
+      returned = latestOnSubmit!('hi', undefined, undefined, commit);
     });
     expect(returned).toBe(false);
     expect(commit).not.toHaveBeenCalled();
     act(() => sendPromptAdmit!());
+    expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
     expect(commit).toHaveBeenCalledTimes(1);
     expect(clearFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attribute prompt admission across a workspace mismatch', () => {
+    connectionState.workspaceCwd = '/other';
+    render({ workspaceCwd: '/w' });
+
+    act(() => {
+      latestOnSubmit!('hi');
+      sendPromptAdmit!();
+    });
+
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+  });
+
+  it('does not update a catalog without an owning workspace', () => {
+    connectionState.workspaceCwd = undefined;
+    render();
+
+    act(() => {
+      latestOnSubmit!('hi');
+      sendPromptAdmit!();
+    });
+
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+
+    streamingStateValue = 'responding';
+    rerender();
+    act(() => {
+      latestOnSubmit!('queued next');
+    });
+    expect(catalogController.invalidateWorkspace).not.toHaveBeenCalled();
+
+    streamingStateValue = 'idle';
+    rerender();
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
   });
 
   it('forwards images with an idle prompt', () => {
@@ -917,7 +1068,7 @@ describe('ChatPane', () => {
     ];
     render();
     act(() => {
-      latestOnSubmit!('check @.husky/', undefined, undefined, {
+      latestOnSubmit!('check @.husky/', undefined, undefined, undefined, {
         inputAnnotations,
       });
     });
@@ -934,7 +1085,7 @@ describe('ChatPane', () => {
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('queued next', undefined, commit);
+      returned = latestOnSubmit!('queued next', undefined, undefined, commit);
     });
     expect(returned).toBe(true);
     expect(enqueuePrompt).toHaveBeenCalledWith(
@@ -942,8 +1093,10 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       expect.any(Function),
     );
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -956,13 +1109,74 @@ describe('ChatPane', () => {
       latestOnSubmit!('name this queued task');
     });
 
-    const onAdmitted = enqueuePrompt.mock.calls[0]?.[4] as
+    const onAdmitted = enqueuePrompt.mock.calls[0]?.[5] as
       | (() => void)
       | undefined;
     expect(onAdmitted).toEqual(expect.any(Function));
     act(() => onAdmitted?.());
     expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
     expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this queued task');
+  });
+
+  it('resynchronizes the owning catalog when a pane turn completes', () => {
+    streamingStateValue = 'responding';
+    render();
+
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+  });
+
+  it('does not duplicate turn completion owned by the outer session', () => {
+    streamingStateValue = 'responding';
+    render({ reportCatalogTurnCompletion: false });
+
+    streamingStateValue = 'idle';
+    rerender({ reportCatalogTurnCompletion: false });
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
+  it('does not attribute a completed pane turn to a different workspace', () => {
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.workspaceCwd = '/other';
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
+  it('captures a pane identity that becomes available mid-turn', () => {
+    connectionState.sessionId = undefined;
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.sessionId = 'sess-late';
+    rerender();
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+  });
+
+  it('captures a pane workspace that becomes available mid-turn', () => {
+    connectionState.workspaceCwd = undefined;
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.workspaceCwd = '/secondary';
+    rerender();
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledTimes(1);
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/secondary');
+    expect(catalogController.turnCompleted).not.toHaveBeenCalledWith(
+      '/primary',
+    );
   });
 
   it('forwards composer annotations with a queued prompt', () => {
@@ -978,12 +1192,13 @@ describe('ChatPane', () => {
     ];
     render();
     act(() => {
-      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, undefined, {
         inputAnnotations,
       });
     });
     expect(enqueuePrompt).toHaveBeenCalledWith(
       'queue @.husky/',
+      undefined,
       undefined,
       undefined,
       inputAnnotations,
@@ -1004,6 +1219,7 @@ describe('ChatPane', () => {
       images,
       undefined,
       undefined,
+      undefined,
       expect.any(Function),
     );
   });
@@ -1017,26 +1233,13 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('', images);
+    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('does not submit while the pane is disconnected', () => {
+  it('submits while disconnected when a session exists', () => {
     connectionState.status = 'disconnected';
     render();
-    let returned: boolean | undefined;
-    act(() => {
-      returned = latestOnSubmit!('hi');
-    });
-    expect(returned).toBe(false);
-    expect(sendPrompt).not.toHaveBeenCalled();
-    expect(enqueuePrompt).not.toHaveBeenCalled();
-  });
-
-  it('submits while disconnected when prompt SSE restart is enabled', () => {
-    connectionState.status = 'disconnected';
-    render({ restartSseOnPrompt: true });
-
     act(() => {
       latestOnSubmit!('hi');
     });
@@ -1047,10 +1250,10 @@ describe('ChatPane', () => {
     );
   });
 
-  it('does not submit without a recoverable disconnected session', () => {
+  it('does not submit without a session while disconnected', () => {
     connectionState.status = 'disconnected';
     connectionState.sessionId = undefined;
-    render({ restartSseOnPrompt: true });
+    render();
 
     act(() => {
       latestOnSubmit!('hi');
@@ -1071,7 +1274,7 @@ describe('ChatPane', () => {
     render({ onError, onImageIngestionNotice });
     const commit = vi.fn();
     await act(async () => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
     expect(commit).not.toHaveBeenCalled();
@@ -1084,6 +1287,10 @@ describe('ChatPane', () => {
     const notice = testid('pane-prompt-admission-unknown');
     expect(notice).not.toBeNull();
     expect(latestChatEditorProps.disabled).toBe(true);
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
     act(() => latestOnSubmit!('do not retry'));
     expect(sendPrompt).toHaveBeenCalledTimes(1);
 
@@ -1141,7 +1348,7 @@ describe('ChatPane', () => {
     const commit = vi.fn();
 
     act(() => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       sendPromptAdmit?.();
     });
     await act(async () => {
@@ -1167,7 +1374,7 @@ describe('ChatPane', () => {
     render();
     const commit = vi.fn();
     await act(async () => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
 
@@ -1431,7 +1638,7 @@ describe('ChatPane', () => {
     render();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('   ', undefined, vi.fn());
+      returned = latestOnSubmit!('   ', undefined, undefined, vi.fn());
     });
     expect(returned).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();
@@ -1631,5 +1838,26 @@ describe('ChatPane', () => {
     });
     expect(setApprovalMode).toHaveBeenCalledWith('yolo');
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
+  });
+
+  it('resolves host at mention providers through a pane ChatEditor', () => {
+    renderRealChatEditor = true;
+    const atProviders = [
+      {
+        id: 'tables',
+        label: 'Tables',
+        async search() {
+          return [];
+        },
+      },
+    ];
+    const builtinAtProviders = { exclude: ['extensions'] as const };
+
+    render({}, { atProviders, builtinAtProviders });
+
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(atProviders);
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
+      builtinAtProviders,
+    );
   });
 });

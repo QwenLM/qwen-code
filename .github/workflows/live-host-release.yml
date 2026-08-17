@@ -38,6 +38,7 @@ on:
         type: 'boolean'
 
 permissions:
+  actions: 'read'
   contents: 'read'
 
 concurrency:
@@ -357,3 +358,6 @@ jobs:
     with:
       version: '${{ needs.prepare.outputs.version }}'
       source: 'artifact'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+      ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

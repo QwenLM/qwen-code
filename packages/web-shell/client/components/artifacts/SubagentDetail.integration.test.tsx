@@ -7,17 +7,22 @@ import type { ACPToolCall, Message } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 
 const {
+  animationFrameBlocks,
   connection,
+  messagesFromBlocks,
   workspaceActions,
   workspaceClient,
   latestMessageListProps,
   messages,
 } = vi.hoisted(() => ({
+  animationFrameBlocks: [{ id: 'frame-block' }],
   connection: {
     sessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     loadingTranscript: false,
+    catchingUp: true,
   },
+  messagesFromBlocks: vi.fn(),
   workspaceActions: {
     readFile: vi.fn(),
   },
@@ -54,7 +59,14 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 vi.mock('../../hooks/useMessages', () => ({
-  useMessages: () => messages,
+  useMessagesFromBlocks: (translator: unknown, blocks: readonly unknown[]) => {
+    messagesFromBlocks(translator, blocks);
+    return messages;
+  },
+}));
+
+vi.mock('../../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptBlocks: () => animationFrameBlocks,
 }));
 
 vi.mock('../../hooks/useSessionArtifacts', () => ({
@@ -81,13 +93,14 @@ afterEach(() => {
   container = null;
   root = null;
   latestMessageListProps.current = undefined;
+  messagesFromBlocks.mockClear();
   workspaceClient.resolveSubagentSession.mockReset();
 });
 
 it('opens subagent and fork transcript outputs in source-scoped panel tabs', async () => {
   workspaceClient.resolveSubagentSession.mockResolvedValue({
     sessionId: 'subagent-session',
-    status: 'completed',
+    status: 'running',
   });
   const onRightPanelOpen = vi.fn();
   container = document.createElement('div');
@@ -101,8 +114,11 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
           sessionId="parent-session"
           rootToolCallId="agent-1"
           initialRootTool={
-            (messages[0] as Extract<Message, { role: 'tool_group' }>)
-              .tools[0] as ACPToolCall
+            {
+              ...(messages[0] as Extract<Message, { role: 'tool_group' }>)
+                .tools[0],
+              startTime: 40_000,
+            } as ACPToolCall
           }
           workspaceCwd="/work/project"
           onRightPanelOpen={onRightPanelOpen}
@@ -113,9 +129,15 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
   });
 
   expect(latestMessageListProps.current).toMatchObject({
+    activeTurnStartedAt: 40_000,
+    catchingUp: true,
     turnFileChanges: expect.any(Map),
     turnArtifacts: expect.any(Map),
   });
+  expect(messagesFromBlocks).toHaveBeenCalledWith(
+    expect.any(Function),
+    animationFrameBlocks,
+  );
 
   const openOutput = latestMessageListProps.current?.[
     'onTurnOutputOpen'

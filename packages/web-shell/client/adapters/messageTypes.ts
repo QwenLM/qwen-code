@@ -82,6 +82,7 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
+  files?: Array<{ name: string; mimeType: string }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
 }
@@ -91,6 +92,7 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  branchRecordId?: string;
   /**
    * Token usage folded onto this assistant block by the daemon SDK reducer
    * (summed when several blocks merge into one message). Summed again across a
@@ -111,6 +113,19 @@ export interface DaemonToolGroupMessage extends DaemonMessageMeta {
   id: string;
   role: 'tool_group';
   tools: DaemonMessageToolCall[];
+  /**
+   * Thinking folded into this group like a tool (compact mode). Streaming
+   * entries carry `isStreaming` so the summary can read "Thinking…" while
+   * the model works, then settle to a click-to-expand row when done.
+   * `beforeToolCallId` pins each thought to the tool that follows it so the
+   * group renders in the original interleaved order; thoughts without one
+   * trail the last tool.
+   */
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>;
 }
 
 export interface DaemonPlanMessage extends DaemonMessageMeta {
@@ -127,6 +142,7 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   retryable?: boolean;
   source?: string;
   data?: unknown;
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

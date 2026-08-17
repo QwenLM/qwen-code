@@ -57,10 +57,16 @@ function isNotCurrentlyGeneratingText(value: unknown): boolean {
 
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
-  constructor(sessionId: string, extra?: string) {
+  readonly code: 'session_not_found' | 'session_closing';
+  constructor(
+    sessionId: string,
+    extra?: string,
+    code: 'session_not_found' | 'session_closing' = 'session_not_found',
+  ) {
     super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
+    this.code = code;
   }
 }
 

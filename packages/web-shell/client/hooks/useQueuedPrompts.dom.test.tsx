@@ -37,6 +37,7 @@ const sdk = vi.hoisted(() => ({
     originatorClientId?: string;
   }>,
   consume: vi.fn(),
+  ownerVersion: 0,
 }));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
@@ -48,6 +49,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useDaemonMidTurnInjected: () => ({
     batches: sdk.batches,
     consume: sdk.consume,
+  }),
+  useDaemonSessionOwnerGuard: () => ({
+    capture: () => {
+      const ownerVersion = sdk.ownerVersion;
+      return { isCurrent: () => sdk.ownerVersion === ownerVersion };
+    },
   }),
 }));
 
@@ -75,6 +82,7 @@ function mount(
   sessionActions: DaemonSessionActions,
   canMutateMidTurn = true,
   connected = false,
+  writeBlocked = false,
 ) {
   const editor = {
     getText: vi.fn(() => ''),
@@ -92,15 +100,22 @@ function mount(
   function Harness({
     state,
     activeSessionId,
+    blocked,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
+    blocked: boolean;
   }) {
     latest = useQueuedPrompts({
       connected,
+      writeBlocked: blocked,
       sessionId: activeSessionId,
+      workspaceCwd: '/workspace',
       clientId: 'client-1',
       canMutateMidTurn,
+      // This suite pins the legacy local-fallback lifecycle.
+      canQueryMidTurn: false,
+      canInjectMidTurnMedia: false,
       streamingState: state,
       sessionActions,
       store,
@@ -112,13 +127,24 @@ function mount(
   }
 
   let activeSessionId = 'session-1';
+  let blocked = writeBlocked;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
+    replaceOwner = false,
+    nextWriteBlocked = blocked,
   ) => {
+    if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
+    blocked = nextWriteBlocked;
     act(() =>
-      root.render(<Harness state={state} activeSessionId={activeSessionId} />),
+      root.render(
+        <Harness
+          state={state}
+          activeSessionId={activeSessionId}
+          blocked={blocked}
+        />,
+      ),
     );
   };
   render(streamingState);
@@ -149,6 +175,7 @@ beforeEach(() => {
   sdk.batches = [];
   sdk.pendingEvents = [];
   sdk.consume.mockReset();
+  sdk.ownerVersion = 0;
 });
 
 afterEach(() => {
@@ -157,6 +184,27 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it('restores an unaccepted mid-turn prompt when its owner is replaced', () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+      new Promise(() => undefined),
+    );
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('belongs to the source attachment'));
+    expect(latest.queuedPrompts).toHaveLength(1);
+
+    render('responding', 'session-1', true);
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).toHaveBeenCalledWith(
+      'belongs to the source attachment',
+    );
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('queues and submits an image-only prompt without using mid-turn text insertion', () => {
     const { actions } = createActions();
     mount('responding', actions);
@@ -243,6 +291,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       '',
       [{ data: 'Ym1w', mimeType: 'image/bmp' }],
       undefined,
+      undefined,
     );
     expect(latest.queuedPrompts).toMatchObject([
       {
@@ -292,6 +341,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       '',
       [{ data: 'c2Vjb25k', mimeType: 'image/png' }],
       undefined,
+      undefined,
     );
   });
 
@@ -330,6 +380,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'dGVybWluYWw=', mimeType: 'image/png' }],
+      undefined,
       undefined,
     );
   });
@@ -513,6 +564,24 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
+  it('fences an old submit before the replacement owner rerenders', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('', [{ data: 'b2xk', media_type: 'image/png' }]),
+    );
+    sdk.ownerVersion += 1;
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'old-server-prompt' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    render('responding', 'session-1');
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
   it('ignores an old refresh after an S1 to S2 to S1 owner change', async () => {
     const { actions } = createActions();
     const oldRefresh = deferred<{
@@ -590,7 +659,13 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ];
 
     act(() =>
-      latest.enqueuePrompt('describe', images, undefined, inputAnnotations),
+      latest.enqueuePrompt(
+        'describe',
+        images,
+        undefined,
+        undefined,
+        inputAnnotations,
+      ),
     );
     await act(async () => {
       pendingSubmit.reject(new DaemonHttpError(413, undefined, 'Too large'));
@@ -664,6 +739,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() =>
       latest.enqueuePrompt(
         '@file.ts\n\nfix it',
+        undefined,
         undefined,
         undefined,
         inputAnnotations,
@@ -802,6 +878,26 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
   });
 
+  it('freezes mid-turn fallback while a session switch is preparing', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('留在当前会话'));
+    render('responding', 'session-1', false, true);
+    await act(async () => admission.resolve({ accepted: false }));
+    render('idle', 'session-1', false, true);
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: '留在当前会话', midTurnState: 'submitting' },
+    ]);
+
+    render('idle', 'session-1', false, false);
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+  });
+
   it('falls back once when the running turn ends before injection', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
@@ -903,6 +999,87 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toEqual([]);
     expect(editor.setText).toHaveBeenCalledWith('修改我');
     expect(editor.focus).toHaveBeenCalled();
+  });
+
+  it('restores an edited prompt after a same-id attachment replacement', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-edit',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('修改后保留'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-1', true);
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
+
+    expect(editor.setText).toHaveBeenCalledWith('修改后保留');
+    expect(editor.setText).toHaveBeenCalledOnce();
+    expect(editor.focus).toHaveBeenCalled();
+  });
+
+  it('restores an edited prompt when switching to a different session', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-cross-session-edit',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('切换后保留'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true);
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
+
+    expect(editor.setText).toHaveBeenCalledWith('切换后保留');
+    expect(editor.setText).toHaveBeenCalledOnce();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('does not restore an edited prompt when cross-session removal loses', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-cross-session-edit-lost',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('仍在服务端'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true);
+    expect(editor.setText).not.toHaveBeenCalled();
+    await act(async () => {
+      removal.resolve({ removed: false });
+      await editPromise;
+    });
+
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('keeps the row when removal loses the race with drain or idle', async () => {
@@ -1065,7 +1242,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() => latest.enqueuePrompt('图片', [{ data: 'x', media_type: 'x' }]));
     act(() => latest.enqueuePrompt('/help'));
     act(() =>
-      latest.enqueuePrompt('@file.ts fix', undefined, undefined, [
+      latest.enqueuePrompt('@file.ts fix', undefined, undefined, undefined, [
         {
           type: 'reference',
           start: 0,

@@ -62,8 +62,14 @@ describe('buildInstallPlan', () => {
   });
 
   it('builds a plan with editable models and unknown IDs', () => {
-    const config = makeConfig({ modelsEditable: true });
-    const plan = buildInstallPlan(config, {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [
+        { id: 'model-a', contextWindowSize: 8192, enableThinking: true },
+        { id: 'model-b' },
+      ],
+    });
+    const plan = buildInstallPlanSrc(config, {
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'sk-test',
       modelIds: ['model-a', 'unknown-model'],
@@ -77,6 +83,9 @@ describe('buildInstallPlan', () => {
       name: '[Test] unknown-model',
     });
     expect(models?.[1]?.generationConfig).toBeUndefined();
+    expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(models ?? []),
+    );
   });
 
   it('applies advancedConfig to editable unknown model IDs only', () => {
@@ -674,7 +683,9 @@ import {
   getAllProviderBaseUrls as getAllProviderBaseUrlsSrc,
 } from '../all-providers.js';
 import {
+  buildInstallPlan as buildInstallPlanSrc,
   resolveBaseUrl as resolveBaseUrlSrc,
+  resolveMetadataKey as resolveMetadataKeySrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
 } from '../provider-config.js';
 
@@ -794,8 +805,6 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
     expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
   });
 });
-
-import { resolveMetadataKey as resolveMetadataKeySrc } from '../provider-config.js';
 
 describe('customHeaders in ProviderConfig', () => {
   it('merges customHeaders into generationConfig for fixed models', () => {

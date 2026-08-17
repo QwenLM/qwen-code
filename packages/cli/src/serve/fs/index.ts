@@ -21,6 +21,7 @@ export {
 export {
   MAX_READ_BYTES,
   MAX_WRITE_BYTES,
+  MAX_UPLOAD_BYTES,
   BINARY_PROBE_BYTES,
   assertTrustedForIntent,
   detectBinary,

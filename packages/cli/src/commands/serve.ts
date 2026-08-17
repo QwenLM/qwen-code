@@ -5,8 +5,6 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { randomBytes } from 'node:crypto';
-import { networkInterfaces } from 'node:os';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
 import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
@@ -21,12 +19,16 @@ import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   isValidMemoryBudgetMb,
+  JOURNAL_GROWTH_POOL_FRACTION,
+  MAX_JOURNAL_GROWTH_POOL_MB,
   memoryBudgetRangeError,
+  MIN_MEMORY_BUDGET_MB,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
@@ -34,7 +36,6 @@ import {
   MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
-  sleepInhibitor,
   shouldLaunchBrowser,
   type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
@@ -54,49 +55,65 @@ function blockForever(): Promise<never> {
 
 const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
 
-export function localControlUrls(
-  baseUrl: string,
-  token: string,
-  interfaces = networkInterfaces(),
-): Array<{ interfaceName: string; url: string }> {
-  const urls: Array<{ interfaceName: string; url: string }> = [];
-  for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
-    for (const address of addresses ?? []) {
-      if (address.family !== 'IPv4' || address.internal) {
-        continue;
-      }
-      const target = new URL(baseUrl);
-      target.hostname = address.address;
-      target.hash = `token=${encodeURIComponent(token)}`;
-      urls.push({ interfaceName, url: target.toString() });
-    }
-  }
-  return urls;
-}
-
-async function showLocalControlPairing(
+/**
+ * Turn Local Control on through the daemon and print the pairing QR.
+ *
+ * The flag no longer implements Local Control — it calls the same service the
+ * Web Shell and the desktop menu item drive. It is a caller now, not a second
+ * implementation, which is why `--local-control` composes with `--token` and
+ * `--allow-origin`: the LAN listener gets its own credential and origin.
+ */
+async function startLocalControl(
   handle: RunHandle,
-  urls: Array<{ interfaceName: string; url: string }>,
+  address: string | undefined,
 ): Promise<void> {
   await handle.runtimeReady;
-  if (!handle.webShellMounted || !handle.resolvedToken) {
-    throw new Error('Local Control requires the authenticated Web Shell.');
+  if (!handle.webShellMounted) {
+    throw new Error('Local Control requires the Web Shell.');
+  }
+  const service = handle.getLocalControl();
+  if (!service) {
+    throw new Error('Local Control is unavailable on this daemon.');
+  }
+  let status;
+  try {
+    status = await service.enable(address ? { address } : {});
+  } catch (err) {
+    // The service reports ambiguity to its caller rather than picking for
+    // them; in a terminal the way to answer is a flag, which only this caller
+    // knows about.
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'ambiguous_lan_interface'
+    ) {
+      throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    throw err;
+  }
+  if (!status.url) {
+    throw new Error('Local Control did not return a pairing URL.');
   }
   const { default: qrcode } = (await import('qrcode-terminal')) as {
     default: typeof import('qrcode-terminal');
   };
   qrcode.setErrorLevel('Q');
   writeStdoutLine(
-    '\nLocal Control is on. Scan a QR code from the same network:',
+    '\nLocal Control is on. Scan this QR code from the same network:',
   );
-  for (const entry of urls) {
-    writeStdoutLine(`\n${entry.interfaceName}: ${entry.url}`);
-    qrcode.generate(entry.url, { small: true }, (code) => {
-      writeStdoutLine(code.trimEnd());
-    });
-  }
+  writeStdoutLine(`\n${status.interfaceName}: ${status.url}`);
+  qrcode.generate(status.url, { small: true }, (code) => {
+    writeStdoutLine(code.trimEnd());
+  });
   writeStdoutLine(
-    '\nKeep this terminal open. Restart after changing networks. Sleep inhibition is best effort. Traffic is encrypted only when --tls-cert and --tls-key are set. Press Ctrl+C to turn Local Control off.',
+    '\nKeep this terminal open. ' +
+      (status.sleepInhibited
+        ? 'Sleep is inhibited while this session is active. '
+        : 'Sleep inhibition is unavailable here, so the host may sleep. ') +
+      (status.encrypted
+        ? 'Traffic is encrypted.'
+        : 'Traffic is unencrypted — use it only on a network you trust.') +
+      ' Turn Local Control off from the Web Shell Settings card, or press ' +
+      'Ctrl+C to exit the daemon.',
   );
 }
 
@@ -166,8 +183,8 @@ interface ServeArgs {
   'max-connections': number;
   'event-ring-size': number;
   'compacted-replay-max-bytes': number;
-  'max-journal-events': number;
-  'max-journal-bytes': number;
+  'max-journal-events'?: number;
+  'max-journal-bytes'?: number;
   workspace?: string | string[];
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
@@ -177,6 +194,7 @@ interface ServeArgs {
   web: boolean;
   open: boolean;
   'local-control': boolean;
+  'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -272,7 +290,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: MEMORY_PROJECT_SCOPES,
         description:
           'Choose how project memory is partitioned. ' +
-          '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +
+          'Defaults to "workspace" so each daemon workspace stays isolated; "git-root" preserves the legacy shared scope. ' +
           'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
       })
       .option('max-connections', {
@@ -341,34 +359,36 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Share the Web Shell on the local IPv4 network with a fresh token, terminal QR code, and best-effort sleep inhibition. Press Ctrl+C to turn it off.',
+          'Share the Web Shell on the local IPv4 network with its own revocable pairing token, terminal QR code, and best-effort sleep inhibition. Ctrl+C turns it off by ending the whole daemon; the Web Shell Settings card turns it off while the daemon keeps running.',
+      })
+      .option('local-control-address', {
+        type: 'string',
+        description:
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
       .check((argv) => {
-        if (argv['local-control'] === true && argv.token !== undefined) {
-          throw new Error('Local Control generates its own token.');
-        }
-        if (
-          argv['local-control'] === true &&
-          argv['allow-origin'] !== undefined
-        ) {
-          throw new Error('Local Control manages its browser origins.');
-        }
+        // A wildcard or LAN primary bind already owns the port Local Control
+        // needs on its selected address. Token and Origin settings remain
+        // independent because the second listener owns those.
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
         if (
           argv['local-control'] === true &&
-          (!Number.isInteger(argv['port']) ||
-            argv['port'] < 1 ||
-            argv['port'] > 65535)
-        ) {
-          throw new Error('Local Control requires a fixed port.');
-        }
-        if (
-          argv['local-control'] === true &&
           argv.hostname !== DEFAULT_SERVE_HOSTNAME
         ) {
-          throw new Error('Local Control manages its hostname.');
+          throw new Error(
+            `Local Control requires --hostname ${DEFAULT_SERVE_HOSTNAME}.`,
+          );
+        }
+        if (
+          argv['local-control'] !== true &&
+          argv['local-control-address'] !== undefined
+        ) {
+          throw new Error('--local-control-address requires --local-control.');
+        }
+        if (argv['local-control-address'] === '') {
+          throw new Error('--local-control-address must not be empty.');
         }
         return true;
       })
@@ -397,21 +417,34 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-journal-events', {
         type: 'number',
-        default: DEFAULT_MAX_JOURNAL_EVENTS,
+        nargs: 1,
         description:
-          'Per-session cap on replay entries retained in the in-flight live ' +
-          'journal (current unfinished turn). Compatible text/thought chunks ' +
-          'share bounded entries. When exceeded, the oldest entries are ' +
-          'dropped. Must be a positive safe integer.',
+          'Per-session baseline cap on replay entries retained in the ' +
+          'in-flight live journal (current unfinished turn). Compatible ' +
+          'text/thought chunks share bounded entries. When exceeded, the ' +
+          'daemon first tries adaptive growth (see --max-journal-bytes); ' +
+          'without granted headroom the oldest entries are dropped. Pinning ' +
+          'this flag (or --max-journal-bytes) disables adaptive growth. ' +
+          'Defaults to ' +
+          DEFAULT_MAX_JOURNAL_EVENTS +
+          ' when unset. Must be a positive safe integer.',
       })
       .option('max-journal-bytes', {
         type: 'number',
-        default: DEFAULT_MAX_JOURNAL_BYTES,
+        nargs: 1,
         description:
-          'Per-session source-event byte cap on the in-flight live journal. ' +
-          'When exceeded, the oldest entries are dropped whole (at least ' +
-          'one is always kept), so the retained tail can be much smaller ' +
-          'than the cap. Must be a positive safe integer.',
+          'Per-session baseline source-event byte cap on the in-flight live ' +
+          'journal. When a turn outgrows it, adaptive growth raises the ' +
+          "session's caps (per-session hard cap " +
+          JOURNAL_GROWTH_HARD_CAP_BYTES / (1024 * 1024) +
+          ' MiB) within a growth ' +
+          'pool derived from the daemon memory budget (see ' +
+          '--memory-budget-mb); without granted headroom the oldest entries ' +
+          'are dropped whole (at least one is always kept), so the retained ' +
+          'tail can be much smaller than the cap. Pinning this flag (or ' +
+          '--max-journal-events) disables adaptive growth. Defaults to ' +
+          DEFAULT_MAX_JOURNAL_BYTES +
+          ' bytes when unset. Must be a positive safe integer.',
       })
       .option('http-bridge', {
         type: 'boolean',
@@ -427,11 +460,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Total memory budget in MB for the daemon process tree. When unset, ' +
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
-          'way. Currently observed and reported under `limits.memory` in daemon ' +
-          'status, and modeled into a per-child partition reported under ' +
-          '`limits.memory.childHeap`. Nothing applies it: no child is sized ' +
-          'from this budget. Must be an integer ' +
-          'in [1024, 1048576].',
+          'way. It does not change how any `qwen --acp` child is sized; the ' +
+          'one consumer today is adaptive live-journal growth: one ' +
+          'daemon-wide pool of ' +
+          JOURNAL_GROWTH_POOL_FRACTION * 100 +
+          '% of the effective budget (capped at ' +
+          MAX_JOURNAL_GROWTH_POOL_MB +
+          ' MB; 0, growth disabled, when the effective budget falls below ' +
+          'the ' +
+          MIN_MEMORY_BUDGET_MB +
+          ' MB minimum; see --max-journal-bytes). Reported under ' +
+          '`limits.memory` in daemon status, alongside a modeled per-child ' +
+          'partition under `limits.memory.childHeap`. Must be an integer in ' +
+          '[1024, 1048576].',
       })
       .option('memory-pressure-mode', {
         choices: ['off', 'observe'] as const,
@@ -768,25 +809,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // the public serve barrel, which also exports REST/ACP runtime modules.
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
-      const localControlToken = argv['local-control']
-        ? randomBytes(32).toString('base64url')
-        : undefined;
-      const localControlPairing = localControlToken
-        ? localControlUrls(
-            `${argv['tls-cert'] ? 'https' : 'http'}://0.0.0.0:${argv.port}/`,
-            localControlToken,
-          )
-        : [];
-      if (argv['local-control'] && localControlPairing.length === 0) {
-        throw new Error(
-          'Local Control could not find a non-loopback IPv4 address.',
-        );
-      }
       const handle = await runQwenServe({
         port: argv.port,
-        strictPort: argv['local-control'],
-        hostname: argv['local-control'] ? '0.0.0.0' : argv.hostname,
-        token: localControlToken ?? argv.token,
+        hostname: argv.hostname,
+        token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         ...(argv['max-total-sessions'] !== undefined
@@ -796,8 +822,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
-        maxJournalEvents: argv['max-journal-events'],
-        maxJournalBytes: argv['max-journal-bytes'],
+        ...(argv['max-journal-events'] !== undefined
+          ? { maxJournalEvents: argv['max-journal-events'] }
+          : {}),
+        ...(argv['max-journal-bytes'] !== undefined
+          ? { maxJournalBytes: argv['max-journal-bytes'] }
+          : {}),
         workspace: argv.workspace,
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
@@ -815,19 +845,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         memoryPressureMode: argv['memory-pressure-mode'],
         childHeapMode: argv['child-heap-mode'],
-        ...(argv['local-control']
-          ? {
-              allowOrigins: localControlPairing
-                .map(({ url }) => new URL(url).origin)
-                .concat(
-                  new URL(
-                    `${argv['tls-cert'] ? 'https' : 'http'}://127.0.0.1:${argv.port}`,
-                  ).origin,
-                ),
-            }
-          : argv['allow-origin'] && argv['allow-origin'].length > 0
-            ? { allowOrigins: argv['allow-origin'] }
-            : {}),
+        // No Local Control special case: the service registers and removes the
+        // LAN origin itself while a session is live.
+        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
+          ? { allowOrigins: argv['allow-origin'] }
+          : {}),
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
           : {}),
@@ -883,8 +905,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {
         try {
-          await showLocalControlPairing(handle, localControlPairing);
-          sleepInhibitor.acquire('Qwen Code Local Control is active');
+          // Sleep inhibition moved into the service: it is held for as long as
+          // the LAN listener is up and released when it goes down, rather than
+          // for the lifetime of the process regardless.
+          await startLocalControl(handle, argv['local-control-address']);
         } catch (err) {
           await handle.close().catch(() => undefined);
           throw err;
