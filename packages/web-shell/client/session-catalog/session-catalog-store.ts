@@ -1,5 +1,6 @@
 import type {
   DaemonClient,
+  DaemonSessionLiveState,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
   DaemonSessionSummary,
@@ -37,6 +38,7 @@ interface Subscriber {
 
 interface Waiter {
   revision: number;
+  liveStateCoordinated: boolean;
   resolve: (page: DaemonSessionListPage) => void;
   reject: (error: Error) => void;
 }
@@ -46,6 +48,11 @@ interface QueueJob {
   priority: number;
   background: boolean;
   sequence: number;
+  staged?: {
+    revision: number;
+    resolve: (page: DaemonSessionListPage) => void;
+    reject: (error: Error) => void;
+  };
 }
 
 interface CatalogEntry {
@@ -56,6 +63,8 @@ interface CatalogEntry {
   desiredRevision: number;
   acceptedRevision: number;
   runningRevision?: number;
+  runningPromise?: Promise<void>;
+  runningStaged?: boolean;
   queuedJob?: QueueJob;
   trailingPriority?: number;
   trailingBackground?: boolean;
@@ -65,6 +74,18 @@ interface CatalogEntry {
   pollTimer?: ReturnType<typeof setTimeout>;
   nextPollAt?: number;
   cleanupTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface StagedCatalogPage {
+  key: string;
+  revision: number;
+  page: DaemonSessionListPage;
+}
+
+export interface StagedWorkspaceSessionCatalog {
+  workspaceCwd: string;
+  pages: StagedCatalogPage[];
+  complete: boolean;
 }
 
 const PRIORITY: Record<RequestPriority, number> = {
@@ -126,6 +147,8 @@ export class SessionCatalogStore {
     string,
     ReturnType<typeof setTimeout>
   >();
+  private readonly liveStateWorkspaceUsers = new Map<string, number>();
+  private readonly liveStateWorkspaceRefreshRequests = new Set<string>();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -139,6 +162,47 @@ export class SessionCatalogStore {
 
   getEmptySnapshot(): SessionCatalogSnapshot {
     return EMPTY_SNAPSHOT;
+  }
+
+  retainWorkspaceLiveState(workspaceCwd: string): () => void {
+    this.liveStateWorkspaceUsers.set(
+      workspaceCwd,
+      (this.liveStateWorkspaceUsers.get(workspaceCwd) ?? 0) + 1,
+    );
+    return () => {
+      const remaining =
+        (this.liveStateWorkspaceUsers.get(workspaceCwd) ?? 1) - 1;
+      if (remaining > 0)
+        this.liveStateWorkspaceUsers.set(workspaceCwd, remaining);
+      else {
+        this.liveStateWorkspaceUsers.delete(workspaceCwd);
+        this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
+        for (const entry of this.entries.values()) {
+          if (entry.query.workspaceCwd !== workspaceCwd) continue;
+          this.resetPollSchedule(entry);
+          if (entry.waiters.length > 0) {
+            entry.desiredRevision += 1;
+            if (entry.queuedJob?.staged) this.removeQueuedJob(entry);
+            this.ensureScheduled(entry, PRIORITY.interactive, false);
+          } else if (
+            entry.subscribers.size > 0 &&
+            (entry.invalidated ||
+              (hasAutoLoadSubscriber(entry) &&
+                (entry.snapshot.page === undefined || entry.snapshot.stale)))
+          ) {
+            this.requestBackground(entry, 'initial');
+          }
+        }
+      }
+    };
+  }
+
+  isWorkspaceLiveStateEnabled(workspaceCwd: string): boolean {
+    return this.liveStateWorkspaceUsers.has(workspaceCwd);
+  }
+
+  consumeWorkspaceLiveStateRefreshRequest(workspaceCwd: string): boolean {
+    return this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
   }
 
   subscribe(
@@ -159,6 +223,15 @@ export class SessionCatalogStore {
         : {}),
     };
     entry.subscribers.add(subscriber);
+    const liveStateEnabled = this.isWorkspaceLiveStateEnabled(
+      query.workspaceCwd,
+    );
+    if (
+      liveStateEnabled &&
+      (entry.snapshot.page === undefined || entry.snapshot.stale)
+    ) {
+      this.liveStateWorkspaceRefreshRequests.add(query.workspaceCwd);
+    }
     this.updateVisibilityListener();
     this.resetPollSchedule(entry);
 
@@ -170,10 +243,11 @@ export class SessionCatalogStore {
         Date.now() - entry.snapshot.updatedAt >= options.maxAgeMs);
 
     if (
-      entry.invalidated ||
-      (subscriber.autoLoad &&
-        (entry.snapshot.page === undefined || entry.snapshot.stale)) ||
-      retainedPageExpired
+      !liveStateEnabled &&
+      (entry.invalidated ||
+        (subscriber.autoLoad &&
+          (entry.snapshot.page === undefined || entry.snapshot.stale)) ||
+        retainedPageExpired)
     ) {
       this.requestBackground(entry, 'initial');
     }
@@ -215,9 +289,15 @@ export class SessionCatalogStore {
     }
     let request: Promise<DaemonSessionListPage>;
     const reusableRunningRequest =
-      entry.runningRevision !== undefined && entry.snapshot.loading;
-    if (options.fresh !== true && (reusableRunningRequest || entry.queuedJob)) {
-      request = this.createWaiter(entry, entry.desiredRevision);
+      entry.runningRevision !== undefined &&
+      entry.snapshot.loading &&
+      !entry.runningStaged;
+    const reusableQueuedRequest = entry.queuedJob && !entry.queuedJob.staged;
+    if (
+      options.fresh !== true &&
+      (reusableRunningRequest || reusableQueuedRequest)
+    ) {
+      request = this.createWaiter(entry, entry.desiredRevision, false);
       if (entry.queuedJob || entry.runningRevision !== entry.desiredRevision) {
         this.ensureScheduled(entry, PRIORITY.interactive, false);
       }
@@ -237,6 +317,10 @@ export class SessionCatalogStore {
   ): void {
     const background = options.background === true;
     const hidden = this.isHidden();
+    const liveStateEnabled = this.isWorkspaceLiveStateEnabled(workspaceCwd);
+    if (liveStateEnabled) {
+      this.liveStateWorkspaceRefreshRequests.add(workspaceCwd);
+    }
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd) continue;
       entry.desiredRevision += 1;
@@ -244,6 +328,16 @@ export class SessionCatalogStore {
       entry.retryAt = undefined;
       this.setSnapshot(entry, { ...entry.snapshot, stale: true });
       if (background && hidden) entry.nextPollAt = Date.now();
+      if (liveStateEnabled) {
+        if (entry.queuedJob?.background) {
+          this.removeQueuedJob(entry);
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            loading: entry.runningRevision !== undefined,
+          });
+        }
+        continue;
+      }
       if (entry.waiters.length > 0) {
         this.ensureScheduled(entry, PRIORITY.interactive, false);
       } else if (entry.subscribers.size > 0 && (!background || !hidden)) {
@@ -284,6 +378,155 @@ export class SessionCatalogStore {
     }
   }
 
+  applyLiveState(
+    workspaceCwd: string,
+    liveSessions: readonly DaemonSessionLiveState[],
+  ): void {
+    const liveById = new Map(
+      liveSessions.map((session) => [session.sessionId, session]),
+    );
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      let changed = false;
+      const sessions = entry.snapshot.page.sessions.map((session) => {
+        const live = liveById.get(session.sessionId);
+        const clientCount = live?.clientCount ?? 0;
+        const hasActivePrompt = live?.hasActivePrompt ?? false;
+        const isWaitingForPermission = live?.isWaitingForPermission ?? false;
+        const isWaitingForUserQuestion =
+          live?.isWaitingForUserQuestion ?? false;
+        if (
+          session.clientCount === clientCount &&
+          session.hasActivePrompt === hasActivePrompt &&
+          session.isWaitingForPermission === isWaitingForPermission &&
+          session.isWaitingForUserQuestion === isWaitingForUserQuestion
+        ) {
+          return session;
+        }
+        changed = true;
+        return {
+          ...session,
+          clientCount,
+          hasActivePrompt,
+          isWaitingForPermission,
+          isWaitingForUserQuestion,
+        };
+      });
+      if (!changed) continue;
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: { ...entry.snapshot.page, sessions },
+      });
+    }
+  }
+
+  async stageWorkspaceRefresh(
+    workspaceCwd: string,
+  ): Promise<StagedWorkspaceSessionCatalog> {
+    const workspaceEntries = [...this.entries.values()].filter(
+      (entry) => entry.query.workspaceCwd === workspaceCwd,
+    );
+    if (
+      workspaceEntries.some((entry) =>
+        entry.waiters.some((waiter) => !waiter.liveStateCoordinated),
+      )
+    ) {
+      return { workspaceCwd, pages: [], complete: false };
+    }
+    const targets: Array<{ entry: CatalogEntry; revision: number }> = [];
+    for (const entry of workspaceEntries) {
+      if (
+        entry.subscribers.size > 0 ||
+        entry.snapshot.loading ||
+        entry.waiters.length > 0
+      ) {
+        this.clearPollTimer(entry);
+        this.removeQueuedJob(entry);
+        entry.trailingPriority = undefined;
+        entry.trailingBackground = undefined;
+        entry.desiredRevision += 1;
+        entry.invalidated = true;
+        entry.retryAt = undefined;
+        this.setSnapshot(entry, {
+          ...entry.snapshot,
+          loading: true,
+          stale: true,
+        });
+        targets.push({ entry, revision: entry.desiredRevision });
+        continue;
+      }
+      entry.desiredRevision += 1;
+      entry.invalidated = true;
+      entry.retryAt = undefined;
+      this.setSnapshot(entry, { ...entry.snapshot, stale: true });
+    }
+    const pages: StagedCatalogPage[] = [];
+    try {
+      for (const { entry, revision } of targets) {
+        if (entry.runningPromise) await entry.runningPromise;
+        if (entry.desiredRevision !== revision) {
+          return { workspaceCwd, pages, complete: false };
+        }
+        pages.push({
+          key: entry.key,
+          revision,
+          page: await this.fetchStagedPage(entry, revision),
+        });
+      }
+    } catch (error) {
+      const normalized = normalizeError(error);
+      for (const { entry, revision } of targets) {
+        if (entry.desiredRevision !== revision) continue;
+        this.setSnapshot(entry, {
+          ...entry.snapshot,
+          loading: false,
+          stale: true,
+          error: normalized,
+        });
+        this.rejectWaiters(entry, revision, normalized);
+      }
+      throw normalized;
+    }
+    return { workspaceCwd, pages, complete: true };
+  }
+
+  commitWorkspaceRefresh(staged: StagedWorkspaceSessionCatalog): boolean {
+    if (!staged.complete) return false;
+    const entries: Array<{
+      entry: CatalogEntry;
+      stagedPage: StagedCatalogPage;
+    }> = [];
+    for (const stagedPage of staged.pages) {
+      const entry = this.entries.get(stagedPage.key);
+      if (
+        !entry ||
+        entry.query.workspaceCwd !== staged.workspaceCwd ||
+        entry.desiredRevision !== stagedPage.revision
+      ) {
+        return false;
+      }
+      entries.push({ entry, stagedPage });
+    }
+    for (const { entry, stagedPage } of entries) {
+      entry.acceptedRevision = stagedPage.revision;
+      entry.invalidated = false;
+      entry.retryAt = undefined;
+      entry.snapshot = {
+        page: stagedPage.page,
+        loading: false,
+        stale: false,
+        updatedAt: Date.now(),
+      };
+    }
+    for (const { entry, stagedPage } of entries) {
+      for (const subscriber of entry.subscribers) subscriber.listener();
+      this.resolveWaiters(entry, stagedPage.page);
+    }
+    return true;
+  }
+
   scheduleWorkspaceRefresh(
     workspaceCwd: string,
     delayMs = SESSION_CATALOG_TRAILING_REFRESH_MS,
@@ -298,16 +541,19 @@ export class SessionCatalogStore {
   }
 
   dispose(): void {
+    const error = new Error('Session catalog store disposed');
     for (const entry of this.entries.values()) {
       this.clearPollTimer(entry);
       if (entry.cleanupTimer !== undefined) clearTimeout(entry.cleanupTimer);
-      const error = new Error('Session catalog store disposed');
       for (const waiter of entry.waiters) waiter.reject(error);
       entry.waiters = [];
     }
+    for (const job of this.queue) job.staged?.reject(error);
     for (const timer of this.trailingRefreshTimers.values())
       clearTimeout(timer);
     this.trailingRefreshTimers.clear();
+    this.liveStateWorkspaceUsers.clear();
+    this.liveStateWorkspaceRefreshRequests.clear();
     this.entries.clear();
     this.queue.length = 0;
     this.removeVisibilityListener();
@@ -339,7 +585,14 @@ export class SessionCatalogStore {
     entry.desiredRevision += 1;
     const revision = entry.desiredRevision;
     this.setSnapshot(entry, { ...entry.snapshot, stale: true });
-    const promise = this.createWaiter(entry, revision);
+    const liveStateCoordinated = this.isWorkspaceLiveStateEnabled(
+      entry.query.workspaceCwd,
+    );
+    const promise = this.createWaiter(entry, revision, liveStateCoordinated);
+    if (liveStateCoordinated) {
+      this.liveStateWorkspaceRefreshRequests.add(entry.query.workspaceCwd);
+      return promise;
+    }
     this.ensureScheduled(entry, PRIORITY.interactive, false);
     return promise;
   }
@@ -347,9 +600,15 @@ export class SessionCatalogStore {
   private createWaiter(
     entry: CatalogEntry,
     revision: number,
+    liveStateCoordinated: boolean,
   ): Promise<DaemonSessionListPage> {
     return new Promise<DaemonSessionListPage>((resolve, reject) => {
-      entry.waiters.push({ revision, resolve, reject });
+      entry.waiters.push({
+        revision,
+        liveStateCoordinated,
+        resolve,
+        reject,
+      });
     });
   }
 
@@ -357,6 +616,7 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     priority: 'initial' | 'poll',
   ): void {
+    if (this.isWorkspaceLiveStateEnabled(entry.query.workspaceCwd)) return;
     if (this.isHidden()) {
       entry.nextPollAt = Date.now();
       this.setSnapshot(entry, { ...entry.snapshot, stale: true });
@@ -404,6 +664,18 @@ export class SessionCatalogStore {
       return;
     }
     if (entry.queuedJob) {
+      if (
+        entry.queuedJob.staged &&
+        entry.desiredRevision > entry.queuedJob.staged.revision
+      ) {
+        entry.trailingPriority = Math.min(
+          entry.trailingPriority ?? priority,
+          priority,
+        );
+        entry.trailingBackground =
+          (entry.trailingBackground ?? true) && background;
+        return;
+      }
       entry.queuedJob.priority = Math.min(entry.queuedJob.priority, priority);
       entry.queuedJob.background = entry.queuedJob.background && background;
       this.sortQueue();
@@ -445,76 +717,133 @@ export class SessionCatalogStore {
 
   private startJob(job: QueueJob): void {
     const entry = job.entry;
-    const revision = entry.desiredRevision;
+    const revision = job.staged?.revision ?? entry.desiredRevision;
     entry.runningRevision = revision;
+    entry.runningStaged = job.staged !== undefined;
     this.activeRequests += 1;
     if (job.background) this.activeBackgroundRequests += 1;
 
-    void this.fetchPage(entry.query)
-      .then((page) => {
-        if (entry.desiredRevision === revision) {
-          entry.acceptedRevision = revision;
-          entry.invalidated = false;
-          entry.retryAt = undefined;
-          this.setSnapshot(entry, {
-            page,
-            loading: false,
-            stale: false,
-            updatedAt: Date.now(),
-          });
-          this.resolveWaiters(entry, page);
-        }
-      })
-      .catch((error: unknown) => {
-        if (entry.desiredRevision !== revision) return;
-        const normalized = normalizeError(error);
-        entry.retryAt = Date.now() + SESSION_CATALOG_ERROR_RETRY_MS;
-        this.setSnapshot(entry, {
-          ...entry.snapshot,
-          loading: false,
-          stale: true,
-          error: normalized,
+    const request = this.fetchPage(entry.query, job.staged !== undefined);
+    let completion: Promise<void>;
+    if (job.staged) {
+      const staged = job.staged;
+      let result: DaemonSessionListPage | undefined;
+      let failure: Error | undefined;
+      completion = request
+        .then(
+          (page) => {
+            result = page;
+          },
+          (error: unknown) => {
+            failure = normalizeError(error);
+          },
+        )
+        .finally(() => this.finishJob(entry, job, revision))
+        .then(() => {
+          if (failure) staged.reject(failure);
+          else staged.resolve(result!);
         });
-        this.rejectWaiters(entry, revision, normalized);
-      })
-      .finally(() => {
-        entry.runningRevision = undefined;
-        this.activeRequests -= 1;
-        if (job.background) this.activeBackgroundRequests -= 1;
-        if (
-          entry.desiredRevision > revision &&
-          entry.trailingPriority !== undefined
-        ) {
-          const priority = entry.trailingPriority;
-          const background = entry.trailingBackground ?? true;
-          entry.trailingPriority = undefined;
-          entry.trailingBackground = undefined;
-          if (!background || (!this.isHidden() && entry.subscribers.size > 0)) {
-            this.ensureScheduled(entry, priority, background);
-          } else {
-            if (entry.snapshot.loading) {
-              this.setSnapshot(entry, { ...entry.snapshot, loading: false });
+    } else {
+      completion = request
+        .then(
+          (page) => {
+            if (entry.desiredRevision === revision) {
+              entry.acceptedRevision = revision;
+              entry.invalidated = false;
+              entry.retryAt = undefined;
+              this.setSnapshot(entry, {
+                page,
+                loading: false,
+                stale: false,
+                updatedAt: Date.now(),
+              });
+              this.resolveWaiters(entry, page);
             }
-            this.schedulePollFromNow(entry);
-            if (entry.subscribers.size === 0) this.scheduleCleanup(entry);
-          }
-        } else {
-          entry.trailingPriority = undefined;
-          entry.trailingBackground = undefined;
-          if (entry.snapshot.loading) {
-            this.setSnapshot(entry, { ...entry.snapshot, loading: false });
-          }
-          this.schedulePollFromNow(entry);
-          if (entry.subscribers.size === 0) this.scheduleCleanup(entry);
+          },
+          (error: unknown) => {
+            if (entry.desiredRevision !== revision) return;
+            const normalized = normalizeError(error);
+            entry.retryAt = Date.now() + SESSION_CATALOG_ERROR_RETRY_MS;
+            this.setSnapshot(entry, {
+              ...entry.snapshot,
+              loading: false,
+              stale: true,
+              error: normalized,
+            });
+            this.rejectWaiters(entry, revision, normalized);
+          },
+        )
+        .finally(() => this.finishJob(entry, job, revision));
+    }
+    entry.runningPromise = completion;
+    void completion;
+  }
+
+  private finishJob(
+    entry: CatalogEntry,
+    job: QueueJob,
+    revision: number,
+  ): void {
+    entry.runningRevision = undefined;
+    entry.runningPromise = undefined;
+    entry.runningStaged = undefined;
+    this.activeRequests -= 1;
+    if (job.background) this.activeBackgroundRequests -= 1;
+    if (
+      entry.desiredRevision > revision &&
+      entry.trailingPriority !== undefined
+    ) {
+      const priority = entry.trailingPriority;
+      const background = entry.trailingBackground ?? true;
+      entry.trailingPriority = undefined;
+      entry.trailingBackground = undefined;
+      if (!background || (!this.isHidden() && entry.subscribers.size > 0)) {
+        this.ensureScheduled(entry, priority, background);
+      } else {
+        if (entry.snapshot.loading) {
+          this.setSnapshot(entry, { ...entry.snapshot, loading: false });
         }
-        this.drainQueue();
-      });
+        this.schedulePollFromNow(entry);
+        if (entry.subscribers.size === 0) this.scheduleCleanup(entry);
+      }
+    } else {
+      entry.trailingPriority = undefined;
+      entry.trailingBackground = undefined;
+      if (entry.snapshot.loading) {
+        this.setSnapshot(entry, { ...entry.snapshot, loading: false });
+      }
+      this.schedulePollFromNow(entry);
+      if (entry.subscribers.size === 0) this.scheduleCleanup(entry);
+    }
+    this.drainQueue();
+  }
+
+  private fetchStagedPage(
+    entry: CatalogEntry,
+    revision: number,
+  ): Promise<DaemonSessionListPage> {
+    return new Promise((resolve, reject) => {
+      const job: QueueJob = {
+        entry,
+        priority: PRIORITY.interactive,
+        background: false,
+        sequence: this.queueSequence++,
+        staged: { revision, resolve, reject },
+      };
+      entry.queuedJob = job;
+      this.queue.push(job);
+      this.setSnapshot(entry, { ...entry.snapshot, loading: true });
+      this.sortQueue();
+      this.drainQueue();
+    });
   }
 
   private async fetchPage(
     query: SessionCatalogQuery,
+    forceWorkspaceQualified = false,
   ): Promise<DaemonSessionListPage> {
-    const page = await (query.routeKind === 'qualified'
+    const page = await (forceWorkspaceQualified ||
+    query.routeKind === 'qualified'
       ? this.client
           .workspaceByCwd(query.workspaceCwd)
           .listWorkspaceSessionsPage(query.options)
@@ -627,6 +956,7 @@ export class SessionCatalogStore {
     const index = this.queue.indexOf(job);
     if (index >= 0) this.queue.splice(index, 1);
     entry.queuedJob = undefined;
+    job.staged?.reject(new Error('Staged session catalog request superseded'));
   }
 
   private scheduleCleanup(entry: CatalogEntry): void {

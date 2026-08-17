@@ -114,6 +114,7 @@ import {
   useWebShellSessions,
 } from '../../session-catalog/session-catalog-hooks';
 import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
+import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -156,6 +157,12 @@ function getSessionIdentity(
   workspaceCwd: string | undefined,
 ): string {
   return `${workspaceCwd ?? ''}\0${sessionId}`;
+}
+
+function isAbsoluteWorkspaceCwd(cwd: string): boolean {
+  return (
+    cwd.startsWith('/') || cwd.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(cwd)
+  );
 }
 
 export type WebShellSidebarFooterItem =
@@ -883,6 +890,12 @@ export function WebShellSidebar({
       'workspace_qualified_rest_core',
     ),
   );
+  const workspaceSessionLiveStateSupported = Boolean(
+    connection.capabilities?.features?.includes(
+      'workspace_session_live_state',
+    ) && typeof workspace.client.getWorkspaceSessionLiveState === 'function',
+  );
+  const sessionCatalogRequestsEnabled = connection.capabilities !== undefined;
   const workspaceSessionMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_session_metadata'),
   );
@@ -908,6 +921,72 @@ export function WebShellSidebar({
     : undefined;
   const includePrimaryWorkspaceSessions =
     !lockedWorkspaceCwd || lockedWorkspace?.primary === true;
+  const projectName =
+    getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
+  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+    const availableWorkspaces =
+      workspaces.length > 0
+        ? workspaces
+        : [
+            {
+              id: 'primary',
+              cwd: connection.workspaceCwd || projectName,
+              primary: true,
+              trusted: true,
+            },
+          ];
+    return lockedWorkspaceCwd
+      ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+      : availableWorkspaces;
+  }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
+  const liveStateWorkspaceCwds = useMemo(
+    () =>
+      displayedWorkspaces
+        .filter((entry) => entry.trusted && isAbsoluteWorkspaceCwd(entry.cwd))
+        .map((entry) => entry.cwd),
+    [displayedWorkspaces],
+  );
+  const liveStateWorkspaceCwdSet = useMemo(
+    () => new Set(liveStateWorkspaceCwds),
+    [liveStateWorkspaceCwds],
+  );
+  const liveStateGroupWorkspaceCwds = useMemo(
+    () =>
+      organizationEnabled && !channelGroupingEnabled
+        ? displayedWorkspaces
+            .filter(
+              (entry) =>
+                entry.kind !== 'live' &&
+                entry.trusted &&
+                isAbsoluteWorkspaceCwd(entry.cwd),
+            )
+            .map((entry) => entry.cwd)
+        : [],
+    [channelGroupingEnabled, displayedWorkspaces, organizationEnabled],
+  );
+  const workspaceSessionLiveStateEnabled =
+    workspaceSessionLiveStateSupported && liveStateWorkspaceCwds.length > 0;
+  const primaryWorkspaceSessionLiveStateEnabled = Boolean(
+    workspaceSessionLiveStateEnabled &&
+      primaryWorkspaceCwd &&
+      liveStateWorkspaceCwdSet.has(primaryWorkspaceCwd),
+  );
+  const primaryWorkspaceLiveStateGroupsEnabled = Boolean(
+    primaryWorkspaceSessionLiveStateEnabled &&
+      primaryWorkspaceCwd &&
+      liveStateGroupWorkspaceCwds.includes(primaryWorkspaceCwd),
+  );
+  const secondaryWorkspaceCwds = useMemo(
+    () =>
+      displayedWorkspaces
+        .filter((entry) => !entry.primary && entry.trusted)
+        .map((entry) => entry.cwd),
+    [displayedWorkspaces],
+  );
+  const secondaryWorkspaceSessionLiveStateEnabled =
+    workspaceSessionLiveStateEnabled &&
+    secondaryWorkspaceCwds.length > 0 &&
+    secondaryWorkspaceCwds.every((cwd) => liveStateWorkspaceCwdSet.has(cwd));
   const {
     sessions,
     loading,
@@ -919,7 +998,8 @@ export function WebShellSidebar({
     archiveSession,
     catalogQuery,
   } = useWebShellSessions({
-    autoLoad: true,
+    autoLoad:
+      sessionCatalogRequestsEnabled && !primaryWorkspaceSessionLiveStateEnabled,
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -956,7 +1036,10 @@ export function WebShellSidebar({
   const loadPinnedSessions =
     organizationEnabled && selectedSessionSource !== 'channel';
   const { sessions: primaryPinnedSessions } = useWebShellSessions({
-    autoLoad: loadPinnedSessions,
+    autoLoad:
+      sessionCatalogRequestsEnabled &&
+      loadPinnedSessions &&
+      !primaryWorkspaceSessionLiveStateEnabled,
     enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -975,7 +1058,8 @@ export function WebShellSidebar({
     unarchiveSession,
     catalogQuery: archivedCatalogQuery,
   } = useWebShellSessions({
-    autoLoad: true,
+    autoLoad:
+      sessionCatalogRequestsEnabled && !primaryWorkspaceSessionLiveStateEnabled,
     enabled:
       sessionArchiveEnabled &&
       archivedExpanded &&
@@ -1182,31 +1266,17 @@ export function WebShellSidebar({
         connection.workspaceCwd || primaryWorkspaceCwd,
       )
     : null;
-  const projectName =
-    getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
-  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
-    const availableWorkspaces =
-      workspaces.length > 0
-        ? workspaces
-        : [
-            {
-              id: 'primary',
-              cwd: connection.workspaceCwd || projectName,
-              primary: true,
-              trusted: true,
-            },
-          ];
-    return lockedWorkspaceCwd
-      ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
-      : availableWorkspaces;
-  }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
-  const secondaryWorkspaceCwds = useMemo(
-    () =>
-      displayedWorkspaces
-        .filter((entry) => !entry.primary && entry.trusted)
-        .map((entry) => entry.cwd),
-    [displayedWorkspaces],
+  const liveStateGroupCatalogs = useWorkspaceSessionLiveState(
+    workspace.client,
+    {
+      enabled: workspaceSessionLiveStateEnabled,
+      workspaceCwds: liveStateWorkspaceCwds,
+      groupWorkspaceCwds: liveStateGroupWorkspaceCwds,
+    },
   );
+  const primaryLiveStateGroupCatalog = primaryWorkspaceCwd
+    ? liveStateGroupCatalogs.get(primaryWorkspaceCwd)
+    : undefined;
   const secondaryActiveQueries = useMemo<SessionCatalogQuery[]>(
     () =>
       secondaryWorkspaceCwds.map((workspaceCwd) => ({
@@ -1229,8 +1299,16 @@ export function WebShellSidebar({
     workspace.client,
     secondaryActiveQueries,
     {
-      autoLoad: collapsed,
-      pollIntervalMs: collapsed ? ACTIVE_SESSION_POLL_INTERVAL_MS : undefined,
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        collapsed &&
+        !secondaryWorkspaceSessionLiveStateEnabled,
+      pollIntervalMs:
+        sessionCatalogRequestsEnabled &&
+        collapsed &&
+        !secondaryWorkspaceSessionLiveStateEnabled
+          ? ACTIVE_SESSION_POLL_INTERVAL_MS
+          : undefined,
     },
   );
   const secondaryActiveSessions = useMemo(
@@ -1261,7 +1339,9 @@ export function WebShellSidebar({
     workspace.client,
     secondaryPinnedQueries,
     {
-      autoLoad: true,
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        !secondaryWorkspaceSessionLiveStateEnabled,
       enabled: organizationEnabled && selectedSessionSource !== 'channel',
     },
   );
@@ -1297,7 +1377,12 @@ export function WebShellSidebar({
   const secondaryArchivedSnapshots = useSessionCatalogQueries(
     workspace.client,
     secondaryArchivedQueries,
-    { autoLoad: true, enabled: secondaryArchivedEnabled },
+    {
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        !secondaryWorkspaceSessionLiveStateEnabled,
+      enabled: secondaryArchivedEnabled,
+    },
   );
   const secondaryArchivedSessions = useMemo(
     () =>
@@ -1706,12 +1791,14 @@ export function WebShellSidebar({
   );
 
   const reloadGroups = useCallback(async () => {
-    if (!organizationEnabled) {
+    if (!organizationEnabled || channelGroupingEnabled) {
       setGroups([]);
+      setMenuGroups([]);
       setColorOptions([]);
       setGroupsCatalogReady(true);
       return;
     }
+    if (primaryWorkspaceLiveStateGroupsEnabled) return;
     try {
       const catalog = await workspaceActions.listSessionGroups();
       setGroups(catalog.groups);
@@ -1724,18 +1811,49 @@ export function WebShellSidebar({
     } catch (err) {
       onError(err, t('sidebar.groupsLoadFailed'));
     }
-  }, [onError, organizationEnabled, t, workspaceActions]);
+  }, [
+    channelGroupingEnabled,
+    onError,
+    organizationEnabled,
+    primaryWorkspaceLiveStateGroupsEnabled,
+    t,
+    workspaceActions,
+  ]);
 
   useEffect(() => {
-    if (!organizationEnabled) {
+    if (!organizationEnabled || channelGroupingEnabled) {
       setGroups([]);
+      setMenuGroups([]);
       setColorOptions([]);
+      setGroupsCatalogReady(true);
+      return;
+    }
+    if (!includePrimaryWorkspaceSessions) {
+      setGroups([]);
+      setMenuGroups([]);
+      setColorOptions([]);
+      setGroupsCatalogReady(true);
+      return;
+    }
+    if (primaryWorkspaceLiveStateGroupsEnabled) {
+      setGroupsCatalogReady(false);
+      if (!primaryLiveStateGroupCatalog) return;
+      setGroups(primaryLiveStateGroupCatalog.groups);
+      setMenuGroups(primaryLiveStateGroupCatalog.groups);
+      setColorOptions(primaryLiveStateGroupCatalog.colorOptions);
       setGroupsCatalogReady(true);
       return;
     }
     setGroupsCatalogReady(false);
     void reloadGroups();
-  }, [organizationEnabled, reloadGroups]);
+  }, [
+    includePrimaryWorkspaceSessions,
+    channelGroupingEnabled,
+    organizationEnabled,
+    primaryLiveStateGroupCatalog,
+    reloadGroups,
+    primaryWorkspaceLiveStateGroupsEnabled,
+  ]);
 
   useEffect(() => {
     if (!groupMenu) return;
@@ -1867,7 +1985,9 @@ export function WebShellSidebar({
   useSessionCatalogPolling(
     workspace.client,
     includePrimaryWorkspaceSessions ? catalogQuery : undefined,
-    sessionPollInterval,
+    sessionCatalogRequestsEnabled && !primaryWorkspaceSessionLiveStateEnabled
+      ? sessionPollInterval
+      : undefined,
   );
   // Channel grouping rides the session poll cadence: instances added or
   // removed while the channel source is active must reach the grouping logic
@@ -4850,6 +4970,11 @@ export function WebShellSidebar({
                 noSessionsLabel={t('sidebar.noSessions')}
                 loadErrorLabel={t('sidebar.loadFailed')}
                 organizationEnabled={false}
+                sessionCatalogRequestsEnabled={sessionCatalogRequestsEnabled}
+                sessionLiveStateEnabled={
+                  workspaceSessionLiveStateEnabled &&
+                  liveStateWorkspaceCwdSet.has(ws.cwd)
+                }
                 sourceType={sourceMetadataEnabled ? 'default' : undefined}
                 channelGroupingEnabled={false}
                 ungroupedLabel={t('sidebar.groupUngrouped')}
@@ -4953,6 +5078,19 @@ export function WebShellSidebar({
                           noSessionsLabel={t('sidebar.noSessions')}
                           loadErrorLabel={t('sidebar.loadFailed')}
                           organizationEnabled={organizationEnabled}
+                          sessionCatalogRequestsEnabled={
+                            sessionCatalogRequestsEnabled
+                          }
+                          sessionGroupCatalog={
+                            workspaceSessionLiveStateEnabled &&
+                            liveStateWorkspaceCwdSet.has(ws.cwd)
+                              ? liveStateGroupCatalogs.get(ws.cwd)
+                              : undefined
+                          }
+                          sessionLiveStateEnabled={
+                            workspaceSessionLiveStateEnabled &&
+                            liveStateWorkspaceCwdSet.has(ws.cwd)
+                          }
                           sourceType={selectedSessionSource}
                           channelGroupingEnabled={channelGroupingEnabled}
                           ungroupedLabel={t('sidebar.groupUngrouped')}
