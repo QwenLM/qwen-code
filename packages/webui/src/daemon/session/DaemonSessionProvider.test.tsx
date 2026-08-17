@@ -2212,6 +2212,78 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('rebuilds the SSE stream immediately when a prompt is submitted while the stream is down', async () => {
+    const turnComplete = createDeferred<void>();
+    const secondSubscriptionStarted = createDeferred<void>();
+    const eventSignals: AbortSignal[] = [];
+    const events = vi.fn(async function* downStreamEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (opts.signal) eventSignals.push(opts.signal);
+      const subscription = events.mock.calls.length;
+      // First subscription ends immediately: the stream is down and the
+      // provider enters reconnect backoff.
+      if (subscription === 1) {
+        yield* [];
+        return;
+      }
+      secondSubscriptionStarted.resolve();
+      await Promise.race([
+        turnComplete.promise,
+        new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+    });
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      // Long backoff: the rebuild must be triggered by the prompt admission,
+      // not by the reconnect timer elapsing.
+      reconnectDelayMs: 60_000,
+      maxReconnectDelayMs: 60_000,
+    });
+    const providerActions = requireActions(actions);
+
+    // The first subscription has ended; the provider is now in backoff.
+    await vi.waitFor(() => expect(events).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(connection?.status).toBe('disconnected'));
+
+    // Submitting a prompt rebuilds the stream immediately (no backoff wait).
+    await act(async () => {
+      void providerActions.sendPrompt('hello');
+      await secondSubscriptionStarted.promise;
+    });
+
+    expect(events).toHaveBeenCalledTimes(2);
+    // The session handle is preserved: no full reload, direct SSE resume.
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+    expect(eventSignals[1]?.aborted).toBe(false);
+
+    turnComplete.resolve();
+    await act(async () => {
+      await flushPromises();
+    });
+  });
+
   it('shows waiting state when a queued prompt starts before assistant output', async () => {
     const turnComplete = createDeferred<void>();
     const session = createMockSession({
