@@ -3774,6 +3774,7 @@ describe('qwen-autofix workflow', () => {
       deleteFails = '',
       cmdFrom = '',
       commentFails = '',
+      commentFailTimes = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3799,7 +3800,7 @@ describe('qwen-autofix workflow', () => {
             // universally exiting 0.
             `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[{"name":"Tracks HTTP 5xx flakes"}]'; fi`,
-            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT-ATTEMPT" >> '${join(dir, 'writes.log')}'; if [[ -n "\${TOGGLE_COMMENT_FAILS:-}" && ! -f '${join(dir, 'comment-failed')}' ]]; then touch '${join(dir, 'comment-failed')}'; printf '%s' "\${TOGGLE_COMMENT_FAILS}" >&2; exit 1; fi; echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT-ATTEMPT" >> '${join(dir, 'writes.log')}'; if [[ -n "\${TOGGLE_COMMENT_FAILS:-}" ]]; then CF=0; if [[ -f '${join(dir, 'comment-fails')}' ]]; then CF="$(< '${join(dir, 'comment-fails')}')"; fi; if (( CF < \${TOGGLE_COMMENT_FAIL_TIMES:-1} )); then printf '%s' "$(( CF + 1 ))" > '${join(dir, 'comment-fails')}'; printf '%s' "\${TOGGLE_COMMENT_FAILS}" >&2; exit 1; fi; fi; echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
         );
@@ -3833,6 +3834,7 @@ describe('qwen-autofix workflow', () => {
               TOGGLE_POST_FAILS: postFails,
               TOGGLE_DELETE_FAILS: deleteFails,
               TOGGLE_COMMENT_FAILS: commentFails,
+              TOGGLE_COMMENT_FAIL_TIMES: commentFailTimes,
               CMD_FROM: cmdFrom,
               CRITICAL_ONLY_AFTER_ROUND: '5',
             },
@@ -3851,6 +3853,7 @@ describe('qwen-autofix workflow', () => {
         error.writes = existsSync(join(dir, 'writes.log'))
           ? readFileSync(join(dir, 'writes.log'), 'utf8')
           : '';
+        error.log = error.stdout ?? '';
         throw error;
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -4116,6 +4119,34 @@ describe('qwen-autofix workflow', () => {
     );
     expect(transientRearmFailure.log).toContain('re-armed');
     expect(transientRearmFailure.log).not.toContain('::error::');
+    // …but a DOUBLE re-arm ack failure must abort instead: nothing heals a
+    // missing re-arm (the scan heals only engage-less PRs, and the
+    // pre-existing engage ack suppresses the dedup), so the 're-armed'
+    // claim and the stale-escalation cleanup must never follow a window
+    // reset that never landed. The stub's fail-once guard above can never
+    // reach this arm — TOGGLE_COMMENT_FAIL_TIMES=2 makes both POSTs fail.
+    let rearmDoubleFailure;
+    try {
+      runToggle({
+        cmd: 'add',
+        labels: ['autofix/takeover'],
+        cmdFrom: '7',
+        commentFails: 'HTTP 502',
+        commentFailTimes: 2,
+      });
+    } catch (error) {
+      rearmDoubleFailure = error;
+    }
+    expect(rearmDoubleFailure).toBeTruthy();
+    expect(
+      rearmDoubleFailure.writes.match(/^COMMENT-ATTEMPT$/gm) ?? [],
+    ).toHaveLength(2);
+    expect(rearmDoubleFailure.writes).not.toContain('takeover-ack engaged');
+    expect(rearmDoubleFailure.writes).not.toContain(
+      'labels/autofix%2Fneeds-human',
+    );
+    expect(rearmDoubleFailure.log).toContain('::error::');
+    expect(rearmDoubleFailure.log).not.toContain('re-armed');
     // The release DELETE tolerates the 404 race (a concurrent removal
     // already reached the end state): the release ack still posts, no
     // warning.
@@ -5557,11 +5588,15 @@ exit 1
     ]) {
       expect(seedOf(body)).toBe('|');
     }
-    // The captured value crosses two job-boundary wires no behavioral
-    // harness exercises — every replay injects CMD_FROM directly, starting
-    // inside a single job — so pin them verbatim like the suite's other
-    // wires: a deleted or typo'd wire would silently degrade 'from N' to a
-    // bare '/takeover' with the whole suite still green.
+    // The captured value crosses a GITHUB_OUTPUT write and two
+    // job-boundary wires no behavioral harness exercises — every replay
+    // injects CMD_FROM directly, starting inside a single job — so pin
+    // them verbatim like the suite's other wires: a deleted or typo'd
+    // link would silently degrade 'from N' to a bare '/takeover' with the
+    // whole suite still green.
+    expect(workflow).toContain(
+      'echo "takeover_from=$(sanitize_number "${TAKEOVER_FROM}")" >> "${GITHUB_OUTPUT}"',
+    );
     expect(workflow).toContain(
       "takeover_from: '${{ steps.decide.outputs.takeover_from }}'",
     );
