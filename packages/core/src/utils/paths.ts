@@ -270,6 +270,66 @@ export function makeRelative(
 }
 
 /**
+ * Canonicalize a path through its nearest existing ancestor: `realpath` only
+ * resolves paths that exist, but callers often hold a path whose tail is
+ * already gone (a deleted worktree, a not-yet-created file). Walks up to the
+ * nearest resolvable ancestor, resolves it on disk, then re-appends the
+ * missing tail; explicit symlink hops along the way are followed through
+ * (bounded, so a loop gives up). Returns `undefined` when resolution hits a
+ * non-ENOENT/ENOTDIR error or the symlink hop cap, so callers can decide
+ * their own keep/drop bias.
+ */
+export function realpathNearestExisting(filePath: string): string | undefined {
+  let current = filePath;
+  const missingSegments: string[] = [];
+  let symlinkHops = 0;
+  const maxSymlinkHops = 40;
+
+  while (true) {
+    try {
+      // Joining deliberately normalizes traversal in the unresolved suffix.
+      return path.join(fs.realpathSync.native(current), ...missingSegments);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        if (symlinkHops++ >= maxSymlinkHops) {
+          return undefined;
+        }
+        const target = fs.readlinkSync(current);
+        const parent = fs.realpathSync.native(path.dirname(current));
+        // Preserve `..` until the symlink is resolved on disk.
+        current = path.isAbsolute(target)
+          ? target
+          : `${parent}${/[\\/]$/.test(parent) ? '' : path.sep}${target}`;
+        continue;
+      }
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
+}
+
+/**
  * Formats a file path for terminal display.
  *
  * - Project-internal paths render relative to `rootDirectory` (the root

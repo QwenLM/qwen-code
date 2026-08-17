@@ -9,7 +9,12 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import {
+  getProjectHash,
+  QWEN_DIR,
+  realpathNearestExisting,
+  sanitizeCwd,
+} from '../utils/paths.js';
 import { FatalConfigError } from '../utils/errors.js';
 
 // The sweep's debug logger and runtime-status reader are imported lazily
@@ -46,23 +51,13 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
 }
 
 // realpathSync only resolves existing paths, but sweep candidates are usually
-// gone by definition: walk up to the nearest existing ancestor and re-append
-// the missing tail, so a deleted worktree still resolves to its real location
-// (on macOS /var/folders vs /private/var/folders otherwise never matches).
-function resolveThroughExistingAncestor(candidate: string): string {
-  let current = candidate;
-  const tail: string[] = [];
-  while (true) {
-    try {
-      const real = fs.realpathSync(current);
-      return path.join(real, ...tail.reverse());
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return candidate;
-      tail.push(path.basename(current));
-      current = parent;
-    }
-  }
+// gone by definition: realpathNearestExisting walks up to the nearest existing
+// ancestor and re-appends the missing tail, so a deleted worktree still
+// resolves to its real location (on macOS /var/folders vs /private/var/folders
+// otherwise never matches). Unresolvable paths fall back to the raw candidate,
+// which simply fails the tmpdir containment check below and keeps the bucket.
+function resolveSweepCandidate(candidate: string): string {
+  return realpathNearestExisting(candidate) ?? candidate;
 }
 
 // The repo-existence conjunct needs positive proof: only a clean stat counts
@@ -84,7 +79,8 @@ function isPositivelyExistingDirectorySync(candidate: string): boolean {
  * `%TEMP%/qwen-*-sess-*` entries accumulate forever (#7906). Sweep the
  * project dirs that are keyed by a worktree path and whose worktree
  * sidecars all point at paths that no longer exist, plus the buckets
- * keyed by a gone ephemeral launch cwd inside the OS temp dir. Anything
+ * keyed by a sidecar's gone ephemeral launch cwd (its `originalCwd`
+ * field) inside the OS temp dir. Anything
  * that cannot prove itself stale (no sidecar, corrupted sidecars, at
  * least one live worktree, a launch cwd outside the temp dir or still
  * present) is kept. Normal project buckets are never touched: they can
@@ -168,7 +164,7 @@ export async function sweepStaleWorktreeProjects(
             sidecar.originalCwd !== undefined &&
             entry === sanitizeCwd(sidecar.originalCwd) &&
             isResolvedPathWithinDirectory(
-              resolveThroughExistingAncestor(sidecar.originalCwd),
+              resolveSweepCandidate(sidecar.originalCwd),
               realTmpdir,
             ) &&
             !isDirectorySync(sidecar.originalCwd),
