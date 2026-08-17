@@ -578,4 +578,56 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       }),
     );
   });
+
+  it('projects reference-only media records as unavailable placeholders', () => {
+    const projection = projectChatRecordsToDaemonTranscript([
+      record('mid-text-plus-image', null, {
+        subtype: 'mid_turn_user_message',
+        message: { role: 'user', parts: [{ text: 'look at this' }] },
+        systemPayload: {
+          displayText: 'look at this',
+          mediaReferences: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      }),
+      record('mid-image-only', 'mid-text-plus-image', {
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '[User message received during tool execution]: ' }],
+        },
+        systemPayload: {
+          displayText: '',
+          mediaReferences: [
+            {
+              type: 'image',
+              mediaId: 'media-2',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    ]);
+
+    const userBlocks = projection.blocks.filter(
+      (block) => block.kind === 'user',
+    );
+    expect(userBlocks.map((block) => block.text)).toEqual([
+      'look at this',
+      '[Attached media is no longer available]',
+      '[Attached media is no longer available]',
+    ]);
+    expect(userBlocks.map((block) => block.sourceRecordIds)).toEqual([
+      ['mid-text-plus-image'],
+      ['mid-text-plus-image'],
+      ['mid-image-only'],
+    ]);
+  });
 });

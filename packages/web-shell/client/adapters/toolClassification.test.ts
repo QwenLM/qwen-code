@@ -28,6 +28,16 @@ describe('isActiveToolStatus', () => {
 });
 
 describe('isBackgroundSubAgentToolCall', () => {
+  it('waits for agent args before inferring the default background mode', () => {
+    expect(
+      isBackgroundSubAgentToolCall({
+        callId: 'agent-1',
+        toolName: 'agent',
+        status: 'pending',
+      }),
+    ).toBe(false);
+  });
+
   it('treats an ordinary agent as background when the flag is omitted', () => {
     expect(isBackgroundSubAgentToolCall(agentTool())).toBe(true);
   });
