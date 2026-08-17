@@ -57,7 +57,11 @@ import {
 } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
-import { composeReview, type ComposeReviewInput } from './compose-review.js';
+import {
+  composeReview,
+  normalizeSeverityFloor,
+  type ComposeReviewInput,
+} from './compose-review.js';
 import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
@@ -531,10 +535,14 @@ export function runSubmit(
     defaultSeverityFloor: opts.defaultSeverityFloor,
     skillArgs: args.skillArgs,
   });
+  // The guard compares the NORMALISED state floor: a case- or
+  // whitespace-drifted transcription of the same floor is agreement, and
+  // announcing an override over it would put a false claim on the audit
+  // channel.
   if (
     recovered !== undefined &&
     payload.state != null &&
-    payload.state.severityFloor !== recovered.floor
+    normalizeSeverityFloor(payload.state.severityFloor) !== recovered.floor
   ) {
     writeStderrLine(
       `Severity floor: using ${JSON.stringify(recovered.floor)} from ` +

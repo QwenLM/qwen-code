@@ -284,6 +284,86 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(
       recordedSeverityFloor({ skillArgs: join(dir, 'no-such-record.txt') }),
     ).toBeUndefined();
+    // The URL branch's OWN number check: a URL record of another PR in the
+    // right repo must not bind — the number bar exists per target shape.
+    expect(
+      recoverFloor(
+        'https://github.com/o/r/pull/999 --severity-floor critical',
+        {
+          callerRepo: 'o/r',
+        },
+      ),
+    ).toBeUndefined();
+    // The caller's host recovers a matching Enterprise record…
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        { callerRepo: 'o/r', callerHost: 'ghe.corp.example' },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // …and the PLAN's identity outranks the caller's on every axis: repo…
+    expect(
+      recoverFloor(
+        'https://github.com/other/repo/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({ prNumber: 123, ownerRepo: 'o/r' }),
+          callerRepo: 'other/repo',
+        },
+      ),
+    ).toBeUndefined();
+    // …and host (which also pins the plan.host read itself).
+    expect(
+      recoverFloor(
+        'https://ghe.corp.example/o/r/pull/123 --severity-floor critical',
+        {
+          planPath: floorPlan({
+            prNumber: 123,
+            ownerRepo: 'o/r',
+            host: 'ghe.corp.example',
+          }),
+          callerRepo: 'o/r',
+          callerHost: 'github.com',
+        },
+      ),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // A plan that parses but names no PR falls back to the caller's pr —
+    // the diff-only/local plan shape must not suppress the fallback.
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: floorPlan({}),
+        fallbackPr: 123,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+    // A corrupt plan file reads as no plan (the catch's documented
+    // contract) — never a throw out of the recovery.
+    const corrupt = join(dir, 'floor-plan-corrupt.json');
+    writeFileSync(corrupt, '{"prNumber": 123, ');
+    expect(
+      recoverFloor('123 --severity-floor critical', {
+        planPath: corrupt,
+        fallbackPr: 123,
+      }),
+    ).toEqual({ floor: 'critical', source: 'explicit' });
+  });
+
+  it('ignores the skillArgs seam whenever a session id is present', () => {
+    // The seam is the tests' door only; in a real run (session id exported)
+    // a model-visible --skill-args must not point the recovery at a
+    // model-writable record — a forged same-number record carrying
+    // --severity-floor suggestion would override the operator's verbatim
+    // posture on the write itself.
+    const argsFile = join(dir, 'seam-args.txt');
+    writeFileSync(argsFile, '123 --severity-floor critical\n');
+    const prev = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'floor-sess';
+    try {
+      expect(
+        recordedSeverityFloor({ fallbackPr: 123, skillArgs: argsFile }),
+      ).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prev;
+    }
   });
 
   it('binds the repo of a URL-shaped authorisation', () => {
@@ -1317,40 +1397,51 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         String(c[0]).includes('verbatim record outranks'),
       ),
     ).toBe(true);
+    // The note names its TRUE source: this one came from the flag.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('the recorded `--severity-floor` flag'),
+      ),
+    ).toBe(true);
   });
 
   it('does not fire the override note when the recovered floor equals the state', () => {
     // The equality guard is the only thing keeping a recovered-but-identical
     // floor from emitting the "record outranks state" note on every
     // non-drifted enforced post — a wrong claim on exactly the operator
-    // audit channel this feature builds.
-    const review = file('floor-equal.json', {
-      ...REVIEW,
-      state: { ...REVIEW.state, severityFloor: 'critical' },
-      comments: [
-        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
-        { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
-      ],
-    });
+    // audit channel this feature builds. The comparison is NORMALISED: a
+    // case-drifted transcription of the same floor is agreement too.
+    for (const stateFloor of ['critical', 'CRITICAL']) {
+      ghMock.mockClear();
+      writeStderrSpy.mockClear();
+      const review = file(`floor-equal-${stateFloor}.json`, {
+        ...REVIEW,
+        state: { ...REVIEW.state, severityFloor: stateFloor },
+        comments: [
+          { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+          { path: 'b.ts', line: 7, body: '**[Suggestion]** tidy this' },
+        ],
+      });
 
-    runSubmit(
-      args({
-        review,
-        skillArgs: file(
-          'floor-equal-args.txt',
-          '6771 --comment --severity-floor critical',
+      runSubmit(
+        args({
+          review,
+          skillArgs: file(
+            `floor-equal-args-${stateFloor}.txt`,
+            '6771 --comment --severity-floor critical',
+          ),
+        }),
+      );
+      expect(ghMock).toHaveBeenCalledOnce();
+      expect(
+        JSON.parse(ghMock.mock.calls[0][0] as string).comments,
+      ).toHaveLength(1);
+      expect(
+        writeStderrSpy.mock.calls.some((c) =>
+          String(c[0]).includes('verbatim record outranks'),
         ),
-      }),
-    );
-    expect(ghMock).toHaveBeenCalledOnce();
-    expect(JSON.parse(ghMock.mock.calls[0][0] as string).comments).toHaveLength(
-      1,
-    );
-    expect(
-      writeStderrSpy.mock.calls.some((c) =>
-        String(c[0]).includes('verbatim record outranks'),
-      ),
-    ).toBe(false);
+      ).toBe(false);
+    }
   });
 
   it('a recorded explicit auto outranks a drifted critical — and does not enforce at round 1', () => {
@@ -1473,6 +1564,20 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
     expect(sent.comments).toHaveLength(1);
     expect(sent.body).toContain('floor enforcement');
+    // Setting-sourced: the note must name the setting, never a flag the
+    // operator did not type.
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes(
+          'setting resolved against the recorded invocation',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('the recorded `--severity-floor` flag'),
+      ),
+    ).toBe(false);
   });
 
   it('reroutes an unusable-line Suggestion instead of refusing the whole post', () => {

@@ -862,6 +862,9 @@ Each entry carries `id` (unique — outcomes and resolved anchors both join on i
 "${QWEN_CODE_CLI:-qwen}" review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json \
   --comments .qwen/tmp/qwen-review-{target}-comments.json \
   --out .qwen/tmp/qwen-review-{target}-composed.json
+# PR reviews: add --pr <n> — the recorded-floor recovery's plan-less
+# fallback identity, mirroring submit's own --pr so the archived compose
+# and the post resolve one floor even when the plan is unusable.
 # GitHub Enterprise: add --host <host> — compose-review may fetch the PR
 # description to pick the body language, and that gh call must hit the PR's host.
 ```

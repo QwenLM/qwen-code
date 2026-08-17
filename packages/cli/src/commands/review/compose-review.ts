@@ -338,7 +338,7 @@ function splitDeferralChannel(raw: unknown): {
  * restatements is the predicate-drift class `lib/inline-counts.ts`'s header
  * exists to prevent.
  */
-function normalizeSeverityFloor(value: unknown): unknown {
+export function normalizeSeverityFloor(value: unknown): unknown {
   return typeof value === 'string' ? value.trim().toLowerCase() : value;
 }
 
@@ -3014,6 +3014,10 @@ interface ComposeReviewCliArgs {
   out: string | undefined;
   /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
   host?: string;
+  /** The PR being composed for — the recovery's plan-less fallback identity,
+   * mirroring `submit`'s own `--pr` so the two boundaries share one formula
+   * (plan ?? caller) even when the state's planPath is absent or unusable. */
+  pr?: number;
   /** Test seam for the recorded-floor recovery — same rule as `submit`'s:
    * honoured only when no session id is present. */
   skillArgs?: string;
@@ -3099,6 +3103,13 @@ export const composeReviewCommand: CommandModule = {
           'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
           'the bilingual body-language recovery has to fetch the PR description',
       })
+      .option('pr', {
+        type: 'number',
+        describe:
+          'The PR this compose is for — the recorded-floor recovery falls ' +
+          'back to it when the plan names no PR, exactly as submit falls ' +
+          'back to its own --pr. Pass it on every PR review.',
+      })
       .option('skill-args', {
         type: 'string',
         describe:
@@ -3108,7 +3119,7 @@ export const composeReviewCommand: CommandModule = {
           'session-scoped record, exactly as submit does.',
       }),
   handler: async (argv) => {
-    const { input, comments, out, host, skillArgs } =
+    const { input, comments, out, host, pr, skillArgs } =
       argv as unknown as ComposeReviewCliArgs;
     // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
     // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
@@ -3163,19 +3174,32 @@ export const composeReviewCommand: CommandModule = {
       );
     }
     // The operator's floor, from the CLI's verbatim record — resolved through
-    // the SAME shared helper `submit` uses, with the SAME identity source
-    // (the plan's — number, ownerRepo and host, binding a URL-shaped record
-    // to all three), which is what keeps this boundary's archived composed
-    // JSON and terminal verdict describing the same review the posted body
-    // describes. A plan-less or local target recovers nothing; every failure
-    // mode returns undefined and leaves the state's value standing. The
-    // note names the true source (flag vs setting).
+    // the SAME shared helper `submit` uses, with the SAME identity formula:
+    // the plan's identity (number, ownerRepo, host — binding a URL-shaped
+    // record to all three) first, this command's own `--pr` as the
+    // plan-less fallback, exactly mirroring submit's `--pr`. The symmetric
+    // fallback is what keeps the two boundaries resolving one floor even
+    // when the state's planPath is absent or unusable — a compose bound to
+    // the plan alone recovered nothing there while submit still recovered,
+    // and the archived composed JSON described a different review than the
+    // post. A plan-less local target with no --pr recovers nothing; every
+    // failure mode returns undefined and leaves the state's value standing.
+    // The note names the true source (flag vs setting), and its guard
+    // compares the NORMALISED state floor — a case-drifted transcription of
+    // the same floor is agreement, not an override to announce.
     const recovered = recordedSeverityFloor({
       planPath: parsed.planPath,
+      fallbackPr:
+        typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0
+          ? pr
+          : undefined,
       defaultSeverityFloor: operatorReviewSettings().severityFloor,
       skillArgs,
     });
-    if (recovered !== undefined && parsed.severityFloor !== recovered.floor) {
+    if (
+      recovered !== undefined &&
+      normalizeSeverityFloor(parsed.severityFloor) !== recovered.floor
+    ) {
       writeStderrLine(
         `Severity floor: using ${JSON.stringify(recovered.floor)} from ` +
           (recovered.source === 'explicit'

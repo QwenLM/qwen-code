@@ -2075,7 +2075,16 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     stateFloor?: string;
     argsLine: string;
     settings?: Record<string, unknown>;
-  }): Promise<{ written: ComposeReviewResult; stderrHasOverride: boolean }> {
+    /** Omit the plan from the state — the R4-1 shape: the recovery must
+     * fall back to the handler's own --pr, exactly as submit does. */
+    noPlan?: boolean;
+    /** The handler's --pr fallback identity. */
+    pr?: number;
+  }): Promise<{
+    written: ComposeReviewResult;
+    stderrHasOverride: boolean;
+    stderr: string[];
+  }> {
     if (opts.settings) reviewSettingsMock.mockReturnValue(opts.settings);
     // The stderr spy accumulates across tests; the no-override assertion
     // below must not read an earlier test's note.
@@ -2091,7 +2100,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       inputPath,
       JSON.stringify({
         modelId: MODEL,
-        planPath,
+        ...(opts.noPlan ? {} : { planPath }),
         ...(opts.stateFloor === undefined
           ? {}
           : { severityFloor: opts.stateFloor }),
@@ -2115,6 +2124,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
         out: outPath,
         skillArgs: argsPath,
+        ...(opts.pr === undefined ? {} : { pr: opts.pr }),
       });
       written = JSON.parse(readFileSync(outPath, 'utf8'));
     } finally {
@@ -2123,13 +2133,15 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
       rmSync(dir, { recursive: true, force: true });
     }
+    const stderr = (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => String(c[0]),
+    );
     return {
       written,
-      stderrHasOverride: (
-        writeStderrLine as ReturnType<typeof vi.fn>
-      ).mock.calls.some((c) =>
-        String(c[0]).includes('verbatim record outranks'),
+      stderrHasOverride: stderr.some((l) =>
+        l.includes('verbatim record outranks'),
       ),
+      stderr,
     };
   }
 
@@ -2168,6 +2180,55 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       settings: { attribution: true, severityFloor: 'critical' },
     });
     expect(written.floorEnforced).toEqual([0]);
+  });
+
+  it('falls back to --pr when the state carries no usable plan — the R4-1 symmetry', async () => {
+    // With the plan absent (or unusable) the recovery must resolve exactly
+    // as submit's does through its own --pr, or the archived compose and
+    // the post describe different reviews on precisely the drifted-state
+    // shape enforcement exists for.
+    const { written, stderr } = await composeWithRecordedFloor({
+      stateFloor: 'suggestion',
+      argsLine: '8255 --severity-floor critical',
+      noPlan: true,
+      pr: 8255,
+    });
+    expect(written.floorEnforced).toEqual([0]);
+    // And the flag-sourced note names the flag, not the setting.
+    expect(
+      stderr.some((l) => l.includes('the recorded `--severity-floor` flag')),
+    ).toBe(true);
+  });
+
+  it('stays silent when the recovered floor equals the state — normalised', async () => {
+    // The equality guard compares the normalised state floor: a
+    // case-drifted transcription of the SAME floor is agreement, and an
+    // override note over it is a false audit claim.
+    for (const stateFloor of ['critical', 'CRITICAL']) {
+      const { written, stderrHasOverride } = await composeWithRecordedFloor({
+        stateFloor,
+        argsLine: '8255 --severity-floor critical',
+      });
+      expect(written.floorEnforced).toEqual([0]);
+      expect(stderrHasOverride).toBe(false);
+    }
+  });
+
+  it('names the setting as the source when no flag was typed', async () => {
+    const { written, stderr } = await composeWithRecordedFloor({
+      stateFloor: 'suggestion',
+      argsLine: '8255',
+      settings: { attribution: true, severityFloor: 'critical' },
+    });
+    expect(written.floorEnforced).toEqual([0]);
+    expect(
+      stderr.some((l) =>
+        l.includes('setting resolved against the recorded invocation'),
+      ),
+    ).toBe(true);
+    expect(
+      stderr.some((l) => l.includes('the recorded `--severity-floor` flag')),
+    ).toBe(false);
   });
 
   it("does not recover another PR's recorded floor", async () => {
@@ -6189,6 +6250,21 @@ describe('floor enforcement — the posture, as code', () => {
     });
     expect(r.floorEnforced).toEqual([0, 1]);
     expect(r.deferredCount).toBe(2);
+  });
+
+  it('adjusts an array-shaped seam count — the legacy list form toCount accepts', () => {
+    // Without the Array.isArray arm the stale pre-enforcement length stays,
+    // and the posted body carries "Suggestions are inline." two lines from
+    // the enforcement disclosure saying they are not.
+    const r = compose({
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: ['x', 'y'] as never,
+      draftedComments: drafts().slice(1),
+    });
+    expect(r.floorEnforced).toEqual([0, 1]);
+    expect(r.body).not.toContain('Suggestions are inline.');
+    expect(r.body).toContain('floor enforcement');
   });
 
   it('an unrecognised present floor fails open — a posting bar in doubt posts', () => {
