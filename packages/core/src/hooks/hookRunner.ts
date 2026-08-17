@@ -603,6 +603,13 @@ export class HookRunner {
           cwd: input.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           shell: false,
+          // cmd.exe needs verbatim arguments: Node's MSVC CRT escaping mangles
+          // quotes and backslashes, which breaks quoted paths (e.g.
+          // `bash "C:\Program Files\...\script.sh"`). PowerShell uses the
+          // default escaping so args round-trip through CommandLineToArgvW.
+          // Mirrors shellExecutionService. #8649.
+          windowsVerbatimArguments:
+            process.platform === 'win32' && shellConfig.shell === 'cmd',
         },
       );
 
