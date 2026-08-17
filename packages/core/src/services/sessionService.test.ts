@@ -20,7 +20,6 @@ import {
 import { getProjectHash } from '../utils/paths.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
-  SessionIdCaseConflictError,
   SessionService,
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
@@ -2537,7 +2536,12 @@ describe('SessionService', () => {
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).rejects.toBeInstanceOf(SessionIdCaseConflictError);
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+        message: `Multiple persisted sessions match "${sessionIdA}" by case.`,
+      });
       expect(getLocation).not.toHaveBeenCalled();
     });
 
@@ -2550,6 +2554,8 @@ describe('SessionService', () => {
       ).rejects.toMatchObject({
         name: 'SessionIdCaseConflictError',
         sessionId: sessionIdA,
+        candidateSessionId: sessionIdA,
+        message: `Session "${sessionIdA}" is persisted in both active and archived states.`,
       });
       expect(getLocation).not.toHaveBeenCalled();
     });

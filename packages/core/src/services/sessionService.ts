@@ -146,8 +146,18 @@ export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
 export class SessionIdCaseConflictError extends Error {
   override readonly name = 'SessionIdCaseConflictError';
 
-  constructor(readonly sessionId: string) {
-    super(`Multiple persisted sessions match "${sessionId}" by case.`);
+  // `candidateSessionId` is set only when one exact spelling was found
+  // persisted in both active and archived states, so callers can re-check
+  // the persisted spelling instead of the request-case id.
+  constructor(
+    readonly sessionId: string,
+    readonly candidateSessionId?: string,
+  ) {
+    super(
+      candidateSessionId === undefined
+        ? `Multiple persisted sessions match "${sessionId}" by case.`
+        : `Session "${candidateSessionId}" is persisted in both active and archived states.`,
+    );
   }
 }
 
@@ -766,11 +776,11 @@ export class SessionService {
     if (candidate === undefined) return undefined;
     const [candidateSessionId, states] = candidate;
     if (states.size > 1) {
-      throw new SessionIdCaseConflictError(sessionId);
+      throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
     }
     const location = await this.getSessionLocation(candidateSessionId);
     if (location === 'conflict') {
-      throw new SessionIdCaseConflictError(sessionId);
+      throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
     }
     return location === undefined ? undefined : candidateSessionId;
   }

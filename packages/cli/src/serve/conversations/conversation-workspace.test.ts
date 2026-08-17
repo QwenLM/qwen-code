@@ -17,7 +17,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assertExactConversationRoot,
   ConversationWorkspace,
@@ -267,6 +267,9 @@ describe('Live conversation workspace root', () => {
 
   it('sanitizes standalone child filesystem errors', async () => {
     if (process.platform === 'win32') return;
+    // Root bypasses the 0o000 chmod below via CAP_DAC_OVERRIDE, so the
+    // EACCES guard this test provokes never fires (e.g. CI in a container).
+    if (process.getuid && process.getuid() === 0) return;
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const prepared = await workspace.prepareStandaloneDirectory('standalone');
@@ -323,5 +326,45 @@ describe('Live conversation workspace root', () => {
       ConversationDirectoryIdentityError,
     );
     expect(compromised.error.reason).toBe('unexpected_identity');
+  });
+
+  it('returns the raced inspection when a concurrent creator wins the ensure race', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+
+    const inspect = vi.spyOn(workspace, 'inspectStandaloneDirectory');
+    inspect.mockResolvedValueOnce({ status: 'missing' });
+
+    const ensured = await workspace.ensureStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+    expect(ensured).toMatchObject({
+      status: 'ready',
+      identity: prepared.identity,
+    });
+    expect(inspect).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports compromised when the raced ensure inspection still finds nothing', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+
+    vi.spyOn(workspace, 'inspectStandaloneDirectory').mockResolvedValue({
+      status: 'missing',
+    });
+
+    const ensured = await workspace.ensureStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+    expect(ensured.status).toBe('compromised');
+    if (ensured.status !== 'compromised') {
+      throw new Error('expected compromised');
+    }
+    expect(ensured.error).toBeInstanceOf(ConversationDirectoryIdentityError);
+    expect(ensured.error.reason).toBe('identity_changed');
   });
 });

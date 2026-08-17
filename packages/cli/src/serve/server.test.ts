@@ -12078,6 +12078,101 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
+      'converts a pre-guard both-states %s conflict to actionable session conflict',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440147';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        // Same spelling persisted in both active and archived states: the
+        // resolver carries the candidate spelling, so the conversion must
+        // re-check THAT spelling — the request-case id finds nothing on a
+        // case-sensitive filesystem and would skip SessionConflictError.
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId ? 'conflict' : undefined,
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body.code).toBe('session_conflict');
+          expect(res.body.error).toContain(
+            'Delete the session with POST /sessions/delete',
+          );
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'converts an in-guard both-states %s conflict to actionable session conflict',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440148';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValueOnce(storageSessionId)
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId ? 'conflict' : undefined,
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body.code).toBe('session_conflict');
+          expect(res.body.error).toContain(
+            'Delete the session with POST /sessions/delete',
+          );
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
       'rejects ordinary %s case conflicts before bridge dispatch',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440141';

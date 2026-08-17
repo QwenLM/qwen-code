@@ -16117,6 +16117,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   function bindRestoreMocks(opts: {
     sessionExists: boolean;
+    persistedSpelling?: string;
     resolverError?: Error;
     resumedConversation?: { messages: unknown[] };
     replayHistoryImpl?: (...args: unknown[]) => Promise<void>;
@@ -16219,7 +16220,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             : vi
                 .fn()
                 .mockImplementation(async (sessionId: string) =>
-                  opts.sessionExists ? sessionId : undefined,
+                  opts.sessionExists
+                    ? (opts.persistedSpelling ?? sessionId)
+                    : undefined,
                 ),
           loadSession,
           readRestoreProjection,
@@ -16489,6 +16492,36 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   );
 
   it.each(['load', 'resume'] as const)(
+    '%s adopts the persisted session id spelling before restore',
+    async (action) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const storageSessionId = sessionId.toUpperCase();
+      bindRestoreMocks({
+        sessionExists: true,
+        persistedSpelling: storageSessionId,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = { cwd: '/tmp', sessionId, mcpServers: [] };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        const argv = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1] as
+          | CliArgs
+          | undefined;
+        expect(argv?.resume).toBe(storageSessionId);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
     '%s rejects case-only persisted session conflicts',
     async (action) => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440000';
@@ -16505,7 +16538,41 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             ? agent.loadSession(request)
             : agent.unstable_resumeSession(request);
         await expect(result).rejects.toMatchObject({
-          data: { errorKind: 'session_id_conflict', sessionId },
+          code: -32603,
+          message: `Multiple persisted sessions match "${sessionId}" by case.`,
+          data: { errorKind: 'session_conflict', sessionId },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s surfaces the both-states conflict message as session_conflict',
+    async (action) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+      const storageSessionId = sessionId.toUpperCase();
+      bindRestoreMocks({
+        sessionExists: false,
+        resolverError: new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        ),
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const request = { cwd: '/tmp', sessionId, mcpServers: [] };
+        const result =
+          action === 'load'
+            ? agent.loadSession(request)
+            : agent.unstable_resumeSession(request);
+        await expect(result).rejects.toMatchObject({
+          code: -32603,
+          message: `Session "${storageSessionId}" is persisted in both active and archived states.`,
+          data: { errorKind: 'session_conflict', sessionId },
         });
       } finally {
         mockConnectionState.resolve();

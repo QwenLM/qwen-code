@@ -5284,10 +5284,13 @@ class QwenAgent implements Agent {
             return await sessionService.findSessionIdIgnoringCase(sessionId);
           } catch (error) {
             if (error instanceof SessionIdCaseConflictError) {
-              throw new RequestError(
-                ACP_ERROR_CODES.INVALID_PARAMS,
-                `Multiple persisted sessions match ${sessionId} by case.`,
-                { errorKind: 'session_id_conflict', sessionId },
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
               );
             }
             throw error;
@@ -5608,10 +5611,13 @@ class QwenAgent implements Agent {
             return await sessionService.findSessionIdIgnoringCase(sessionId);
           } catch (error) {
             if (error instanceof SessionIdCaseConflictError) {
-              throw new RequestError(
-                ACP_ERROR_CODES.INVALID_PARAMS,
-                `Multiple persisted sessions match ${sessionId} by case.`,
-                { errorKind: 'session_id_conflict', sessionId },
+              // Parity with the daemon surfaces (toRpcError / REST 409):
+              // persisted-storage conflicts use `session_conflict`;
+              // `session_id_conflict` is reserved for live-id admission
+              // occupancy.
+              throw RequestError.internalError(
+                { errorKind: 'session_conflict', sessionId },
+                error.message,
               );
             }
             throw error;

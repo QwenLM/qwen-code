@@ -1589,13 +1589,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
       id: number;
-      error: { code: number; message: string };
+      error: {
+        code: number;
+        message: string;
+        data?: { errorKind?: string };
+      };
     }>;
     expect(frame).toMatchObject({
       id: 90,
       error: {
         code: -32602,
         message: expect.stringContaining('standalone'),
+        data: { errorKind: 'reserved_session_source' },
       },
     });
   });
@@ -4987,6 +4992,95 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           );
         } finally {
           runSharedMany.mockRestore();
+        }
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s converts a pre-guard both-states conflict to actionable session conflict',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440149'
+            : '550e8400-e29b-41d4-a716-44665544014a';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(storageSessionId, 'active');
+        await writeStoredSession(storageSessionId, 'archived');
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 231,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 231,
+          error: {
+            message: expect.stringContaining(
+              'Delete the session with POST /sessions/delete',
+            ),
+            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+          },
+        });
+        reader.close();
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s converts an in-guard both-states conflict to actionable session conflict',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-44665544014b'
+            : '550e8400-e29b-41d4-a716-44665544014c';
+        const storageSessionId = sessionId.toUpperCase();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValueOnce(storageSessionId)
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId ? 'conflict' : undefined,
+          );
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 232,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({
+            id: 232,
+            error: {
+              message: expect.stringContaining(
+                'Delete the session with POST /sessions/delete',
+              ),
+              data: expect.objectContaining({ errorKind: 'session_conflict' }),
+            },
+          });
+          reader.close();
+          // The conversion must re-check the resolver's candidate spelling:
+          // the request-case id finds nothing on a case-sensitive filesystem.
+          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
         }
       });
     },

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, type Stats } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -16,7 +16,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ConversationDirectoryIdentityError,
   createConversationRootIdentity,
@@ -25,6 +25,13 @@ import {
   materializeConversationDirectoryIdentity,
   revalidateConversationRootIdentity,
 } from './conversation-directory-identity.js';
+
+// fs-interception seam: lets a test commit a rename exactly between two fs
+// calls inside the module under test.
+vi.mock('node:fs/promises', { spy: true });
+
+const realFsPromises =
+  await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 
 const cleanup: string[] = [];
 
@@ -152,5 +159,33 @@ describe('conversation directory identity', () => {
     await expect(
       revalidateConversationRootIdentity(root),
     ).rejects.toMatchObject({ scope: 'root', reason: 'identity_changed' });
+  });
+
+  it('rejects a root swap committed during child inspection', async () => {
+    const { root } = await tempRoot();
+    const created = await materializeConversationDirectoryIdentity(
+      root,
+      'swapme',
+    );
+
+    // Fire after the child's post-realpath stat, before the trailing root
+    // revalidation: rename the validated root aside and recreate it empty.
+    const realLstat = realFsPromises.lstat;
+    let hits = 0;
+    vi.mocked(lstat).mockImplementation((async (path: string) => {
+      const stats = (await realLstat(path)) as Stats;
+      if (path.endsWith(created.identity.name) && ++hits === 2) {
+        await rename(root.configuredRoot, `${root.configuredRoot}-old`);
+        await mkdir(root.configuredRoot, { mode: 0o700 });
+      }
+      return stats;
+    }) as unknown as typeof lstat);
+    try {
+      await expect(
+        inspectConversationDirectoryIdentity(root, 'swapme'),
+      ).rejects.toMatchObject({ scope: 'root', reason: 'identity_changed' });
+    } finally {
+      vi.mocked(lstat).mockRestore();
+    }
   });
 });

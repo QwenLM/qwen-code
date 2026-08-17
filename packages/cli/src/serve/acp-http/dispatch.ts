@@ -1658,6 +1658,7 @@ export class AcpDispatcher {
                 id,
                 RPC.INVALID_PARAMS,
                 'The requested session source is reserved for daemon-owned standalone sessions.',
+                { errorKind: 'reserved_session_source' },
               ),
             );
             return;
@@ -1840,8 +1841,9 @@ export class AcpDispatcher {
             } catch (error) {
               if (
                 error instanceof SessionIdCaseConflictError &&
-                (await guardSessionService.getSessionLocation(sessionId)) ===
-                  'conflict'
+                (await guardSessionService.getSessionLocation(
+                  error.candidateSessionId ?? sessionId,
+                )) === 'conflict'
               ) {
                 throw new SessionConflictError(sessionId);
               }
@@ -1862,8 +1864,9 @@ export class AcpDispatcher {
                 } catch (error) {
                   if (
                     error instanceof SessionIdCaseConflictError &&
-                    (await sessionService.getSessionLocation(sessionId)) ===
-                      'conflict'
+                    (await sessionService.getSessionLocation(
+                      error.candidateSessionId ?? sessionId,
+                    )) === 'conflict'
                   ) {
                     throw new SessionConflictError(sessionId);
                   }

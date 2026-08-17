@@ -30,6 +30,8 @@ const SELF_ID = '550e8400-e29b-41d4-a716-44665544000b';
 const CYCLE_A_ID = '550e8400-e29b-41d4-a716-44665544000c';
 const CYCLE_B_ID = '550e8400-e29b-41d4-a716-44665544000d';
 const LEGACY_CHILD_OF_EXPLICIT_ID = '550e8400-e29b-41d4-a716-44665544000e';
+const SELF_STANDALONE_ID = '550e8400-e29b-41d4-a716-44665544000f';
+const MALFORMED_PARENT_STANDALONE_ID = '550e8400-e29b-41d4-a716-446655440010';
 
 function createStore(
   records: ReadonlyMap<string, LiveSessionCreationMetadata>,
@@ -70,6 +72,16 @@ describe('conversation session source classification', () => {
     [CYCLE_A_ID, { parentSessionId: CYCLE_B_ID }],
     [CYCLE_B_ID, { parentSessionId: CYCLE_A_ID }],
     [LEGACY_CHILD_OF_EXPLICIT_ID, { parentSessionId: EXPLICIT_ID }],
+    [
+      SELF_STANDALONE_ID,
+      { sourceType: 'standalone', parentSessionId: SELF_STANDALONE_ID },
+    ],
+    // Without the `!isValidSessionId` conjunct the explicit-standalone
+    // shortcut below the parent guard would accept this record.
+    [
+      MALFORMED_PARENT_STANDALONE_ID,
+      { sourceType: 'standalone', parentSessionId: 'not-a-session-id' },
+    ],
   ]);
   const store = createStore(records);
 
@@ -126,6 +138,8 @@ describe('conversation session source classification', () => {
     ATTRIBUTED_CHILD_ID,
     MALFORMED_LIVE_ID,
     SELF_ID,
+    SELF_STANDALONE_ID,
+    MALFORMED_PARENT_STANDALONE_ID,
     CYCLE_A_ID,
   ])('rejects malformed or ambiguous lineage for %s', async (sessionId) => {
     await expect(
@@ -140,6 +154,9 @@ describe('conversation session source classification', () => {
     await expect(
       readLoadableLiveConversationMetadata(LEGACY_ID, store),
     ).resolves.toEqual(records.get(LEGACY_ID));
+    await expect(
+      readLoadableLiveConversationMetadata(LEGACY_CHILD_ID, store),
+    ).resolves.toEqual(records.get(LEGACY_CHILD_ID));
     await expect(
       readLoadableLiveConversationMetadata(EXPLICIT_ID, store),
     ).resolves.toBeUndefined();
@@ -208,5 +225,23 @@ describe('conversation session source classification', () => {
       readLoadableLiveConversationMetadata(LEGACY_ID, unreadableStore),
     ).resolves.toBeUndefined();
     expect(states).toEqual(['active', 'active']);
+  });
+
+  it('reads archived transcripts with the archived state', async () => {
+    const states: Array<'active' | 'archived'> = [];
+    const archivedStore: ConversationSessionMetadataStore = {
+      async getSessionLocation(sessionId) {
+        return records.has(sessionId) ? 'archived' : undefined;
+      },
+      async readCreationMetadataIfReadable(sessionId, state) {
+        states.push(state);
+        return records.get(sessionId);
+      },
+    };
+
+    await expect(
+      readLoadableConversationSession(LEGACY_ID, archivedStore),
+    ).resolves.toMatchObject({ kind: 'standalone', persistence: 'legacy' });
+    expect(states).toEqual(['archived']);
   });
 });

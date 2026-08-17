@@ -3010,8 +3010,9 @@ export function registerSessionRoutes(
         } catch (error) {
           if (
             error instanceof SessionIdCaseConflictError &&
-            (await guardSessionService.getSessionLocation(sessionId)) ===
-              'conflict'
+            (await guardSessionService.getSessionLocation(
+              error.candidateSessionId ?? sessionId,
+            )) === 'conflict'
           ) {
             throw new SessionConflictError(sessionId);
           }
@@ -3029,8 +3030,9 @@ export function registerSessionRoutes(
             } catch (error) {
               if (
                 error instanceof SessionIdCaseConflictError &&
-                (await sessionService.getSessionLocation(sessionId)) ===
-                  'conflict'
+                (await sessionService.getSessionLocation(
+                  error.candidateSessionId ?? sessionId,
+                )) === 'conflict'
               ) {
                 throw new SessionConflictError(sessionId);
               }
