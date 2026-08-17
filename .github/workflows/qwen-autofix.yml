@@ -5628,6 +5628,15 @@ jobs:
           # PATH pin, the digest checks and the wrapper — so pin it empty
           # even though the agent steps unlink their channel files.
           BASH_ENV: ''
+          # LD_* is applied by the loader at process STARTUP: a planted
+          # LD_PRELOAD is loaded into this step's OWN bash before line 1,
+          # which an in-script unset can no longer prevent — it only ever
+          # stripped the channel from children. Step-level env is applied
+          # before the step's bash starts and outranks $GITHUB_ENV: the one
+          # point the preload channels can still be dropped (#9214 review).
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         run: |-
           # The gate decides whether the PAT push runs, and it executes the
           # branch's OWN build/test — so it runs inside an ephemeral container
@@ -5635,11 +5644,26 @@ jobs:
           # $GITHUB_OUTPUT are simply absent inside, so BASH_ENV/LD_PRELOAD
           # and a forged verdict line have nothing to reach. Both staged
           # scripts are digest-verified first (digests recorded in
-          # GITHUB_OUTPUT, unreachable from a disk write), with PATH pinned
-          # and the preload channels dropped so the sha256sum/bash doing the
-          # verifying cannot themselves be swapped.
+          # GITHUB_OUTPUT, unreachable from a disk write), with PATH pinned,
+          # the image shape validated, and the preload channels pinned empty
+          # at step env: level above — the loader applies LD_* at process
+          # STARTUP, so only a pre-startup pin keeps the sha256sum/bash doing
+          # the verifying from being swapped; an in-script unset would strip
+          # the channel from children after this step's own bash was already
+          # preloaded (#9214 review).
           export PATH="${TRUSTED_PATH}"
-          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          # The image must be the resolver's digest-bound reference to the
+          # trusted image: a watcher can append a forged `image=` line during
+          # the sandbox step's own window (up to the 10-minute pull), and the
+          # runner's last-wins parse at step END displaces the honest value
+          # before this step captures it — validate the shape at the consumer.
+          # The resolver can only export this exact form, so the pin is exact
+          # and a forged foreign-registry reference becomes an explicit
+          # refusal (#9214 review).
+          if [[ ! "${GATE_IMAGE}" =~ ^ghcr\.io/qwenlm/qwen-code@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::GATE_IMAGE is not a digest-bound ghcr.io/qwenlm/qwen-code reference — refusing to run the gate."
+            exit 1
+          fi
           # Pre-merge: the wrapper is absent from the trusted base (staged
           # empty above), so there is nothing digest-verifiable to run. Skip
           # with notice instead of failing sha256sum -c opaquely; the empty
@@ -5649,6 +5673,21 @@ jobs:
             echo "::notice::run-autofix-gate-container.sh is absent from the trusted base (pre-merge) — skipping the container gate; the next scan retries."
             exit 0
           fi
+          # Type discipline before hashing, the wrapper's own shape: RUNNER_TEMP
+          # is attacker-writable during the agent step, and a planted FIFO or
+          # /dev/zero symlink at any digested script path hangs sha256sum's
+          # open() until the step's 60-minute timeout — a one-line-per-round
+          # DoS of the verification loop (#9214 review).
+          for _gs in run-autofix-review-verification.sh run-autofix-gate-container.sh \
+            check-settings-schema.sh check-autofix-contracts.sh resolve-owning-packages.sh; do
+            case "$(stat -c '%F' "${RUNNER_TEMP}/${_gs}" 2> /dev/null || true)" in
+              'regular file' | 'regular empty file') : ;;
+              *)
+                echo "::error::staged gate script ${_gs} is not a regular file — refusing to run the gate."
+                exit 1
+                ;;
+            esac
+          done
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
           echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
           # The helpers the gate executes are staged in the same writable
@@ -5876,6 +5915,15 @@ jobs:
           # PATH pin, the digest checks and the wrapper — so pin it empty
           # even though the agent steps unlink their channel files.
           BASH_ENV: ''
+          # LD_* is applied by the loader at process STARTUP: a planted
+          # LD_PRELOAD is loaded into this step's OWN bash before line 1,
+          # which an in-script unset can no longer prevent — it only ever
+          # stripped the channel from children. Step-level env is applied
+          # before the step's bash starts and outranks $GITHUB_ENV: the one
+          # point the preload channels can still be dropped (#9214 review).
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
         run: |-
           # The gate decides whether the PAT push runs, and it executes the
           # branch's OWN build/test — so it runs inside an ephemeral container
@@ -5883,11 +5931,26 @@ jobs:
           # $GITHUB_OUTPUT are simply absent inside, so BASH_ENV/LD_PRELOAD
           # and a forged verdict line have nothing to reach. Both staged
           # scripts are digest-verified first (digests recorded in
-          # GITHUB_OUTPUT, unreachable from a disk write), with PATH pinned
-          # and the preload channels dropped so the sha256sum/bash doing the
-          # verifying cannot themselves be swapped.
+          # GITHUB_OUTPUT, unreachable from a disk write), with PATH pinned,
+          # the image shape validated, and the preload channels pinned empty
+          # at step env: level above — the loader applies LD_* at process
+          # STARTUP, so only a pre-startup pin keeps the sha256sum/bash doing
+          # the verifying from being swapped; an in-script unset would strip
+          # the channel from children after this step's own bash was already
+          # preloaded (#9214 review).
           export PATH="${TRUSTED_PATH}"
-          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          # The image must be the resolver's digest-bound reference to the
+          # trusted image: a watcher can append a forged `image=` line during
+          # the sandbox step's own window (up to the 10-minute pull), and the
+          # runner's last-wins parse at step END displaces the honest value
+          # before this step captures it — validate the shape at the consumer.
+          # The resolver can only export this exact form, so the pin is exact
+          # and a forged foreign-registry reference becomes an explicit
+          # refusal (#9214 review).
+          if [[ ! "${GATE_IMAGE}" =~ ^ghcr\.io/qwenlm/qwen-code@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::GATE_IMAGE is not a digest-bound ghcr.io/qwenlm/qwen-code reference — refusing to run the gate."
+            exit 1
+          fi
           # Pre-merge: the wrapper is absent from the trusted base (staged
           # empty above), so there is nothing digest-verifiable to run. Skip
           # with notice instead of failing sha256sum -c opaquely; the empty
@@ -5897,6 +5960,21 @@ jobs:
             echo "::notice::run-autofix-gate-container.sh is absent from the trusted base (pre-merge) — skipping the container gate; the next scan retries."
             exit 0
           fi
+          # Type discipline before hashing, the wrapper's own shape: RUNNER_TEMP
+          # is attacker-writable during the agent step, and a planted FIFO or
+          # /dev/zero symlink at any digested script path hangs sha256sum's
+          # open() until the step's 60-minute timeout — a one-line-per-round
+          # DoS of the verification loop (#9214 review).
+          for _gs in run-autofix-review-verification.sh run-autofix-gate-container.sh \
+            check-settings-schema.sh check-autofix-contracts.sh resolve-owning-packages.sh; do
+            case "$(stat -c '%F' "${RUNNER_TEMP}/${_gs}" 2> /dev/null || true)" in
+              'regular file' | 'regular empty file') : ;;
+              *)
+                echo "::error::staged gate script ${_gs} is not a regular file — refusing to run the gate."
+                exit 1
+                ;;
+            esac
+          done
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c -
           echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c -
           # The helpers the gate executes are staged in the same writable

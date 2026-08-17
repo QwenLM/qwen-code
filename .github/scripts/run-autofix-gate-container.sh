@@ -64,8 +64,16 @@ GATE_CONTAINER="qwen-code-gate-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
 teardown() { timeout 30 docker rm -f "${GATE_CONTAINER}" > /dev/null 2>&1 || true; }
 trap teardown EXIT INT TERM
 
-if [[ -z "${GATE_IMAGE:-}" ]]; then
-  echo "::error::GATE_IMAGE is empty — the sandbox image did not resolve; refusing to run the gate on the host."
+# The resolver only ever exports a digest-bound reference to the trusted
+# image, ghcr.io/qwenlm/qwen-code@sha256:… — validate the shape at this
+# consumer. A host watcher can append a forged `image=` line during the
+# sandbox step's own window (up to the 10-minute pull), and the runner
+# parses the step's output file last-wins at step END, displacing the
+# honest value before the gate steps capture it into GATE_IMAGE; running
+# the gate in an attacker-chosen image forges the entire verdict. Defense
+# in depth — both gate steps validate the same shape (#9214 review).
+if [[ ! "${GATE_IMAGE:-}" =~ ^ghcr\.io/qwenlm/qwen-code@sha256:[0-9a-f]{64}$ ]]; then
+  echo "::error::GATE_IMAGE is not a digest-bound ghcr.io/qwenlm/qwen-code reference (got '${GATE_IMAGE:-}') — refusing to run the gate."
   exit 125
 fi
 
@@ -151,6 +159,15 @@ if [[ "${INPUTS_BEFORE}" == *':NONREGULAR:'* ]]; then
   echo "::error::a verdict input in ${WORKDIR} is not a regular file — refusing to run the gate."
   exit 125
 fi
+# The container mounts the workspace rw at the runner uid, so a detached
+# in-container process can move the branch ref to an attacker commit AND
+# append verified_head=<it> after the gate's honest final write — the
+# extraction below is last-wins, and the push guard compares `git rev-parse
+# HEAD` (read from the same rw-mounted .git) against the forwarded value:
+# both operands attacker-consistent, and a head the gate never verified
+# would ship on the PAT. Pin the host-side HEAD across the run and refuse
+# any move, whatever the verdict file says (#9214 review).
+HOST_HEAD_BEFORE="$(git rev-parse HEAD 2> /dev/null || true)"
 
 # --network none: the gate only runs build/typecheck/lint/test against
 # node_modules already installed on the host side, so it needs no egress —
@@ -186,6 +203,15 @@ if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]; then
   # own exit code is now meaningless as evidence about the fix, so take the
   # crash path (retry) rather than publish a verdict derived from them.
   echo "::error::the gate container modified the agent's verdict inputs in ${WORKDIR} — refusing the verdict; the next scan retries."
+  exit 125
+fi
+# Host-side half of the HEAD pin captured before the run: the container can
+# write the workspace's .git (same uid, rw mount), so re-read HEAD here — a
+# moved ref means the tree now present is not the one the gate verified, and
+# the verdict is refused regardless of its content.
+HOST_HEAD_NOW="$(git rev-parse HEAD 2> /dev/null || true)"
+if [[ -z "${HOST_HEAD_NOW}" || "${HOST_HEAD_NOW}" != "${HOST_HEAD_BEFORE}" ]]; then
+  echo "::error::the workspace HEAD moved during the gate run (${HOST_HEAD_BEFORE:-?} -> ${HOST_HEAD_NOW:-?}) — refusing the verdict; the next scan retries."
   exit 125
 fi
 
@@ -234,8 +260,27 @@ case "${GATE_RC}" in
     # verdict says anything else (or nothing) is a gate that did not reach a
     # verdict, which is the crash path, not a silent success.
     if [[ "${OUTCOME}" == 'fixed' || "${OUTCOME}" == 'noop' ]]; then
+      # The same anti-append discipline as the rc=1 arm: every genuine
+      # exit-0 verdict writes outcome= and verified_head= exactly once
+      # (fixed at the gate's end, noop at the no-action exit), and
+      # committed= at most once, so any duplicate is an in-container append.
+      # Without the count, a watcher appending `outcome=noop` after the
+      # gate's `outcome=fixed` flips last-wins extraction and silently
+      # discards a verified fix as no-action (the reverse reports a fix on
+      # an unchanged branch), and an appended `verified_head=` is the
+      # identity forgery the host-HEAD pin above independently refuses
+      # (#9214 review).
+      OUTCOME_LINES="$(grep -c '^outcome=' "${VERDICT}" 2> /dev/null || true)"
+      VERIFIED_HEAD_LINES="$(grep -c '^verified_head=' "${VERDICT}" 2> /dev/null || true)"
+      COMMITTED_LINES="$(grep -c '^committed=' "${VERDICT}" 2> /dev/null || true)"
+      if [[ "${OUTCOME_LINES:-0}" -ne 1 ]] ||
+        [[ "${VERIFIED_HEAD_LINES:-0}" -ne 1 ]] ||
+        [[ "${COMMITTED_LINES:-0}" -gt 1 ]]; then
+        echo "::error::verdict carries a forged line (outcome lines: ${OUTCOME_LINES:-0}, verified_head lines: ${VERIFIED_HEAD_LINES:-0}, committed lines: ${COMMITTED_LINES:-0}) — refusing the verdict as tampered."
+        exit 125
+      fi
       echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
-      [[ -n "${VERIFIED_HEAD}" ]] && echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
+      echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
     else
       echo "::warning::gate container exited 0 without a verdict (outcome='${OUTCOME}') — treating as a gate crash so the next scan retries."
     fi

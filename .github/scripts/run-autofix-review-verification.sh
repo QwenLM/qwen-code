@@ -343,20 +343,97 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 VERIFICATION_HEAD="$(git rev-parse HEAD)"
 
-# The bite section reads rc.json / resolved-comments.txt / rv.json AFTER the
-# build legs — host-authored before the container, never written by the gate.
-# A branch background process can truncate one for the mid-run read (flipping
-# BITE_ENFORCE off, so the bogus-fix round the bite check exists to reject
-# sails to outcome=fixed) and restore the bytes before exit — the wrapper's
-# post-run fingerprint compare only sees the restoration. Capture identity
-# now, before any branch code runs, and refuse at the bite section if the
-# inputs moved (#9214 review).
+# The bite section's three inputs are host-authored before the container and
+# never written by the gate, but they stay attacker-writable for the whole
+# container run. Every read that feeds the enforcement decision therefore
+# happens ONCE, here, before any branch code runs: the old shape digested the
+# live files here but let the bite section RE-READ them after the build legs —
+# check-then-use, with two probe-confirmed entrances: a watcher truncates in
+# the digest→read gap (BITE_ENFORCE flips off for the mid-run read), or
+# substitutes a FIFO that feeds the digest the original bytes while `[[ -s ]]`
+# sees st_size 0 — and restored bytes pass the wrapper's post-run compare.
+# Freezing the decision at gate start makes the mid-run files inert (#9214
+# review). Non-regular inputs crash the gate verdict-less: the wrapper
+# type-checked them before the run, so a non-regular file here moved during
+# container startup, and no verdict may be built on inputs of unknown
+# identity. Absent inputs are legitimate (the -s guards read them as "no
+# defect claim"), matching the wrapper's own fingerprint discipline.
+for _bi in rc.json resolved-comments.txt rv.json; do
+  case "$(stat -c '%F' "${WORKDIR}/${_bi}" 2> /dev/null || true)" in
+    '' | 'regular file' | 'regular empty file') : ;;
+    *)
+      echo "❌ bite check input ${_bi} is not a regular file at gate start"
+      exit 1
+      ;;
+  esac
+done
 bite_input_digest() {
   { sha256sum "${WORKDIR}/rc.json" "${WORKDIR}/resolved-comments.txt" \
     "${WORKDIR}/rv.json" 2> /dev/null || true; } |
     sha256sum | cut -d' ' -f1
 }
 BITE_INPUTS_BEFORE="$(bite_input_digest)"
+BITE_ENFORCE='false'
+if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
+  # Ids tolerate the rc: prefix and CR the other consumers strip (SKILL
+  # tells the agent to write the rc:<id> handle); a reply resolved inside a
+  # Critical-rooted thread is a defect claim too, matching how the feedback
+  # renderers classify replies.
+  BITE_ENFORCE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
+    --slurpfile reviews "${WORKDIR}/rv.json" '
+    (add // []) as $comments
+    | ($reviews | add // []) as $reviews
+    | ($ids | split("\n")
+        | map(sub("^rc:"; "") | sub("\r$"; "")
+          | select(test("^[0-9]+$")) | tonumber)) as $resolved
+    | def cr_attached($x):
+        (($x.pull_request_review_id // null) as $review
+          | $review != null
+          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+      def critical($c):
+        (($c.body // "") | contains("**[Critical]**"))
+        or (($c.in_reply_to_id // null) as $root
+          | $root != null
+          and any($comments[];
+            .id == $root
+            and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+        or cr_attached($c);
+    any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
+    "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
+  [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
+  # A defect claim whose EVERY resolved-Critical thread sits on a test file
+  # is a test-side claim ("this test asserts the wrong behavior"): its fixed
+  # test legitimately passes on the pre-round tree, so it takes the advisory
+  # arm, never the rejection.
+  if [[ "${BITE_ENFORCE}" == 'true' ]]; then
+    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
+      --slurpfile reviews "${WORKDIR}/rv.json" '
+      (add // []) as $comments
+      | ($reviews | add // []) as $reviews
+      | ($ids | split("\n")
+          | map(sub("^rc:"; "") | sub("\r$"; "")
+            | select(test("^[0-9]+$")) | tonumber)) as $resolved
+      | def cr_attached($x):
+          (($x.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+        def critical($c):
+          (($c.body // "") | contains("**[Critical]**"))
+          or (($c.in_reply_to_id // null) as $root
+            | $root != null
+            and any($comments[];
+              .id == $root
+              and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+          or cr_attached($c);
+      [ $comments[]
+        | select(.id as $id | $resolved | index($id) != null)
+        | select(critical(.)) | (.path // "") ]
+      | (length > 0) and all(.[];
+          test("\\.(test|spec)\\.") or test("__tests__/|__snapshots__/|test-utils/|^integration-tests/"))' \
+      "${WORKDIR}/rc.json" 2> /dev/null)" || TESTSIDE='false'
+    [[ "${TESTSIDE}" == 'true' ]] && BITE_ENFORCE='advisory'
+  fi
+fi
 
 # The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
 # entry point, which the CLI bundle restored from the TRUSTED BASE. When the
@@ -386,11 +463,17 @@ fi
 # that predates the script does not contain it (bash would exit 127
 # and kill the gate with no outcome), and the gate logic must come
 # from the trusted base, not the branch under verification.
+# GITHUB_OUTPUT= blanks the verdict channel for the helpers' own fail():
+# both append outcome=failed to $GITHUB_OUTPUT when set (their host-run
+# contract), and inside the container $GITHUB_OUTPUT IS the verdict file —
+# the duplicate outcome= line would trip the wrapper's exactly-one count
+# and drop a genuine rejection as forged. reject_fix writes the sole
+# verdict line below (#9214 review).
 run_check_no_ab 'settings schema is stale on the agent-committed fix' \
-  bash "${RUNNER_TEMP}/check-settings-schema.sh"
+  env GITHUB_OUTPUT= bash "${RUNNER_TEMP}/check-settings-schema.sh"
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
 run_check_no_ab 'cross-package contract verification failed' \
-  bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
+  env GITHUB_OUTPUT= bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
 assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
@@ -476,7 +559,7 @@ sensitive_class_of() {
       # the class ledger — fail CLOSED as its own class instead of open.
       echo 'suspicious-path' ;;
     .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml | .github/workflows/qwen-pr-safety-precheck.yml) echo 'autofix-loop' ;;
-    .github/scripts/run-autofix-review-verification.sh | .github/scripts/run-autofix-gate-container.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs | .github/scripts/pr-safety-precheck.mjs) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh | .github/scripts/run-autofix-gate-container.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs | .github/scripts/pr-safety-precheck.mjs | .github/scripts/resanitize-git-config.sh) echo 'autofix-loop' ;;
     .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
     .github/scripts/*) echo 'ci-scripts' ;;
     .github/*) echo 'gh-metadata' ;;
@@ -899,69 +982,20 @@ BITE_SRC="$(git diff --name-only -z --no-renames "${ROUND_RANGE}" \
 # code? resolved-comments.txt is the agent's own machine-readable claim of
 # what it fixed; rc.json/rv.json carry the thread bodies and review states
 # the scan already fetched. Absent/empty inputs read as "no defect claim".
+# BITE_ENFORCE was frozen at gate start from the inputs as captured there;
+# what remains here is the tamper ALARM — re-check the live inputs type-safely
+# (never opening a non-regular file, so a planted FIFO cannot hang the gate
+# out) and refuse loudly if they moved. The decision no longer depends on
+# this re-read, but a tampered round must not carry a verdict built on inputs
+# whose integrity the run cannot vouch for (#9214 review).
+for _bi in rc.json resolved-comments.txt rv.json; do
+  case "$(stat -c '%F' "${WORKDIR}/${_bi}" 2> /dev/null || true)" in
+    '' | 'regular file' | 'regular empty file') : ;;
+    *) reject_fix 'bite check inputs changed during the gate run' ;;
+  esac
+done
 if [[ "$(bite_input_digest)" != "${BITE_INPUTS_BEFORE}" ]]; then
   reject_fix 'bite check inputs changed during the gate run'
-fi
-BITE_ENFORCE='false'
-if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
-  # Ids tolerate the rc: prefix and CR the other consumers strip (SKILL
-  # tells the agent to write the rc:<id> handle); a reply resolved inside a
-  # Critical-rooted thread is a defect claim too, matching how the feedback
-  # renderers classify replies.
-  BITE_ENFORCE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
-    --slurpfile reviews "${WORKDIR}/rv.json" '
-    (add // []) as $comments
-    | ($reviews | add // []) as $reviews
-    | ($ids | split("\n")
-        | map(sub("^rc:"; "") | sub("\r$"; "")
-          | select(test("^[0-9]+$")) | tonumber)) as $resolved
-    | def cr_attached($x):
-        (($x.pull_request_review_id // null) as $review
-          | $review != null
-          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
-      def critical($c):
-        (($c.body // "") | contains("**[Critical]**"))
-        or (($c.in_reply_to_id // null) as $root
-          | $root != null
-          and any($comments[];
-            .id == $root
-            and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
-        or cr_attached($c);
-    any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
-    "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
-  [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
-  # A defect claim whose EVERY resolved-Critical thread sits on a test file
-  # is a test-side claim ("this test asserts the wrong behavior"): its fixed
-  # test legitimately passes on the pre-round tree, so it takes the advisory
-  # arm, never the rejection.
-  if [[ "${BITE_ENFORCE}" == 'true' ]]; then
-    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
-      --slurpfile reviews "${WORKDIR}/rv.json" '
-      (add // []) as $comments
-      | ($reviews | add // []) as $reviews
-      | ($ids | split("\n")
-          | map(sub("^rc:"; "") | sub("\r$"; "")
-            | select(test("^[0-9]+$")) | tonumber)) as $resolved
-      | def cr_attached($x):
-          (($x.pull_request_review_id // null) as $review
-            | $review != null
-            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
-        def critical($c):
-          (($c.body // "") | contains("**[Critical]**"))
-          or (($c.in_reply_to_id // null) as $root
-            | $root != null
-            and any($comments[];
-              .id == $root
-              and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
-          or cr_attached($c);
-      [ $comments[]
-        | select(.id as $id | $resolved | index($id) != null)
-        | select(critical(.)) | (.path // "") ]
-      | (length > 0) and all(.[];
-          test("\\.(test|spec)\\.") or test("__tests__/|__snapshots__/|test-utils/|^integration-tests/"))' \
-      "${WORKDIR}/rc.json" 2> /dev/null)" || TESTSIDE='false'
-    [[ "${TESTSIDE}" == 'true' ]] && BITE_ENFORCE='advisory'
-  fi
 fi
 if [[ -z "${BITE_SRC}" && ( "${BITE_ENFORCE}" == 'true' || "${BITE_ENFORCE}" == 'advisory' ) ]]; then
   # A defect-claim round that changed only tests cannot be bite-checked
