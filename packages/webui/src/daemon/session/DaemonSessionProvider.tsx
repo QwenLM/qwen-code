@@ -492,10 +492,12 @@ interface HeartbeatFailureState {
 
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
-// normalization still rebuilds from retained blocks today, so this high default
-// is a history-preservation tradeoff rather than a claim that large transcripts
-// are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
-const DEFAULT_MAX_BLOCKS = 200_000;
+// normalization still rebuilds from retained blocks today, so this default is a
+// history-preservation tradeoff rather than a claim that large transcripts are
+// CPU-free. The value is also a memory ceiling: blocks can carry large tool
+// payloads, so an implicit 200k window let a single busy session exhaust
+// renderer memory. Callers can pass a smaller maxBlocks in constrained contexts.
+const DEFAULT_MAX_BLOCKS = 50_000;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -1482,7 +1484,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) &&
               (activeSession.historyHasMore || replayHistoryWasTruncated) &&
               firstPersistedRecordId !== undefined;
-          if (!repairingEpisode) {
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          // After the snapshot is consumed the replay-derived inputs above
+          // (firstPersistedRecordId, replayHistoryWasTruncated) recompute
+          // empty on delta-resume reconnects; keep the history state that
+          // the original injection initialized instead of clobbering it.
+          if (
+            !repairingEpisode &&
+            (replayInjected ||
+              transcriptHistoryRef.current.sessionId !==
+                activeSession.sessionId)
+          ) {
             transcriptHistoryRef.current = {
               sessionId: activeSession.sessionId,
               ...(firstPersistedRecordId !== undefined
@@ -1500,6 +1513,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               paginationError: false,
             });
           } else if (
+            repairingEpisode &&
             !markerStillVisible &&
             firstPersistedRecordId !== undefined
           ) {
@@ -1507,8 +1521,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               firstPersistedRecordId;
             transcriptHistoryRef.current.cursor = undefined;
           }
-          const replayInjected =
-            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          if (replayInjected) {
+            // The snapshot is injected into the store below and never read
+            // again (SSE continues from lastEventId; older history arrives
+            // via pagination). Drop the client's reference so busy-session
+            // snapshots — tens of MiB of raw wire events after adaptive
+            // journal growth — don't stay pinned for the whole attachment.
+            activeSession.consumeReplaySnapshot();
+          }
           if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
@@ -1643,11 +1663,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               needsStoreReset ||
               store.getSnapshot().blocks.length === 0;
             if (rebuildReplay) {
-              const replayMaxBlocks = repairingEpisode
-                ? markerStillVisible
+              // Ordinary replay rebuilds under the same cap as live growth:
+              // a session loaded mid-turn can carry a live journal with tens
+              // of thousands of events, and retaining it all (the previous
+              // uncapped rebuild) exhausted renderer memory. Trimming keeps
+              // the most recent blocks; older history stays reachable via
+              // pagination.
+              const replayMaxBlocks =
+                repairingEpisode && markerStillVisible
                   ? repairingEpisode.checkpoint.maxBlocks
-                  : maxBlocks
-                : Number.MAX_SAFE_INTEGER;
+                  : maxBlocks;
               const replayStore = createDaemonTranscriptStore(
                 repairingEpisode && markerStillVisible
                   ? {
@@ -1674,12 +1699,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
               }
               const replayState = replayStore.getSnapshot();
+              // A saturated rebuild means older blocks were trimmed away
+              // (or the window is exactly full), so there is no in-store
+              // room for pagination either way — surface capacityReached.
               replayExceededCapacity =
                 repairingEpisode === undefined &&
-                replayState.blocks.length > maxBlocks;
-              const committedMaxBlocks = repairingEpisode
-                ? replayMaxBlocks
-                : Math.max(maxBlocks, replayState.blocks.length);
+                replayState.blocks.length >= maxBlocks;
+              // Replay must never ratchet the retention window above the
+              // configured cap: the committed cap is what bounds every
+              // later dispatch, and an escalation here turned one large
+              // replay into permanent unbounded retention.
+              const committedMaxBlocks = replayMaxBlocks;
               store.reset({
                 ...replayState,
                 maxBlocks: committedMaxBlocks,

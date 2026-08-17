@@ -2662,6 +2662,25 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('caps the embedded payload of unrecognized session_update debug text', () => {
+    // One transcript block per such frame is appended, so an unrecognized
+    // kind streaming at high frequency must not embed its full payload
+    // (up to 100KB wire frames) — the text is capped like tool details.
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'some_future_kind',
+          payload: 'x'.repeat(100_000),
+        },
+      }),
+    );
+
+    expect(events).toHaveLength(1);
+    const text = (events[0] as { text?: string }).text ?? '';
+    expect(text.length).toBeLessThanOrEqual(4096 + '... [truncated]'.length);
+    expect(text.endsWith('... [truncated]')).toBe(true);
+  });
+
   it('classifies a session_update with no usable discriminator as malformed', () => {
     // `getSessionUpdatePayload` accepts any record, so these reach the default
     // branch with `kind === undefined`. They are broken frames, not kinds from

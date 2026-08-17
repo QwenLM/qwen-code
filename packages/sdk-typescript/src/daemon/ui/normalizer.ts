@@ -879,7 +879,13 @@ function normalizeSessionUpdate(
           debugReason: kind?.trim()
             ? 'unrecognized_session_update'
             : 'malformed_payload',
-          text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
+          // One block per such frame is appended to the transcript, so the
+          // payload embedding must stay tiny: a high-frequency unrecognized
+          // kind (e.g. a newer daemon's streaming update) could otherwise
+          // accumulate 100KB blocks up to the transcript block cap.
+          text: capDetails(
+            `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
+          ),
         },
       ];
   }

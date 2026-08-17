@@ -334,6 +334,37 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('42');
   });
 
+  it('releases the replay snapshot once consumed', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          lastEventId: 7,
+          compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
+          liveJournal: [{ id: 7, v: 1, type: 'session_update', data: {} }],
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(1);
+
+    const consumed = session.consumeReplaySnapshot();
+    expect(consumed.compactedReplay).toHaveLength(1);
+    expect(consumed.liveJournal).toHaveLength(1);
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(0);
+    // Idempotent: a second consume returns the empty snapshot.
+    expect(session.consumeReplaySnapshot().compactedReplay).toHaveLength(0);
+  });
+
   it('loads restored prompt activity from hasActivePrompt responses', async () => {
     const { fetch } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {

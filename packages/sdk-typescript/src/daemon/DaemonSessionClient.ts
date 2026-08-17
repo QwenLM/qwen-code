@@ -144,7 +144,14 @@ export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
-  readonly replaySnapshot: DaemonReplaySnapshot;
+  /**
+   * Backing store for {@link replaySnapshot}. Mutable so consumers can
+   * `consumeReplaySnapshot()` once the snapshot has been injected into a
+   * transcript store, releasing the raw wire events (which can reach tens
+   * of MiB for busy sessions) instead of retaining them for the lifetime
+   * of the session client.
+   */
+  private retainedReplaySnapshot: DaemonReplaySnapshot;
   readonly replaySnapshotComplete: boolean;
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
@@ -194,7 +201,7 @@ export class DaemonSessionClient {
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
-    this.replaySnapshot = opts.replaySnapshot ?? {
+    this.retainedReplaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
     };
@@ -369,6 +376,27 @@ export class DaemonSessionClient {
 
   get eventEpoch(): string | undefined {
     return this.lastSeenEpoch;
+  }
+
+  /**
+   * The replay snapshot captured by `load()`. Empty after
+   * {@link consumeReplaySnapshot} has been called.
+   */
+  get replaySnapshot(): DaemonReplaySnapshot {
+    return this.retainedReplaySnapshot;
+  }
+
+  /**
+   * Returns the retained replay snapshot and drops the client's reference
+   * to it. Call once the snapshot has been injected into a transcript
+   * store; the raw wire events are no longer needed (SSE continues from
+   * `lastEventId`, and older history is served by pagination) and can
+   * otherwise pin tens of MiB per session client.
+   */
+  consumeReplaySnapshot(): DaemonReplaySnapshot {
+    const snapshot = this.retainedReplaySnapshot;
+    this.retainedReplaySnapshot = { compactedReplay: [], liveJournal: [] };
+    return snapshot;
   }
 
   setLastEventId(lastEventId: number | undefined): void {

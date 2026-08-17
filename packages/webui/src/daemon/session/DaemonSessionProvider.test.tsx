@@ -100,6 +100,10 @@ interface MockSession {
     compactedReplay: DaemonEvent[];
     liveJournal: DaemonEvent[];
   };
+  consumeReplaySnapshot: () => {
+    compactedReplay: DaemonEvent[];
+    liveJournal: DaemonEvent[];
+  };
   events: (opts?: {
     signal?: AbortSignal;
     maxQueued?: number;
@@ -3829,11 +3833,16 @@ describe('DaemonSessionProvider', () => {
     const sdk = await import('@qwen-code/sdk/daemon');
     const realCreateStore = sdk.createDaemonTranscriptStore;
     const replayDispatchBatchSizes: number[] = [];
+    // The first store created is the provider's main store; every later
+    // store in this flow is the replay rebuild store (replay now rebuilds
+    // under the same maxBlocks cap, so the seed no longer identifies it).
+    let createStoreCalls = 0;
     const createStoreSpy = vi
       .spyOn(sdk, 'createDaemonTranscriptStore')
       .mockImplementation((seed) => {
         const store = realCreateStore(seed);
-        if (seed?.maxBlocks === Number.MAX_SAFE_INTEGER) {
+        createStoreCalls += 1;
+        if (createStoreCalls > 1) {
           const realDispatch = store.dispatch.bind(store);
           store.dispatch = (event) => {
             replayDispatchBatchSizes.push(
@@ -12112,7 +12121,7 @@ describe('DaemonSessionProvider', () => {
     expect(notices.at(-1)).toBeUndefined();
   });
 
-  it('keeps an oversized initial replay intact and stops older pagination', async () => {
+  it('trims an oversized initial replay to the block cap and stops older pagination', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
@@ -12161,8 +12170,10 @@ describe('DaemonSessionProvider', () => {
       maxBlocks: 1,
     });
 
+    // The rebuild keeps the most recent blocks within the cap instead of
+    // ratcheting the cap up to the replay size (which retained unbounded
+    // history and exhausted renderer memory on busy sessions).
     expect(blocks).toMatchObject([
-      { kind: 'user', text: 'recent prompt' },
       { kind: 'assistant', text: 'recent answer' },
     ]);
     expect(history).toMatchObject({
@@ -12171,6 +12182,88 @@ describe('DaemonSessionProvider', () => {
       capacityReached: true,
     });
     expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('releases the replay snapshot after injection and never raises the block cap', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: [],
+    });
+    const chunk = (
+      id: number,
+      kind: 'user_message_chunk' | 'agent_message_chunk',
+      text: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: kind,
+          content: { type: 'text', text },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-consume-replay',
+      lastEventId: 3,
+      replaySnapshot: {
+        compactedReplay: [
+          chunk(1, 'user_message_chunk', 'replayed prompt'),
+          chunk(2, 'agent_message_chunk', 'replayed answer'),
+          {
+            id: 3,
+            v: 1,
+            type: 'turn_complete',
+            data: { stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* oneLiveEventThenIdle(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield chunk(4, 'user_message_chunk', 'live follow-up');
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        yield* [];
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      maxBlocks: 1,
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(blocks).toMatchObject([
+          { kind: 'user', text: 'live follow-up' },
+        ]),
+      );
+    });
+
+    // The oversized replay was trimmed to the cap on injection...
+    expect(blocks).toHaveLength(1);
+    // ...the raw snapshot was released from the session client...
+    expect(session.consumeReplaySnapshot).toHaveBeenCalledTimes(1);
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(0);
+    // ...and later live growth still trims at the configured cap, i.e. the
+    // replay did not ratchet maxBlocks up to its own size.
   });
 
   it('rejects a terminal older page that does not fit atomically', async () => {
@@ -12182,13 +12275,14 @@ describe('DaemonSessionProvider', () => {
       id: number,
       text: string,
       recordId?: string,
+      kind: 'user_message_chunk' | 'agent_message_chunk' = 'user_message_chunk',
     ): DaemonEvent => ({
       id,
       v: 1,
       type: 'session_update',
       data: {
         update: {
-          sessionUpdate: 'user_message_chunk',
+          sessionUpdate: kind,
           content: { type: 'text', text },
           ...(recordId ? { _meta: { 'qwen.session.recordId': recordId } } : {}),
         },
@@ -12203,10 +12297,16 @@ describe('DaemonSessionProvider', () => {
       },
     });
     sdkMocks.sessions.push(session);
+    // Two older blocks (distinct kinds so they do not merge): with the
+    // retained block they overflow the cap, so the terminal page must be
+    // rejected atomically instead of partially prepended.
     sdkMocks.getSessionTranscriptPage.mockResolvedValue({
       v: 1,
       sessionId: session.sessionId,
-      events: [replayEvent(1, 'older prompt')],
+      events: [
+        replayEvent(0, 'older prompt'),
+        replayEvent(1, 'older answer', undefined, 'agent_message_chunk'),
+      ],
       hasMore: false,
     });
     let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
@@ -12218,10 +12318,12 @@ describe('DaemonSessionProvider', () => {
       return null;
     }
 
+    // maxBlocks 2 leaves headroom over the single retained replay block so
+    // the load actually proceeds and exercises the atomic page rejection.
     await renderWithProvider(<Harness />, {
       autoConnect: true,
       historyPageSize: 25,
-      maxBlocks: 1,
+      maxBlocks: 2,
     });
     await act(async () => {
       await history?.loadMore();
@@ -12442,6 +12544,11 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       compactedReplay: [],
       liveJournal: [],
     },
+    consumeReplaySnapshot: vi.fn(() => {
+      const snapshot = session.replaySnapshot;
+      session.replaySnapshot = { compactedReplay: [], liveJournal: [] };
+      return snapshot;
+    }),
     events: opts.events ?? createIdleEvents(),
   };
   return session;
