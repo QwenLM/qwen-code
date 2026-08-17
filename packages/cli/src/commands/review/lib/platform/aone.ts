@@ -13,7 +13,7 @@
 import { git, gitRaw } from '../git.js';
 import { isOwnerRepo } from '../gh.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
-import { hostsEquivalent } from '../remote-match.js';
+import { isAoneHostFamily } from '../remote-match.js';
 import { a1Json, ensureAoneAuthenticated } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -81,30 +81,42 @@ interface AoneWorkitem {
 export function parseRemoteUrl(url: string): RepoIdentity | null {
   const trimmed = url.trim();
   const schemeForm = /^[a-z+]+:\/\//i.test(trimmed);
-  // Clean, per form (order matters inside each):
-  //  - URL form: strip the userinfo FIRST, bounded to the authority — the
-  //    span between `//` and the first `/` (RFC 3986: userinfo cannot
-  //    contain `/`). Greedy within that span, so multi-`@` tokens
-  //    (`user:S1@S2@host`) and `?`/`#` inside the secret
-  //    (`https://user:pa?ss@host/…` — a query-first strip would truncate
-  //    mid-credential) are consumed whole. A `/`-bearing secret puts the
-  //    `@` in PATH territory: nothing is stripped, and the residue fails
+  // Clean, per form:
+  //  - URL form: the AUTHORITY is the span between `//` and the first `/`.
+  //    Userinfo is consumed WHOLE within it — up to the authority's last
+  //    `@` — so multi-`@` tokens (`user:S1@S2@host`) and `?`/`#` inside
+  //    the secret (`https://user:pa?ss@host/…`) survive; a query strip run
+  //    first would truncate the secret mid-credential. The query/fragment
+  //    strip runs on the PATH portion only — an `@` inside a query or
+  //    fragment value is the credential's own character, and letting it
+  //    drive either strip fabricates coordinates from the query tail. A
+  //    `/`-bearing secret puts the `@` in PATH territory (the authority
+  //    ends at the first `/`): nothing is stripped, and the residue fails
   //    closed in `take` — it must never fold into a fabricated host.
   //  - scp form: the token may contain `:` AND `/`, so consume up to the
-  //    LAST `@` that leaves a `host:` shape behind (the lookahead); when
-  //    the only `@` cannot front a host (`host:path@x`, `user:tok@nohost`)
-  //    nothing is stripped and the residue fails closed in `take`.
-  //    (`[\s\S]*`, not `.*` — git re-emits newline-bearing URLs.)
-  // Then the query string / fragment on both forms: query-string
-  // credentials (`?private_token=…`, a real CI pattern) would otherwise
-  // become part of the repo coordinate; `[\s\S]*` eats newlines too.
+  //    LAST `@` before any `?`/`#` that leaves a `host:` shape behind (the
+  //    lookahead); when the only `@` cannot front a host (`host:path@x`,
+  //    `user:tok@nohost`) nothing is stripped and the residue fails closed
+  //    in `take`. (`[^?#]` — git re-emits newline-bearing URLs, and the
+  //    markers bound the credential span.)
+  // The query string / fragment is then stripped on both forms: query-
+  // string credentials (`?private_token=…`, a real CI pattern) would
+  // otherwise become part of the repo coordinate; `[\s\S]*` eats newlines.
   // Finally trailing slashes before `.git`, so `…/p.git//` cannot defeat
   // the suffix strip. Git accepts all of these shapes.
-  const cleaned = (
-    schemeForm
-      ? trimmed.replace(/^([a-z+]+:\/\/)[^/]*@/i, '$1')
-      : trimmed.replace(/^(?:[\s\S]*@)(?=[^:@/]+:)/, '')
-  )
+  let cleaned: string;
+  if (schemeForm) {
+    const parts = /^([a-z+]+:\/\/)([^/]*)([\s\S]*)$/i.exec(trimmed);
+    const authority = parts?.[2] ?? '';
+    const at = authority.lastIndexOf('@');
+    cleaned =
+      (parts?.[1] ?? '') +
+      (at === -1 ? authority : authority.slice(at + 1)) +
+      (parts?.[3] ?? '');
+  } else {
+    cleaned = trimmed.replace(/^(?:[^?#]*@)(?=[^:@/?#]+:)/, '');
+  }
+  cleaned = cleaned
     .replace(/[?#][\s\S]*$/, '')
     .replace(/\/+$/, '')
     .replace(/\.git$/, '');
@@ -149,19 +161,21 @@ export function parseRemoteUrl(url: string): RepoIdentity | null {
 }
 
 /** Redact a URL before putting it in a message — the raw secret must not
- *  reach stderr/logs/the transcript. Fail closed BY CONSTRUCTION: replace
- *  EVERYTHING before the last `@` with `<redacted>` — whatever the
- *  userinfo contains (`/`, newlines, more `@`s). A regex-per-shape
- *  redaction always misses the next shape (rounds 5–9 each found one);
- *  the split at the last `@` leaks nothing in front of it by construction.
- *  The query/fragment strip runs on the tail only, AFTER the split — a
- *  userinfo can itself contain `?`/`#` (`https://user:pa?ss@host/…`), and
- *  stripping first would truncate it mid-credential. An origin whose only
- *  `@` sits in the path/query (no userinfo) is over-redacted — acceptable
- *  for an error message, never a leak. */
+ *  reach stderr/logs/the transcript. Fail closed BY CONSTRUCTION: the split
+ *  at the last `@` redacts everything before it — but ONLY when that `@`
+ *  sits in the authority region. An `@` inside a query or fragment VALUE is
+ *  the credential's own character (`?private_token=prefix@SECRET` is the
+ *  shape this code's own cleaning comment calls "a real CI pattern"); there
+ *  is no safe tail to keep after it, so the display fails closed with a
+ *  constant instead of slicing around it. Six rounds of shape-by-shape
+ *  slicing each missed the next shape — the class is closed, not patched.
+ *  A userinfo-less origin carrying `@` only in the path is likewise a
+ *  constant. */
 function redactUrl(url: string): string {
   const at = url.lastIndexOf('@');
   if (at === -1) return url.replace(/[?#][\s\S]*$/, '');
+  const marker = url.search(/[?#]/);
+  if (marker !== -1 && marker < at) return '<redacted remote>';
   const tail = url.slice(at + 1).replace(/[?#][\s\S]*$/, '');
   return `<redacted>@${tail}`;
 }
@@ -198,15 +212,22 @@ function mrHeadRefSpec(prNumber: number): string {
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else — no option spellings, no refspec
  * shapes (`+`, `:`), no rev-parse metasyntax (`^`, `~`, `@{`), no ranges
- * (`..`), and never the reserved word `HEAD` (fetch serves it silently and
- * merge-base resolves it through the stale clone-time symref). Fail closed:
- * an unusual-but-legal name is refused with a clear metadata-stage error
+ * (`..`), never the reserved word `HEAD` (fetch serves it silently and
+ * merge-base resolves it through the stale clone-time symref), and never
+ * the pseudo-ref set — `FETCH_HEAD` resolves to the just-fetched MR head
+ * (an EMPTY diff beside full-range metadata), `ORIG_HEAD` to an arbitrary
+ * ancestor. Both shape-legal, both silently wrong. Fail closed: an
+ * unusual-but-legal name is refused with a clear metadata-stage error
  * rather than guessed at inside a git invocation. fetch-pr's baseRefName
  * guard carries the twin of this check.
  */
+const GIT_PSEUDO_REFS =
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/;
+
 function isPlainBranchName(name: string): boolean {
   return (
     name !== 'HEAD' &&
+    !GIT_PSEUDO_REFS.test(name) &&
     !name.includes('..') &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
   );
@@ -345,11 +366,14 @@ export const aoneReader: ReviewPlatformReader = {
     const mrPath = mrRepoPath(view.detailUrl);
     // The comparison carries the origin's HOST too — owner/repo equality
     // alone lets a same-named repo on a DIFFERENT platform pass the guard
-    // and serve the ref-fetch; an Aone target's clone must sit on the Aone
-    // host family (the web/git alias pair counts as one, per remote-match).
+    // and serve the ref-fetch. The host arm keys on the CANONICAL Aone
+    // family predicate (port/trailing-dot/case normalized) — detection
+    // accepts a dotted-FQDN origin as Aone, so the diff gate must too; a
+    // harder comparison here refused a genuine clone with a misdirecting
+    // remedy.
     const sameRepo =
       originIdentity !== null &&
-      hostsEquivalent(originIdentity.host, 'gitlab.alibaba-inc.com') &&
+      isAoneHostFamily(originIdentity.host) &&
       (mrPath !== undefined
         ? originIdentity.groupPath === mrPath
         : `${originIdentity.owner}/${originIdentity.repo}` === ownerRepo);

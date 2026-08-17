@@ -571,11 +571,19 @@ function sectionsContained(
  * a plain branch name and nothing else (twin of aone.ts's guard — see that
  * comment for each admitted channel's wrong outcome). Fail closed: an
  * unusual-but-legal name is refused with a clear metadata-stage error
- * rather than guessed at inside a git invocation.
+ * rather than guessed at inside a git invocation. The pseudo-ref set rides
+ * the same rejection: `FETCH_HEAD` resolves to the JUST-fetched PR head
+ * (merge-base(head, head) = empty diff beside full-range metadata), and
+ * `ORIG_HEAD` to an arbitrary ancestor — both shape-legal, both silently
+ * wrong.
  */
+const GIT_PSEUDO_REFS =
+  /^(FETCH|ORIG|MERGE|CHERRY_PICK|REVERT|REBASE|BISECT)_HEAD$/;
+
 function isPlainBranchName(name: string): boolean {
   return (
     name !== 'HEAD' &&
+    !GIT_PSEUDO_REFS.test(name) &&
     !name.includes('..') &&
     /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
   );
@@ -588,7 +596,17 @@ const gitProbe: GitProbe = {
   // value must never reach git as an option (`git fetch origin
   // --upload-pack=<payload>` executes the attacker-named program on the
   // remote host with the reviewer's credentials).
-  fetch: (remote, ref) => gitOpt('fetch', remote, '--', ref) !== null,
+  //
+  // The fetch must ALSO have produced the tracking ref: a bare-name fetch
+  // of a TAG exits 0 writing only FETCH_HEAD (`* tag v1.0 -> FETCH_HEAD`),
+  // so the fetch "succeeds" yet no `origin/<ref>` exists — and the
+  // bare-name fallback then merge-bases against the reviewer's LOCAL tag:
+  // a wrong-base diff with baseFetchFailed falsely false. Requiring the
+  // tracking ref converts the tag-only shape into the disclosed
+  // baseFetchFailed state.
+  fetch: (remote, ref) =>
+    gitOpt('fetch', remote, '--', ref) !== null &&
+    refExists(`${remote}/${ref}`),
   refExists,
   mergeBase: (a, b) => gitOpt('merge-base', a, b),
 };

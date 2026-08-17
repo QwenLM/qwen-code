@@ -136,6 +136,19 @@ describe('parseRemoteUrl hardening', () => {
       repo: 'proj',
       groupPath: 'group/proj',
     });
+    // The scp form too — an insteadOf rewrite can turn a token-bearing
+    // https origin into scp shape; the userinfo strip must not cross the
+    // `?` and consume the path (round-10 fabrication witness).
+    expect(
+      parseRemoteUrl(
+        'git@gitlab.alibaba-inc.com:group/proj?private_token=ab@cd:8443/x/y',
+      ),
+    ).toEqual({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'group',
+      repo: 'proj',
+      groupPath: 'group/proj',
+    });
     // A junk path segment carrying `@` fails closed instead of folding
     // into a host swap.
     expect(
@@ -298,6 +311,33 @@ describe('aoneReader.resolveRepo', () => {
       expect(message).toContain('cannot parse the origin remote');
       expect(message).not.toContain(secret);
       expect(message).not.toContain(user);
+    }
+  });
+
+  it('fails the display CLOSED when the last @ sits in a query/fragment value', () => {
+    // An `@` inside a query or fragment VALUE is the credential's own
+    // character — the split at the last `@` has no safe tail to keep
+    // there, so the message becomes a constant. Round-10 witnesses: the
+    // URL, scp, and fragment spellings all leaked the token tail before.
+    for (const origin of [
+      'https://code.alibaba-inc.com/solo?private_token=prefix@SECRET-TOKEN-TAIL',
+      'ci-user:tok@code.alibaba-inc.com:solo?token=a@SECRET-SCP',
+      'https://code.alibaba-inc.com/solo#frag@SECRET-FRAG',
+    ]) {
+      gitMock.mockImplementation((...args: string[]) => {
+        if (args[0] === 'remote') return origin;
+        return '';
+      });
+      let message = '';
+      try {
+        aoneReader.resolveRepo();
+        throw new Error(`expected ${JSON.stringify(origin)} to refuse`);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('cannot parse the origin remote');
+      expect(message).not.toContain('SECRET');
+      expect(message).not.toContain('prefix');
     }
   });
 });
@@ -598,5 +638,40 @@ describe('aoneReader.fetchDiff', () => {
     });
     gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
     expect(() => aoneReader.fetchDiff(7, 'sub/app')).not.toThrow();
+  });
+
+  it('accepts a trailing-dot FQDN origin (detection and gate normalize alike)', () => {
+    // Detection accepts the dotted spelling as Aone; the diff gate keyed on
+    // a harder comparison refused the same genuine clone with a
+    // misdirecting remedy. Both arms key on the canonical predicate now.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'merge-base') return 'base-sha';
+      if (args[0] === 'remote') return 'https://code.alibaba-inc.com./g/p.git';
+      return '';
+    });
+    gitRawMock.mockReturnValue(Buffer.from('d', 'latin1'));
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).not.toThrow();
+  });
+
+  it('refuses git pseudo-refs as the target branch (allowlist)', () => {
+    // FETCH_HEAD resolves to the just-fetched MR head (an empty diff under
+    // full-range metadata); ORIG_HEAD to an arbitrary ancestor. Both are
+    // shape-legal and silently wrong — the allowlist refuses the set.
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') return 'git@gitlab.alibaba-inc.com:g/p.git';
+      return '';
+    });
+    for (const target of ['FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD']) {
+      a1JsonMock.mockReturnValue({
+        mergeRequest: { sourceBranch: 'sha', targetBranch: target },
+      });
+      expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+        /not a plain branch name/,
+      );
+    }
+    expect(gitRawMock).not.toHaveBeenCalled();
   });
 });

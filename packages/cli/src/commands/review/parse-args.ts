@@ -573,6 +573,24 @@ export function parseReviewArgs(
   // target; the rest are the same intent restated, not extra arguments —
   // pushing them all left the operator told "Ignoring extra argument(s)"
   // on the very invocation the dedupe blesses (round-9 finding).
+  //
+  // The repo-qualified URL spelling OUTRANKS the bare number as the
+  // rescued target: it is the only carrier of host/platform identity. A
+  // bare-number target flips detection onto the cwd fallback, and the run
+  // silently reviews the cwd clone's same-number PR instead of the named
+  // platform's — which spelling won depending on token order (round-10
+  // finding: a loud refusal at the merge base degraded to a silent
+  // wrong-platform retarget).
+  const isPrUrlToken = (token: string): boolean => {
+    const c = classifyToken(token);
+    return c !== null && c !== 'invalid-url' && c.type === 'pr-url';
+  };
+  const preferredRescueToken =
+    !hasValidCandidate && distinctPr.size === 1
+      ? kept.find(
+          (k) => k.invalidValueOf !== undefined && isPrUrlToken(k.token),
+        )?.token
+      : undefined;
   let rescuedPr = false;
   for (const k of kept) {
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
@@ -586,11 +604,28 @@ export function parseReviewArgs(
       }
       if (isPrShaped(k.token)) {
         if (rescuedPr) continue; // same PR, restated — not an extra token
+        // A bare number may not become the rescued target while the
+        // same-PR URL spelling is present — the URL carries the identity.
+        if (
+          preferredRescueToken !== undefined &&
+          k.token !== preferredRescueToken &&
+          !isPrUrlToken(k.token)
+        ) {
+          continue;
+        }
         rescuedPr = true;
       }
       issues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);
+  }
+  // Same preference for positional spellings: when the target tokens hold
+  // both a bare number and a same-number PR URL, the URL becomes the
+  // target regardless of arrival order.
+  const urlIdx = targetTokens.findIndex(isPrUrlToken);
+  if (urlIdx > 0) {
+    const [urlToken] = targetTokens.splice(urlIdx, 1);
+    targetTokens.unshift(urlToken);
   }
 
   // Pick the first classifiable target token. A token that looks like a URL
@@ -602,6 +637,19 @@ export function parseReviewArgs(
   const trailingExtras: string[] = [];
   for (const tok of targetTokens) {
     if (targetAssigned) {
+      // A bare number restating the assigned URL target's number is the
+      // same intent restated, not an extra argument (mirror of the
+      // rescue loop's restatement handling).
+      const classifiedRestate = classifyToken(tok);
+      if (
+        target.type === 'pr-url' &&
+        classifiedRestate !== null &&
+        classifiedRestate !== 'invalid-url' &&
+        classifiedRestate.type === 'pr-number' &&
+        classifiedRestate.number === target.number
+      ) {
+        continue;
+      }
       extraTokens.push(tok);
       trailingExtras.push(tok);
       continue;

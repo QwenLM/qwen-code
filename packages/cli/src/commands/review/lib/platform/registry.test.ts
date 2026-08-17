@@ -42,6 +42,13 @@ describe('detectPlatformKind', () => {
     // DNS-identical to the plain host, admitted by the URL grammar — both
     // spellings must hit the same guards.
     expect(detectPlatformKind({ host: 'code.alibaba-inc.com.' })).toBe('aone');
+    // The remoteUrl arm too — a dotted-spelling clone must route to the
+    // same platform its CR-URL twin names.
+    expect(
+      detectPlatformKind({
+        remoteUrl: 'https://code.alibaba-inc.com./maxcompute/odps_src.git',
+      }),
+    ).toBe('aone');
   });
 
   it('detects Aone from an Aone remote URL', () => {

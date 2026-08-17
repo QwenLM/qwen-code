@@ -42,6 +42,22 @@ export function hostsEquivalent(a: string, b: string): boolean {
   return AONE_HOSTS.has(a) && AONE_HOSTS.has(b);
 }
 
+/** Hosts that count as the Aone platform family — one canonical predicate,
+ *  shared by every guard that asks "is this origin on Aone" (registry
+ *  detection and aone.fetchDiff's origin guard both key on it). Normalizes
+ *  the way a remote URL can spell the same DNS name: a port, one trailing
+ *  dot (FQDN form), and case — so a dotted-spelling clone cannot pass
+ *  detection and then be refused by a gate that normalized differently. */
+export function isAoneHostFamily(host: string | undefined): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
+  return (
+    h === 'gitlab.alibaba-inc.com' ||
+    h === 'code.alibaba-inc.com' ||
+    h.endsWith('.alibaba-inc.com')
+  );
+}
+
 /**
  * Parse one remote URL into its host / owner / repo, or null when it is
  * neither of the two shapes `git remote -v` prints for a GitHub-style host —

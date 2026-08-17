@@ -587,6 +587,41 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     expect(got.warnings.some((w) => w.includes('Ambiguous target'))).toBe(true);
   });
 
+  it('a bare number beside a same-number CR URL never wins — in any order', () => {
+    // The CR URL is the only carrier of host/platform identity: when both
+    // spellings of one PR arrive, the URL must be the target regardless of
+    // token order — a bare-number target flips detection onto the cwd
+    // fallback and silently reviews the cwd clone's same-number PR.
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [`7 ${url}`, `${url} 7`]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        owner: 'maxcompute',
+        repo: 'odps_src',
+        number: 7,
+      });
+    }
+  });
+
+  it('flag-rescued spellings prefer the CR URL over the bare number too', () => {
+    // The rescue pool's one-PR subsumption must pick the repo-qualified
+    // spelling whichever order the invalid flag values arrived in.
+    const url = 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/7';
+    for (const args of [
+      `--severity-floor 7 --effort ${url}`,
+      `--severity-floor ${url} --effort 7`,
+    ]) {
+      const got = parseReviewArgs(args);
+      expect(got.target).toMatchObject({
+        type: 'pr-url',
+        host: 'code.alibaba-inc.com',
+        number: 7,
+      });
+    }
+  });
+
   it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
     // Round-8 probe: `--severity-floor=6711` reviewed the LOCAL tree while
     // `--severity-floor 6711` rescued PR 6711 — the guard's invariant

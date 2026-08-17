@@ -239,7 +239,9 @@ const producerMocks = vi.hoisted(() => ({
   gitOpt: vi.fn((..._args: string[]): string | null => null),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
   resolveMergeBase: vi.fn(
-    (): { sha: string | null; baseFetchFailed: boolean } => ({
+    (
+      ..._args: unknown[]
+    ): { sha: string | null; baseFetchFailed: boolean } => ({
       sha: null,
       baseFetchFailed: false,
     }),
@@ -510,6 +512,64 @@ describe('fetch-pr report assembly', () => {
       );
       await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
     }
+  });
+
+  it('refuses git pseudo-refs as baseRefName (allowlist)', async () => {
+    // `FETCH_HEAD` resolves to the just-fetched PR head — merge-base(head,
+    // head) = an EMPTY diff beside full-range metadata; `ORIG_HEAD` to an
+    // arbitrary ancestor. Shape-legal, silently wrong — refused at the
+    // metadata stage.
+    for (const baseRefName of ['FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD']) {
+      producerMocks.gh.mockReturnValue(
+        JSON.stringify({
+          headRefName: 'feat/x',
+          headRefOid: 'f00df00df00d',
+          baseRefName,
+          additions: 1,
+          deletions: 0,
+          changedFiles: 1,
+          isCrossRepository: false,
+          body: '',
+        }),
+      );
+      await expect(reportFor({})).rejects.toThrow(/not a plain branch name/);
+    }
+  });
+
+  it('a TAG-only base ref degrades to the disclosed baseFetchFailed state', async () => {
+    // `git fetch origin -- v1.0` exits 0 writing only FETCH_HEAD when v1.0
+    // is tag-only on the remote — the fetch "succeeds" yet no tracking ref
+    // exists, and the bare-name fallback would merge-base against the
+    // reviewer's LOCAL tag: a wrong-base diff with baseFetchFailed falsely
+    // false. The probe requires the tracking ref, so the tag-only shape
+    // lands in the DISCLOSED state instead.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'v1.0',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    // The fetch itself exits 0 (tag shape), but no `origin/v1.0` tracking
+    // ref exists afterwards.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'fetch' ? '' : null,
+    );
+    producerMocks.refExists.mockReturnValue(false);
+    // Drive the seam the way the real resolveMergeBase does: the probe the
+    // command passes must report the fetch as FAILED for the tag shape.
+    producerMocks.resolveMergeBase.mockImplementation((...args: unknown[]) => {
+      const probe = args[3] as { fetch: (r: string, b: string) => boolean };
+      const ok = probe.fetch('origin', 'v1.0');
+      return { sha: null, baseFetchFailed: !ok };
+    });
+    const report = await reportFor({});
+    expect(report.baseFetchFailed).toBe(true);
   });
 
   it('refuses a non-positive pr_number before any side effect', async () => {

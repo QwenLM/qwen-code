@@ -14,6 +14,7 @@
 // practical override.)
 
 import { gitOpt } from '../git.js';
+import { isAoneHostFamily } from '../remote-match.js';
 import { aoneReader } from './aone.js';
 import { githubReader } from './github.js';
 import type { PlatformKind, ReviewPlatformReader } from './types.js';
@@ -26,19 +27,13 @@ export interface PlatformHint {
   remoteUrl?: string;
 }
 
-/** Hosts that identify Aone Code (web host + git host). */
+/** Hosts that identify Aone Code (web host + git host). Delegates to the
+ *  canonical remote-match predicate so every Aone-family gate normalizes
+ *  identically (port, trailing-dot FQDN spelling, case) — a dotted-spelling
+ *  clone that passes detection cannot be refused by a downstream gate that
+ *  normalized differently. */
 export function isAoneHost(host: string | undefined): boolean {
-  if (!host) return false;
-  // Strip a port and one trailing dot: the trailing-dot FQDN spelling
-  // (`code.alibaba-inc.com.`) is DNS-identical to the plain host, and the
-  // URL grammar admits it — without this it slips past every guard that
-  // keys on isAoneHost while its CR-form twin is refused fail-closed.
-  const h = host.toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
-  return (
-    h === 'gitlab.alibaba-inc.com' ||
-    h === 'code.alibaba-inc.com' ||
-    h.endsWith('.alibaba-inc.com')
-  );
+  return isAoneHostFamily(host);
 }
 
 /** scheme://[user@]host/… or [user@]host:path → host. */
