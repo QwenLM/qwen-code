@@ -59,7 +59,12 @@ export class WeixinChannel extends ChannelBase {
   >();
   private typingKeepaliveInFlight = new Set<string>();
   private typingKeepaliveArmedAt = new Map<string, number>();
-  /** Per-chat generation token; stale setTyping continuations bail out. */
+  /**
+   * Per-chat generation token; stale setTyping continuations bail out.
+   * Entries are reclaimed only by `disconnect()` — deleting them in
+   * `stopTyping` would restart the numbering and let a stale continuation
+   * carrying the same generation match again.
+   */
   private typingGenerations = new Map<string, number>();
   private baseUrl: string;
   private token: string = '';
@@ -340,10 +345,13 @@ export class WeixinChannel extends ChannelBase {
       }
       // A successor turn (or stopTyping) already moved on — a stale result
       // must not touch the live turn's typing state. A late success still
-      // re-set the server-side indicator after our CANCEL, so compensate;
-      // a late failure is harmless and must not delete live state.
+      // re-set the server-side indicator after our CANCEL, so compensate —
+      // but only while the chat is idle; if a successor turn is live
+      // (activeTypingChats re-added), an unconditional CANCEL here would
+      // blank the successor's indicator mid-turn. A late failure is
+      // harmless and must not delete live state.
       if (generation !== this.typingGenerations.get(chatId)) {
-        if (started) {
+        if (started && !this.activeTypingChats.has(chatId)) {
           void this.setTyping(chatId, false);
         }
         return;
@@ -394,7 +402,13 @@ export class WeixinChannel extends ChannelBase {
           armedAt !== undefined &&
           Date.now() - armedAt >= TYPING_KEEPALIVE_MAX_MS
         ) {
-          // Wedged turn — bound the leak and clear the indicator.
+          // Wedged turn — bound the leak and clear the indicator. The
+          // backstop firing is the only observable signal that a turn never
+          // emitted a terminal event, so leave a log line tying the dropped
+          // indicator to the wedged chat.
+          process.stderr.write(
+            `[Weixin:${this.name}] Typing keepalive backstop (${TYPING_KEEPALIVE_MAX_MS}ms) elapsed for chat ${chatId} without a terminal event; clearing the indicator\n`,
+          );
           this.stopTyping(chatId);
           return;
         }
@@ -414,6 +428,12 @@ export class WeixinChannel extends ChannelBase {
     clearInterval(interval);
     this.typingKeepaliveIntervals.delete(chatId);
     this.typingKeepaliveArmedAt.delete(chatId);
+    // A refresh in flight from the ending turn would otherwise keep the flag
+    // set until it settles (up to the post() timeout), and every keepalive
+    // tick of the successor turn would early-return on the dedup check —
+    // leaving the new indicator unrefreshed across the turn boundary. The
+    // stale request's own `.finally` delete is then a harmless no-op.
+    this.typingKeepaliveInFlight.delete(chatId);
   }
 
   private async setTyping(userId: string, typing: boolean): Promise<boolean> {

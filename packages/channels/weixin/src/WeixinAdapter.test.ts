@@ -438,6 +438,9 @@ describe('WeixinChannel', () => {
       const channel = createChannel();
       const setTyping = vi.fn().mockResolvedValue(true);
       installSetTypingMock(channel, setTyping);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
       const base = keepaliveEvent('user-wedged', 'session-wedged');
 
       channel.emitLifecycle({ ...base, type: 'started' });
@@ -448,6 +451,14 @@ describe('WeixinChannel', () => {
       await vi.advanceTimersByTimeAsync(TYPING_KEEPALIVE_MAX_MS + 4000);
       const callsAtBackstop = setTyping.mock.calls.length;
       expect(setTyping).toHaveBeenLastCalledWith('user-wedged', false);
+      // The backstop firing is the only signal of a wedged turn, so it must
+      // leave a log line tying the dropped indicator to the chat.
+      expect(
+        stderrSpy.mock.calls.some((args) =>
+          String(args[0]).includes('Typing keepalive backstop'),
+        ),
+      ).toBe(true);
+      stderrSpy.mockRestore();
 
       await vi.advanceTimersByTimeAsync(20000);
       expect(setTyping).toHaveBeenCalledTimes(callsAtBackstop);
@@ -482,6 +493,113 @@ describe('WeixinChannel', () => {
 
       channel.emitLifecycle({ ...base, type: 'completed' });
       expect(setTyping).toHaveBeenLastCalledWith('user-stale', false);
+    });
+
+    it('does not cancel a live successor turn when a stale initial TYPING resolves late', async () => {
+      const channel = createChannel();
+      const stale = deferredPromise<boolean>();
+      const setTyping = vi
+        .fn()
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-late-success', 'session-ls');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      channel.emitLifecycle({ ...base, type: 'cancelled' });
+      // Turn 2 starts and confirms before turn 1's stalled request settles.
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      // Stalled initial, terminal CANCEL, turn-2 initial.
+      expect(setTyping).toHaveBeenCalledTimes(3);
+
+      // Turn 1's request finally succeeds. The stale-success compensation
+      // must stay idle-gated: a successor turn is live, so an unconditional
+      // CANCEL here would blank turn 2's indicator mid-turn.
+      stale.resolve(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(8000);
+      // Turn-2 initial plus two keepalive refreshes, no spurious CANCEL.
+      expect(setTyping).toHaveBeenCalledTimes(5);
+      expect(setTyping).toHaveBeenLastCalledWith('user-late-success', true);
+
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      expect(setTyping).toHaveBeenLastCalledWith('user-late-success', false);
+    });
+
+    it('lets a successor turn refresh even if the previous refresh is still in flight', async () => {
+      const channel = createChannel();
+      const stalledRefresh = deferredPromise<boolean>();
+      const setTyping = vi
+        .fn()
+        .mockResolvedValueOnce(true) // turn-1 initial
+        .mockReturnValueOnce(stalledRefresh.promise) // turn-1 refresh stalls
+        .mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-inflight-boundary', 'session-ifb');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(1);
+
+      // The refresh fires and is still in flight when the turn ends.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(2);
+      channel.emitLifecycle({ ...base, type: 'completed' });
+      expect(setTyping).toHaveBeenCalledTimes(3);
+
+      // The successor turn re-arms the keepalive.
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setTyping).toHaveBeenCalledTimes(4);
+
+      // The stalled turn-1 refresh must not suppress turn-2 refreshes via
+      // the in-flight dedup flag.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(5);
+      expect(setTyping).toHaveBeenLastCalledWith(
+        'user-inflight-boundary',
+        true,
+      );
+
+      stalledRefresh.resolve(true);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(6);
+    });
+
+    it('reclaims all keepalive state on disconnect so a reused adapter starts clean', async () => {
+      const channel = createChannel();
+      const setTyping = vi.fn().mockResolvedValue(true);
+      installSetTypingMock(channel, setTyping);
+      const base = keepaliveEvent('user-reclaim', 'session-reclaim');
+
+      channel.emitLifecycle({ ...base, type: 'started' });
+      // Run close to the backstop so any leaked armedAt entry goes stale.
+      await vi.advanceTimersByTimeAsync(TYPING_KEEPALIVE_MAX_MS - 4000);
+      const callsBeforeDisconnect = setTyping.mock.calls.length;
+      expect(callsBeforeDisconnect).toBeGreaterThan(1);
+
+      channel.disconnect();
+
+      const priv = channel as unknown as {
+        typingKeepaliveIntervals: Map<string, unknown>;
+        typingKeepaliveInFlight: Set<string>;
+        typingKeepaliveArmedAt: Map<string, number>;
+        typingGenerations: Map<string, number>;
+      };
+      expect(priv.typingKeepaliveIntervals.size).toBe(0);
+      expect(priv.typingKeepaliveInFlight.size).toBe(0);
+      expect(priv.typingKeepaliveArmedAt.size).toBe(0);
+      expect(priv.typingGenerations.size).toBe(0);
+
+      // A fresh turn on the reused adapter must not be reaped early by
+      // stale backstop state: it should refresh, not CANCEL.
+      channel.emitLifecycle({ ...base, type: 'started' });
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(setTyping).toHaveBeenCalledTimes(callsBeforeDisconnect + 2);
+      expect(setTyping).toHaveBeenLastCalledWith('user-reclaim', true);
     });
   });
 });
