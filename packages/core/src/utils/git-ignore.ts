@@ -50,12 +50,19 @@ export function isGitIgnored(
   // GIT_COMMON_DIR is the same class: it selects where check-ignore
   // resolves info/exclude and config (core.excludesFile), so an ambient
   // value answers against a foreign repository's rules.
+  // GIT_CONFIG_COUNT activates inline GIT_CONFIG_KEY_<n>/VALUE_<n>
+  // injection, and GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM redirect the config
+  // files — any of them can aim core.excludesFile at a foreign rules file,
+  // the same leak class.
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['GIT_DIR'];
   delete env['GIT_WORK_TREE'];
   delete env['GIT_INDEX_FILE'];
   delete env['GIT_OBJECT_DIRECTORY'];
   delete env['GIT_COMMON_DIR'];
+  delete env['GIT_CONFIG_COUNT'];
+  delete env['GIT_CONFIG_GLOBAL'];
+  delete env['GIT_CONFIG_SYSTEM'];
   try {
     execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
       stdio: 'ignore',

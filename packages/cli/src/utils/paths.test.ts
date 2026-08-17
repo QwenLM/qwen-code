@@ -53,6 +53,12 @@ describe('safeTarget', () => {
     expect(slugA.length).toBeLessThanOrEqual(200);
     expect(slugB.length).toBeLessThanOrEqual(200);
     expect(slugA).not.toBe(slugB);
+    // …and the digest hashes the ORIGINAL target, not its flattened form:
+    // these two flatten to the same string, so only a hash of the originals
+    // keeps them apart (a hash-of-`flat` mutant collides).
+    const flatA = 'a/' + 'b/'.repeat(100) + 'end';
+    const flatB = flatA.replaceAll('/', '_');
+    expect(safeTarget(flatA)).not.toBe(safeTarget(flatB));
     // Deterministic: the same target always flattens to the same slug.
     expect(safeTarget(deepA)).toBe(slugA);
     // Shallow targets stay untouched.

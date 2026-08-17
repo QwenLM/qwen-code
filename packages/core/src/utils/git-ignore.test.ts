@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isGitIgnored } from './git-ignore.js';
 
@@ -35,11 +35,13 @@ describe('isGitIgnored', () => {
   let originalConfigNosystem: string | undefined;
   let originalConfigGlobal: string | undefined;
   let originalXdgConfigHome: string | undefined;
+  let originalHome: string | undefined;
 
   beforeEach(() => {
     originalConfigNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
     originalConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
     originalXdgConfigHome = process.env['XDG_CONFIG_HOME'];
+    originalHome = process.env['HOME'];
     dir = join(
       tmpdir(),
       `git-ignore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -50,11 +52,14 @@ describe('isGitIgnored', () => {
     // .qwen/) would leak into the verdicts. The config pins block the
     // gitconfig channel but NOT git's XDG default excludes file
     // ($XDG_CONFIG_HOME/git/ignore), which git consults without any
-    // config — pin XDG_CONFIG_HOME away from the host's too.
+    // config — pin XDG_CONFIG_HOME away from the host's too. HOME as well:
+    // the probe scrubs GIT_CONFIG_GLOBAL, so the empty-gitconfig pin never
+    // reaches it, and git's default global config resolves under $HOME.
     writeFileSync(join(dir, 'empty-gitconfig'), '');
     process.env['GIT_CONFIG_NOSYSTEM'] = '1';
     process.env['GIT_CONFIG_GLOBAL'] = join(dir, 'empty-gitconfig');
     process.env['XDG_CONFIG_HOME'] = join(dir, 'xdg');
+    process.env['HOME'] = dir;
     execFileSync('git', ['init', '-q'], { cwd: dir, env: scrubbedInitEnv() });
     // A genuinely repo-less location: a sibling temp dir the repo walk
     // cannot reach. (A subdirectory of the repo would let git walk up and
@@ -72,6 +77,8 @@ describe('isGitIgnored', () => {
     if (originalXdgConfigHome === undefined)
       delete process.env['XDG_CONFIG_HOME'];
     else process.env['XDG_CONFIG_HOME'] = originalXdgConfigHome;
+    if (originalHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = originalHome;
     rmSync(dir, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
   });
@@ -224,6 +231,67 @@ describe('isGitIgnored', () => {
     }
   });
 
+  it('answers for the -C worktree even when GIT_CONFIG_COUNT injects config', () => {
+    // COUNT activates the inline KEY_<n>/VALUE_<n> channel; aim it at a
+    // foreign excludesFile. Without the COUNT scrub the injected rule
+    // answers for the -C worktree (measured: the verdict flips to true).
+    const excludes = join(outside, 'foreign-excludes');
+    writeFileSync(excludes, '.qwen/\n');
+    const savedCount = process.env['GIT_CONFIG_COUNT'];
+    const savedKey = process.env['GIT_CONFIG_KEY_0'];
+    const savedValue = process.env['GIT_CONFIG_VALUE_0'];
+    process.env['GIT_CONFIG_COUNT'] = '1';
+    process.env['GIT_CONFIG_KEY_0'] = 'core.excludesFile';
+    process.env['GIT_CONFIG_VALUE_0'] = excludes;
+    try {
+      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
+    } finally {
+      if (savedCount === undefined) delete process.env['GIT_CONFIG_COUNT'];
+      else process.env['GIT_CONFIG_COUNT'] = savedCount;
+      if (savedKey === undefined) delete process.env['GIT_CONFIG_KEY_0'];
+      else process.env['GIT_CONFIG_KEY_0'] = savedKey;
+      if (savedValue === undefined) delete process.env['GIT_CONFIG_VALUE_0'];
+      else process.env['GIT_CONFIG_VALUE_0'] = savedValue;
+    }
+  });
+
+  it('answers for the -C worktree even when the config files redirect elsewhere', () => {
+    // GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM redirect the config files;
+    // point both at a foreign gitconfig whose core.excludesFile carries the
+    // rule. NOSYSTEM must go for the arm — with it set, git skips the
+    // system file and the SYSTEM scrub line would ship green unpinned.
+    const excludes = join(outside, 'foreign-excludes');
+    writeFileSync(excludes, '.qwen/\n');
+    const foreignConfig = join(outside, 'foreign-gitconfig');
+    writeFileSync(foreignConfig, `[core]\n\texcludesFile = ${excludes}\n`);
+    const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
+    const savedSystem = process.env['GIT_CONFIG_SYSTEM'];
+    const savedNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
+    process.env['GIT_CONFIG_GLOBAL'] = foreignConfig;
+    process.env['GIT_CONFIG_SYSTEM'] = foreignConfig;
+    delete process.env['GIT_CONFIG_NOSYSTEM'];
+    try {
+      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
+    } finally {
+      if (savedGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
+      if (savedSystem === undefined) delete process.env['GIT_CONFIG_SYSTEM'];
+      else process.env['GIT_CONFIG_SYSTEM'] = savedSystem;
+      if (savedNosystem === undefined)
+        delete process.env['GIT_CONFIG_NOSYSTEM'];
+      else process.env['GIT_CONFIG_NOSYSTEM'] = savedNosystem;
+    }
+  });
+
+  it('answers for a dash-leading path thanks to the -- separator', () => {
+    // Without '--' a dash-leading path reaches check-ignore in option
+    // position (unknown switch, exit 129) and the catch reads it as
+    // not-ignored — a flipped verdict for exactly the paths the separator
+    // exists for.
+    writeFileSync(join(dir, '.gitignore'), '-weird.md\n');
+    expect(isGitIgnored(dir, '-weird.md')).toBe(true);
+  });
+
   // ':' is a reserved Win32 filename character, so the fixture directory
   // cannot be created on Windows.
   it.skipIf(process.platform === 'win32')(
@@ -236,6 +304,31 @@ describe('isGitIgnored', () => {
       expect(isGitIgnored(dir, ':weird/.qwen/x.md')).toBe(false);
       writeFileSync(join(dir, '.gitignore'), ':weird/.qwen/\n');
       expect(isGitIgnored(dir, ':weird/.qwen/x.md')).toBe(true);
+    },
+  );
+
+  // The shim is a shebang script named `git` fronting PATH — a shape
+  // Windows cannot execute, so the arm skips there (as the colon arm does
+  // for its own platform reason).
+  it.skipIf(process.platform === 'win32')(
+    'kills a wedged probe at the caller’s deadline and reads it as not-ignored',
+    () => {
+      // Every other call rides the default deadline; this is the only pin
+      // of the timeoutMs wiring. The blocking shim stands in for a wedged
+      // check-ignore on a worktree the caller does not control.
+      const shimDir = mkdtempSync(join(tmpdir(), 'git-ignore-shim-'));
+      writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexec sleep 30\n', {
+        mode: 0o755,
+      });
+      const savedPath = process.env['PATH'];
+      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+      try {
+        expect(isGitIgnored(dir, 'anything.md', 500)).toBe(false);
+      } finally {
+        if (savedPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
     },
   );
 });
