@@ -422,6 +422,7 @@ describe('Session', () => {
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordCronPrompt: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
@@ -692,6 +693,7 @@ describe('Session', () => {
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
+      recordCronPrompt: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
       recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
@@ -13476,6 +13478,23 @@ describe('Session', () => {
                 'Loop tick — tasks from project loop.md',
           ).length;
           expect(labelledEchoes).toBe(2);
+          await vi.waitFor(() =>
+            expect(
+              mockChatRecordingService.recordCronPrompt,
+            ).toHaveBeenCalledTimes(2),
+          );
+          expect(
+            mockChatRecordingService.recordCronPrompt.mock.calls[1],
+          ).toEqual([
+            [
+              {
+                text: expect.stringContaining(
+                  'Work the tasks from the loop.md contents established earlier',
+                ),
+              },
+            ],
+            'Loop tick — tasks from project loop.md',
+          ]);
         } finally {
           await fs.rm(tmpDir, { recursive: true, force: true });
         }
@@ -14826,6 +14845,18 @@ describe('Session', () => {
               },
             });
           });
+          await vi.waitFor(() => {
+            expect(
+              mockChatRecordingService.recordCronPrompt,
+            ).toHaveBeenCalledWith(
+              [
+                {
+                  text: expect.stringContaining('# Autonomous loop check'),
+                },
+              ],
+              'Autonomous loop tick',
+            );
+          });
         } finally {
           restoreHome();
           await fs.rm(tmpDir, { recursive: true, force: true });
@@ -14833,7 +14864,7 @@ describe('Session', () => {
         }
       });
 
-      it('leaves a non-sentinel cron prompt untouched (no loop.md expansion)', async () => {
+      it('persists a non-sentinel cron prompt and keeps the session interactive', async () => {
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -14854,6 +14885,7 @@ describe('Session', () => {
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
         mockChat.sendMessageStream = vi
           .fn()
+          .mockResolvedValueOnce(createEmptyStream())
           .mockResolvedValueOnce(createEmptyStream())
           .mockResolvedValueOnce(createEmptyStream());
 
@@ -14882,6 +14914,33 @@ describe('Session', () => {
           expect(sentToModel()).toContain('do the normal cron thing');
         });
         expect(sentToModel()).not.toContain('# /loop tick');
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'do the normal cron thing' }],
+          'do the normal cron thing',
+        );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalledWith('do the normal cron thing');
+        await vi.waitFor(() =>
+          expect(
+            (session as unknown as { cronProcessing: boolean }).cronProcessing,
+          ).toBe(false),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'follow-up' }],
+        });
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'follow-up',
+        );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
       });
 
       it('re-expands the full loop.md block after an auto-compaction resets the resolver cache', async () => {
@@ -15020,6 +15079,9 @@ describe('Session', () => {
           expect.any(AbortSignal),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.recordCronPrompt,
+        ).not.toHaveBeenCalled();
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -15074,6 +15136,77 @@ describe('Session', () => {
 
         expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
         expect(tokenLimitDiagnosticCount()).toBe(diagnosticCountBefore);
+      });
+
+      it('persists a cron prompt preserved after send preparation is cancelled', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: 'scheduled prompt',
+                cronExpr: '0 * * * *',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        let cronCompressionStarted!: () => void;
+        const cronCompressionStartedPromise = new Promise<void>((resolve) => {
+          cronCompressionStarted = resolve;
+        });
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockImplementationOnce(
+            async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+              new Promise((_, reject) => {
+                cronCompressionStarted();
+                signal.addEventListener('abort', () => {
+                  const abortError = new Error('aborted');
+                  abortError.name = 'AbortError';
+                  reject(abortError);
+                });
+              }),
+          );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await cronCompressionStartedPromise;
+        vi.mocked(mockChat.addHistory).mockClear();
+
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() =>
+          expect(
+            mockChatRecordingService.recordCronPrompt,
+          ).toHaveBeenCalledTimes(1),
+        );
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([{ text: 'scheduled prompt' }]),
+        });
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'scheduled prompt' }],
+          'scheduled prompt',
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       it('does not auto-compress slash commands handled without a model send', async () => {
@@ -17336,6 +17469,143 @@ describe('Session', () => {
             }),
           });
         });
+      });
+
+      it('records a tool-using cron fire only once', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        registerAllowedTool('read_file', execute);
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cron',
+                      name: 'read_file',
+                      args: { file_path: 'a.sql' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start cron' }],
+        });
+
+        await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+      });
+
+      it('does not record a tool-using cron fire again when turn two is cancelled', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        registerAllowedTool('read_file', execute);
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        let turnTwoCompressionStarted!: () => void;
+        const turnTwoCompressionStartedPromise = new Promise<void>(
+          (resolve) => {
+            turnTwoCompressionStarted = resolve;
+          },
+        );
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockResolvedValueOnce(noCompression)
+          .mockImplementationOnce(
+            async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+              new Promise((_, reject) => {
+                turnTwoCompressionStarted();
+                signal.addEventListener('abort', () => {
+                  const abortError = new Error('aborted');
+                  abortError.name = 'AbortError';
+                  reject(abortError);
+                });
+              }),
+          );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cron-cancel',
+                      name: 'read_file',
+                      args: { file_path: 'a.sql' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start cron' }],
+        });
+        await turnTwoCompressionStartedPromise;
+        vi.mocked(mockChat.addHistory).mockClear();
+
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() => expect(mockChat.addHistory).toHaveBeenCalled());
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
       });
 
       it('tracks unresolved preparation in a background notification stream', async () => {
@@ -19716,7 +19986,9 @@ describe('Session', () => {
         const cronGate = new Promise<void>((resolve) => {
           releaseCron = resolve;
         });
+        const cronStreamStarted = vi.fn();
         async function* cronStream() {
+          cronStreamStarted();
           yield {
             type: core.StreamEventType.CHUNK,
             value: {
@@ -19756,11 +20028,25 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
         );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
+        ).toBeGreaterThan(
+          vi.mocked(mockChat.sendMessageStream).mock.invocationCallOrder[1]!,
+        );
+        expect(
+          mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
+        ).toBeLessThan(cronStreamStarted.mock.invocationCallOrder[0]!);
 
         await session.cancelPendingPrompt();
         releaseCron!();
 
         expect(scheduler.stop).toHaveBeenCalled();
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
         const finals = messageBus.request.mock.calls.filter(
           ([request]) =>
             request.eventName === 'MessageDisplay' && request.input.is_final,
