@@ -64,6 +64,57 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
+    // A checkpointed record replayed as 2+ chunks creates its block from
+    // the first (undecorated) chunk; the decorated final chunk must merge
+    // into that block and carry the branchRecordId with it.
+    const first = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'historical ' },
+          _meta: {
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        },
+      },
+    });
+    const second = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'answer' },
+          _meta: {
+            qwenTranscript: {
+              sourceRecordIds: ['record-1'],
+              branchRecordId: 'checkpoint-record',
+            },
+          },
+        },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...first, ...second],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'historical answer',
+        branchRecordId: 'checkpoint-record',
+      },
+    ]);
+  });
+
   it('drops silent-shell heartbeat tool updates instead of rewriting the tool block', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -212,6 +263,20 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(store.getSnapshot().blocks[0]).toMatchObject({
       kind: 'user',
       meta: { inputAnnotations },
+    });
+  });
+
+  it('stores text file attachment metadata on local user messages', () => {
+    const store = createDaemonTranscriptStore();
+
+    store.appendLocalUserMessage('check this', undefined, undefined, [
+      { name: 'app.log', mimeType: 'text/plain' },
+    ]);
+
+    expect(store.getSnapshot().blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'check this',
+      files: [{ name: 'app.log', mimeType: 'text/plain' }],
     });
   });
 
@@ -2771,6 +2836,76 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         enabled: false,
       }),
     ]);
+  });
+
+  it('normalizes skill-toggle mutation metadata on settings_changed', () => {
+    const mutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_changed', {
+        key: 'skills.disabled',
+        value: [],
+        scope: 'workspace',
+        mutation,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'skills.disabled',
+        scope: 'workspace',
+        value: [],
+        mutation,
+      }),
+    ]);
+  });
+
+  it('keeps settings_changed when skill-toggle mutation metadata is malformed', () => {
+    const validMutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const malformed = [
+      { kind: 'skill_toggle' },
+      { ...validMutation, kind: 'other' },
+      { ...validMutation, activation: 'soon' },
+      { ...validMutation, skills: [] },
+      { ...validMutation, skills: 'not-an-array' },
+      { ...validMutation, sessionsFailed: Number.POSITIVE_INFINITY },
+      { ...validMutation, skills: [{ name: '', enabled: true }] },
+      {
+        ...validMutation,
+        skills: [{ name: 'web-search', enabled: 'yes' }],
+      },
+    ];
+    for (const mutation of malformed) {
+      const events = normalizeDaemonEvent(
+        envelopeOf('settings_changed', {
+          key: 'skills.disabled',
+          value: ['skill-a'],
+          scope: 'workspace',
+          mutation,
+        }),
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'workspace.settings.changed',
+          key: 'skills.disabled',
+          value: ['skill-a'],
+        }),
+      ]);
+      expect(events[0]).not.toHaveProperty('mutation');
+    }
   });
 
   it('normalizes settings_reloaded as a settings refresh signal', () => {
@@ -6350,9 +6485,187 @@ describe('R5 review batch — coverage additions', () => {
     expect(events).toEqual([
       expect.objectContaining({
         type: 'status',
-        text: 'Inserted message: 你好',
+        text: '你好',
         source: 'mid_turn_message_injected',
         data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
+  });
+
+  it('keeps each message in an injected mid-turn batch separate', () => {
+    const events = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's1',
+        messages: ['with image', 'text only'],
+        messageIds: ['mid-1', 'mid-2'],
+        items: [
+          {
+            content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+          },
+          {},
+        ],
+      },
+    });
+
+    expect(events).toMatchObject([
+      {
+        type: 'status',
+        text: 'with image',
+        data: {
+          messages: ['with image'],
+          messageIds: ['mid-1'],
+          items: [
+            {
+              content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+            },
+          ],
+        },
+      },
+      {
+        type: 'status',
+        text: 'text only',
+        data: {
+          messages: ['text only'],
+          messageIds: ['mid-2'],
+          items: [{}],
+        },
+      },
+    ]);
+  });
+
+  it('preserves replay source metadata on an image-only user block', () => {
+    const events = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+          _meta: {
+            source: 'mid_turn_message_injected',
+            qwenDiscreteMessage: true,
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        },
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'user',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
+  it('normalizes a reference-only image block into the media-unavailable placeholder', () => {
+    // Replay producers persist uploaded attachments as media references
+    // (`mediaId`, no inline bytes). Paths that normalize without hydrating
+    // (offline record projections) must degrade to a visible placeholder
+    // instead of silently dropping the user's message.
+    expect(
+      normalizeDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+            _meta: {
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+              qwenTranscript: { sourceRecordIds: ['record-1'] },
+            },
+          },
+        },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'user.text.delta',
+        text: '[Attached media is no longer available]',
+        sourceRecordIds: ['record-1'],
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+  });
+
+  it('normalizes an image-only mid-turn message without dropping its slot', () => {
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      items: [
+        {
+          content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
+      }),
+    ]);
+  });
+
+  it('normalizes a degraded-media mid-turn echo instead of dropping it', () => {
+    // The drain's media-failure path publishes `messages: ['']` whose item
+    // content is the media-unavailable text block (no image blocks); the
+    // guard must keep the user's injected echo renderable.
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      messageIds: ['mid-gone'],
+      items: [
+        {
+          content: [
+            { type: 'text', text: '[Attached media is no longer available]' },
+          ],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 5,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
       }),
     ]);
   });

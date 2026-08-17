@@ -18,8 +18,10 @@ import type {
 import { assertValidChannelSecretUpdates } from '../channel-settings-store.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
+  sendConversationRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -45,6 +47,7 @@ interface RegisterWorkspaceChannelManagementRoutesDeps {
     res: Response,
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
+  conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 type RuntimeResolver = (req: Request, res: Response) => WorkspaceRuntime | null;
@@ -282,8 +285,14 @@ async function resolveTarget(
   res: Response,
   resolveRuntime: RuntimeResolver,
   resolveService: RegisterWorkspaceChannelManagementRoutesDeps['resolveService'],
+  activity: ConversationRuntimeActivityGate | undefined,
 ): Promise<
-  { runtime: WorkspaceRuntime; service: ChannelManagementService } | undefined
+  | {
+      runtime: WorkspaceRuntime;
+      service: ChannelManagementService;
+      run: <T>(operation: () => Promise<T>) => Promise<T>;
+    }
+  | undefined
 > {
   const runtime = resolveRuntime(req, res);
   if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
@@ -295,8 +304,16 @@ async function resolveTarget(
     });
     return;
   }
+  if (runtime.provenance === 'live-conversation' && !activity) {
+    sendConversationRuntimeUnavailable(res);
+    return;
+  }
   try {
-    const service = await resolveService(runtime);
+    const run = <T>(operation: () => Promise<T>): Promise<T> =>
+      runtime.provenance === 'live-conversation'
+        ? activity!.run(operation)
+        : operation();
+    const service = await run(async () => resolveService(runtime));
     if (!service) {
       res.status(503).json({
         error: 'Channel management is unavailable.',
@@ -304,7 +321,7 @@ async function resolveTarget(
       });
       return;
     }
-    return { runtime, service };
+    return { runtime, service, run };
   } catch (error) {
     sendManagementError(res, error);
     return;
@@ -317,7 +334,11 @@ export function registerWorkspaceChannelManagementRoutes(
 ): void {
   const primary: RuntimeResolver = () => deps.primaryRuntime;
   const qualified: RuntimeResolver = (req, res) =>
-    resolveWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res);
+    resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
 
   const register = (prefix: string, resolveRuntime: RuntimeResolver) => {
     const pairingRead = deps.mutate({ strict: true });
@@ -332,7 +353,13 @@ export function registerWorkspaceChannelManagementRoutes(
     const restart = deps.mutate({ strict: true });
 
     const target = (req: Request, res: Response) =>
-      resolveTarget(req, res, resolveRuntime, deps.resolveService);
+      resolveTarget(
+        req,
+        res,
+        resolveRuntime,
+        deps.resolveService,
+        deps.conversationRuntimeActivity,
+      );
     const validateClient = (
       req: Request,
       res: Response,
@@ -342,9 +369,23 @@ export function registerWorkspaceChannelManagementRoutes(
     app.get(`${prefix}/channel-types`, async (req, res) => {
       const runtime = resolveRuntime(req, res);
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (
+        runtime.provenance === 'live-conversation' &&
+        !deps.conversationRuntimeActivity
+      ) {
+        sendConversationRuntimeUnavailable(res);
+        return;
+      }
       try {
         noStore(res);
-        res.status(200).json(await supportedChannelCatalog());
+        const catalog =
+          runtime.provenance === 'live-conversation' &&
+          deps.conversationRuntimeActivity
+            ? await deps.conversationRuntimeActivity.run(() =>
+                supportedChannelCatalog(),
+              )
+            : await supportedChannelCatalog();
+        res.status(200).json(catalog);
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -355,7 +396,7 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!resolved || !validateClient(req, res, resolved.runtime)) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.list());
+        res.status(200).json(await resolved.run(() => resolved.service.list()));
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -371,7 +412,11 @@ export function registerWorkspaceChannelManagementRoutes(
         if (!name) return;
         try {
           noStore(res);
-          res.status(200).json(await resolved.service.pairingRequests(name));
+          res
+            .status(200)
+            .json(
+              await resolved.run(() => resolved.service.pairingRequests(name)),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -392,7 +437,11 @@ export function registerWorkspaceChannelManagementRoutes(
           noStore(res);
           res
             .status(200)
-            .json(await resolved.service.approvePairing(name, code));
+            .json(
+              await resolved.run(() =>
+                resolved.service.approvePairing(name, code),
+              ),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -409,7 +458,11 @@ export function registerWorkspaceChannelManagementRoutes(
         if (!name) return;
         try {
           noStore(res);
-          res.status(200).json(await resolved.service.pairingApprovals(name));
+          res
+            .status(200)
+            .json(
+              await resolved.run(() => resolved.service.pairingApprovals(name)),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -430,7 +483,11 @@ export function registerWorkspaceChannelManagementRoutes(
           noStore(res);
           res
             .status(200)
-            .json(await resolved.service.revokePairingApproval(name, subject));
+            .json(
+              await resolved.run(() =>
+                resolved.service.revokePairingApproval(name, subject),
+              ),
+            );
         } catch (error) {
           sendManagementError(res, error);
         }
@@ -446,7 +503,11 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!request) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.upsert(name, request));
+        res
+          .status(200)
+          .json(
+            await resolved.run(() => resolved.service.upsert(name, request)),
+          );
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -461,7 +522,11 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!request) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.remove(name, request));
+        res
+          .status(200)
+          .json(
+            await resolved.run(() => resolved.service.remove(name, request)),
+          );
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -476,7 +541,13 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!request) return;
       try {
         noStore(res);
-        res.status(200).json(await resolved.service.setStartup(name, request));
+        res
+          .status(200)
+          .json(
+            await resolved.run(() =>
+              resolved.service.setStartup(name, request),
+            ),
+          );
       } catch (error) {
         sendManagementError(res, error);
       }
@@ -496,7 +567,11 @@ export function registerWorkspaceChannelManagementRoutes(
           if (!name) return;
           try {
             noStore(res);
-            res.status(200).json(await resolved.service[operation](name));
+            res
+              .status(200)
+              .json(
+                await resolved.run(() => resolved.service[operation](name)),
+              );
           } catch (error) {
             sendManagementError(res, error);
           }

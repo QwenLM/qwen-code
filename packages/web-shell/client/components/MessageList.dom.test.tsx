@@ -36,6 +36,9 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      showAssistantBranch,
+      onBranchSession,
+      branchRecordId,
       isLocateFlashing,
       assistantTurnFooterInfo,
       sendFailed,
@@ -43,6 +46,9 @@ vi.mock('./MessageItem', async () => {
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      showAssistantBranch?: boolean;
+      onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+      branchRecordId?: string;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
@@ -80,6 +86,12 @@ vi.mock('./MessageItem', async () => {
           ? React.createElement('button', {
               'aria-expanded': 'false',
               'data-testid': `disclosure-${message.id}`,
+            })
+          : null,
+        showAssistantBranch
+          ? React.createElement('button', {
+              'data-testid': `branch-${message.id}`,
+              onClick: () => onBranchSession?.(branchRecordId),
             })
           : null,
         assistantTurnFooter,
@@ -304,6 +316,7 @@ function mount(
       cachedTokens?: number;
     };
     includeSubagentToolUsageInMetrics?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     compactMode?: boolean;
@@ -343,6 +356,7 @@ function mount(
                 includeSubagentToolUsageInMetrics={
                   opts.includeSubagentToolUsageInMetrics
                 }
+                onBranchSession={opts.onBranchSession}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
@@ -412,6 +426,7 @@ function renderInto(
     loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
 ) {
@@ -425,6 +440,7 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
+          onBranchSession={opts.onBranchSession}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -3813,6 +3829,53 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows branch only for anchored replies and forwards the checkpoint', () => {
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const c = mount(
+      [userMsg('u1'), anchored, userMsg('u2'), asstMsg('unanchored')],
+      undefined,
+      { onBranchSession },
+    );
+
+    expect(c.querySelector('[data-testid="branch-unanchored"]')).toBeNull();
+    click(c.querySelector('[data-testid="branch-anchored"]')!);
+    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
+  });
+
+  it('hides branch actions while a later turn is responding', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const messages = [userMsg('u1'), anchored, userMsg('u2'), asstMsg('live')];
+
+    renderInto(root, messages, undefined, {
+      isResponding: false,
+      onBranchSession,
+    });
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).not.toBeNull();
+
+    renderInto(root, messages, undefined, {
+      isResponding: true,
+      onBranchSession,
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-anchored"]'),
+    ).toBeNull();
   });
 
   it('reports when the user has scrolled away from the bottom', async () => {

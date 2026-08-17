@@ -50,6 +50,7 @@ import type {
   CronTaskDelivery,
   InvocationContextV1,
   WorkflowApproval,
+  BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -196,11 +197,13 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MEDIA_REFERENCES_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { SessionMediaReference } from '@qwen-code/acp-bridge/sessionMedia';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -349,6 +352,47 @@ const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const MAX_DAEMON_MEDIA_REFERENCES = 256;
+
+function readDaemonMediaReferences(
+  value: unknown,
+): SessionMediaReference[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DAEMON_MEDIA_REFERENCES
+  ) {
+    return undefined;
+  }
+  const references: SessionMediaReference[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return undefined;
+    }
+    const reference = item as Record<string, unknown>;
+    if (
+      reference['type'] !== 'image' ||
+      typeof reference['mediaId'] !== 'string' ||
+      reference['mediaId'].length === 0 ||
+      reference['mediaId'].length > 128 ||
+      typeof reference['mimeType'] !== 'string' ||
+      reference['mimeType'].length === 0 ||
+      reference['mimeType'].length > 128 ||
+      typeof reference['size'] !== 'number' ||
+      !Number.isSafeInteger(reference['size']) ||
+      reference['size'] <= 0
+    ) {
+      return undefined;
+    }
+    references.push({
+      type: reference['type'],
+      mediaId: reference['mediaId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    });
+  }
+  return references;
+}
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -580,6 +624,8 @@ type QueueToolResultRecord = (
   fc: FunctionCall,
   record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
 ) => void;
+
+type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
 
 export type DaemonToolLoopState = {
   totalToolCalls: number;
@@ -895,7 +941,12 @@ const TRANSIENT_FS_CODES: readonly string[] = [
 
 type DrainedMidTurnMessage =
   | { kind: 'text'; message: string }
-  | { kind: 'structured'; content: ContentBlock[]; displayText: string };
+  | {
+      kind: 'structured';
+      content: ContentBlock[];
+      displayText: string;
+      mediaReferences?: SessionMediaReference[];
+    };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
@@ -1005,6 +1056,30 @@ function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
   return content.some((part) => part.type === 'image' || part.type === 'audio');
 }
 
+function stripReferencedInlineDataParts(
+  parts: Part[],
+  content: ContentBlock[],
+): Part[] {
+  const coveredByKey = new Map<string, number>();
+  for (const block of content) {
+    if (block.type !== 'image') continue;
+    const key = `${block.mimeType}\u0000${block.data}`;
+    coveredByKey.set(key, (coveredByKey.get(key) ?? 0) + 1);
+  }
+  if (coveredByKey.size === 0) return parts;
+  return parts.filter((part) => {
+    const inlineData = part.inlineData;
+    if (inlineData === undefined || typeof inlineData.data !== 'string') {
+      return true;
+    }
+    const key = `${inlineData.mimeType ?? ''}\u0000${inlineData.data}`;
+    const remaining = coveredByKey.get(key) ?? 0;
+    if (remaining === 0) return true;
+    coveredByKey.set(key, remaining - 1);
+    return false;
+  });
+}
+
 function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
   if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
 
@@ -1050,6 +1125,7 @@ function getValidMidTurnContentBlocks(
 function getStructuredMidTurnDisplayText(
   content: ContentBlock[],
   displayText: unknown,
+  willPersistReferences: boolean,
 ): string {
   if (typeof displayText === 'string' && displayText.trim().length > 0) {
     return displayText.trim();
@@ -1064,7 +1140,19 @@ function getStructuredMidTurnDisplayText(
     .join('\n')
     .trim();
 
-  return text || '[User message with attachments]';
+  if (text) return text;
+
+  // Only records that WILL persist media references keep '' (replay then
+  // projects the media ids). The gate must match #buildMidTurnParts'
+  // persistence condition exactly; a record that will not carry references
+  // needs the visible placeholder, because resume and replay fall back to the
+  // recorded parts — which start with the raw internal prefix — when
+  // displayText is empty.
+  if (!willPersistReferences && hasInlineMediaContentBlock(content)) {
+    return '[User message with attachments]';
+  }
+
+  return text;
 }
 
 function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
@@ -1081,6 +1169,17 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
           item['displayText'],
         );
         if (content.length === 0) return [];
+        const mediaReferences = readDaemonMediaReferences(
+          item['mediaReferences'],
+        );
+        // Same gate #buildMidTurnParts uses to decide whether references are
+        // persisted; display text must agree or a mixed inline+reference
+        // message records displayText:'' with NO references — a shape replay
+        // and resume cannot project.
+        const willPersistReferences =
+          mediaReferences !== undefined &&
+          mediaReferences.length ===
+            content.filter((block) => block.type === 'image').length;
         return [
           {
             kind: 'structured',
@@ -1088,7 +1187,9 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
             displayText: getStructuredMidTurnDisplayText(
               content,
               item['displayText'],
+              willPersistReferences,
             ),
+            ...(mediaReferences ? { mediaReferences } : {}),
           },
         ];
       },
@@ -1130,7 +1231,9 @@ function isValidMidTurnDrainResponse(
         isRecord(item) &&
         Array.isArray(item['content']) &&
         item['content'].length > 0 &&
-        item['content'].every(isContentBlock),
+        item['content'].every(isContentBlock) &&
+        (item['mediaReferences'] === undefined ||
+          readDaemonMediaReferences(item['mediaReferences']) !== undefined),
     );
   }
 
@@ -1633,6 +1736,7 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private historyMutationActive = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -1686,6 +1790,9 @@ export class Session implements SessionContext {
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
+    private readonly runExclusiveAutomaticHistoryMutation: HistoryMutationRunner = (
+      operation,
+    ) => operation(),
     /**
      * Invoked whenever work this Session owns may have started or finished.
      * The owner (one reporter per ACP channel) coalesces these and republishes
@@ -1953,6 +2060,13 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.goalQueue.length === 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainGoalQueueExclusive(),
+    );
+  }
+
+  async #drainGoalQueueExclusive(): Promise<void> {
     if (
       this.disposed ||
       this.closing ||
@@ -2877,6 +2991,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     try {
       await this.config.assertCanStartTurn();
     } catch (error) {
@@ -2890,14 +3010,20 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
+  }
+
+  isTurnIdle(): boolean {
+    return !this.closing && !this.#hasActiveTurn();
   }
 
   isIdle(): boolean {
-    return (
-      !this.closing &&
-      !this.#hasActiveTurn() &&
-      this.collectActiveWorkHolds().length === 0
-    );
+    return this.isTurnIdle() && this.collectActiveWorkHolds().length === 0;
   }
 
   /**
@@ -2958,6 +3084,7 @@ export class Session implements SessionContext {
   #hasActiveTurn(): boolean {
     return Boolean(
       this.pendingPrompt ||
+        this.historyMutationActive ||
         this.pendingPromptCompletion ||
         this.goalProcessing ||
         this.cronProcessing ||
@@ -2967,6 +3094,27 @@ export class Session implements SessionContext {
         this.notificationAbortController ||
         this.notificationCompletion,
     );
+  }
+
+  beginHistoryMutation(): () => void {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.#hasActiveTurn()) {
+      throw new RequestError(-32602, 'Session is busy processing a turn', {
+        errorKind: 'session_busy',
+      });
+    }
+    this.historyMutationActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.historyMutationActive = false;
+      if (this.disposed) return;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
   }
 
   beginClose(): () => void {
@@ -3432,6 +3580,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     if (modelPrompt !== undefined && invocationContext === undefined) {
       throw RequestError.invalidParams(
         undefined,
@@ -3454,6 +3608,12 @@ export class Session implements SessionContext {
     }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
     }
     if (admissionCancellation?.aborted) {
       return { stopReason: 'cancelled' };
@@ -3617,6 +3777,16 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
+    const recording = this.config.getChatRecordingService();
+    const branchCheckpointCursor =
+      scheduledGoalTurn === undefined && !channelPromptTurn
+        ? recording?.getBranchCheckpointCursor()
+        : undefined;
+
     if (todoStopGuardPreparation.startsWorkChain) {
       this.#clearTodoStopGuardQueuedPromptWait();
       this.todoStopGuard.startOrdinaryPrompt();
@@ -3629,10 +3799,6 @@ export class Session implements SessionContext {
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
-    const channelPromptTurn =
-      (params as { _meta?: Record<string, unknown> })._meta?.[
-        CHANNEL_PROMPT_META_KEY
-      ] === true;
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
     // #executePromptInner. Only the authenticated channel-prompt marker
@@ -3672,13 +3838,39 @@ export class Session implements SessionContext {
         goalTurn,
         channelPromptTurn,
       );
-      promptResult = result;
+      let branchPoint: BranchPoint | undefined;
+      if (recording && branchCheckpointCursor) {
+        try {
+          branchPoint = await recording.recordBranchCheckpointTransaction({
+            cursor: branchCheckpointCursor,
+            stopReason: result.stopReason,
+          });
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to record branch checkpoint; completing the turn without a branch point',
+            error,
+          );
+        }
+      }
+      const completedResult: PromptResponse = branchPoint
+        ? {
+            ...result,
+            _meta: {
+              ...result._meta,
+              'qwen.branchPoint': {
+                assistantRecordUuid: branchPoint.assistantRecordUuid,
+                checkpointUuid: branchPoint.checkpointUuid,
+              },
+            },
+          }
+        : result;
+      promptResult = completedResult;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
-      this.#maybeEmitFollowupSuggestion(result);
-      if (channelDelivery && result.stopReason === 'end_turn') {
+      this.#maybeEmitFollowupSuggestion(completedResult);
+      if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
           sessionId: this.sessionId,
           deliveryId: channelDelivery.deliveryId,
@@ -3690,7 +3882,7 @@ export class Session implements SessionContext {
           promptId: channelDelivery.deliveryId,
         });
       }
-      return result;
+      return completedResult;
     } catch (error) {
       promptFailed = true;
       if (error instanceof SessionWriterError) {
@@ -3992,10 +4184,11 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const promptDisplayTextValue =
+              promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
             const promptDisplayText =
-              typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
-              'string'
-                ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+              typeof promptDisplayTextValue === 'string'
+                ? promptDisplayTextValue
                 : undefined;
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
@@ -4116,11 +4309,15 @@ export class Session implements SessionContext {
               // (R18-6) — while every other slash command records here,
               // BEFORE its action runs: `/clear` swaps in a fresh recorder
               // inside its action, so its record must land first (R20-9).
+              const mediaReferences = readDaemonMediaReferences(
+                promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+              );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined) {
+              if (promptDisplayText !== undefined || mediaReferences) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                  displayText: promptDisplayText,
+                  displayText: promptDisplayText ?? promptText,
                   hookContext: '',
+                  ...(mediaReferences ? { mediaReferences } : {}),
                 });
               } else if (goalTurn) {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
@@ -6605,9 +6802,24 @@ export class Session implements SessionContext {
         }
       }
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
-      this.config
-        .getChatRecordingService()
-        ?.recordMidTurnUserMessage(built, displayText);
+      const recorder = this.config.getChatRecordingService();
+      if (message.kind === 'structured' && message.mediaReferences) {
+        const everyMediaBlockHasAReference =
+          message.mediaReferences.length ===
+          message.content.filter((block) => block.type === 'image').length;
+        if (everyMediaBlockHasAReference) {
+          recorder?.recordMidTurnUserMessage(
+            stripReferencedInlineDataParts(built, message.content),
+            displayText,
+            undefined,
+            message.mediaReferences,
+          );
+        } else {
+          recorder?.recordMidTurnUserMessage(built, displayText);
+        }
+      } else {
+        recorder?.recordMidTurnUserMessage(built, displayText);
+      }
       parts.push(...built);
     }
     return parts;
@@ -6738,6 +6950,16 @@ export class Session implements SessionContext {
     if (this.pendingPrompt) return;
     if (this.goalProcessing) return;
     if (this.notificationProcessing) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.#nextCronQueueIndex() < 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainCronQueueExclusive(),
+    );
+  }
+
+  async #drainCronQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
     try {
@@ -7539,6 +7761,20 @@ export class Session implements SessionContext {
       this.cronProcessing ||
       this.cronAbortController
     ) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.notificationQueue.length === 0) return;
+    if (this.#nextNotificationQueueIndex() < 0) return;
+
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainNotificationQueueExclusive(),
+    );
+  }
+
+  async #drainNotificationQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;

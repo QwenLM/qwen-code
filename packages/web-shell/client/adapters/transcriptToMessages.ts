@@ -44,7 +44,6 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
 interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
-  midTurnInserted?: (message: string) => string;
   modelStreamInterrupted?: string;
   loopDetected?: string;
 }
@@ -246,15 +245,68 @@ function getSessionBranchDisplayName(data: unknown): string | null {
     : null;
 }
 
-function getMidTurnInjectedText(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const messages = (data as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return null;
-  const text = messages
-    .filter((message): message is string => typeof message === 'string')
-    .join('\n')
-    .trim();
-  return text || null;
+/**
+ * Extract image content blocks from mid-turn injected message items.
+ * Returns an array of {data, mimeType} objects for rendering in the transcript.
+ */
+function getMidTurnInjectedImages(
+  data: unknown,
+): Array<{ data: string; mimeType: string }> | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const type = (block as { type?: unknown }).type;
+      const blockData = (block as { data?: unknown }).data;
+      const mimeType = (block as { mimeType?: unknown }).mimeType;
+
+      if (
+        type === 'image' &&
+        typeof blockData === 'string' &&
+        typeof mimeType === 'string'
+      ) {
+        images.push({ data: blockData, mimeType });
+      }
+    }
+  }
+
+  return images.length > 0 ? images : undefined;
+}
+
+/**
+ * Collect text content blocks from mid-turn injected message items. The
+ * degraded-media drain echo ships an empty `messages` array whose items carry
+ * only the unavailability notice, so the echo text can be empty while the
+ * items still hold renderable text.
+ */
+function getMidTurnInjectedItemText(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const texts: string[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if ((block as { type?: unknown }).type !== 'text') continue;
+      const text = (block as { text?: unknown }).text;
+      if (typeof text === 'string' && text.length > 0) texts.push(text);
+    }
+  }
+
+  return texts.length > 0 ? texts.join('\n') : undefined;
 }
 
 function isBackgroundNotificationBlock(
@@ -381,6 +433,23 @@ export function transcriptBlocksToDaemonMessages(
         const inputAnnotations = Array.isArray(meta?.inputAnnotations)
           ? (meta.inputAnnotations as DaemonInputAnnotation[])
           : undefined;
+        const images = textBlock.images?.map((img) => ({
+          data: img.data,
+          mimeType: img.mimeType || 'image/*',
+        }));
+        if (source === 'mid_turn_message_injected') {
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source,
+            timestamp: blockTime,
+            ...(images && images.length > 0 ? { images } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -390,10 +459,13 @@ export function transcriptBlocksToDaemonMessages(
           ...(inputAnnotations ? { inputAnnotations } : {}),
         };
         // Attach images if present
-        if (textBlock.images && textBlock.images.length > 0) {
-          msg.images = textBlock.images.map((img) => ({
-            data: img.data,
-            mimeType: img.mimeType || 'image/*',
+        if (images && images.length > 0) {
+          msg.images = images;
+        }
+        if (textBlock.files && textBlock.files.length > 0) {
+          msg.files = textBlock.files.map((file) => ({
+            name: file.name,
+            mimeType: file.mimeType || 'text/plain',
           }));
         }
         messages.push(msg);
@@ -433,6 +505,7 @@ export function transcriptBlocksToDaemonMessages(
           let hasTerminal = false;
           let readyCount = 0;
           let errorCount = 0;
+          let lastAssistantSegmentIndex: number | null = null;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
@@ -462,7 +535,17 @@ export function transcriptBlocksToDaemonMessages(
                 timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
+              lastAssistantSegmentIndex = currentAssistantIdx;
               currentThinkingIdx = null;
+            }
+          }
+          if (textBlock.branchRecordId && lastAssistantSegmentIndex !== null) {
+            const assistant = messages[lastAssistantSegmentIndex];
+            if (assistant?.role === 'assistant') {
+              messages[lastAssistantSegmentIndex] = {
+                ...assistant,
+                branchRecordId: textBlock.branchRecordId,
+              };
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -494,6 +577,9 @@ export function transcriptBlocksToDaemonMessages(
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
@@ -505,6 +591,9 @@ export function transcriptBlocksToDaemonMessages(
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
@@ -514,6 +603,9 @@ export function transcriptBlocksToDaemonMessages(
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
+            ...(textBlock.branchRecordId
+              ? { branchRecordId: textBlock.branchRecordId }
+              : {}),
             ...(usage ? { usage } : {}),
           };
         }
@@ -735,20 +827,41 @@ export function transcriptBlocksToDaemonMessages(
       case 'debug': {
         const statusBlock = block;
         if (isUnrecognizedDaemonDebug(statusBlock)) break;
+        // Mid-turn injected echoes are user content, not daemon diagnostics:
+        // run them past no filter, or an injected message that merely starts
+        // like a status line ("Model switched: …") or plan JSON would be
+        // dropped or misrendered.
+        if (statusBlock.source === 'mid_turn_message_injected') {
+          const midTurnInjectedImages = getMidTurnInjectedImages(
+            statusBlock.data,
+          );
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content:
+              statusBlock.text.length > 0
+                ? statusBlock.text
+                : (getMidTurnInjectedItemText(statusBlock.data) ??
+                  statusBlock.text),
+            variant: 'info',
+            timestamp: blockTime,
+            source: statusBlock.source,
+            ...(statusBlock.data !== undefined
+              ? { data: statusBlock.data }
+              : {}),
+            ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
             : null;
-        const midTurnInsertedText =
-          statusBlock.source === 'mid_turn_message_injected'
-            ? getMidTurnInjectedText(statusBlock.data)
-            : null;
         const text =
           branchDisplayName && options.labels?.branchSuccess
             ? options.labels.branchSuccess(branchDisplayName)
-            : midTurnInsertedText && options.labels?.midTurnInserted
-              ? options.labels.midTurnInserted(midTurnInsertedText)
-              : statusBlock.text;
+            : statusBlock.text;
         if (isIgnoredWebShellStatus(text)) break;
         const todos = parsePlanTodos(text);
         if (todos) {

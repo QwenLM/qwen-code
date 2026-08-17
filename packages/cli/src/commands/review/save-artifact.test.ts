@@ -64,6 +64,9 @@ const verdict = {
   downgraded: true,
   downgradedFrom: 'Request changes',
   remediation: ['Run verification again.'],
+  // Non-zero on purpose: the copy test then proves passthrough, not just
+  // the validator's absent-means-zero default.
+  deferredCount: 2,
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -280,6 +283,44 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
+  it.each(['two', -1, 1.5] as const)(
+    'refuses a present deferredCount of the wrong shape (%s)',
+    (bad) => {
+      // The absent-means-zero default must not swallow a PRESENT malformed
+      // value: a mutant deleting the refuse arm saved `deferredCount: -1`
+      // into the durable artifact with the suite fully green.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, deferredCount: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/deferredCount/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
+    // Null rides the same absence semantics compose-review's own toCount
+    // boundary gives this field's siblings.
+    const paths = fixture();
+    const { deferredCount: _absent, ...prePosture } = verdict;
+    for (const composed of [prePosture, { ...verdict, deferredCount: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
+      ).toBe(0);
+    }
+  });
+
   it.each(['findings', 'composed', 'report'] as const)(
     'refuses to overwrite the %s input',
     (input) => {
@@ -306,6 +347,30 @@ describe('saveReviewArtifact', () => {
       expect(readFileSync(inputPath, 'utf8')).toBe(original);
     },
   );
+
+  it('refuses an absent output spelled through a symlink onto an absent input', () => {
+    // The hardened absent-side semantics: neither file is on disk yet, but
+    // the output is spelled through a symlinked directory component, so its
+    // canonical identity is the findings input's. A revert to the old local
+    // sameFile — false whenever a side is absent — passes green and lets
+    // saveReviewArtifact overwrite an input it is about to read.
+    const paths = fixture();
+    symlinkSync(join(root, '.qwen/tmp'), join(root, '.qwen/reviews/link'));
+    const absentInput = join(root, '.qwen/tmp/next.json');
+    const out = join(root, '.qwen/reviews/link/next.json');
+
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        findings: absentInput,
+        out,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/must not overwrite/);
+    expect(existsSync(out)).toBe(false);
+    expect(existsSync(absentInput)).toBe(false);
+  });
 
   it.skipIf(!caseInsensitiveFs)(
     'refuses a case-insensitive output alias of the Markdown report',

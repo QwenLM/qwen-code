@@ -75,6 +75,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  BranchPointInvalidError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
@@ -580,11 +581,17 @@ async function waitForSessionDrain(
   operation: Promise<void>,
   timeoutMs: number,
   kind: 'close' | 'restore',
+  displayTimeoutMs?: number,
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Session ${kind} timed out after ${timeoutMs}ms`)),
+      () =>
+        reject(
+          new Error(
+            `Session ${kind} timed out after ${displayTimeoutMs ?? timeoutMs}ms`,
+          ),
+        ),
       timeoutMs,
     );
     timer.unref();
@@ -985,6 +992,20 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
+function deriveForkBaseName(
+  name: unknown,
+  recording: { getCurrentCustomTitle(): string | undefined } | undefined,
+  sessionId: string,
+): string {
+  if (typeof name === 'string' && name.trim().length > 0) {
+    return name.trim();
+  }
+  const existingTitle = recording?.getCurrentCustomTitle();
+  const stripped = existingTitle
+    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+    .trim();
+  return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
+}
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
     get(target, prop) {
@@ -3773,6 +3794,7 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
@@ -3865,6 +3887,50 @@ class QwenAgent implements Agent {
     }
     if (this.managedShuttingDown) {
       throw new SessionWriterUnavailableError();
+    }
+  }
+
+  private async runExclusiveHistoryMutation<T>(
+    sessionId: string,
+    operation: () => Promise<T>,
+    waitTimeoutMs?: number,
+    waitDisplayTimeoutMs?: number,
+  ): Promise<T> {
+    const previous =
+      this.historyMutationTails.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous.then(() => gate);
+    this.historyMutationTails.set(sessionId, current);
+    try {
+      if (waitTimeoutMs === undefined) {
+        await previous;
+      } else {
+        await waitForSessionDrain(
+          previous,
+          waitTimeoutMs,
+          'close',
+          waitDisplayTimeoutMs,
+        );
+      }
+    } catch (error) {
+      release();
+      void current.then(() => {
+        if (this.historyMutationTails.get(sessionId) === current) {
+          this.historyMutationTails.delete(sessionId);
+        }
+      });
+      throw error;
+    }
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.historyMutationTails.get(sessionId) === current) {
+        this.historyMutationTails.delete(sessionId);
+      }
     }
   }
 
@@ -4507,14 +4573,14 @@ class QwenAgent implements Agent {
 
     const recorder = session.getConfig().getChatRecordingService();
     const requireFlush = opts?.requireFlush === true;
-    if (requireFlush) {
-      await recorder?.flush();
-    }
-
+    if (requireFlush) await recorder?.flush();
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    const conditionalDrainDeadline = opts?.onlyIfUnheld
+      ? Date.now() + drainTimeoutMs
+      : undefined;
     // Reject known work before disturbing any active turn. The close gate
     // prevents new turns, but a turn that was already running can still settle
     // into a new hold while the drain below is in progress, so this early read
@@ -4526,13 +4592,28 @@ class QwenAgent implements Agent {
         return { closed: false, holds };
       }
     }
-    for (const [requestId, generation] of this.generationControllers) {
-      if (generation.sessionId !== sessionId) continue;
-      generation.controller.abort();
-      this.generationControllers.delete(requestId);
-    }
     let removedFromStore = false;
     try {
+      if (opts?.onlyIfUnheld) {
+        // Let the turn that already owned the gate settle without cancelling
+        // queues or stopping schedulers. It may create a hold while settling;
+        // a refusal must leave the retained Session untouched.
+        await waitForSessionDrain(
+          session.waitForActiveTurnsToSettle(),
+          drainTimeoutMs,
+          'close',
+        );
+        const holds = session.collectActiveWorkHolds();
+        if (holds.length > 0) {
+          return { closed: false, holds };
+        }
+      }
+
+      for (const [requestId, generation] of this.generationControllers) {
+        if (generation.sessionId !== sessionId) continue;
+        generation.controller.abort();
+        this.generationControllers.delete(requestId);
+      }
       await waitForSessionDrain(
         (async () => {
           try {
@@ -4546,49 +4627,81 @@ class QwenAgent implements Agent {
           }
           await session.waitForActiveTurnsToSettle();
         })(),
-        drainTimeoutMs,
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
         'close',
+        // Report the shared budget, not the phase-2 residue — a residue like
+        // "1ms" hides that the settle phase consumed the budget and sends
+        // oncall grepping for a timeout setting that does not exist.
+        drainTimeoutMs,
       );
 
-      // Existing out-of-scope work such as a cron turn may have registered a
-      // background shell while it drained. Re-check after every active turn
-      // has settled and while the close gate still blocks new ones; only this
-      // read can authorize the destructive recorder/session cleanup below.
-      if (opts?.onlyIfUnheld) {
-        const holds = session.collectActiveWorkHolds();
-        if (holds.length > 0) {
-          return { closed: false, holds };
-        }
-      }
+      const blockedByHolds = await this.runExclusiveHistoryMutation(
+        sessionId,
+        async () => {
+          if (this.sessions.get(sessionId) !== session) {
+            removedFromStore = true;
+            return undefined;
+          }
 
-      recorder?.finalize();
-      let flushError: unknown;
-      try {
-        await recorder?.flush();
-      } catch (error) {
-        flushError = error;
-      }
-      if (flushError !== undefined && requireFlush) {
-        throw flushError;
-      }
+          // Existing out-of-scope work such as a cron turn may have
+          // registered a background shell while it drained. Re-check after
+          // every active turn has settled, while both the close gate and the
+          // history-mutation gate still block destructive races.
+          if (opts?.onlyIfUnheld) {
+            const holds = session.collectActiveWorkHolds();
+            if (holds.length > 0) {
+              return { closed: false, holds };
+            }
+          }
 
-      let closeError: unknown;
-      try {
-        await recorder?.close();
-      } catch (error) {
-        closeError = error;
-      }
-      if (recorder?.hasWriteOwnership()) {
-        throw closeError ?? new SessionWriterUnavailableError();
-      }
+          recorder?.finalize();
+          let flushError: unknown;
+          try {
+            await recorder?.flush();
+          } catch (error) {
+            flushError = error;
+          }
+          if (flushError !== undefined && requireFlush) {
+            throw flushError;
+          }
 
-      const cleanupErrors: unknown[] = [];
-      if (flushError !== undefined) cleanupErrors.push(flushError);
-      if (closeError !== undefined) cleanupErrors.push(closeError);
-      await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
-        shutdownConfig: opts?.shutdownConfig,
-      });
-      removedFromStore = true;
+          let closeError: unknown;
+          try {
+            await recorder?.close();
+          } catch (error) {
+            closeError = error;
+          }
+          if (recorder?.hasWriteOwnership()) {
+            throw closeError ?? new SessionWriterUnavailableError();
+          }
+
+          const cleanupErrors: unknown[] = [];
+          if (flushError !== undefined) cleanupErrors.push(flushError);
+          if (closeError !== undefined) cleanupErrors.push(closeError);
+          await this.removeStoredSessionEntry(
+            sessionId,
+            session,
+            cleanupErrors,
+            {
+              shutdownConfig: opts?.shutdownConfig,
+            },
+          );
+          removedFromStore = true;
+          return undefined;
+        },
+        // The mutation wait shares the conditional close's budget too, or
+        // the whole round trip can outlast the daemon's outer wait — the
+        // coupling the drain budget exists to keep. The mutation body
+        // itself stays untimed, so the guarantee remains approximate. The
+        // message reports the shared budget, not the residue.
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
+        drainTimeoutMs,
+      );
+      if (blockedByHolds) return blockedByHolds;
     } finally {
       if (!removedFromStore) cancelClose();
     }
@@ -5897,6 +6010,13 @@ class QwenAgent implements Agent {
       if (!isNotCurrentlyGeneratingCancelError(error)) {
         throw error;
       }
+    }
+    // Prompt calls still waiting at Session admission are tracked in
+    // activePromptCalls but have no session pendingPrompt yet, so
+    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+    // cancelled prompt would run in full once admission frees.
+    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+      call.controller.abort();
     }
   }
 
@@ -11184,12 +11304,41 @@ class QwenAgent implements Agent {
           );
         }
 
+        // Fail fast like branch admission: the bridge bounds this RPC with a
+        // timeout that races but cannot cancel queued work, so a rewind
+        // admitted behind an active turn would still truncate history after
+        // the client was told it failed. rewindToTurn re-checks inside the
+        // gate.
+        if (!session.isTurnIdle()) {
+          throw new RequestError(
+            -32602,
+            'Cannot rewind while a prompt is running',
+            {
+              errorKind: 'session_busy',
+            },
+          );
+        }
+
+        // Validate request FORMAT synchronously at RPC entry so a malformed
+        // rewind fails with a deterministic invalid_rewind_target instead of
+        // queueing behind an active mutation and surfacing as a bridge
+        // timeout (which for a destructive op means "may have executed").
+        // Only the snapshot-index resolution needs the gate.
+        const rawPromptId = params['promptId'];
+        if (rawPromptId !== undefined && typeof rawPromptId !== 'string') {
+          throw new RequestError(-32602, 'Invalid promptId format', {
+            errorKind: 'invalid_rewind_target',
+          });
+        }
+        const promptId =
+          typeof rawPromptId === 'string' ? rawPromptId : undefined;
         let turnIndex: number | undefined = params['targetTurnIndex'] as
           | number
           | undefined;
-        const promptId = params['promptId'] as string | undefined;
-
-        if (promptId && (turnIndex === undefined || turnIndex === null)) {
+        const resolveFromPromptId =
+          promptId !== undefined &&
+          (turnIndex === undefined || turnIndex === null);
+        if (resolveFromPromptId) {
           const prefix = sessionId + '########';
           if (!promptId.startsWith(prefix)) {
             throw new RequestError(-32602, 'Invalid promptId format', {
@@ -11204,121 +11353,133 @@ class QwenAgent implements Agent {
               { errorKind: 'invalid_rewind_target' },
             );
           }
-          // Derive turnIndex from the snapshot's position in the array,
-          // NOT from the promptId suffix. Session.turn is monotonic and
-          // does not reset on rewind, so after a rewind cycle the suffix
-          // no longer matches the turn's position in the current history.
-          const fhs = session.getConfig().getFileHistoryService();
-          const snapshots = fhs.getSnapshots();
-          const snapshotIdx = snapshots.findIndex(
-            (s) => s.promptId === promptId,
-          );
-          if (snapshotIdx < 0) {
-            throw new RequestError(
-              -32602,
-              'Snapshot not found for the given promptId',
-              { errorKind: 'invalid_rewind_target' },
-            );
-          }
-          turnIndex = snapshotIdx;
-        }
-
-        if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
+        } else if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing targetTurnIndex',
           );
         }
 
-        const rewindFiles = params['rewindFiles'] !== false;
-        const historyBeforeRewind = session.captureHistorySnapshot();
-        let rewindResult;
-        try {
-          rewindResult = session.rewindToTurn(turnIndex as number, {
-            rewindFiles,
-          });
-        } catch (err) {
-          if (err instanceof RequestError) {
-            const msg = err.message;
-            if (msg.includes('Cannot rewind while a prompt is running')) {
-              throw new RequestError(err.code, msg, {
-                errorKind: 'session_busy',
-              });
-            }
-            if (msg.includes('compressed or does not exist')) {
-              throw new RequestError(err.code, msg, {
-                errorKind: 'invalid_rewind_target',
-              });
-            }
-          }
-          throw err;
-        }
-
-        let filesChanged: string[] = [];
-        let filesFailed: string[] = [];
-        if (rewindFiles && promptId) {
-          const fhs = session.getConfig().getFileHistoryService();
-          try {
-            const fileResult = await fhs.rewind(promptId, true);
-            filesChanged = fileResult.filesChanged;
-            filesFailed = fileResult.filesFailed;
-          } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            debugLogger.error(
-              `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+        return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          if (resolveFromPromptId) {
+            // Derive turnIndex from the snapshot's position in the array,
+            // NOT from the promptId suffix. Session.turn is monotonic and
+            // does not reset on rewind, so after a rewind cycle the suffix
+            // no longer matches the turn's position in the current history.
+            const fhs = session.getConfig().getFileHistoryService();
+            const snapshots = fhs.getSnapshots();
+            const snapshotIdx = snapshots.findIndex(
+              (s) => s.promptId === promptId,
             );
-            filesFailed = [`file-history-rewind: ${reason}`];
+            if (snapshotIdx < 0) {
+              throw new RequestError(
+                -32602,
+                'Snapshot not found for the given promptId',
+                { errorKind: 'invalid_rewind_target' },
+              );
+            }
+            turnIndex = snapshotIdx;
           }
-        }
-        let artifactSnapshot: unknown;
-        let artifactSnapshotUnavailable: string | undefined;
-        try {
-          const config = session.getConfig();
-          const recording = config.getChatRecordingService();
-          await recording?.flush();
-          const loadAuthoritative = () =>
-            config.getSessionService().loadSession(sessionId);
-          const sessionData = recording
-            ? await recording.runWithWriteBarrier(loadAuthoritative)
-            : await loadAuthoritative();
-          if (sessionData === undefined) {
-            artifactSnapshotUnavailable =
-              'session data unavailable after rewind';
-          } else if (sessionData.artifactSnapshot) {
-            artifactSnapshot = sessionData.artifactSnapshot;
-          } else {
-            // A successful reload with no artifact records is a valid empty
-            // artifact timeline, distinct from an unavailable reload.
-            artifactSnapshot = {
-              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-              sessionId,
-              sequence: 0,
-              artifacts: [],
-              tombstonedIds: [],
-              stickyEphemeralIds: [],
-              warnings: [],
-            };
-          }
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          artifactSnapshotUnavailable =
-            'artifact snapshot unavailable after rewind';
-          debugLogger.warn(
-            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
-          );
-        }
 
-        return {
-          success: true,
-          historyBeforeRewind,
-          ...rewindResult,
-          filesChanged,
-          filesFailed,
-          ...(artifactSnapshot ? { artifactSnapshot } : {}),
-          ...(artifactSnapshotUnavailable
-            ? { artifactSnapshotUnavailable }
-            : {}),
-        };
+          const rewindFiles = params['rewindFiles'] !== false;
+          const historyBeforeRewind = session.captureHistorySnapshot();
+          let rewindResult;
+          let releaseHistoryMutation: () => void;
+          try {
+            rewindResult = session.rewindToTurn(turnIndex as number, {
+              rewindFiles,
+            });
+            releaseHistoryMutation = session.beginHistoryMutation();
+          } catch (err) {
+            if (err instanceof RequestError) {
+              const msg = err.message;
+              if (
+                msg.includes('Cannot rewind while a prompt is running') ||
+                msg.includes('Session is busy processing a turn')
+              ) {
+                throw new RequestError(err.code, msg, {
+                  errorKind: 'session_busy',
+                });
+              }
+              if (msg.includes('compressed or does not exist')) {
+                throw new RequestError(err.code, msg, {
+                  errorKind: 'invalid_rewind_target',
+                });
+              }
+            }
+            throw err;
+          }
+
+          try {
+            let filesChanged: string[] = [];
+            let filesFailed: string[] = [];
+            if (rewindFiles && promptId) {
+              const fhs = session.getConfig().getFileHistoryService();
+              try {
+                const fileResult = await fhs.rewind(promptId, true);
+                filesChanged = fileResult.filesChanged;
+                filesFailed = fileResult.filesFailed;
+              } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                debugLogger.error(
+                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+                );
+                filesFailed = [`file-history-rewind: ${reason}`];
+              }
+            }
+            let artifactSnapshot: unknown;
+            let artifactSnapshotUnavailable: string | undefined;
+            try {
+              const config = session.getConfig();
+              const recording = config.getChatRecordingService();
+              await recording?.flush();
+              const loadAuthoritative = () =>
+                config.getSessionService().loadSession(sessionId);
+              const sessionData = recording
+                ? await recording.runWithWriteBarrier(loadAuthoritative)
+                : await loadAuthoritative();
+              if (sessionData === undefined) {
+                artifactSnapshotUnavailable =
+                  'session data unavailable after rewind';
+              } else if (sessionData.artifactSnapshot) {
+                artifactSnapshot = sessionData.artifactSnapshot;
+              } else {
+                // A successful reload with no artifact records is a valid empty
+                // artifact timeline, distinct from an unavailable reload.
+                artifactSnapshot = {
+                  v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                  sessionId,
+                  sequence: 0,
+                  artifacts: [],
+                  tombstonedIds: [],
+                  stickyEphemeralIds: [],
+                  warnings: [],
+                };
+              }
+            } catch (err) {
+              const reason = err instanceof Error ? err.message : String(err);
+              artifactSnapshotUnavailable =
+                'artifact snapshot unavailable after rewind';
+              debugLogger.warn(
+                `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
+              );
+            }
+
+            return {
+              success: true,
+              historyBeforeRewind,
+              ...rewindResult,
+              filesChanged,
+              filesFailed,
+              ...(artifactSnapshot ? { artifactSnapshot } : {}),
+              ...(artifactSnapshotUnavailable
+                ? { artifactSnapshotUnavailable }
+                : {}),
+            };
+          } finally {
+            releaseHistoryMutation();
+          }
+        });
       }
       case 'qwen/session/loadUpdates': {
         const sessionId = params['sessionId'] as string;
@@ -11430,6 +11591,16 @@ class QwenAgent implements Agent {
           );
         }
         const name = params['name'];
+        const atRecordId = params['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          throw RequestError.invalidParams(undefined, 'Invalid atRecordId');
+        }
+        if (isSideTask && atRecordId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'atRecordId is not supported for side tasks',
+          );
+        }
 
         const sourceSession = this.sessions.get(sessionId);
         if (!sourceSession) {
@@ -11439,70 +11610,83 @@ class QwenAgent implements Agent {
           });
         }
 
-        const sourceConfig = sourceSession.getConfig();
-        const recording = sourceConfig.getChatRecordingService();
-        if (recording) {
-          await recording.flush();
+        if (!isSideTask) {
+          if (!sourceSession.isTurnIdle()) {
+            throw new RequestError(
+              -32602,
+              'Cannot branch while a prompt is running',
+              { errorKind: 'session_busy' },
+            );
+          }
+          try {
+            return await this.runExclusiveHistoryMutation(
+              sessionId,
+              async () => {
+                await sourceSession.assertCanStartTurn();
+                const releaseHistoryMutation =
+                  sourceSession.beginHistoryMutation();
+                try {
+                  const sourceConfig = sourceSession.getConfig();
+                  const recording = sourceConfig.getChatRecordingService();
+                  const sessionService = sourceConfig.getSessionService();
+
+                  const baseName = deriveForkBaseName(
+                    name,
+                    recording,
+                    sessionId,
+                  );
+
+                  const title = await computeUniqueBranchTitle(
+                    baseName,
+                    sessionService,
+                  );
+                  const newSessionId = randomUUID();
+                  const fork = () =>
+                    sessionService.forkSession(sessionId, newSessionId, {
+                      title,
+                      ...(atRecordId !== undefined ? { atRecordId } : {}),
+                    });
+                  if (recording) {
+                    await recording.runWithWriteBarrier(fork);
+                  } else {
+                    await fork();
+                  }
+                  return { newSessionId, title, displayName: title };
+                } finally {
+                  releaseHistoryMutation();
+                }
+              },
+            );
+          } catch (error) {
+            if (error instanceof BranchPointInvalidError) {
+              throw new RequestError(-32009, error.message, {
+                errorKind: 'branch_point_invalid',
+                recordId: error.recordId,
+              });
+            }
+            throw error;
+          }
         }
 
-        const newSessionId = randomUUID();
+        const sourceConfig = sourceSession.getConfig();
+        const recording = sourceConfig.getChatRecordingService();
+        if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
+        const title = deriveForkBaseName(name, recording, sessionId);
+        const newSessionId = randomUUID();
         const fork = () =>
-          isSideTask
-            ? sessionService.forkSession(sessionId, newSessionId, {
-                source: {
-                  sourceType: 'side_task',
-                  sourceId: sessionId,
-                },
-              })
-            : sessionService.forkSession(sessionId, newSessionId);
-        if (isSideTask && recording) {
+          sessionService.forkSession(sessionId, newSessionId, {
+            source: {
+              sourceType: 'side_task',
+              sourceId: sessionId,
+            },
+            title,
+          });
+        if (recording) {
           await recording.runWithWriteBarrier(fork);
         } else {
           await fork();
         }
-
-        let title: string;
-        try {
-          let baseName: string;
-          if (typeof name === 'string' && name.trim().length > 0) {
-            baseName = name.trim();
-          } else {
-            const existingTitle = recording?.getCurrentCustomTitle();
-            const stripped = existingTitle
-              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-              .trim();
-            if (stripped && stripped.length > 0) {
-              baseName = stripped;
-            } else {
-              baseName = sessionId.slice(0, 8);
-            }
-          }
-
-          title = isSideTask
-            ? baseName
-            : await computeUniqueBranchTitle(baseName, sessionService);
-          const renamed = await sessionService.renameSession(
-            newSessionId,
-            title,
-            'manual',
-          );
-          if (!renamed) {
-            throw new RequestError(
-              -32603,
-              `Failed to set title on forked session ${newSessionId}`,
-              { errorKind: 'internal', sessionId: newSessionId },
-            );
-          }
-        } catch (err) {
-          sessionService.removeSession(newSessionId).catch((rmErr) => {
-            process.stderr.write(
-              `qwen serve: failed to clean up orphan session ${newSessionId}: ${rmErr instanceof Error ? rmErr.message : rmErr}\n`,
-            );
-          });
-          throw err;
-        }
-
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
@@ -12533,6 +12717,7 @@ class QwenAgent implements Agent {
       config,
       this.connection,
       settings,
+      (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
     );
     let published = false;

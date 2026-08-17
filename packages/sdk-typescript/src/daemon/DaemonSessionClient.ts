@@ -23,6 +23,10 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionMediaData,
+  DaemonSessionMediaReference,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTranscriptPageOptions,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -47,6 +51,7 @@ import type {
   DaemonSessionTasksStatus,
   HeartbeatResult,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
@@ -129,6 +134,26 @@ export interface DaemonSessionSubscribeOptions
   resume?: boolean;
 }
 
+function isSessionMediaReference(
+  value: unknown,
+): value is DaemonSessionMediaReference {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record['type'] === 'image' &&
+    typeof record['mediaId'] === 'string' &&
+    record['mediaId'].length > 0 &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].startsWith(`${record['type']}/`) &&
+    typeof record['size'] === 'number' &&
+    Number.isSafeInteger(record['size']) &&
+    record['size'] > 0
+  );
+}
+
+const MAX_MEDIA_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_MEDIA_CACHE_ENTRIES = 128;
+
 /**
  * Session-scoped wrapper around `DaemonClient`.
  *
@@ -178,6 +203,11 @@ export class DaemonSessionClient {
   private reattaching?: Promise<void>;
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
+  private readonly mediaCache = new Map<
+    string,
+    { pending: Promise<DaemonSessionMediaData>; size: number }
+  >();
+  private mediaCacheBytes = 0;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -290,7 +320,7 @@ export class DaemonSessionClient {
       eventEpoch,
       ...session
     } = restored;
-    return new DaemonSessionClient({
+    const result = new DaemonSessionClient({
       client,
       session,
       hasActivePrompt,
@@ -308,6 +338,8 @@ export class DaemonSessionClient {
       historyAnchorRecordId,
       replayDegraded,
     });
+    await result.hydrateReplaySnapshot();
+    return result;
   }
 
   /**
@@ -463,6 +495,35 @@ export class DaemonSessionClient {
       throw new Error('Expected non-blocking prompt acceptance');
     }
     return accepted;
+  }
+
+  async uploadMedia(
+    data: Blob,
+    mimeType: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionMediaReference> {
+    return await this.withClientIdSelfHeal(() =>
+      this.client.uploadSessionMedia(this.sessionId, data, mimeType, {
+        ...(signal ? { signal } : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
+  }
+
+  async removeMedia(mediaId: string): Promise<boolean> {
+    const removed = await this.withClientIdSelfHeal(() =>
+      this.client.removeSessionMedia(
+        this.sessionId,
+        mediaId,
+        this.clientId ? { clientId: this.clientId } : undefined,
+      ),
+    );
+    if (removed) {
+      const cached = this.mediaCache.get(mediaId);
+      this.mediaCache.delete(mediaId);
+      this.mediaCacheBytes -= cached?.size ?? 0;
+    }
+    return removed;
   }
 
   /**
@@ -652,11 +713,18 @@ export class DaemonSessionClient {
    */
   async enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal; messageId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+    },
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
+      ...(opts?.content && opts.content.length > 0
+        ? { content: opts.content }
+        : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -679,16 +747,52 @@ export class DaemonSessionClient {
   async getMidTurnMessages(opts?: {
     signal?: AbortSignal;
   }): Promise<DaemonMidTurnMessagesResult> {
-    return await this.client.getMidTurnMessages(this.sessionId, {
+    const result = await this.client.getMidTurnMessages(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
+    return {
+      ...result,
+      messages: await Promise.all(
+        result.messages.map(async (message) => ({
+          ...message,
+          ...(message.content
+            ? { content: await this.hydrateContent(message.content) }
+            : {}),
+        })),
+      ),
+    };
   }
 
   async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
-    return await this.client.getPendingPrompts(this.sessionId, {
+    const result = await this.client.getPendingPrompts(this.sessionId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
+    return {
+      pendingPrompts: await Promise.all(
+        result.pendingPrompts.map(async (prompt) => ({
+          ...prompt,
+          ...(prompt.content
+            ? { content: await this.hydrateContent(prompt.content) }
+            : {}),
+        })),
+      ),
+    };
+  }
+
+  async getTranscriptPage(
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const page = await this.client.getSessionTranscriptPage(this.sessionId, {
+      ...opts,
+      clientId: opts.clientId ?? this.clientId,
+    });
+    return {
+      ...page,
+      events: await Promise.all(
+        page.events.map(async (event) => await this.hydrateEvent(event)),
+      ),
+    };
   }
 
   async removePendingPrompt(
@@ -928,8 +1032,9 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
-        this._dispatchTurnEvent(event);
-        yield event;
+        const hydratedEvent = await this.hydrateEvent(event);
+        this._dispatchTurnEvent(hydratedEvent);
+        yield hydratedEvent;
         if (event.id !== undefined) {
           this.lastSeenEventId = Math.max(
             this.lastSeenEventId ?? 0,
@@ -940,6 +1045,125 @@ export class DaemonSessionClient {
     } finally {
       this._rejectAllPending(new Error('SSE stream ended'));
       release();
+    }
+  }
+
+  private async hydrateReplaySnapshot(): Promise<void> {
+    this.replaySnapshot.compactedReplay = await Promise.all(
+      this.replaySnapshot.compactedReplay.map(
+        async (event) => await this.hydrateEvent(event),
+      ),
+    );
+    this.replaySnapshot.liveJournal = await Promise.all(
+      this.replaySnapshot.liveJournal.map(
+        async (event) => await this.hydrateEvent(event),
+      ),
+    );
+  }
+
+  private async hydrateEvent(event: DaemonEvent): Promise<DaemonEvent> {
+    if (!event.data || typeof event.data !== 'object') return event;
+    const data = event.data as Record<string, unknown>;
+    if (event.type === 'session_update') {
+      const update = data['update'];
+      if (update && typeof update === 'object' && !Array.isArray(update)) {
+        const content = (update as Record<string, unknown>)['content'];
+        const hydrated = await this.hydrateBlock(content);
+        if (hydrated === content) return event;
+        return {
+          ...event,
+          data: { ...data, update: { ...update, content: hydrated } },
+        };
+      }
+      const content = data['content'];
+      const hydrated = await this.hydrateBlock(content);
+      if (hydrated === content) return event;
+      return { ...event, data: { ...data, content: hydrated } };
+    }
+    if (event.type !== 'mid_turn_message_injected') return event;
+    const items = data['items'];
+    if (!Array.isArray(items)) return event;
+    return {
+      ...event,
+      data: {
+        ...data,
+        items: await Promise.all(
+          items.map(async (item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+              return item;
+            }
+            const record = item as Record<string, unknown>;
+            return Array.isArray(record['content'])
+              ? {
+                  ...record,
+                  content: await this.hydrateContent(record['content']),
+                }
+              : item;
+          }),
+        ),
+      },
+    };
+  }
+
+  private async hydrateContent(
+    content: readonly unknown[],
+  ): Promise<PromptContentBlock[]> {
+    return await Promise.all(
+      content.map(async (block) => await this.hydrateBlock(block)),
+    );
+  }
+
+  private async hydrateBlock(block: unknown): Promise<PromptContentBlock> {
+    if (!isSessionMediaReference(block)) {
+      return block as PromptContentBlock;
+    }
+    let cached = this.mediaCache.get(block.mediaId);
+    if (cached) {
+      this.mediaCache.delete(block.mediaId);
+      this.mediaCache.set(block.mediaId, cached);
+    } else {
+      const pending = this.withClientIdSelfHeal(() =>
+        this.client.readSessionMedia(this.sessionId, block.mediaId, {
+          ...(this.clientId ? { clientId: this.clientId } : {}),
+        }),
+      );
+      cached = { pending, size: block.size };
+      this.mediaCache.set(block.mediaId, cached);
+      this.mediaCacheBytes += block.size;
+      while (
+        this.mediaCache.size > MAX_MEDIA_CACHE_ENTRIES ||
+        this.mediaCacheBytes > MAX_MEDIA_CACHE_BYTES
+      ) {
+        const oldestId = this.mediaCache.keys().next().value;
+        if (oldestId === undefined) break;
+        const evicted = this.mediaCache.get(oldestId);
+        this.mediaCache.delete(oldestId);
+        this.mediaCacheBytes -= evicted?.size ?? 0;
+      }
+      void pending.catch(() => {
+        if (this.mediaCache.get(block.mediaId)?.pending !== pending) return;
+        this.mediaCache.delete(block.mediaId);
+        this.mediaCacheBytes -= block.size;
+      });
+    }
+    try {
+      const media = await cached.pending;
+      return { type: block.type, data: media.data, mimeType: media.mimeType };
+    } catch (err) {
+      // 404/410 means the daemon no longer holds the blob, so pin the
+      // placeholder. Any other failure is transient: return the reference
+      // unchanged so the snapshot keeps its mediaId and a later hydration
+      // pass can retry (the failed cache entry evicted itself above).
+      if (
+        err instanceof DaemonHttpError &&
+        (err.status === 404 || err.status === 410)
+      ) {
+        return {
+          type: 'text',
+          text: '[Attached media is no longer available]',
+        };
+      }
+      return block;
     }
   }
 
