@@ -1073,6 +1073,30 @@
   white-space: nowrap;
 }
 
+.queuedPromptImages {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.queuedPromptImage {
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.queuedPromptImageInteractive {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.queuedPromptImageInteractive:hover {
+  opacity: 0.85;
+}
+
 .queuedPromptState {
   display: inline-flex;
   align-items: center;

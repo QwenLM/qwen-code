@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { APIUserAbortError } from 'openai';
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
 import {
@@ -21,6 +22,17 @@ describe('classifyRetryError', () => {
       statusCode: 429,
       reason: 'rate-limit',
     });
+  });
+
+  it('classifies the OpenAI SDK APIUserAbortError as an abort, not unknown', () => {
+    // A user cancel on the auth_type=openai path surfaces as APIUserAbortError.
+    // It must be treated as an abort so retries stop and it is not logged as an
+    // api_error — otherwise it falls through to the 'unknown' classification.
+    expect(
+      classifyRetryError(
+        new APIUserAbortError({ message: 'Request was aborted.' }),
+      ),
+    ).toMatchObject({ kind: 'abort' });
   });
 
   it('classifies HTTP 503 as retryable rate limiting to match stream retry semantics', () => {

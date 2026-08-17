@@ -33,7 +33,11 @@ import {
   type DaemonSessionOwnerSnapshot,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  isDaemonTurnError,
+  isStaleBranchPointError,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
@@ -55,6 +59,7 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
+import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -82,11 +87,13 @@ import type {
   ComposerSubmitCommit,
   EditorHandle,
 } from './hooks/useComposerCore';
-import type { PromptImage } from './adapters/promptTypes';
+import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
+  TOAST_REQUEST_EVENT,
+  type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
 } from './components/ToastHost';
@@ -210,7 +217,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { isEditableTarget } from './utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from './utils/dom';
 import {
   invokeSlashCommandHandler,
   SLASH_COMMAND_PATTERN,
@@ -486,6 +493,7 @@ interface ActiveGoalStatus {
 interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   onAdmissionStarted?: () => void;
@@ -497,14 +505,29 @@ interface SendPromptOptionsWithRetry {
 interface OptimisticUserMessage {
   sessionId: string;
   messageId: string;
+  identity: TranscriptUserMessageIdentity;
+  previousIdentity?: TranscriptUserMessageIdentity;
+  owner: CancelledRetryOwner;
 }
 
 interface FailedPrompt {
   sessionId: string;
   messageId: string;
+  identity: TranscriptUserMessageIdentity;
+  previousIdentity?: TranscriptUserMessageIdentity;
   text: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
+  owner: CancelledRetryOwner;
+}
+
+interface TranscriptUserMessageIdentity {
+  block: DaemonTranscriptBlock;
+}
+
+interface TranscriptTurnErrorIdentity {
+  block: DaemonTranscriptBlock;
 }
 
 interface FailedPromptRetry {
@@ -513,6 +536,81 @@ interface FailedPromptRetry {
   startedAt: number;
   admitted: boolean;
   settled: boolean;
+  owner: CancelledRetryOwner;
+  transcriptIdentity:
+    | { kind: 'failed-prompt'; identity: TranscriptUserMessageIdentity }
+    | { kind: 'turn-error'; identity: TranscriptTurnErrorIdentity };
+}
+
+type CancelledRetryState =
+  | {
+      kind: 'failed-prompt';
+      attemptId: number;
+      failed: FailedPrompt;
+    }
+  | {
+      kind: 'turn-error';
+      attemptId: number;
+      errorId: string;
+      identity: TranscriptTurnErrorIdentity;
+      text: string;
+      images?: PromptImage[];
+      files?: PromptFile[];
+      inputAnnotations?: DaemonInputAnnotation[];
+      previousRetriedTurnErrorId: string | null;
+      previousShowRetryHint: boolean;
+    };
+
+type CancelledRetryRestoreResult = 'restored' | 'pending' | 'invalid';
+
+interface CancelledRetryOwner {
+  sessionId?: string;
+  workspaceCwd?: string;
+  sessionKey?: string;
+  sourceVersion: number;
+  snapshot: DaemonSessionOwnerSnapshot;
+}
+
+function retryOwnerMatchesCurrent(
+  owner: CancelledRetryOwner,
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+  sourceVersion: number,
+): boolean {
+  const workspaceMatches =
+    (owner.workspaceCwd !== undefined && owner.workspaceCwd === workspaceCwd) ||
+    owner.snapshot.isCurrent();
+  return (
+    owner.sessionId === sessionId &&
+    owner.sourceVersion === sourceVersion &&
+    workspaceMatches
+  );
+}
+
+interface CancelledRetryEntry {
+  owner?: CancelledRetryOwner;
+  state: CancelledRetryState;
+}
+
+function mergeCancelledRetryEntries(
+  current: readonly CancelledRetryEntry[],
+  incoming: readonly CancelledRetryEntry[],
+): CancelledRetryEntry[] {
+  return incoming.reduce<CancelledRetryEntry[]>(
+    (merged, candidate) => {
+      const existing = merged.find(
+        (entry) => entry.state.kind === candidate.state.kind,
+      );
+      if (existing && existing.state.attemptId >= candidate.state.attemptId) {
+        return merged;
+      }
+      return [
+        ...merged.filter((entry) => entry.state.kind !== candidate.state.kind),
+        candidate,
+      ];
+    },
+    [...current],
+  );
 }
 
 interface UnknownPromptAdmission {
@@ -520,6 +618,7 @@ interface UnknownPromptAdmission {
   messageId?: string;
   text?: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   payloadAvailable: boolean;
 }
@@ -527,11 +626,125 @@ interface UnknownPromptAdmission {
 function getLatestUserBlockId(
   blocks: readonly DaemonTranscriptBlock[],
 ): string | undefined {
+  return getLatestUserBlock(blocks)?.id;
+}
+
+function getLatestUserBlock(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (block?.kind === 'user') return block.id;
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification'
+    ) {
+      return block;
+    }
   }
   return undefined;
+}
+
+function matchesUserMessageIdentity(
+  block: DaemonTranscriptBlock | undefined,
+  identity: TranscriptUserMessageIdentity | undefined,
+  allowLocalId = false,
+): boolean {
+  if (!identity) return block === undefined;
+  if (!block || block.kind !== 'user' || identity.block.kind !== 'user') {
+    return false;
+  }
+  if (block === identity.block) return true;
+  if (allowLocalId && block.id === identity.block.id) return true;
+  const expectedRecords = identity.block.sourceRecordIds;
+  const currentRecords = block.sourceRecordIds;
+  return (
+    expectedRecords !== undefined &&
+    expectedRecords.length > 0 &&
+    currentRecords !== undefined &&
+    currentRecords.length === expectedRecords.length &&
+    currentRecords.every((record, index) => record === expectedRecords[index])
+  );
+}
+
+function findUserMessageByIdentity(
+  blocks: readonly DaemonTranscriptBlock[],
+  identity: TranscriptUserMessageIdentity,
+  allowLocalId = false,
+): DaemonTranscriptBlock | undefined {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification' &&
+      matchesUserMessageIdentity(block, identity, allowLocalId)
+    ) {
+      return block;
+    }
+  }
+  return undefined;
+}
+
+function getLogicalSessionKey(
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+): string | undefined {
+  return sessionId ? `${workspaceCwd ?? ''}\0${sessionId}` : undefined;
+}
+
+function getRetryableTurnError(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock | undefined {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (block?.kind === 'user') {
+      if (block.meta?.['source'] === 'background_notification') continue;
+      break;
+    }
+    if (block?.kind === 'error' && block.source === 'turn_error') {
+      return block;
+    }
+    if (block?.kind !== 'debug') break;
+  }
+  return undefined;
+}
+
+function matchesTurnErrorIdentity(
+  block: DaemonTranscriptBlock | undefined,
+  identity: TranscriptTurnErrorIdentity,
+): boolean {
+  if (
+    !block ||
+    block.kind !== 'error' ||
+    block.source !== 'turn_error' ||
+    identity.block.kind !== 'error' ||
+    identity.block.source !== 'turn_error'
+  ) {
+    return false;
+  }
+  if (block === identity.block) return true;
+  const expectedPromptId = identity.block.promptId;
+  if (expectedPromptId) return block.promptId === expectedPromptId;
+  return (
+    identity.block.eventId !== undefined &&
+    block.eventId === identity.block.eventId
+  );
+}
+
+function retryTranscriptIdentityMatches(
+  blocks: readonly DaemonTranscriptBlock[],
+  transcriptIdentity: FailedPromptRetry['transcriptIdentity'],
+  allowLocalUserId = false,
+): boolean {
+  return transcriptIdentity.kind === 'failed-prompt'
+    ? matchesUserMessageIdentity(
+        getLatestUserBlock(blocks),
+        transcriptIdentity.identity,
+        allowLocalUserId,
+      )
+    : matchesTurnErrorIdentity(
+        getRetryableTurnError(blocks),
+        transcriptIdentity.identity,
+      );
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -644,7 +857,6 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
-  desiredSessionTargetPending?: boolean;
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
@@ -729,6 +941,14 @@ export interface WebShellProps {
   onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: `false` force-
+   * disables upload even when the daemon advertises the capability, while
+   * `true`/omitted still requires the capability to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -865,6 +1085,16 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'subagents', 'backgroundTasks'];
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
+
+// One preview tab per image, keyed by its content, so opening several images
+// keeps a tab each while re-clicking the same image just focuses its tab.
+function imageTabId(src: string): string {
+  let hash = 0;
+  for (let i = 0; i < src.length; i++) {
+    hash = (hash * 31 + src.charCodeAt(i)) | 0;
+  }
+  return `image:${hash.toString(36)}`;
+}
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -1566,7 +1796,6 @@ function readScopedModelSetting(
 }
 
 export function App({
-  desiredSessionTargetPending = false,
   onSessionIdChange,
   onSessionCreated,
   theme: providedTheme,
@@ -1586,6 +1815,7 @@ export function App({
   builtinAtProviders,
   atProviders,
   composerTagIcons,
+  fileUploadEnabled,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -1822,6 +2052,8 @@ export function App({
   const customization = useMemo(
     () => ({
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -1842,9 +2074,12 @@ export function App({
       markdownTableMode,
       markdown,
       loadingPhrases,
+      fileUploadEnabled,
     }),
     [
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -1865,6 +2100,7 @@ export function App({
       markdownTableMode,
       markdown,
       loadingPhrases,
+      fileUploadEnabled,
     ],
   );
   const CustomFooter = renderFooter;
@@ -1873,15 +2109,24 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useAnimationFrameTranscriptBlocks();
   const connection = useConnection();
-  const logicalSessionKey = connection.sessionId
-    ? `${connection.workspaceCwd ?? ''}\0${connection.sessionId}`
-    : undefined;
-  const sessionWriteBlocked =
-    desiredSessionTargetPending ||
-    connection.sessionTransition?.phase === 'queued' ||
-    connection.sessionTransition?.phase === 'preparing';
+  const logicalSessionKey = getLogicalSessionKey(
+    connection.sessionId,
+    connection.workspaceCwd,
+  );
+  const sessionWriteBlocked = Boolean(connection.loadingTranscript);
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
+  const sessionWriteBlockGenerationRef = useRef(0);
+  if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
+    sessionWriteBlockGenerationRef.current += 1;
+  }
   sessionWriteBlockedRef.current = sessionWriteBlocked;
+  const appMountedRef = useRef(true);
+  useLayoutEffect(() => {
+    appMountedRef.current = true;
+    return () => {
+      appMountedRef.current = false;
+    };
+  }, []);
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
@@ -1901,6 +2146,16 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const ordinaryWorkspaces = useMemo(
+    () => workspaces.filter((entry) => entry.kind !== 'live'),
+    [workspaces],
+  );
+  const isKnownLiveWorkspaceCwd = useCallback(
+    (cwd: string | undefined) =>
+      cwd !== undefined &&
+      workspaces.some((entry) => entry.kind === 'live' && entry.cwd === cwd),
+    [workspaces],
+  );
   const composerWorkspacesRef = useRef<
     | Array<{
         id: string;
@@ -1912,11 +2167,10 @@ export function App({
     | undefined
   >(undefined);
   const nextComposerWorkspaces = !lockedWorkspaceCwd
-    ? workspaces.map((entry) => ({
+    ? ordinaryWorkspaces.map((entry) => ({
         id: entry.id,
         cwd: entry.cwd,
-        label:
-          entry.kind === 'live' ? t('sidebar.live') : workspaceLabel(entry),
+        label: workspaceLabel(entry),
         primary: entry.primary,
         trusted: entry.trusted,
       }))
@@ -1939,14 +2193,14 @@ export function App({
     composerWorkspacesRef.current = nextComposerWorkspaces;
   }
   const composerWorkspaces = composerWorkspacesRef.current;
-  const workspacesRef = useRef(workspaces);
-  workspacesRef.current = workspaces;
+  const workspacesRef = useRef(ordinaryWorkspaces);
+  workspacesRef.current = ordinaryWorkspaces;
   const visibleWorkspaces = useMemo(
     () =>
       lockedWorkspaceCwd
-        ? workspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
-        : workspaces,
-    [lockedWorkspaceCwd, workspaces],
+        ? ordinaryWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+        : ordinaryWorkspaces,
+    [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
   const sessionActions = useActions();
   const reloadTranscript = useCallback(
@@ -2017,14 +2271,14 @@ export function App({
 
   useEffect(() => {
     if (!workspace.capabilities || !selectedWorkspaceCwd) return;
-    const selected = workspaces.find(
+    const selected = ordinaryWorkspaces.find(
       (entry) => entry.cwd === selectedWorkspaceCwd,
     );
     if (selected?.trusted) return;
     composerSourceVersionRef.current += 1;
     selectedWorkspaceCwdRef.current = undefined;
     setSelectedWorkspaceCwd(undefined);
-  }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
+  }, [ordinaryWorkspaces, selectedWorkspaceCwd, workspace.capabilities]);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
   // branch/dirty counts while the new fetch is in flight; same-workspace
@@ -2136,20 +2390,20 @@ export function App({
         ? connection.workspaceCwd
         : (lockedWorkspaceCwd ??
           selectedWorkspaceCwd ??
-          workspaces.find((entry) => entry.primary)?.cwd),
+          ordinaryWorkspaces.find((entry) => entry.primary)?.cwd),
     [
       connection.sessionId,
       connection.workspaceCwd,
       lockedWorkspaceCwd,
       selectedWorkspaceCwd,
-      workspaces,
+      ordinaryWorkspaces,
     ],
   );
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
   useEffect(() => {
-    if (!activeWorkspaceCwd) {
+    if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
@@ -2217,6 +2471,7 @@ export function App({
   }, [
     activeWorkspaceCwd,
     connection.gitBranch,
+    isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
   ]);
@@ -2267,6 +2522,11 @@ export function App({
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
   const [failedPromptRetry, setFailedPromptRetry] =
     useState<FailedPromptRetry | null>(null);
+  const cancelledRetryStatesRef = useRef(
+    new Map<string, CancelledRetryEntry[]>(),
+  );
+  const cancelledRetryAttemptRef = useRef(0);
+  const [cancelledRetryRevision, setCancelledRetryRevision] = useState(0);
   const [unknownPromptAdmission, setUnknownPromptAdmission] =
     useState<UnknownPromptAdmission | null>(null);
   const unknownPromptAdmissionRef = useRef<UnknownPromptAdmission | null>(null);
@@ -2281,11 +2541,40 @@ export function App({
     failedPromptRef.current = next;
     setFailedPrompt(next);
   }, []);
+  const failedPromptOwnerRef = useRef<{
+    sessionId?: string;
+    workspaceCwd?: string;
+    snapshot: DaemonSessionOwnerSnapshot;
+  }>({
+    sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
+    snapshot: sessionOwnerGuard.capture(),
+  });
   useLayoutEffect(() => {
+    const previousOwner = failedPromptOwnerRef.current;
+    failedPromptOwnerRef.current = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+      snapshot: sessionOwnerGuard.capture(),
+    };
+    if (
+      previousOwner.sessionId === connection.sessionId &&
+      previousOwner.workspaceCwd === undefined &&
+      connection.workspaceCwd !== undefined &&
+      previousOwner.snapshot.isCurrent()
+    ) {
+      return;
+    }
     updateFailedPrompt(null);
     setFailedPromptRetry(null);
     updateUnknownPromptAdmission(null);
-  }, [logicalSessionKey, updateFailedPrompt, updateUnknownPromptAdmission]);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    sessionOwnerGuard,
+    updateFailedPrompt,
+    updateUnknownPromptAdmission,
+  ]);
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
     null,
   );
@@ -2328,19 +2617,51 @@ export function App({
   useEffect(() => {
     const failed = failedPromptRef.current;
     if (!failed) return;
-    const failedIndex = displayMessages.findIndex(
-      (message) => message.id === failed.messageId,
+    const currentFailedBlock = findUserMessageByIdentity(
+      store.getSnapshot().blocks,
+      failed.identity,
+      failed.owner.snapshot.isCurrent(),
     );
+    const failedBlock = findUserMessageByIdentity(
+      blocks,
+      failed.identity,
+      failed.owner.snapshot.isCurrent(),
+    );
+    if (failed.sessionId !== connection.sessionId || !currentFailedBlock) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (!failedBlock) return;
+    const failedIndex = displayMessages.findIndex(
+      (message) => message.id === failedBlock.id,
+    );
+    if (failedIndex < 0) return;
     if (
-      failed.sessionId !== connection.sessionId ||
-      failedIndex < 0 ||
       displayMessages
         .slice(failedIndex + 1)
         .some((message) => message.role === 'user')
     ) {
       updateFailedPrompt(null);
+      return;
     }
-  }, [connection.sessionId, displayMessages, failedPrompt, updateFailedPrompt]);
+    if (
+      failed.messageId !== failedBlock.id ||
+      failed.identity.block !== failedBlock
+    ) {
+      updateFailedPrompt({
+        ...failed,
+        messageId: failedBlock.id,
+        identity: { block: failedBlock },
+      });
+    }
+  }, [
+    blocks,
+    connection.sessionId,
+    displayMessages,
+    failedPrompt,
+    store,
+    updateFailedPrompt,
+  ]);
   useEffect(() => {
     const unknown = unknownPromptAdmissionRef.current;
     if (unknown && unknown.sessionId !== connection.sessionId) {
@@ -3062,6 +3383,28 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openImagePanel = useCallback(
+    (src: string, alt?: string) => {
+      const tab: ArtifactPanelTab = {
+        id: imageTabId(src),
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        src,
+        ...(alt ? { alt } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [tab, ...tabs],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3203,6 +3546,10 @@ export function App({
         );
         return;
       }
+      if (request.kind === 'image') {
+        openImagePanel(request.src, request.alt);
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3258,6 +3605,7 @@ export function App({
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
+      openImagePanel,
       openSubagentPanelForSession,
     ],
   );
@@ -3725,21 +4073,37 @@ export function App({
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
+  const failedPromptRetryIsCurrent = Boolean(
+    failedPromptRetry &&
+      retryOwnerMatchesCurrent(
+        failedPromptRetry.owner,
+        connection.sessionId,
+        connection.workspaceCwd,
+        composerSourceVersionRef.current,
+      ) &&
+      retryTranscriptIdentityMatches(
+        blocks,
+        failedPromptRetry.transcriptIdentity,
+      ),
+  );
   useEffect(() => {
     if (
       failedPromptRetry &&
-      (failedPromptRetry.sessionId !== connection.sessionId ||
+      (!failedPromptRetryIsCurrent ||
         (streamingState === 'idle' && failedPromptRetry.settled))
     ) {
       setFailedPromptRetry(null);
     }
-  }, [connection.sessionId, failedPromptRetry, streamingState]);
+  }, [failedPromptRetry, failedPromptRetryIsCurrent, streamingState]);
   const suppressFailedPromptRetryStreaming = Boolean(
     failedPromptRetry &&
-      failedPromptRetry.sessionId === connection.sessionId &&
+      failedPromptRetryIsCurrent &&
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  useEffect(() => {
+    streamingStateRef.current = streamingState;
+  }, [streamingState]);
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
@@ -3772,6 +4136,7 @@ export function App({
   }, [displayMessages, streamingState]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
   const lastSubmittedInputAnnotationsRef = useRef<
     DaemonInputAnnotation[] | undefined
   >(undefined);
@@ -3779,10 +4144,298 @@ export function App({
     composerSourceVersionRef.current,
   );
   const retryableTurnErrorIdRef = useRef<string | null>(null);
+  const lastTurnErrorIdRef = useRef<string | null>(null);
+  const retryableTurnErrorIdentityRef = useRef<
+    TranscriptTurnErrorIdentity | undefined
+  >(undefined);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
+  const failedTurnErrorRetryRef = useRef<{
+    errorId: string;
+    text: string;
+    images?: PromptImage[];
+    files?: PromptFile[];
+    inputAnnotations?: DaemonInputAnnotation[];
+    owner: CancelledRetryOwner;
+  } | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
+  const rearmFailedTurnErrorRetry = useCallback(
+    (
+      retryableTurnError: DaemonTranscriptBlock,
+      currentBlocks: readonly DaemonTranscriptBlock[],
+    ) => {
+      const failedRetry = failedTurnErrorRetryRef.current;
+      if (!failedRetry || retryableTurnError.id === failedRetry.errorId) {
+        return;
+      }
+      if (
+        !retryOwnerMatchesCurrent(
+          failedRetry.owner,
+          connectionRef.current.sessionId,
+          connectionRef.current.workspaceCwd,
+          composerSourceVersionRef.current,
+        )
+      ) {
+        failedTurnErrorRetryRef.current = null;
+        return;
+      }
+      if (
+        !currentBlocks.some(
+          (block) =>
+            block.kind === 'error' &&
+            block.source === 'turn_error' &&
+            block.id === failedRetry.errorId,
+        )
+      ) {
+        failedTurnErrorRetryRef.current = null;
+        return;
+      }
+      lastSubmittedPromptRef.current = failedRetry.text;
+      lastSubmittedImagesRef.current = failedRetry.images;
+      lastSubmittedFilesRef.current = failedRetry.files;
+      lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
+      lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
+      retryableTurnErrorIdRef.current = retryableTurnError.id;
+      retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
+      retriedTurnErrorIdRef.current = null;
+      failedTurnErrorRetryRef.current = null;
+      setShowRetryHint(true);
+    },
+    [],
+  );
+  const retryOwnerRef = useRef<CancelledRetryOwner>({
+    sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
+    sessionKey: logicalSessionKey,
+    sourceVersion: composerSourceVersionRef.current,
+    snapshot: sessionOwnerGuard.capture(),
+  });
+  useLayoutEffect(() => {
+    const previousOwner = retryOwnerRef.current;
+    const currentSnapshot = sessionOwnerGuard.capture();
+    const workspaceBecameKnown =
+      previousOwner.sessionId !== undefined &&
+      previousOwner.sessionId === connection.sessionId &&
+      previousOwner.workspaceCwd === undefined &&
+      connection.workspaceCwd !== undefined &&
+      previousOwner.snapshot.isCurrent();
+    if (workspaceBecameKnown && logicalSessionKey) {
+      const previousSessionKey = previousOwner.sessionKey;
+      previousOwner.workspaceCwd = connection.workspaceCwd;
+      previousOwner.sessionKey = logicalSessionKey;
+      previousOwner.snapshot = currentSnapshot;
+      const previousStates =
+        previousSessionKey !== undefined
+          ? cancelledRetryStatesRef.current.get(previousSessionKey)
+          : undefined;
+      if (
+        previousSessionKey &&
+        previousStates &&
+        previousSessionKey !== logicalSessionKey
+      ) {
+        const currentStates =
+          cancelledRetryStatesRef.current.get(logicalSessionKey) ?? [];
+        cancelledRetryStatesRef.current.set(
+          logicalSessionKey,
+          mergeCancelledRetryEntries(
+            currentStates,
+            previousStates.map((previous) => ({ state: previous.state })),
+          ),
+        );
+        cancelledRetryStatesRef.current.delete(previousSessionKey);
+      }
+      return;
+    }
+    if (
+      retryOwnerMatchesCurrent(
+        previousOwner,
+        connection.sessionId,
+        connection.workspaceCwd,
+        composerSourceVersionRef.current,
+      )
+    ) {
+      return;
+    }
+    if (previousOwner.workspaceCwd === undefined && previousOwner.sessionKey) {
+      cancelledRetryStatesRef.current.delete(previousOwner.sessionKey);
+    }
+    retryOwnerRef.current = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+      sessionKey: logicalSessionKey,
+      sourceVersion: composerSourceVersionRef.current,
+      snapshot: currentSnapshot,
+    };
+    lastSubmittedPromptRef.current = '';
+    lastSubmittedImagesRef.current = undefined;
+    lastSubmittedFilesRef.current = undefined;
+    lastSubmittedInputAnnotationsRef.current = undefined;
+    lastSubmittedSourceVersionRef.current = -1;
+    retryableTurnErrorIdRef.current = null;
+    retryableTurnErrorIdentityRef.current = undefined;
+    retriedTurnErrorIdRef.current = null;
+    failedTurnErrorRetryRef.current = null;
+    setShowRetryHint(false);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    logicalSessionKey,
+    sessionOwnerGuard,
+  ]);
+  const applyCancelledRetryState = useCallback(
+    (state: CancelledRetryState): CancelledRetryRestoreResult => {
+      const currentBlocks = store.getSnapshot().blocks;
+      if (state.kind === 'failed-prompt') {
+        let failed = state.failed;
+        const latestUserMessage = getLatestUserBlock(currentBlocks);
+        if (!matchesUserMessageIdentity(latestUserMessage, failed.identity)) {
+          if (
+            !matchesUserMessageIdentity(
+              latestUserMessage,
+              failed.previousIdentity,
+            )
+          ) {
+            return 'invalid';
+          }
+          store.appendLocalUserMessage(
+            failed.text,
+            failed.images?.map((image) => ({
+              data: image.data,
+              mimeType: image.media_type,
+            })),
+            failed.inputAnnotations?.length
+              ? { inputAnnotations: failed.inputAnnotations }
+              : undefined,
+            failed.files?.map((file) => ({
+              name: file.name,
+              mimeType: file.media_type,
+            })),
+          );
+          const rehydratedMessage = getLatestUserBlock(
+            store.getSnapshot().blocks,
+          );
+          if (!rehydratedMessage || rehydratedMessage === latestUserMessage) {
+            return 'invalid';
+          }
+          failed = {
+            ...failed,
+            messageId: rehydratedMessage.id,
+            identity: { block: rehydratedMessage },
+          };
+          state.failed = failed;
+        } else if (
+          latestUserMessage &&
+          (latestUserMessage.id !== failed.messageId ||
+            latestUserMessage !== failed.identity.block)
+        ) {
+          failed = {
+            ...failed,
+            messageId: latestUserMessage.id,
+            identity: { block: latestUserMessage },
+          };
+          state.failed = failed;
+        }
+        if (
+          !displayMessages.some((message) => message.id === failed.messageId)
+        ) {
+          return 'pending';
+        }
+        failed = {
+          ...failed,
+          owner: retryOwnerRef.current,
+        };
+        state.failed = failed;
+        updateFailedPrompt(failed);
+        setFailedPromptRetry(null);
+        return 'restored';
+      }
+      const currentTurnError = getRetryableTurnError(currentBlocks);
+      if (!matchesTurnErrorIdentity(currentTurnError, state.identity)) {
+        return 'invalid';
+      }
+      const renderedTurnError = getRetryableTurnError(blocks);
+      if (
+        !renderedTurnError ||
+        !matchesTurnErrorIdentity(renderedTurnError, state.identity)
+      ) {
+        return 'pending';
+      }
+      lastSubmittedPromptRef.current = state.text;
+      lastSubmittedImagesRef.current = state.images;
+      lastSubmittedFilesRef.current = state.files;
+      lastSubmittedInputAnnotationsRef.current = state.inputAnnotations;
+      lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
+      retryableTurnErrorIdRef.current = renderedTurnError.id;
+      retryableTurnErrorIdentityRef.current = { block: renderedTurnError };
+      retriedTurnErrorIdRef.current = state.previousRetriedTurnErrorId;
+      setShowRetryHint(state.previousShowRetryHint);
+      setFailedPromptRetry(null);
+      return 'restored';
+    },
+    [blocks, displayMessages, store, updateFailedPrompt],
+  );
+  const restoreOrDeferCancelledRetry = useCallback(
+    (owner: CancelledRetryOwner, state: CancelledRetryState) => {
+      const resolvedSessionKey = owner.sessionKey;
+      if (
+        !resolvedSessionKey ||
+        (owner.workspaceCwd === undefined && !owner.snapshot.isCurrent())
+      ) {
+        return;
+      }
+      const states = mergeCancelledRetryEntries(
+        cancelledRetryStatesRef.current.get(resolvedSessionKey) ?? [],
+        [
+          {
+            ...(owner.workspaceCwd === undefined ? { owner } : {}),
+            state,
+          },
+        ],
+      );
+      cancelledRetryStatesRef.current.set(resolvedSessionKey, states);
+      if (appMountedRef.current) {
+        setCancelledRetryRevision((current) => current + 1);
+      }
+    },
+    [],
+  );
+  useLayoutEffect(() => {
+    if (
+      !logicalSessionKey ||
+      sessionWriteBlocked ||
+      connection.loadingTranscript ||
+      connection.catchingUp
+    ) {
+      return;
+    }
+    const exactStates =
+      cancelledRetryStatesRef.current.get(logicalSessionKey) ?? [];
+    const pendingExactStates: CancelledRetryEntry[] = [];
+    for (const entry of exactStates) {
+      if (entry.owner && !entry.owner.snapshot.isCurrent()) {
+        continue;
+      }
+      if (applyCancelledRetryState(entry.state) === 'pending') {
+        pendingExactStates.push(entry);
+      }
+    }
+    if (pendingExactStates.length > 0) {
+      cancelledRetryStatesRef.current.set(
+        logicalSessionKey,
+        pendingExactStates,
+      );
+    } else {
+      cancelledRetryStatesRef.current.delete(logicalSessionKey);
+    }
+  }, [
+    applyCancelledRetryState,
+    cancelledRetryRevision,
+    connection.catchingUp,
+    connection.loadingTranscript,
+    logicalSessionKey,
+    sessionWriteBlocked,
+  ]);
   const connected = connection.status === 'connected';
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
@@ -3951,8 +4604,8 @@ export function App({
     }
     // document.activeElement retargets to the shadow host in shadow-DOM
     // portal mode; read the focused node from the surface's own root.
-    const surfaceRoot = surface.getRootNode() as Document | ShadowRoot;
-    if (!surface.contains(surfaceRoot.activeElement)) surface.focus();
+    const surfaceActive = getShadowAwareActiveElement(surface);
+    if (!surface.contains(surfaceActive)) surface.focus();
     // Keydowns inside the sandboxed HTML preview iframe never reach the
     // surface's Tab-wrap handler or the window Escape handler, and a Tab
     // past the preview's last focusable lands focus natively outside the
@@ -4012,9 +4665,7 @@ export function App({
         return;
       }
       const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
-      const focused = (
-        event.currentTarget.getRootNode() as Document | ShadowRoot
-      ).activeElement;
+      const focused = getShadowAwareActiveElement(event.currentTarget);
       if (!first || !last) {
         if (focused === event.currentTarget) event.preventDefault();
         return;
@@ -4681,9 +5332,22 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
+  const promptPreparationOwnerRef = useRef<symbol | null>(null);
+  const beginPromptPreparation = useCallback(() => {
+    const owner = Symbol('prompt-preparation');
+    promptPreparationOwnerRef.current = owner;
+    setIsPreparingPrompt(true);
+    return owner;
+  }, []);
+  const finishPromptPreparation = useCallback((owner: symbol | undefined) => {
+    if (!owner || promptPreparationOwnerRef.current !== owner) return;
+    promptPreparationOwnerRef.current = null;
+    setIsPreparingPrompt(false);
+  }, []);
   const planPreparationTokenRef = useRef(0);
   useLayoutEffect(() => {
     planPreparationTokenRef.current += 1;
+    promptPreparationOwnerRef.current = null;
     setIsPreparingPrompt(false);
   }, [logicalSessionKey]);
   const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
@@ -4756,18 +5420,21 @@ export function App({
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
-      const primaryWorkspaceCwd = workspaces.find(
+      const primaryWorkspaceCwd = ordinaryWorkspaces.find(
         (entry) => entry.primary,
       )?.cwd;
       const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
       const acceptedWorkspaceCwd = requestedWorkspaceCwd
-        ? workspaces.find(
+        ? ordinaryWorkspaces.find(
             (entry) =>
               entry.cwd === requestedWorkspaceCwd && entry.trusted === true,
           )?.cwd
         : undefined;
       const targetWorkspaceCwd =
-        lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd;
+        ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+          ?.cwd ??
+        acceptedWorkspaceCwd ??
+        primaryWorkspaceCwd;
       const catalogWorkspaceCwd =
         targetWorkspaceCwd ??
         workspace.workspaceCwd ??
@@ -4841,7 +5508,7 @@ export function App({
     sessionActions,
     sessionCatalogController,
     workspace.workspaceCwd,
-    workspaces,
+    ordinaryWorkspaces,
   ]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
@@ -4852,11 +5519,22 @@ export function App({
       return connectionRef.current.workspaceCwd;
     }
     return (
-      lockedWorkspaceCwd ??
+      workspacesRef.current.find((entry) => entry.cwd === lockedWorkspaceCwd)
+        ?.cwd ??
       selectedWorkspaceCwdRef.current ??
       workspacesRef.current.find((entry) => entry.primary)?.cwd
     );
   }, [lockedWorkspaceCwd]);
+  const retryOwnerIsCurrent = useCallback(
+    (owner: CancelledRetryOwner) =>
+      retryOwnerMatchesCurrent(
+        owner,
+        connectionRef.current.sessionId,
+        getComposerWorkspaceCwd(),
+        composerSourceVersionRef.current,
+      ),
+    [getComposerWorkspaceCwd],
+  );
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
@@ -4873,6 +5551,7 @@ export function App({
     async (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
@@ -4881,6 +5560,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: () => void;
+        onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
@@ -4892,46 +5572,62 @@ export function App({
         );
       }
       const isUserPrompt = !text.trimStart().startsWith('/');
-      const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
-      const previousLastSubmittedImages = lastSubmittedImagesRef.current;
-      const previousLastSubmittedInputAnnotations =
-        lastSubmittedInputAnnotationsRef.current;
-      const previousLastSubmittedSourceVersion =
-        lastSubmittedSourceVersionRef.current;
-      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
-      const previousShowRetryHint = showRetryHintRef.current;
-      const restoreCancelledSubmitState = () => {
-        setIsPreparingPrompt(false);
-        lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
-        lastSubmittedImagesRef.current = previousLastSubmittedImages;
-        lastSubmittedInputAnnotationsRef.current =
-          previousLastSubmittedInputAnnotations;
-        lastSubmittedSourceVersionRef.current =
-          previousLastSubmittedSourceVersion;
-        retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
-        setShowRetryHint(previousShowRetryHint);
+      let promptPreparationOwner: symbol | undefined;
+      const startPreparing = () => {
+        promptPreparationOwner ??= beginPromptPreparation();
       };
-      if (!opts?.retry && isUserPrompt) {
-        lastSubmittedPromptRef.current = text;
-        lastSubmittedImagesRef.current = images;
-        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
-        lastSubmittedSourceVersionRef.current =
-          composerSourceVersionRef.current;
-        retriedTurnErrorIdRef.current = null;
-      }
-      setShowRetryHint(false);
+      const finishPreparing = () => {
+        finishPromptPreparation(promptPreparationOwner);
+      };
+      const restoreCancelledSubmitState = () => {
+        finishPreparing();
+        opts?.onCancelledBeforeAdmission?.();
+      };
       const shouldShowPreparing = !connectionRef.current.sessionId;
-      if (onSubmitBeforeRef.current) {
-        const sourceSessionId = connectionRef.current.sessionId;
-        const sourceWorkspaceCwd = getComposerWorkspaceCwd();
-        const sourceVersion = composerSourceVersionRef.current;
-        setIsPreparingPrompt(true);
+      const submitBefore = onSubmitBeforeRef.current;
+      const admissionSource = {
+        owner: sessionOwnerGuard.capture(),
+        sessionId: connectionRef.current.sessionId,
+        workspaceCwd: getComposerWorkspaceCwd(),
+        sourceVersion: composerSourceVersionRef.current,
+        writeBlockGeneration: sessionWriteBlockGenerationRef.current,
+      };
+      const admissionOwnerIsCurrent = (allocatedSessionId?: string) => {
+        if (!appMountedRef.current) return false;
+        const currentSessionId = connectionRef.current.sessionId;
+        const sessionMatches =
+          currentSessionId === admissionSource.sessionId ||
+          (admissionSource.sessionId === undefined &&
+            (currentSessionId === undefined ||
+              (allocatedSessionId !== undefined &&
+                currentSessionId === allocatedSessionId)));
+        const ownAllocationSucceeded =
+          admissionSource.sessionId === undefined &&
+          allocatedSessionId !== undefined &&
+          (currentSessionId === undefined ||
+            currentSessionId === allocatedSessionId);
+        return (
+          (admissionSource.owner.isCurrent() || ownAllocationSucceeded) &&
+          sessionMatches &&
+          (ownAllocationSucceeded ||
+            getComposerWorkspaceCwd() === admissionSource.workspaceCwd) &&
+          composerSourceVersionRef.current === admissionSource.sourceVersion
+        );
+      };
+      const admissionSourceIsCurrent = (allocatedSessionId?: string) =>
+        admissionOwnerIsCurrent(allocatedSessionId) &&
+        !sessionWriteBlockedRef.current &&
+        sessionWriteBlockGenerationRef.current ===
+          admissionSource.writeBlockGeneration;
+      if (submitBefore) {
+        startPreparing();
         try {
-          await onSubmitBeforeRef.current({
-            sessionId: sourceSessionId,
+          await submitBefore({
+            sessionId: admissionSource.sessionId,
             prompt: text,
           });
         } catch (err) {
+          if (!appMountedRef.current) return;
           console.warn(
             '[web-shell] onSubmitBefore rejected, prompt cancelled',
             err,
@@ -4941,38 +5637,28 @@ export function App({
           restoreCancelledSubmitState();
           return;
         }
-        if (
-          connectionRef.current.sessionId !== sourceSessionId ||
-          getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
-          composerSourceVersionRef.current !== sourceVersion
-        ) {
+        if (!appMountedRef.current) return;
+        if (!admissionSourceIsCurrent()) {
           restoreCancelledSubmitState();
           return;
         }
-        // Only reset if session already exists; otherwise keep true and let
-        // ensureSessionForPrompt's finally block handle it.
-        if (!shouldShowPreparing) {
-          setIsPreparingPrompt(false);
-        }
       }
-      if (!onSubmitBeforeRef.current && shouldShowPreparing) {
-        setIsPreparingPrompt(true);
+      if (!submitBefore && shouldShowPreparing) {
+        startPreparing();
       }
-      clearFollowup();
       const existingSessionWorkspaceCwd = getComposerWorkspaceCwd();
       let allocatedSessionId: string | undefined;
       try {
         allocatedSessionId = await ensureSessionForPrompt();
-        if (opts?.ownerRef) opts.ownerRef.current = sessionOwnerGuard.capture();
       } finally {
-        if (shouldShowPreparing) {
-          setIsPreparingPrompt(false);
+        if (appMountedRef.current && shouldShowPreparing) {
+          finishPreparing();
         }
       }
-      if (opts?.commitComposerAccepted) {
-        opts.commitComposerAccepted();
-      } else if (opts?.clearComposerOnPromptStart) {
-        editorRef.current?.clear();
+      if (!appMountedRef.current) return;
+      if (!admissionSourceIsCurrent(allocatedSessionId)) {
+        restoreCancelledSubmitState();
+        return;
       }
       const sessionIdAfterEnsure =
         connectionRef.current.sessionId ?? allocatedSessionId;
@@ -4982,10 +5668,46 @@ export function App({
           ? allocatedOwner.workspaceCwd
           : undefined
         : existingSessionWorkspaceCwd;
+      if (
+        !opts?.retry &&
+        opts?.optimisticUserMessage !== false &&
+        isUserPrompt
+      ) {
+        lastSubmittedPromptRef.current = text;
+        lastSubmittedImagesRef.current = images;
+        lastSubmittedFilesRef.current = files;
+        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
+        lastSubmittedSourceVersionRef.current =
+          composerSourceVersionRef.current;
+        retryableTurnErrorIdRef.current = null;
+        retryableTurnErrorIdentityRef.current = undefined;
+        retriedTurnErrorIdRef.current = null;
+        failedTurnErrorRetryRef.current = null;
+        retryOwnerRef.current = {
+          sessionId: sessionIdAfterEnsure,
+          workspaceCwd: promptWorkspaceCwd,
+          sessionKey: getLogicalSessionKey(
+            sessionIdAfterEnsure,
+            promptWorkspaceCwd,
+          ),
+          sourceVersion: composerSourceVersionRef.current,
+          snapshot: sessionOwnerGuard.capture(),
+        };
+      }
+      setShowRetryHint(false);
+      finishPreparing();
+      if (opts?.ownerRef) opts.ownerRef.current = sessionOwnerGuard.capture();
+      clearFollowup();
+      if (opts?.commitComposerAccepted) {
+        opts.commitComposerAccepted();
+      } else if (opts?.clearComposerOnPromptStart) {
+        editorRef.current?.clear();
+      }
       let admissionStarted = false;
       let admitted = false;
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
+        files,
         inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
@@ -5006,7 +5728,10 @@ export function App({
           opts?.onAdmitted?.();
         },
       };
-      if (sessionIdAfterEnsure && (text.trim() || (images?.length ?? 0) > 0)) {
+      if (
+        sessionIdAfterEnsure &&
+        (text.trim() || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
+      ) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId: sessionIdAfterEnsure,
@@ -5014,8 +5739,8 @@ export function App({
           queued: false,
         });
       }
-      const previousUserMessageId = opts?.onOptimisticUserMessage
-        ? getLatestUserBlockId(store.getSnapshot().blocks)
+      const previousUserMessage = opts?.onOptimisticUserMessage
+        ? getLatestUserBlock(store.getSnapshot().blocks)
         : undefined;
       const resultPromise = (
         sessionActions.sendPrompt as (
@@ -5028,11 +5753,16 @@ export function App({
         opts?.optimisticUserMessage !== false &&
         opts?.onOptimisticUserMessage
       ) {
-        const messageId = getLatestUserBlockId(store.getSnapshot().blocks);
-        if (messageId && messageId !== previousUserMessageId) {
+        const message = getLatestUserBlock(store.getSnapshot().blocks);
+        if (message && message !== previousUserMessage) {
           opts.onOptimisticUserMessage({
             sessionId: sessionIdAfterEnsure,
-            messageId,
+            messageId: message.id,
+            identity: { block: message },
+            owner: retryOwnerRef.current,
+            ...(previousUserMessage
+              ? { previousIdentity: { block: previousUserMessage } }
+              : {}),
           });
         }
       }
@@ -5051,8 +5781,10 @@ export function App({
       }
     },
     [
+      beginPromptPreparation,
       clearFollowup,
       ensureSessionForPrompt,
+      finishPromptPreparation,
       getComposerWorkspaceCwd,
       sessionCatalogController,
       sessionActions,
@@ -5116,10 +5848,13 @@ export function App({
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
-  const gitDiffWorkspaceCwd = activeWorkspaceCwd;
+  const gitDiffWorkspaceCwd = isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
+    ? undefined
+    : activeWorkspaceCwd;
   const gitModeEligible = Boolean(
     !connection.sessionId &&
-      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      ordinaryWorkspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
+        ?.trusted &&
       selectedWorkspaceGitStatus?.branch,
   );
   useEffect(() => {
@@ -5183,7 +5918,7 @@ export function App({
         sessionId: connection.sessionId,
         workspaces:
           workspace.capabilities?.workspaces || lockedWorkspaceCapability
-            ? workspaces
+            ? ordinaryWorkspaces
             : undefined,
       }),
     [
@@ -5191,7 +5926,7 @@ export function App({
       connection.sessionId,
       lockedWorkspaceCapability,
       workspace.capabilities,
-      workspaces,
+      ordinaryWorkspaces,
     ],
   );
   const [voiceUserRevision, setVoiceUserRevision] = useState(0);
@@ -5246,32 +5981,66 @@ export function App({
     [pushToast],
   );
   const handleFailedPromptRetry = useCallback(() => {
-    const failed = failedPromptRef.current;
+    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+      return;
+    }
+    let failed = failedPromptRef.current;
     if (!failed || failed.sessionId !== connectionRef.current.sessionId) {
       updateFailedPrompt(null);
       return;
     }
-    const retryOwner = {
-      sourceVersion: composerSourceVersionRef.current,
-      sessionId: connectionRef.current.sessionId,
-      workspaceCwd: getComposerWorkspaceCwd(),
-    };
-    const retryOwnerIsCurrent = () =>
-      composerSourceVersionRef.current === retryOwner.sourceVersion &&
-      connectionRef.current.sessionId === retryOwner.sessionId &&
-      getComposerWorkspaceCwd() === retryOwner.workspaceCwd;
+    const retryOwner = failed.owner;
+    if (!retryOwnerIsCurrent(retryOwner)) {
+      updateFailedPrompt(null);
+      return;
+    }
+    const currentFailedBlock = getLatestUserBlock(store.getSnapshot().blocks);
+    if (
+      !currentFailedBlock ||
+      !matchesUserMessageIdentity(
+        currentFailedBlock,
+        failed.identity,
+        retryOwner.snapshot.isCurrent(),
+      )
+    ) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (
+      currentFailedBlock !== failed.identity.block ||
+      currentFailedBlock.id !== failed.messageId
+    ) {
+      failed = {
+        ...failed,
+        messageId: currentFailedBlock.id,
+        identity: { block: currentFailedBlock },
+      };
+    }
     updateFailedPrompt(null);
     const retryStartedAt = Date.now();
+    const retryAttemptId = ++cancelledRetryAttemptRef.current;
+    const retryTranscriptIdentity: FailedPromptRetry['transcriptIdentity'] = {
+      kind: 'failed-prompt',
+      identity: failed.identity,
+    };
+    const retryTranscriptIsCurrent = () =>
+      retryTranscriptIdentityMatches(
+        store.getSnapshot().blocks,
+        retryTranscriptIdentity,
+        retryOwner.snapshot.isCurrent(),
+      );
     setFailedPromptRetry({
       sessionId: failed.sessionId,
       messageId: failed.messageId,
       startedAt: retryStartedAt,
       admitted: false,
       settled: false,
+      owner: retryOwner,
+      transcriptIdentity: retryTranscriptIdentity,
     });
     let admitted = false;
     let admissionStarted = false;
-    sendPrompt(failed.text, failed.images, {
+    sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
@@ -5279,24 +6048,34 @@ export function App({
       },
       onAdmitted: () => {
         admitted = true;
-        if (!retryOwnerIsCurrent()) return;
+        if (!retryOwnerIsCurrent(retryOwner)) return;
         setFailedPromptRetry((current) =>
-          current?.sessionId === failed.sessionId &&
-          current.messageId === failed.messageId
-            ? { ...current, admitted: true }
+          current?.transcriptIdentity === retryTranscriptIdentity
+            ? retryTranscriptIsCurrent()
+              ? { ...current, admitted: true }
+              : null
             : current,
         );
       },
+      onCancelledBeforeAdmission: () => {
+        restoreOrDeferCancelledRetry(retryOwner, {
+          kind: 'failed-prompt',
+          attemptId: retryAttemptId,
+          failed,
+        });
+      },
     })
       .catch((error: unknown) => {
-        if (!retryOwnerIsCurrent()) return;
+        if (!retryOwnerIsCurrent(retryOwner)) return;
         const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
         if (admissionStarted && !admitted && !definitelyRejected) {
+          if (!retryTranscriptIsCurrent()) return;
           updateUnknownPromptAdmission({
             sessionId: failed.sessionId,
             messageId: failed.messageId,
             text: failed.text,
             images: failed.images ? [...failed.images] : undefined,
+            files: failed.files ? [...failed.files] : undefined,
             inputAnnotations: failed.inputAnnotations,
             payloadAvailable: true,
           });
@@ -5307,28 +6086,32 @@ export function App({
           );
           return;
         }
-        if (
-          !admitted &&
-          connectionRef.current.sessionId === failed.sessionId &&
-          getLatestUserBlockId(store.getSnapshot().blocks) === failed.messageId
-        ) {
-          updateFailedPrompt(failed);
+        if (!admitted) {
+          restoreOrDeferCancelledRetry(retryOwner, {
+            kind: 'failed-prompt',
+            attemptId: retryAttemptId,
+            failed,
+          });
         }
-        reportError(error, 'Failed to resend message');
+        if (retryTranscriptIsCurrent()) {
+          reportError(error, 'Failed to resend message');
+        }
       })
       .finally(() => {
-        if (!retryOwnerIsCurrent()) return;
+        if (!retryOwnerIsCurrent(retryOwner)) return;
         setFailedPromptRetry((current) =>
-          current?.sessionId === failed.sessionId &&
-          current.messageId === failed.messageId
-            ? { ...current, settled: true }
+          current?.transcriptIdentity === retryTranscriptIdentity
+            ? retryTranscriptIsCurrent()
+              ? { ...current, settled: true }
+              : null
             : current,
         );
       });
   }, [
-    getComposerWorkspaceCwd,
     pushToast,
     reportError,
+    restoreOrDeferCancelledRetry,
+    retryOwnerIsCurrent,
     sendPrompt,
     store,
     t,
@@ -5343,6 +6126,8 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -5361,6 +6146,7 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions,
     store,
@@ -5373,14 +6159,17 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       onComplete?: () => void,
       commitComposerAccepted?: ComposerSubmitCommit,
       inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
+        const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
+        const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
         onSubmitBeforeRef
           .current({
             sessionId: sourceSessionId,
@@ -5388,6 +6177,10 @@ export function App({
           })
           .then(() => {
             if (
+              !appMountedRef.current ||
+              !sourceOwner.isCurrent() ||
+              sessionWriteBlockedRef.current ||
+              sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
               connectionRef.current.sessionId !== sourceSessionId ||
               getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
               composerSourceVersionRef.current !== sourceVersion
@@ -5397,6 +6190,7 @@ export function App({
             const result = rawEnqueuePrompt(
               text,
               images,
+              files,
               onComplete,
               inputAnnotations,
             );
@@ -5407,7 +6201,12 @@ export function App({
                 editorRef.current?.clear();
               }
             }
-            if (sourceSessionId && (text.trim() || (images?.length ?? 0) > 0)) {
+            if (
+              sourceSessionId &&
+              (text.trim() ||
+                (images?.length ?? 0) > 0 ||
+                (files?.length ?? 0) > 0)
+            ) {
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
                 sessionId: sourceSessionId,
@@ -5432,11 +6231,15 @@ export function App({
       const result = rawEnqueuePrompt(
         text,
         images,
+        files,
         onComplete,
         inputAnnotations,
       );
       const sessionId = connectionRef.current.sessionId;
-      if (sessionId && (text.trim() || (images?.length ?? 0) > 0)) {
+      if (
+        sessionId &&
+        (text.trim() || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
+      ) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId,
@@ -5450,7 +6253,12 @@ export function App({
       }
       return result;
     },
-    [getComposerWorkspaceCwd, rawEnqueuePrompt, sessionCatalogController],
+    [
+      getComposerWorkspaceCwd,
+      rawEnqueuePrompt,
+      sessionCatalogController,
+      sessionOwnerGuard,
+    ],
   );
 
   useEffect(() => {
@@ -5804,6 +6612,9 @@ export function App({
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
+  const compactModeSetting = workspaceSettings.find(
+    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
+  );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
       targetedWorkspaceSettings,
@@ -6068,6 +6879,11 @@ export function App({
   compactModeRef.current = compactMode;
 
   useEffect(() => {
+    const value = compactModeSetting?.values.effective;
+    if (typeof value === 'boolean') setCompactMode(value);
+  }, [compactModeSetting?.values.effective]);
+
+  useEffect(() => {
     if (providedTheme) {
       setSelectedTheme(providedTheme);
       return;
@@ -6118,7 +6934,7 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(command, undefined, { ownerRef: owner })
+      sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(refreshSettings)
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
@@ -6222,10 +7038,6 @@ export function App({
       t,
     ],
   );
-
-  useEffect(() => {
-    streamingStateRef.current = streamingState;
-  }, [streamingState]);
 
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
@@ -6335,33 +7147,74 @@ export function App({
   ]);
 
   useEffect(() => {
-    let retryableTurnErrorId: string | null = null;
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const block = blocks[i];
-      if (block?.kind === 'user') break;
-      if (block?.kind === 'error' && block.source === 'turn_error') {
-        retryableTurnErrorId = block.id;
-        break;
-      }
-      if (block?.kind !== 'debug') break;
+    const lastTurnError = getRetryableTurnError(blocks);
+    // Loop-detected turn errors still surface through turn_complete below,
+    // but resubmitting a prompt the daemon stopped for loop protection
+    // tends to re-loop, so no retry affordance is offered for them.
+    const retryableTurnError =
+      lastTurnError &&
+      lastTurnError.kind === 'error' &&
+      isRetryableTurnErrorKind(lastTurnError.errorKind)
+        ? lastTurnError
+        : undefined;
+    if (retryableTurnError) {
+      rearmFailedTurnErrorRetry(retryableTurnError, blocks);
     }
+    const previousIdentity = retryableTurnErrorIdentityRef.current;
+    const identityMatches =
+      previousIdentity === undefined ||
+      (retryableTurnError !== undefined &&
+        matchesTurnErrorIdentity(retryableTurnError, previousIdentity));
+    if (
+      retryableTurnError &&
+      previousIdentity &&
+      identityMatches &&
+      retriedTurnErrorIdRef.current !== null
+    ) {
+      retriedTurnErrorIdRef.current = retryableTurnError.id;
+    }
+    // Same walk as the retry decision above, so turn_complete and the
+    // retry affordance never disagree about whether the current turn has
+    // a turn error (e.g. across a trailing background notification). An
+    // error the user already retried stays suppressed, mirroring the
+    // retry affordance; loop-detected errors are never retried, so they
+    // always surface.
+    lastTurnErrorIdRef.current =
+      lastTurnError && lastTurnError.id !== retriedTurnErrorIdRef.current
+        ? lastTurnError.id
+        : null;
     const canRetry =
       connected &&
-      retryableTurnErrorId !== null &&
-      retryableTurnErrorId !== retriedTurnErrorIdRef.current &&
+      retryableTurnError !== undefined &&
+      identityMatches &&
+      retryableTurnError.id !== retriedTurnErrorIdRef.current &&
+      failedPromptRetry === null &&
       lastSubmittedSourceVersionRef.current ===
         composerSourceVersionRef.current &&
       (lastSubmittedPromptRef.current.length > 0 ||
-        (lastSubmittedImagesRef.current?.length ?? 0) > 0);
-    retryableTurnErrorIdRef.current = canRetry ? retryableTurnErrorId : null;
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0 ||
+        (lastSubmittedFilesRef.current?.length ?? 0) > 0);
+    if (retryableTurnError && previousIdentity && !identityMatches) {
+      lastSubmittedPromptRef.current = '';
+      lastSubmittedImagesRef.current = undefined;
+      lastSubmittedFilesRef.current = undefined;
+      lastSubmittedInputAnnotationsRef.current = undefined;
+      lastSubmittedSourceVersionRef.current = -1;
+      retryableTurnErrorIdentityRef.current = undefined;
+      retriedTurnErrorIdRef.current = null;
+      failedTurnErrorRetryRef.current = null;
+    } else if (canRetry) {
+      retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
+    }
+    retryableTurnErrorIdRef.current = canRetry ? retryableTurnError.id : null;
     setShowRetryHint(canRetry);
-  }, [blocks, connected]);
+  }, [blocks, connected, failedPromptRetry, rearmFailedTurnErrorRetry]);
 
   useEffect(() => {
     onStreamingStateChange?.(streamingState);
   }, [streamingState, onStreamingStateChange]);
 
-  // Reads retryableTurnErrorIdRef which is set by the blocks effect above.
+  // Reads lastTurnErrorIdRef which is set by the blocks effect above.
   // Declaration order matters: this effect must run after the blocks effect
   // so that within the same render, the ref is already updated before we read it.
   const prevStreamingForTurnCompleteRef = useRef(streamingState);
@@ -6395,8 +7248,8 @@ export function App({
         return;
       }
       const turnError =
-        retryableTurnErrorIdRef.current != null
-          ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
+        lastTurnErrorIdRef.current != null
+          ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       if (workspaceCwd) {
         sessionCatalogController.turnCompleted(workspaceCwd);
@@ -6453,6 +7306,7 @@ export function App({
   }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
+    if (connection.loadingTranscript) return;
     if (!connection.sessionId && connection.missingSession) {
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
@@ -6489,6 +7343,7 @@ export function App({
     );
   }, [
     connection.missingSession,
+    connection.loadingTranscript,
     connection.sessionId,
     connection.workspaceCwd,
     onSessionIdChange,
@@ -6746,13 +7601,24 @@ export function App({
     showContextUsage('/context detail', true);
   }, [showContextUsage]);
 
+  const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
-    (name?: string) => {
+    (name?: string, atRecordId?: string) => {
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
-      sessionActions
-        .branchSession(name || undefined)
+      const sourceSessionId = connectionRef.current.sessionId;
+      const requestKey = JSON.stringify([
+        sourceSessionId,
+        name ?? null,
+        atRecordId ?? null,
+      ]);
+      const pending = pendingBranchRequestsRef.current.get(requestKey);
+      if (pending) return pending;
+
+      const request = sessionActions
+        .branchSession(name || undefined, atRecordId)
         .then((result) => {
+          if (!result.switchStarted) return;
           store.dispatch([
             {
               type: 'status',
@@ -6762,22 +7628,69 @@ export function App({
             },
           ]);
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
+          if (
+            error instanceof DOMException &&
+            error.name === 'InvalidStateError' &&
+            error.message === 'A branch request is already in progress'
+          ) {
+            return;
+          }
+          if (isStaleBranchPointError(error)) {
+            if (!transcriptReloadSupported) {
+              pushToast('error', t('branch.staleUnsupported'));
+              return;
+            }
+            // The recovery reload targets whatever session is selected when
+            // the branch call returns. If the user switched away in flight,
+            // report the failure without refreshing the unrelated session.
+            if (connectionRef.current.sessionId !== sourceSessionId) {
+              pushToast('error', t('branch.failed'));
+              return;
+            }
+            let refreshed = false;
+            try {
+              await sessionActions.reloadSession(new AbortController().signal);
+              refreshed = true;
+            } catch (reloadError) {
+              refreshed = isAbortError(reloadError);
+            }
+            // A switch landing while the recovery reload is in flight
+            // supersedes it; the outcome toast belongs to the source session.
+            if (connectionRef.current.sessionId !== sourceSessionId) return;
+            pushToast(
+              'error',
+              t(refreshed ? 'branch.stale' : 'branch.staleRefreshFailed'),
+            );
+            return;
+          }
           reportError(error, t('branch.failed'));
+        })
+        .finally(() => {
+          if (pendingBranchRequestsRef.current.get(requestKey) === request) {
+            pendingBranchRequestsRef.current.delete(requestKey);
+          }
         });
+      pendingBranchRequestsRef.current.set(requestKey, request);
+      return request;
     },
     [
       reportError,
+      pushToast,
       requireActiveSessionForLocalCommand,
       sessionWriteBlocked,
       sessionActions,
       store,
       t,
+      transcriptReloadSupported,
     ],
   );
-  const handleBranchCurrentSession = useCallback(() => {
-    branchCurrentSession();
-  }, [branchCurrentSession]);
+  const handleBranchCurrentSession = useCallback(
+    (atRecordId?: string) => {
+      return branchCurrentSession(undefined, atRecordId);
+    },
+    [branchCurrentSession],
+  );
 
   const composerFocusRequestRef = useRef(0);
   const scheduleComposerFocus = useCallback((sessionId?: string) => {
@@ -7332,6 +8245,19 @@ export function App({
     return () => window.removeEventListener('qwen:open-session', handler);
   }, [handleOpenSessionFromOverview]);
 
+  // Listen for toast requests from deeply nested components (markdown links
+  // and artifact actions reporting a failed external open, for example).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<ToastRequestDetail>).detail;
+      if (detail && typeof detail.message === 'string' && detail.message) {
+        pushToast(detail.tone, detail.message);
+      }
+    };
+    window.addEventListener(TOAST_REQUEST_EVENT, handler);
+    return () => window.removeEventListener(TOAST_REQUEST_EVENT, handler);
+  }, [pushToast]);
+
   useEffect(() => {
     if (
       sidebarSwitchingSessionId !== null &&
@@ -7402,7 +8328,7 @@ export function App({
           admitted = true;
           resolve();
         };
-        sendPrompt(prompt, undefined, { onAdmitted: admit }).then(
+        sendPrompt(prompt, undefined, undefined, { onAdmitted: admit }).then(
           () => {
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
@@ -7639,6 +8565,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       opts?: {
         sendToDaemon?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -7648,10 +8575,12 @@ export function App({
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
         const owner = { current: sessionOwnerGuard.capture() };
-        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const deferComposerCommit =
+          Boolean(onSubmitBeforeRef.current) ||
+          createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
-        sendPrompt(text, images, {
+        sendPrompt(text, images, files, {
           ownerRef: owner,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
@@ -7712,6 +8641,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
@@ -7736,7 +8666,6 @@ export function App({
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
           hasSession: Boolean(connectionRef.current.sessionId),
-          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -7746,6 +8675,7 @@ export function App({
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
+        promptFiles: PromptFile[] | undefined,
         errorMessage: string,
         opts?: {
           optimisticUserMessage?: boolean;
@@ -7769,14 +8699,16 @@ export function App({
             (connectionRef.current.sessionId === admissionOwner.sessionId &&
               getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
-        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const deferComposerCommit =
+          Boolean(onSubmitBeforeRef.current) ||
+          createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
         let admitted = false;
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
-        sendPrompt(promptText, promptImages, {
+        sendPrompt(promptText, promptImages, promptFiles, {
           ownerRef: admissionAttachment,
           ...sendOptions,
           clearComposerOnPromptStart,
@@ -7813,6 +8745,7 @@ export function App({
                 messageId: failedMessage?.messageId,
                 text: promptText,
                 images: promptImages ? [...promptImages] : undefined,
+                files: promptFiles ? [...promptFiles] : undefined,
                 inputAnnotations: sendOptions.inputAnnotations,
                 payloadAvailable: true,
               });
@@ -7829,17 +8762,23 @@ export function App({
             !admitted &&
             failedMessage &&
             failedMessage.sessionId === connectionRef.current.sessionId &&
-            store
-              .getSnapshot()
-              .blocks.some(
-                (block) =>
-                  block.kind === 'user' && block.id === failedMessage.messageId,
-              )
+            matchesUserMessageIdentity(
+              store
+                .getSnapshot()
+                .blocks.find(
+                  (block) =>
+                    block.kind === 'user' &&
+                    block.id === failedMessage.messageId,
+                ),
+              failedMessage.identity,
+              failedMessage.owner.snapshot.isCurrent(),
+            )
           ) {
             updateFailedPrompt({
               ...failedMessage,
               text: promptText,
               images: promptImages,
+              files: promptFiles,
               inputAnnotations: sendOptions.inputAnnotations,
             });
           }
@@ -7856,6 +8795,7 @@ export function App({
               return enqueuePrompt(
                 text,
                 images,
+                files,
                 undefined,
                 commitComposerAccepted,
                 metadata?.inputAnnotations,
@@ -7864,6 +8804,7 @@ export function App({
             return submitPromptFromEditor(
               text,
               images,
+              files,
               'Failed to send hidden slash command',
               { inputAnnotations: metadata?.inputAnnotations },
             );
@@ -7925,7 +8866,7 @@ export function App({
               }
               return blockLocalCommandDuringTurn();
             }
-            return handleGoalSlashCommand(text, images, {
+            return handleGoalSlashCommand(text, images, files, {
               commitComposerAccepted,
             });
           }
@@ -7990,16 +8931,23 @@ export function App({
               const owner = { current: sessionOwnerGuard.capture() };
               handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
-                const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+                const deferComposerCommit =
+                  Boolean(onSubmitBeforeRef.current) ||
+                  createSessionPromiseRef.current !== null;
                 const clearComposerOnPromptStart =
                   !connectionRef.current.sessionId || deferComposerCommit;
-                sendPrompt(`/language ui ${nextLanguage}`, undefined, {
-                  ownerRef: owner,
-                  clearComposerOnPromptStart,
-                  commitComposerAccepted: clearComposerOnPromptStart
-                    ? commitComposerAccepted
-                    : undefined,
-                })
+                sendPrompt(
+                  `/language ui ${nextLanguage}`,
+                  undefined,
+                  undefined,
+                  {
+                    ownerRef: owner,
+                    clearComposerOnPromptStart,
+                    commitComposerAccepted: clearComposerOnPromptStart
+                      ? commitComposerAccepted
+                      : undefined,
+                  },
+                )
                   .then(() => {
                     if (!owner.current.isCurrent()) return;
                     return sessionActions.refreshCommands();
@@ -8094,6 +9042,7 @@ export function App({
                 return enqueuePrompt(
                   text,
                   images,
+                  files,
                   undefined,
                   commitComposerAccepted,
                   metadata?.inputAnnotations,
@@ -8102,6 +9051,7 @@ export function App({
               return submitPromptFromEditor(
                 text,
                 images,
+                files,
                 'Failed to send /model --fast',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
@@ -8163,6 +9113,7 @@ export function App({
                 return submitPromptFromEditor(
                   prompt,
                   images,
+                  files,
                   'Failed to send plan prompt',
                   { inputAnnotations: metadata?.inputAnnotations },
                 );
@@ -8172,15 +9123,23 @@ export function App({
             const planPreparationToken = prompt
               ? ++planPreparationTokenRef.current
               : undefined;
-            if (prompt) setIsPreparingPrompt(true);
+            const planPromptPreparationOwner = prompt
+              ? beginPromptPreparation()
+              : undefined;
             const owner = sessionOwnerGuard.capture();
+            const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
             sessionActions
               .setApprovalMode('plan')
               .then(() => {
                 if (!owner.isCurrent()) return;
                 setPendingMode('plan');
-                if (prompt) {
-                  return sendPrompt(prompt, images, {
+                if (
+                  prompt &&
+                  !sessionWriteBlockedRef.current &&
+                  sessionWriteBlockGenerationRef.current ===
+                    writeBlockGeneration
+                ) {
+                  return sendPrompt(prompt, images, files, {
                     clearComposerOnPromptStart: true,
                     inputAnnotations: metadata?.inputAnnotations,
                   }).catch((error: unknown) =>
@@ -8197,7 +9156,7 @@ export function App({
                   prompt &&
                   planPreparationTokenRef.current === planPreparationToken
                 ) {
-                  setIsPreparingPrompt(false);
+                  finishPromptPreparation(planPromptPreparationOwner);
                 }
               });
             return prompt ? false : true;
@@ -8241,6 +9200,7 @@ export function App({
                 return enqueuePrompt(
                   skillPrompt,
                   images,
+                  files,
                   undefined,
                   commitComposerAccepted,
                   metadata?.inputAnnotations,
@@ -8249,6 +9209,7 @@ export function App({
               return submitPromptFromEditor(
                 skillPrompt,
                 images,
+                files,
                 'Failed to send /skills command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
@@ -8469,6 +9430,7 @@ export function App({
                 return enqueuePrompt(
                   text,
                   images,
+                  files,
                   undefined,
                   commitComposerAccepted,
                   metadata?.inputAnnotations,
@@ -8477,6 +9439,7 @@ export function App({
               return submitPromptFromEditor(
                 text,
                 images,
+                files,
                 'Failed to send /rename command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
@@ -8699,14 +9662,21 @@ export function App({
           return enqueuePrompt(
             text,
             images,
+            files,
             undefined,
             commitComposerAccepted,
             metadata?.inputAnnotations,
           );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send command', {
-          inputAnnotations: metadata?.inputAnnotations,
-        });
+        return submitPromptFromEditor(
+          text,
+          images,
+          files,
+          'Failed to send command',
+          {
+            inputAnnotations: metadata?.inputAnnotations,
+          },
+        );
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
@@ -8716,17 +9686,18 @@ export function App({
           return true;
         }
         const needsSession = !connectionRef.current.sessionId;
+        let shellPromptPreparationOwner: symbol | undefined;
         if (needsSession) {
           if (shellSubmitInFlightRef.current) return false;
           shellSubmitInFlightRef.current = true;
-          setIsPreparingPrompt(true);
+          shellPromptPreparationOwner = beginPromptPreparation();
         }
         let sessionCreated = false;
         const generationAtSubmit = drainGenerationRef.current;
         void ensureSessionForPrompt()
           .finally(() => {
             if (needsSession) {
-              setIsPreparingPrompt(false);
+              finishPromptPreparation(shellPromptPreparationOwner);
               shellSubmitInFlightRef.current = false;
             }
           })
@@ -8772,18 +9743,26 @@ export function App({
           return enqueuePrompt(
             text,
             images,
+            files,
             undefined,
             commitComposerAccepted,
             metadata?.inputAnnotations,
           );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send message', {
-          inputAnnotations: metadata?.inputAnnotations,
-          trackSendFailure: true,
-        });
+        return submitPromptFromEditor(
+          text,
+          images,
+          files,
+          'Failed to send message',
+          {
+            inputAnnotations: metadata?.inputAnnotations,
+            trackSendFailure: true,
+          },
+        );
       }
     },
     [
+      beginPromptPreparation,
       sendPrompt,
       sessionActions,
       sessionOwnerGuard,
@@ -8799,6 +9778,7 @@ export function App({
       openGoals,
       createNewSession,
       ensureSessionForPrompt,
+      finishPromptPreparation,
       getComposerWorkspaceCwd,
       sessionCatalogController,
       gitDiffWorkspaceCwd,
@@ -8821,7 +9801,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -8843,12 +9822,14 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       const accepted = handleSubmitRef.current(
         text,
         images,
+        files,
         commitComposerAccepted,
         metadata,
       );
@@ -8939,6 +9920,7 @@ export function App({
       : draft;
     if (restoredText !== draft) editor.setText(restoredText);
     if (current.images?.length) editor.restoreImages(current.images);
+    if (current.files?.length) editor.restoreFiles(current.files);
     if (current.inputAnnotations?.length) {
       editor.restoreInputAnnotations?.(current.inputAnnotations);
     }
@@ -8957,39 +9939,78 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
-    if (sessionWriteBlockedRef.current) return;
+    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+      return;
+    }
     if (
       showRetryHintRef.current &&
       connected &&
       streamingStateRef.current === 'idle' &&
       retryableTurnErrorIdRef.current &&
+      retryableTurnErrorIdentityRef.current &&
       connectionRef.current.sessionId &&
       (lastSubmittedPromptRef.current ||
-        (lastSubmittedImagesRef.current?.length ?? 0) > 0)
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0 ||
+        (lastSubmittedFilesRef.current?.length ?? 0) > 0)
     ) {
-      const retryErrorId = retryableTurnErrorIdRef.current;
+      const savedRetryErrorIdentity = retryableTurnErrorIdentityRef.current;
+      const currentRetryError = getRetryableTurnError(
+        store.getSnapshot().blocks,
+      );
+      if (
+        !savedRetryErrorIdentity ||
+        !currentRetryError ||
+        !matchesTurnErrorIdentity(currentRetryError, savedRetryErrorIdentity)
+      ) {
+        lastSubmittedPromptRef.current = '';
+        lastSubmittedImagesRef.current = undefined;
+        lastSubmittedFilesRef.current = undefined;
+        lastSubmittedInputAnnotationsRef.current = undefined;
+        lastSubmittedSourceVersionRef.current = -1;
+        retryableTurnErrorIdRef.current = null;
+        retryableTurnErrorIdentityRef.current = undefined;
+        retriedTurnErrorIdRef.current = null;
+        setShowRetryHint(false);
+        return;
+      }
+      const retryErrorId = currentRetryError.id;
+      const retryErrorIdentity = { block: currentRetryError };
       const retrySessionId = connectionRef.current.sessionId;
-      const retryWorkspaceCwd = getComposerWorkspaceCwd();
-      const retrySourceVersion = composerSourceVersionRef.current;
       const retryText = lastSubmittedPromptRef.current;
       const retryImages = lastSubmittedImagesRef.current;
+      const retryFiles = lastSubmittedFilesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
-      const retryOwnerIsCurrent = () =>
-        composerSourceVersionRef.current === retrySourceVersion &&
-        connectionRef.current.sessionId === retrySessionId &&
-        getComposerWorkspaceCwd() === retryWorkspaceCwd;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
+      const retryAttemptId = ++cancelledRetryAttemptRef.current;
+      const retryOwner = retryOwnerRef.current;
+      if (!retryOwnerIsCurrent(retryOwner)) {
+        setShowRetryHint(false);
+        return;
+      }
       retriedTurnErrorIdRef.current = retryErrorId;
       setShowRetryHint(false);
+      const retryTranscriptIdentity: FailedPromptRetry['transcriptIdentity'] = {
+        kind: 'turn-error',
+        identity: retryErrorIdentity,
+      };
+      const retryTranscriptIsCurrent = () =>
+        retryTranscriptIdentityMatches(
+          store.getSnapshot().blocks,
+          retryTranscriptIdentity,
+        );
       setFailedPromptRetry({
         sessionId: retrySessionId,
         messageId: retryErrorId,
         startedAt: Date.now(),
         admitted: false,
         settled: false,
+        owner: retryOwner,
+        transcriptIdentity: retryTranscriptIdentity,
       });
       let admissionStarted = false;
       let admitted = false;
-      sendPrompt(retryText, retryImages, {
+      sendPrompt(retryText, retryImages, retryFiles, {
         optimisticUserMessage: false,
         retry: true,
         inputAnnotations: retryInputAnnotations,
@@ -8998,24 +10019,41 @@ export function App({
         },
         onAdmitted: () => {
           admitted = true;
-          if (!retryOwnerIsCurrent()) return;
+          if (!retryOwnerIsCurrent(retryOwner)) return;
           setFailedPromptRetry((current) =>
-            current?.sessionId === retrySessionId &&
-            current.messageId === retryErrorId
-              ? { ...current, admitted: true }
+            current?.transcriptIdentity === retryTranscriptIdentity
+              ? retryTranscriptIsCurrent()
+                ? { ...current, admitted: true }
+                : null
               : current,
           );
         },
+        onCancelledBeforeAdmission: () => {
+          restoreOrDeferCancelledRetry(retryOwner, {
+            kind: 'turn-error',
+            attemptId: retryAttemptId,
+            errorId: retryErrorId,
+            identity: retryErrorIdentity,
+            text: retryText,
+            images: retryImages,
+            files: retryFiles,
+            inputAnnotations: retryInputAnnotations,
+            previousRetriedTurnErrorId,
+            previousShowRetryHint,
+          });
+        },
       })
         .catch((error: unknown) => {
-          if (!retryOwnerIsCurrent()) return;
+          if (!retryOwnerIsCurrent(retryOwner)) return;
           const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
           if (admissionStarted && !admitted && !definitelyRejected) {
+            if (!retryTranscriptIsCurrent()) return;
             updateUnknownPromptAdmission({
               sessionId: retrySessionId,
               messageId: retryErrorId,
               text: retryText,
               images: retryImages ? [...retryImages] : undefined,
+              files: retryFiles ? [...retryFiles] : undefined,
               inputAnnotations: retryInputAnnotations,
               payloadAvailable: true,
             });
@@ -9026,14 +10064,60 @@ export function App({
             );
             return;
           }
-          reportError(error, 'Failed to retry prompt');
+          if (!admitted) {
+            restoreOrDeferCancelledRetry(retryOwner, {
+              kind: 'turn-error',
+              attemptId: retryAttemptId,
+              errorId: retryErrorId,
+              identity: retryErrorIdentity,
+              text: retryText,
+              images: retryImages,
+              files: retryFiles,
+              inputAnnotations: retryInputAnnotations,
+              previousRetriedTurnErrorId,
+              previousShowRetryHint,
+            });
+          }
+          if (isDaemonTurnError(error)) {
+            // A loop-detected rejection ends the retry lineage: the
+            // retried turn itself was stopped for loop protection, so
+            // the stashed prompt must not be re-offered — resubmitting
+            // it tends to re-loop.
+            if (error.body !== 'LOOP_DETECTED') {
+              failedTurnErrorRetryRef.current = {
+                errorId: retryErrorId,
+                text: retryText,
+                images: retryImages,
+                files: retryFiles,
+                inputAnnotations: retryInputAnnotations,
+                owner: retryOwner,
+              };
+            }
+            const nextTurnError = getRetryableTurnError(
+              store.getSnapshot().blocks,
+            );
+            if (
+              nextTurnError &&
+              nextTurnError.kind === 'error' &&
+              isRetryableTurnErrorKind(nextTurnError.errorKind)
+            ) {
+              rearmFailedTurnErrorRetry(
+                nextTurnError,
+                store.getSnapshot().blocks,
+              );
+            }
+          }
+          if (retryTranscriptIsCurrent()) {
+            reportError(error, 'Failed to retry prompt');
+          }
         })
         .finally(() => {
-          if (!retryOwnerIsCurrent()) return;
+          if (!retryOwnerIsCurrent(retryOwner)) return;
           setFailedPromptRetry((current) =>
-            current?.sessionId === retrySessionId &&
-            current.messageId === retryErrorId
-              ? { ...current, settled: true }
+            current?.transcriptIdentity === retryTranscriptIdentity
+              ? retryTranscriptIsCurrent()
+                ? { ...current, settled: true }
+                : null
               : current,
           );
         });
@@ -9042,9 +10126,11 @@ export function App({
     }
   }, [
     connected,
-    getComposerWorkspaceCwd,
     pushToast,
     reportError,
+    rearmFailedTurnErrorRetry,
+    restoreOrDeferCancelledRetry,
+    retryOwnerIsCurrent,
     sendPrompt,
     store,
     t,
@@ -9230,12 +10316,33 @@ export function App({
   const isDisabled =
     sessionWriteBlocked ||
     shouldDisableComposerInput({
-      catchingUp: Boolean(connection.catchingUp),
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
+  const retryableTurnErrorIdentity = retryableTurnErrorIdentityRef.current;
+  const showCurrentRetryHint = Boolean(
+    showRetryHint &&
+      !isPreparingPrompt &&
+      retryableTurnErrorIdentity &&
+      matchesTurnErrorIdentity(
+        getRetryableTurnError(blocks),
+        retryableTurnErrorIdentity,
+      ) &&
+      retryOwnerIsCurrent(retryOwnerRef.current),
+  );
+  const latestUserBlock = getLatestUserBlock(blocks);
+  const visibleFailedPromptBlock =
+    failedPrompt &&
+    latestUserBlock &&
+    matchesUserMessageIdentity(
+      latestUserBlock,
+      failedPrompt.identity,
+      failedPrompt.owner.snapshot.isCurrent(),
+    ) &&
+    retryOwnerIsCurrent(failedPrompt.owner)
+      ? latestUserBlock
+      : undefined;
   const composerPlaceholderInputState = {
-    catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
     isStreaming: streamingState !== 'idle',
   };
@@ -9296,6 +10403,20 @@ export function App({
       store,
       t,
     ],
+  );
+
+  const handleReasoningEffort = useCallback(
+    (value: string) => {
+      if (sessionWriteBlocked || !connectionRef.current.sessionId) {
+        return Promise.resolve();
+      }
+      return sessionActions
+        .setReasoningEffort(value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        );
+    },
+    [reportError, sessionActions, sessionWriteBlocked, t],
   );
 
   const handleDeleteModel = useCallback(
@@ -9425,7 +10546,7 @@ export function App({
       const scopeFlag =
         modelSettingScope === 'user' ? ' --global' : ' --project';
       const owner = { current: sessionOwnerGuard.capture() };
-      sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, {
+      sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
       })
         .then(() => {
@@ -10174,9 +11295,7 @@ export function App({
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
-              onSuggest={(prefix) =>
-                workspaceActions.suggestWorkspacePaths(prefix)
-              }
+              onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={async () => {
                 const result = await workspaceActions.pickWorkspaceDirectory();
                 return result.selected ? result.path : undefined;
@@ -10197,7 +11316,7 @@ export function App({
               <div className="flex flex-col gap-4">
                 <p>{t('sidebar.scratchOutcomeUnknown')}</p>
                 <ul className="max-h-48 overflow-y-auto text-sm text-muted-foreground">
-                  {workspaces.map((entry) => (
+                  {ordinaryWorkspaces.map((entry) => (
                     <li key={entry.id}>{entry.cwd}</li>
                   ))}
                 </ul>
@@ -10725,7 +11844,7 @@ export function App({
                       workspaces={
                         lockedWorkspaceCwd
                           ? visibleWorkspaces
-                          : workspaces
+                          : ordinaryWorkspaces
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
                       onCreateViaChat={() => {
@@ -10843,10 +11962,15 @@ export function App({
                           current: sessionOwnerGuard.capture(),
                         };
                         try {
-                          await sendPrompt(`/goal ${condition}`, undefined, {
-                            clearComposerOnPromptStart: true,
-                            ownerRef: owner,
-                          });
+                          await sendPrompt(
+                            `/goal ${condition}`,
+                            undefined,
+                            undefined,
+                            {
+                              clearComposerOnPromptStart: true,
+                              ownerRef: owner,
+                            },
+                          );
                           if (!owner.current.isCurrent()) return false;
                         } catch (error) {
                           // `sendPrompt` creates the session lazily, so by now
@@ -10927,7 +12051,7 @@ export function App({
                         voiceWorkspaces={
                           workspace.capabilities?.workspaces ||
                           lockedWorkspaceCapability
-                            ? workspaces
+                            ? ordinaryWorkspaces
                             : undefined
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
@@ -11050,10 +12174,12 @@ export function App({
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }
-                                showRetryHint={showRetryHint}
+                                showRetryHint={showCurrentRetryHint}
                                 onRetryClick={handleRetry}
                                 failedPromptMessageId={
-                                  failedPrompt?.messageId
+                                  isPreparingPrompt
+                                    ? undefined
+                                    : visibleFailedPromptBlock?.id
                                 }
                                 onRetryFailedPrompt={handleFailedPromptRetry}
                                 onBranchSession={handleBranchCurrentSession}
@@ -11086,6 +12212,7 @@ export function App({
                                     : undefined
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
+                                onImagePreview={openImagePanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -11355,6 +12482,7 @@ export function App({
                           onEdit={editQueuedPrompt}
                           onRestoreUnknown={restoreUnknownQueuedPrompt}
                           onDiscardUnknown={discardUnknownQueuedPrompt}
+                          onImagePreview={openImagePanel}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
@@ -11378,6 +12506,7 @@ export function App({
                             handleComposerAttachmentsChange
                           }
                           onImageIngestionNotice={pushToast}
+                          onImagePreview={openImagePanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -11444,24 +12573,33 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          reasoning={connection.reasoning}
+                          onSelectReasoningEffort={handleReasoningEffort}
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
-                              ? workspaces.find(
+                              ? ordinaryWorkspaces.find(
                                   (entry) =>
-                                    entry.cwd === connection.workspaceCwd,
-                                )?.primary
-                                ? undefined
-                                : connection.workspaceCwd
+                                    entry.cwd === connection.workspaceCwd &&
+                                    !entry.primary,
+                                )?.cwd
                               : selectedWorkspaceCwd
                           }
                           workspaceSelectionDisabled={false}
                           atWorkspaceCwd={
-                            lockedWorkspaceCwd ??
+                            ordinaryWorkspaces.find(
+                              (entry) => entry.cwd === lockedWorkspaceCwd,
+                            )?.cwd ??
                             (connection.sessionId
-                              ? connection.workspaceCwd
+                              ? isKnownLiveWorkspaceCwd(
+                                  connection.workspaceCwd,
+                                )
+                                ? undefined
+                                : connection.workspaceCwd
                               : (selectedWorkspaceCwd ??
-                                workspaces.find((entry) => entry.primary)?.cwd))
+                                ordinaryWorkspaces.find(
+                                  (entry) => entry.primary,
+                                )?.cwd))
                           }
                           onSelectWorkspace={handleSelectComposerWorkspace}
                           scratchWorkspaceSupported={
@@ -11664,10 +12802,12 @@ export function App({
                   }}
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
-                  <ArtifactPanel
-                    {...artifactPanelSharedProps}
-                    variant="drawer"
-                  />
+                  <WebShellCustomizationProvider value={customization}>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      variant="drawer"
+                    />
+                  </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
             )}
@@ -11730,12 +12870,14 @@ export function App({
                       onPointerDown={handleArtifactPanelResizeStart}
                     />
                   )}
-                  <div className={styles.artifactPanelClip}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      panelWidth={artifactPanelWidth}
-                    />
-                  </div>
+                  <WebShellCustomizationProvider value={customization}>
+                    <div className={styles.artifactPanelClip}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        panelWidth={artifactPanelWidth}
+                      />
+                    </div>
+                  </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
               )}

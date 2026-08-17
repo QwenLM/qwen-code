@@ -106,8 +106,23 @@ import {
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
 } from './extension-store.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+  loadAgentPluginManifest,
+  loadAgentPluginMcpServers,
+  loadAgentPluginSkills,
+} from './agent-plugins-v1/index.js';
+import { resolveContainedExistingPath } from './agent-plugins-v1/paths.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
+
+export type ExtensionPackageFormat = 'qwen' | 'agent-plugins-v1';
+
+interface LoadedExtensionManifest {
+  format: ExtensionPackageFormat;
+  config: ExtensionConfig;
+}
 
 // ============================================================================
 // Types and Interfaces
@@ -137,6 +152,7 @@ export interface Extension {
   isActive: boolean;
   path: string;
   config: ExtensionConfig;
+  format?: ExtensionPackageFormat;
   installMetadata?: ExtensionInstallMetadata;
 
   mcpServers?: Record<string, MCPServerConfig>;
@@ -1135,9 +1151,9 @@ export class ExtensionManager {
     return snapshot;
   }
 
-  private static stampPath(target: string): string {
+  private static stampPath(target: string, followSymlinks = true): string {
     try {
-      const stats = fs.statSync(target);
+      const stats = followSymlinks ? fs.statSync(target) : fs.lstatSync(target);
       return `${stats.mtimeMs}:${stats.size}`;
     } catch {
       // Absent is a real state and must not collide with any present one —
@@ -1155,10 +1171,11 @@ export class ExtensionManager {
    * A refresh never writes these paths, which is what makes it safe to commit
    * the pre-load value — see `refreshCacheWithSnapshot`.
    *
-   * Deliberately cheap: one `readdir` plus one `stat` per entry, where
-   * `refreshCache()` parses every manifest and re-lists every extension skill
-   * directory. That difference is what lets a status read stay self-healing
-   * without becoming a directory scan.
+   * Deliberately cheap: one `readdir`, one manifest `stat` per entry, and a
+   * sidecar read for linked entries, where `refreshCache()` parses every
+   * manifest and re-lists every extension skill directory. That difference is
+   * what lets a status read stay self-healing without becoming a directory
+   * scan.
    *
    * mtime-and-size is the usual stat-based approximation, so an edit that
    * preserves both is not detected. That is acceptable here: this is only the
@@ -1174,8 +1191,33 @@ export class ExtensionManager {
     }
     const parts: string[] = [];
     for (const entry of entries) {
+      const extensionRoot = path.join(this.configDir, entry);
+      const installMetadata = this.loadInstallMetadata(extensionRoot);
+      const effectiveRoot =
+        installMetadata?.type === 'link' &&
+        typeof installMetadata.source === 'string' &&
+        installMetadata.source.length > 0
+          ? installMetadata.source
+          : extensionRoot;
+      const manifestName =
+        getAgentPluginSchemaStatus(effectiveRoot) === 'unrelated'
+          ? EXTENSIONS_CONFIG_FILENAME
+          : AGENT_PLUGIN_MANIFEST;
+      let manifestPath = path.join(effectiveRoot, manifestName);
+      let followManifestSymlink = true;
+      if (manifestName === AGENT_PLUGIN_MANIFEST) {
+        try {
+          manifestPath = resolveContainedExistingPath(
+            effectiveRoot,
+            manifestPath,
+          );
+        } catch {
+          followManifestSymlink = false;
+        }
+      }
       const stamp = ExtensionManager.stampPath(
-        path.join(this.configDir, entry, EXTENSIONS_CONFIG_FILENAME),
+        manifestPath,
+        followManifestSymlink,
       );
       // Entries with no manifest are not extensions — notably the enablement
       // file, which lives in this directory and is created lazily by the store.
@@ -1336,20 +1378,37 @@ export class ExtensionManager {
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
 
-    if (installMetadata?.type === 'link') {
+    if (
+      installMetadata?.type === 'link' &&
+      typeof installMetadata.source === 'string' &&
+      installMetadata.source.length > 0
+    ) {
       effectiveExtensionPath = installMetadata.source;
     }
 
     try {
-      let config = this.loadExtensionConfig({
+      const loadedManifest = this.loadExtensionManifest({
         extensionDir: effectiveExtensionPath,
         workspaceDir,
       });
-
-      config = resolveEnvVarsInObject(config);
+      let config = loadedManifest.config;
+      if (loadedManifest.format === 'qwen') {
+        config = resolveEnvVarsInObject(config);
+      }
+      const extensionId = getExtensionId(config, installMetadata);
+      if (loadedManifest.format === 'agent-plugins-v1') {
+        config = {
+          ...config,
+          mcpServers: await loadAgentPluginMcpServers(
+            effectiveExtensionPath,
+            this.extensionStore.agentPluginDataRoot(extensionId),
+            { createDataDir: true },
+          ),
+        };
+      }
 
       const extension: Extension = {
-        id: getExtensionId(config, installMetadata),
+        id: extensionId,
         name: config.name,
         displayName: config.displayName,
         version:
@@ -1357,6 +1416,7 @@ export class ExtensionManager {
           installMetadata?.marketplaceConfig?.metadata?.version ||
           '1.0.0',
         path: effectiveExtensionPath,
+        format: loadedManifest.format,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
         config,
@@ -1373,28 +1433,36 @@ export class ExtensionManager {
         );
       }
 
-      if (config.channels) {
+      if (loadedManifest.format === 'qwen' && config.channels) {
         extension.channels = config.channels;
       }
 
-      extension.commands = await loadCommandsFromDir(
-        `${effectiveExtensionPath}/commands`,
-      );
+      if (loadedManifest.format === 'agent-plugins-v1') {
+        extension.commands = [];
+        extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
+        extension.agents = [];
+      } else {
+        extension.commands = await loadCommandsFromDir(
+          `${effectiveExtensionPath}/commands`,
+        );
+        extension.contextFiles = getContextFileNames(config)
+          .map((contextFileName) =>
+            path.join(effectiveExtensionPath, contextFileName),
+          )
+          .filter((contextFilePath) => fs.existsSync(contextFilePath));
+        extension.skills = await loadSkillsFromDir(
+          `${effectiveExtensionPath}/skills`,
+        );
+        extension.agents = await loadSubagentFromDir(
+          `${effectiveExtensionPath}/agents`,
+        );
+      }
 
-      extension.contextFiles = getContextFileNames(config)
-        .map((contextFileName) =>
-          path.join(effectiveExtensionPath, contextFileName),
-        )
-        .filter((contextFilePath) => fs.existsSync(contextFilePath));
-
-      extension.skills = await loadSkillsFromDir(
-        `${effectiveExtensionPath}/skills`,
-      );
-      extension.agents = await loadSubagentFromDir(
-        `${effectiveExtensionPath}/agents`,
-      );
-
-      if (config.hooks && typeof config.hooks !== 'string') {
+      if (
+        loadedManifest.format === 'qwen' &&
+        config.hooks &&
+        typeof config.hooks !== 'string'
+      ) {
         // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
         extension.hooks = this.substituteHookVariables(
           config.hooks,
@@ -1403,7 +1471,7 @@ export class ExtensionManager {
       }
 
       // Also load hooks from hooks directory or from config.hooks string path if available and not already set
-      if (!extension.hooks) {
+      if (loadedManifest.format === 'qwen' && !extension.hooks) {
         const hooksDir = path.join(effectiveExtensionPath, 'hooks');
         const hooksJsonPath = path.join(hooksDir, 'hooks.json');
 
@@ -1488,7 +1556,27 @@ export class ExtensionManager {
   }
 
   loadExtensionConfig(context: LoadExtensionContext): ExtensionConfig {
+    return this.loadExtensionManifest(context).config;
+  }
+
+  private loadExtensionManifest(
+    context: LoadExtensionContext,
+  ): LoadedExtensionManifest {
     const { extensionDir, workspaceDir = this.workspaceDir } = context;
+    const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
+    if (agentPluginStatus !== 'unrelated') {
+      try {
+        return {
+          format: 'agent-plugins-v1',
+          config: loadAgentPluginManifest(extensionDir),
+        };
+      } catch (error) {
+        throw new Error(
+          `Failed to load Agent Plugins manifest from ${path.join(extensionDir, 'plugin.json')}: ${getErrorMessage(error)}`,
+        );
+      }
+    }
+
     const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
     if (!fs.existsSync(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
@@ -1512,7 +1600,7 @@ export class ExtensionManager {
       }
       validateName(config.name);
       validateExtensionSettingEnvVars(config.settings);
-      return config;
+      return { format: 'qwen', config };
     } catch (e) {
       throw new Error(
         `Failed to load extension config from ${configFilePath}: ${getErrorMessage(
@@ -1849,6 +1937,17 @@ export class ExtensionManager {
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
         });
+        const isAgentPlugin = originSource === 'AgentPlugins';
+        const extensionId = getExtensionId(newExtensionConfig, installMetadata);
+        if (isAgentPlugin) {
+          newExtensionConfig = {
+            ...newExtensionConfig,
+            mcpServers: await loadAgentPluginMcpServers(
+              localSourcePath,
+              this.extensionStore.agentPluginDataRoot(extensionId),
+            ),
+          };
+        }
 
         if (isUpdate && installMetadata.autoUpdate) {
           const oldSettings = new Set(
@@ -1884,17 +1983,19 @@ export class ExtensionManager {
           );
         }
 
-        const commands = await loadCommandsFromDir(
-          `${localSourcePath}/commands`,
-        );
+        const commands = isAgentPlugin
+          ? []
+          : await loadCommandsFromDir(`${localSourcePath}/commands`);
         const previousCommands = previous?.commands ?? [];
 
-        const skills = await loadSkillsFromDir(`${localSourcePath}/skills`);
+        const skills = isAgentPlugin
+          ? await loadAgentPluginSkills(localSourcePath)
+          : await loadSkillsFromDir(`${localSourcePath}/skills`);
         const previousSkills = previous?.skills ?? [];
 
-        const subagents = await loadSubagentFromDir(
-          `${localSourcePath}/agents`,
-        );
+        const subagents = isAgentPlugin
+          ? []
+          : await loadSubagentFromDir(`${localSourcePath}/agents`);
         const previousSubagents = previous?.agents ?? [];
 
         if (requestConsent) {
@@ -1924,7 +2025,6 @@ export class ExtensionManager {
         }
 
         const destinationPath = path.join(this.configDir, newExtensionName);
-        const extensionId = getExtensionId(newExtensionConfig, installMetadata);
         if (isUpdate && previous?.id !== extensionId) {
           throw new Error(
             `Extension "${newExtensionName}" changed its stable id during update.`,
@@ -1940,7 +2040,9 @@ export class ExtensionManager {
         stagingPath = await this.extensionStore.createStagingDirectory();
 
         if (installMetadata.type !== 'link') {
-          await copyExtension(localSourcePath, stagingPath);
+          await copyExtension(localSourcePath, stagingPath, {
+            skipSymlinks: isAgentPlugin,
+          });
         }
 
         if (isUpdate) {
@@ -2737,13 +2839,20 @@ export class ExtensionManager {
 export async function copyExtension(
   source: string,
   destination: string,
+  options: { skipSymlinks?: boolean } = {},
 ): Promise<void> {
-  await fs.promises.cp(source, destination, {
+  const copySource = options.skipSymlinks
+    ? await fs.promises.realpath(source)
+    : source;
+  await fs.promises.cp(copySource, destination, {
     recursive: true,
-    dereference: true,
+    dereference: !options.skipSymlinks,
     filter: async (src: string) => {
       try {
-        const stats = await fs.promises.stat(src);
+        const stats = options.skipSymlinks
+          ? await fs.promises.lstat(src)
+          : await fs.promises.stat(src);
+        if (options.skipSymlinks && stats.isSymbolicLink()) return false;
         // Only copy regular files and directories
         // Skip sockets, FIFOs, block devices, and character devices
         return stats.isFile() || stats.isDirectory();

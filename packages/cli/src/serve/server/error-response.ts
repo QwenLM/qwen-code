@@ -235,6 +235,17 @@ export function sendBridgeError(
     return;
   }
   if (sendGenerationClosedError(res, err)) return;
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    (err.code === 'session_media_gone' ||
+      err.code === 'invalid_session_media_reference')
+  ) {
+    res
+      .status(err.code === 'session_media_gone' ? 410 : 400)
+      .json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,
@@ -390,7 +401,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionNotFoundError) {
-    res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    res
+      .status(404)
+      .json({ error: err.message, code: err.code, sessionId: err.sessionId });
     return;
   }
   if (err instanceof SessionArchivedError) {
@@ -636,6 +649,14 @@ export function sendBridgeError(
         res.status(503).json({
           error: SESSION_WRITER_ERROR_MESSAGES[kind],
           code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'branch_point_invalid') {
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'branch_point_invalid',
           errorKind: kind,
         });
         return;
