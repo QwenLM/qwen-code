@@ -754,13 +754,12 @@
   pointer-events: auto;
 }
 
+/* In-flow bottom sheet: the approval replaces the hidden composer, so the
+   message list shrinks above it instead of being covered by a floating
+   overlay. */
 .approvalOverlay {
-  position: absolute;
-  right: 20px;
-  bottom: calc(100% + 8px);
-  left: 20px;
-  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
-  pointer-events: auto;
+  margin-bottom: 8px;
+  min-width: 0;
 }
 
 .approvalOverlay:focus,
@@ -831,6 +830,10 @@
 .composer {
   flex-shrink: 0;
   padding: 0;
+}
+
+.composerHidden {
+  display: none;
 }
 
 .composerHeader {
