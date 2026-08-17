@@ -176,6 +176,14 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('maps the workspace live-state route to its own low-cardinality label', () => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('GET', '/workspaces/ws-secondary/sessions/live-state'),
+      ),
+    ).toEqual({ route: 'GET /workspaces/:workspace/sessions/live-state' });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);

@@ -90,6 +90,11 @@ export interface ScheduledTasksSessionBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Advance the in-memory session-catalog revision after a successful
+   * persisted removal driven by task cleanup. Optional so existing
+   * structural test fakes stay source-compatible; the production bridge
+   * always provides it. */
+  markSessionCatalogChanged?(): void;
   /** Give the task's session a readable name so it's recognizable in the
    * session list (rather than a bare id). Best-effort. */
   updateSessionMetadata(
@@ -185,11 +190,12 @@ async function teardownBoundSession(
     await target.cleanupSession(sessionId).catch(() => {});
   } else if (target.bridge) {
     await target.bridge.closeSession(sessionId).catch(() => {});
-    await new SessionService(target.workspaceCwd, {
+    const removed = await new SessionService(target.workspaceCwd, {
       runtimeBaseDir: target.runtimeBaseDir,
     })
       .removeSession(sessionId)
-      .catch(() => {});
+      .catch(() => false);
+    if (removed) target.bridge.markSessionCatalogChanged?.();
   }
 }
 
